@@ -1,14 +1,51 @@
 # zccsdt implementation plan (draft for review)
 
-Status: **confirmed direction (2026-09-30)**, details still open (Q2).
+Status: **confirmed (2026-09-30)**.
 Decisions: Python implementation first (no C++ until profiling says where it
 pays); contraction schemes are hand-optimized term by term; benchmark
-substitutes of Section 8 accepted; default git branch (`master`).
+substitutes of Section 8 accepted; default git branch (`master`); T1-dressed
+Hamiltonian accepted. Order of work: first make the Python code *correct*
+(einsum prototype from the generated equations, M2, validated against all
+references), and only then optimize (M3-M5).
 Background on CFOUR's design is in `docs/cfour_notes.md`.
 
 Notation: `o`, `v` = number of occupied / virtual **spin orbitals (spinors)**.
 Flop counts are given in fused multiply-adds (FMA); one complex FMA = 4 real
 FMA = 8 real flops.
+
+---
+
+## Starting point (decided 2026-09-30): code ported from socutils
+
+socutils (same author) already contains a validated spin-orbital CCSDT
+(`cc/zccsdt.py`, commit ffbe691), which is T1-dressed and checked
+element-wise against a determinant-space brute-force oracle. It was ported
+here as the starting point; the einsum prototype of M2 is replaced by it.
+
+| zccsdt file | origin | change |
+|---|---|---|
+| `src/zccsdt/cc/ccsdt.py` | `cc/zccsdt.py` | imports; class wrapper removed |
+| `src/zccsdt/cc/ccsd.py` | `update_amps` from `cc/zccsd.py` | imports only |
+| `src/zccsdt/cc/gintermediates.py` | `cc/gintermediates.py` (PySCF, Apache-2.0) | none |
+| `src/zccsdt/cc/bruteforce.py` | `cc/_ccsdt_bruteforce.py` | none |
+| `src/zccsdt/lib/_clib.py`, `csrc/*.c` | `cc/_ccsdt_clib.py`, `lib/ccsdt/*.c` | library path, standalone CMake |
+| `src/zccsdt/eris.py`, `src/zccsdt/cc/solver.py` | new | integrals from any GHF/spinor SCF; driver without the PySCF CC classes |
+
+Known limitations of the starting point:
+- The integrals are held as a full n^4 tensor `g`, and T1 dressing costs
+  n^5 per iteration.
+- T3 is unpacked to the full o^3 v^3 array every iteration, and several full
+  o^3 v^3 intermediates exist at once.
+- Real input is computed in complex arithmetic (C kernels are
+  complex-only).
+
+Measured baseline: H2O/cc-pVDZ X2CAMF, about 8 s/iteration, 5.4 GB peak,
+48 threads. These limitations are exactly what the optimization milestones
+remove.
+
+The `zwick` engine (Section 3) is deferred. The brute-force oracle now
+provides the ground truth for every residual; the engine is still wanted
+later for zmr.
 
 ---
 
@@ -20,7 +57,7 @@ FMA = 8 real flops.
   denominator for all "% of peak" numbers.
 - Toolchain: g++ 9.3 and icpx 2022.1, CMake 3.27, Intel MKL 2022.1 (the same
   MKL CFOUR links against), HDF5 (h5py 3.x, h5cc).
-- Python 3.11, numpy 1.x (OpenBLAS), PySCF 2.4.6, pytest.
+- Python 3.11, numpy 2.4.6 (OpenBLAS), PySCF 2.13.1, pytest.
 - Spinor FCI: `socutils-git/fci/zfci.py` (`kernel(h1e, eri, norb, nelec)`,
   pyscf `fci_dhf_slow` conventions); reached via
   `PYTHONPATH=~/apps/socutils-git-env`.
@@ -304,7 +341,7 @@ Each milestone is several small commits, and every feature ships with its test.
 |---|---|---|
 | M0 | Skeleton: pyproject, pytest config; HDF5 format + writer/reader; PySCF GHF integral generator (real), RHF->GHF->complex-unitary generator, socutils X2C spinor generator | Round-trip HDF5; antisymmetry of stored blocks; E_HF recomputed from the file equals the SCF energy (real, rotated-complex, X2C) |
 | M1 | `zwick` engine | Contraction identities; term counts; CCSD energy expression |
-| M2 | Generated CCSD/CCSDT equations -> einsum prototype + DIIS solver | **CCSD vs PySCF GCCSD, real and complex, 1e-10**; **CCSDT = FCI for 3 electrons** (real: PySCF FCI; spinor: zfci); **RHF->GHF->complex-unitary invariance** for CCSD and CCSDT (1e-10); other invariance tests (below) |
+| M2 | (Done by the port) CCSD/CCSDT reference implementation + DIIS solver | **CCSD vs PySCF GCCSD, real and complex, 1e-10**; **CCSDT = FCI for 3 electrons** (real: PySCF FCI; spinor: zfci); **RHF->GHF->complex-unitary invariance** for CCSD and CCSDT (1e-10); other invariance tests (below) |
 | M3 | Flop/bookkeeping tool; T1 dressing; hand-designed factorization for each term, with design notes in `docs/factorization.md` | Each term and intermediate vs raw equations on random amplitudes (1e-12) |
 | M4 | Packed T3 storage, gather/scatter tables, measured BLAS peak (OpenBLAS vs MKL) | Pack/unpack round trip; gather/scatter vs dense einsum, real and complex |
 | M5 | Optimized Python CCSDT driver (packed T3 + BLAS), one term at a time | Residual equals prototype to 1e-12 per iteration; energies equal to prototype to 1e-10 |
@@ -374,11 +411,10 @@ representation factor, and to (2) directly.
 
 ## 9. Open questions
 
-- **Q2 (T1 dressing).** Storage cost explained in Section 4.1; awaiting
-  confirmation.
 - Resolved on 2026-09-30:
   - Q1: benchmark substitutes of Section 8 accepted.
   - Q3: factorization is manual, term by term.
   - Q4: MRCC and CFOUR may be run on this node.
   - Q5: default branch `master`, no remote.
+  - Q2: T1-dressed Hamiltonian accepted.
   - C++ is deferred until the Python version has been profiled.
