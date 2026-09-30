@@ -17,6 +17,8 @@ def test_ccsdt_equals_fci_three_electrons_real():
     r = solver.kernel(E.from_scf(mf), 'ccsdt', TIGHT)
     assert r.converged
     assert abs(r.e_tot - e_fci) < 1e-9
+    # real integrals must keep the whole iteration in real arithmetic
+    assert not any(np.iscomplexobj(x) for x in (r.e_corr, r.t1, r.t2, r.t3))
 
 
 def test_ccsdt_equals_fci_three_electrons_spinor():

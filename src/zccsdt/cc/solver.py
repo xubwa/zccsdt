@@ -9,7 +9,8 @@ from dataclasses import dataclass
 import numpy as np
 from pyscf import lib
 
-from zccsdt.cc import ccsd, ccsdt
+from zccsdt.cc import ccsd, ccsdt, ccsdt_opt, t3pack
+from zccsdt.timing import timer
 
 
 @dataclass
@@ -19,6 +20,8 @@ class Options:
     conv_tol_normt: float = 1e-8
     max_cycle: int = 200
     diis_space: int = 8
+    diis_incore: bool = True    # PySCF's default keeps DIIS vectors on disk
+    mem_mb: float = 2000.0      # batch buffer budget of the packed-T3 code
     verbose: bool = False
 
 
@@ -47,27 +50,34 @@ def init_amps(eris):
 
 
 def _pack(t1, t2, t3):
-    parts = [t1.ravel(), ccsdt.pack_t2(t2)]
+    om, vm = t3pack.triple_map(t1.shape[0]), t3pack.triple_map(t1.shape[1])
+    t2p = t2[om.pairs[:, 0][:, None], om.pairs[:, 1][:, None],
+             vm.pairs[:, 0], vm.pairs[:, 1]]
+    parts = [t1.ravel(), t2p.ravel()]
     if t3 is not None:
         parts.append(t3)
     return np.hstack(parts)
 
 
 def _unpack(vec, nocc, nvir, with_t3):
+    '''Inverse of _pack; keeps the dtype of vec (real stays real).'''
+    om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
     n1 = nocc * nvir
-    n2 = nocc * (nocc - 1) // 2 * (nvir * (nvir - 1) // 2)
+    n2 = om.npair * vm.npair
     t1 = vec[:n1].reshape(nocc, nvir)
-    t2 = ccsdt.unpack_t2(vec[n1:n1 + n2], nocc, nvir)
+    t2 = ccsdt_opt._unpack_pairs(vec[n1:n1 + n2].reshape(om.npair, vm.npair), om, vm)
     t3 = vec[n1 + n2:].copy() if with_t3 else None
     return t1, t2, t3
 
 
 def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
-    '''Solve CCSD or CCSDT.  Returns a Result; t3 is kept packed.'''
+    '''Solve CCSD or CCSDT.  Returns a Result; t3 is kept packed.
+    method: 'ccsd', 'ccsdt' (packed-T3 implementation) or 'ccsdt_ref'
+    (the ported reference implementation, for validation).'''
     opts = opts or Options()
     method = method.lower()
-    assert method in ('ccsd', 'ccsdt')
-    with_t3 = method == 'ccsdt'
+    assert method in ('ccsd', 'ccsdt', 'ccsdt_ref')
+    with_t3 = method != 'ccsd'
     nocc = eris.nocc
     nvir = eris.fock.shape[0] - nocc
     if t1 is None or t2 is None:
@@ -76,26 +86,31 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     t1 = t1.astype(dtype)
     t2 = t2.astype(dtype)
     if with_t3 and t3 is None:
-        t3 = np.zeros(len(ccsdt._t3_tri(nocc, nvir)[0]) * len(ccsdt._t3_tri(nocc, nvir)[1]),
+        t3 = np.zeros(t3pack.triple_map(nocc).ntri * t3pack.triple_map(nvir).ntri,
                       dtype=dtype)
 
     e_old = ccsd.energy(t1, t2, eris)
-    adiis = lib.diis.DIIS()
+    adiis = lib.diis.DIIS(incore=opts.diis_incore)
     adiis.space = opts.diis_space
     timings = []
     conv = False
     for icycle in range(opts.max_cycle):
         t0 = time.perf_counter()
         if with_t3:
-            t1n, t2n, t3n = ccsdt.update_amps(opts, t1, t2, t3, eris)
+            if method == 'ccsdt':
+                t1n, t2n, t3n = ccsdt_opt.update_amps(opts, t1, t2, t3, eris,
+                                                      mem_mb=opts.mem_mb)
+            else:
+                t1n, t2n, t3n = ccsdt.update_amps(opts, t1, t2, t3, eris)
             normt = (np.linalg.norm(t1n - t1) + np.linalg.norm(t2n - t2)
                      + 6.0 * np.linalg.norm(t3n - t3))
         else:
             t1n, t2n = ccsd.update_amps(opts, t1, t2, eris)
             t3n = None
             normt = np.linalg.norm(t1n - t1) + np.linalg.norm(t2n - t2)
-        vec = adiis.update(_pack(t1n, t2n, t3n))
-        t1, t2, t3 = _unpack(vec, nocc, nvir, with_t3)
+        with timer('diis'):
+            vec = adiis.update(_pack(t1n, t2n, t3n))
+            t1, t2, t3 = _unpack(vec, nocc, nvir, with_t3)
         e_new = ccsd.energy(t1, t2, eris)
         timings.append(time.perf_counter() - t0)
         de = e_new - e_old
