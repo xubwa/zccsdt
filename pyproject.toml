@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zccsdt"
+version = "0.1.0"
+description = "Spin-orbital / spinor CCSDT"
+requires-python = ">=3.9"
+dependencies = ["numpy", "scipy", "pyscf", "h5py"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["slow: long-running test", "socutils: needs socutils on PYTHONPATH"]
