@@ -13,8 +13,10 @@ def test_roundtrip(tmp_path, kind):
     path = tmp_path / 'ints.h5'
     h5io.save(path, e)
     r = h5io.load(path)
-    assert r.nocc == e.nocc and r.e_hf == e.e_hf and r.e_nuc == e.e_nuc
-    assert r.dtype == e.dtype
+    assert r.nocc == e.nocc
+    assert r.e_hf == e.e_hf, (r.e_hf, e.e_hf)
+    assert r.e_nuc == e.e_nuc, (r.e_nuc, e.e_nuc)
+    assert r.dtype == e.dtype, (r.dtype, e.dtype)
     np.testing.assert_array_equal(r.fock, e.fock)
     for name in E.BLOCKS:
         np.testing.assert_allclose(getattr(r, name), getattr(e, name), atol=1e-14)

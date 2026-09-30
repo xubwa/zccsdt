@@ -33,6 +33,7 @@ from pyscf import lib
 from pyscf.lib import logger
 from zccsdt.cc import ccsd
 from zccsdt.cc.bruteforce import build_g
+from zccsdt.timing import timer
 try:
     from zccsdt.lib import _clib
 except Exception:
@@ -292,6 +293,21 @@ def _t3_residual(t2, t3, ge, fdr, nocc, nmo):
     return R
 
 
+class _Lap:
+    '''Charge the time since the previous lap to a named timer.'''
+    def __init__(self):
+        import time
+        self._time = time.perf_counter
+        self.t = self._time()
+
+    def __call__(self, name):
+        from zccsdt import timing
+        t = self._time()
+        timing._totals[name] += t - self.t
+        timing._counts[name] += 1
+        self.t = t
+
+
 _USE_CPACK = _clib is not None and getattr(_clib, 'HAVE_ASYM_PACK', False)
 
 
@@ -325,6 +341,7 @@ def _t3_residual_packed(t2, t3, ge, fdr, nocc, nmo):
     oi0, oi1, oi2 = oi[:, 0], oi[:, 1], oi[:, 2]
     vi0, vi1, vi2 = vi[:, 0], vi[:, 1], vi[:, 2]
 
+    _lap = _Lap()
     Rp = np.zeros(notri * nvtri, dtype=np.complex128)
 
     # pair- and triple-gathers reused across several terms (gather once)
@@ -353,17 +370,20 @@ def _t3_residual_packed(t2, t3, ge, fdr, nocc, nmo):
     Xr1 = einsum('Qei,Pec->iPQc', Wvvvo[md, ne], t2mn)
     Xr2 = einsum('maP,mkQ->kPQa', Wvooo[:, :, nn, mm], t2P)
     _clib.drive_to_pack(Rp, Xr1 + Xr2, -0.25, nocc, nvir)
+    _lap('r3_drive')
 
     # F_vv (P(a/bc), occ-restricted t3)
     Feff_vv = fvv - einsum('Paf,Pdf->ad', t2mn, goovvmn)
     Xfvv = _einsum_opt('ad,Idbc->Iabc', Feff_vv, t3occ)
     _clib.pvir_to_pack(Rp, Xfvv, 1.0, 0, nocc, nvir)
+    _lap('r3_fvv')
 
     # F_oo (-P(i/jk), vir-restricted t3)
     Feff_oo = foo + einsum('mnP,inP->mi', goovvP, t2P)
     t3vir = t3[:, :, :, vi0, vi1, vi2]                          # (o,o,o,nvtri)
     Xfoo = _einsum_opt('mi,mjkA->ijkA', Feff_oo, t3vir)
     _clib.pocc_to_pack(Rp, Xfoo, -1.0, 0, nocc, nvir)
+    _lap('r3_foo')
 
     # ring (P(i/jk)P(a/bc)); the contraction inherits t3's (j,k) and (b,c)
     # antisymmetry, so build it on the reduced (i,a,[j<k],[b<c]) block (~4x
@@ -372,6 +392,7 @@ def _t3_residual_packed(t2, t3, ge, fdr, nocc, nmo):
     t3r = t3mn[:, :, :, md, ne]                     # (m, [j<k], d, [b<c])
     Xr = einsum('madi,mPdQ->iaPQ', Weff_ovvo, t3r)  # (i, a, [j<k], [b<c])
     _clib.ring_to_pack(Rp, Xr, 1.0, nocc, nvir)
+    _lap('r3_ring')
 
     # pp ladder (P(c/ab), occ-restricted t3, summed pair d<e packed); feed the
     # (i<j<k, [a<b], c) block straight to the kernel (no full-vir scatter)
@@ -379,6 +400,7 @@ def _t3_residual_packed(t2, t3, ge, fdr, nocc, nmo):
     vvvv_pp = Weff_vvvv[md[:, None], ne[:, None], md[None, :], ne[None, :]]
     Xpp = einsum('QP,IPc->IQc', vvvv_pp, t3occ[:, md, ne, :])   # (notri, [a<b], c)
     _clib.pp_to_pack(Rp, Xpp, 1.0, nocc, nvir)
+    _lap('r3_pp')
 
     # hh ladder (P(k/ij), vir-restricted t3, summed pair m<n packed); feed the
     # ([i<j], k, a<b<c) block straight to the kernel (no full-occ scatter)
@@ -387,6 +409,7 @@ def _t3_residual_packed(t2, t3, ge, fdr, nocc, nmo):
     t3hr = t3[mm, nn][:, :, vi0, vi1, vi2]                      # (m<n, k, nvtri)
     Xhh = einsum('PQ,PkA->QkA', oooo_pp, t3hr)                  # ([i<j], k, nvtri)
     _clib.hh_to_pack(Rp, Xhh, 1.0, nocc, nvir)
+    _lap('r3_hh')
     return Rp
 
 
@@ -413,7 +436,8 @@ def update_amps(cc, t1, t2, t3, eris):
     nocc, nvir = t1.shape
     nmo = nocc + nvir
     t3p = t3 if t3.ndim == 1 else pack_t3(t3)
-    t3 = t3 if t3.ndim == 6 else unpack_t3(t3p, nocc, nvir)
+    with timer('unpack_t3'):
+        t3 = t3 if t3.ndim == 6 else unpack_t3(t3p, nocc, nvir)
     o = slice(0, nocc)
     v = slice(nocc, nmo)
     mo_e = eris.mo_energy
@@ -425,53 +449,58 @@ def update_amps(cc, t1, t2, t3, eris):
     # the T1-dressing below is redone each iteration (t1 changes).
     g = getattr(eris, '_ccsdt_g', None)
     if g is None:
-        g = build_g(eris, nocc, nmo)
+        with timer('build_g'):
+            g = build_g(eris, nocc, nmo)
         eris._ccsdt_g = g
     fock = _asarray(eris.fock)
-    ge, fdr = _t1_dress(g, fock, t1, nocc, nmo)
+    with timer('t1_dress'):
+        ge, fdr = _t1_dress(g, fock, t1, nocc, nmo)
 
     # CCSD T1/T2 part (socutils, validated == pyscf CCSD)
-    t1new, t2new = ccsd.update_amps(cc, t1, t2, eris)
+    with timer('ccsd'):
+        t1new, t2new = ccsd.update_amps(cc, t1, t2, eris)
 
-    # pair-gathers of t3 reused by the T3->T1/T2 couplings (antisymmetric pairs
-    # are summed only over the unique half, ~2x each)
-    op, vp = _t2_pair(nocc, nvir)
-    mm, nn = op[:, 0], op[:, 1]; md, ne = vp[:, 0], vp[:, 1]
-    t3mn = t3[:, mm, nn]                        # (i, [m<n], a, e, f)
-    t3ij = t3[mm, nn]                           # ([i<j], m, a, b, e)
+    with timer('t3_to_t1t2'):
+        # pair-gathers of t3 reused by the T3->T1/T2 couplings (antisymmetric pairs
+        # are summed only over the unique half, ~2x each)
+        op, vp = _t2_pair(nocc, nvir)
+        mm, nn = op[:, 0], op[:, 1]; md, ne = vp[:, 0], vp[:, 1]
+        t3mn = t3[:, mm, nn]                        # (i, [m<n], a, e, f)
+        t3ij = t3[mm, nn]                           # ([i<j], m, a, b, e)
 
-    # T3 -> T1: <mn||ef> antisym in (m,n) and (e,f), both summed -> unique halves
-    gT1 = ge[o, o, v, v][mm, nn][:, md, ne]                     # ([m<n], [e<f])
-    r1t3 = einsum('PQ,iPaQ->ia', gT1, t3mn[:, :, :, md, ne])
-    t1new = t1new + r1t3 / eia
+        # T3 -> T1: <mn||ef> antisym in (m,n) and (e,f), both summed -> unique halves
+        gT1 = ge[o, o, v, v][mm, nn][:, md, ne]                     # ([m<n], [e<f])
+        r1t3 = einsum('PQ,iPaQ->ia', gT1, t3mn[:, :, :, md, ne])
+        t1new = t1new + r1t3 / eia
 
-    # T3 -> T2: each term inherits t3 antisymmetry, so build it on the reduced
-    # (i<j, a<b) block and unpack once.  term A: (i,j),(a,b) pairs; term B:
-    # e<f summed; term C: m<n summed (the (m,n) pair sits reversed in t3 -> sign).
-    rA = einsum('me,PmQe->PQ', fdr[o, v], t3ij[:, :, md, ne])
-    B0 = 2 * einsum('amP,PQmb->Qab', ge[v, o, v, v][:, :, md, ne],
-                    t3ij[:, :, md, :, ne])                      # ([i<j], a, b)
-    rB = 0.5 * (B0[:, md, ne] - B0[:, ne, md])                  # P(ab)
-    C0 = -2 * einsum('Pej,iPQe->ijQ', ge[o, o, v, o][mm, nn],
-                     t3mn[:, :, md, ne])                        # (i, j, [a<b])
-    rC = -0.5 * (C0[mm, nn] - C0[nn, mm])                       # P(ij)
-    t2new = t2new + unpack_t2((rA + rB + rC).ravel(), nocc, nvir) / eijab
+        # T3 -> T2: each term inherits t3 antisymmetry, so build it on the reduced
+        # (i<j, a<b) block and unpack once.  term A: (i,j),(a,b) pairs; term B:
+        # e<f summed; term C: m<n summed (the (m,n) pair sits reversed in t3 -> sign).
+        rA = einsum('me,PmQe->PQ', fdr[o, v], t3ij[:, :, md, ne])
+        B0 = 2 * einsum('amP,PQmb->Qab', ge[v, o, v, v][:, :, md, ne],
+                        t3ij[:, :, md, :, ne])                      # ([i<j], a, b)
+        rB = 0.5 * (B0[:, md, ne] - B0[:, ne, md])                  # P(ab)
+        C0 = -2 * einsum('Pej,iPQe->ijQ', ge[o, o, v, o][mm, nn],
+                         t3mn[:, :, md, ne])                        # (i, j, [a<b])
+        rC = -0.5 * (C0[mm, nn] - C0[nn, mm])                       # P(ij)
+        t2new = t2new + unpack_t2((rA + rB + rC).ravel(), nocc, nvir) / eijab
 
     # T3 residual.  With the C backend, compute it on the unique antisymmetric
     # block (packed) -- ~2x faster and no full O(o^3 v^3) intermediate -- and
     # divide by the packed energy denominator before unpacking once.
-    if _USE_CPACK:
-        r3p = _t3_residual_packed(t2, t3, ge, fdr, nocc, nmo)
-        oi, vi = _t3_tri(nocc, nvir)
-        mo_o = mo_e[:nocc]; eav = mo_e[nocc:] + cc.level_shift
-        eo = mo_o[oi[:, 0]] + mo_o[oi[:, 1]] + mo_o[oi[:, 2]]
-        ev = eav[vi[:, 0]] + eav[vi[:, 1]] + eav[vi[:, 2]]
-        d = (eo[:, None] - ev[None, :]).ravel()
-        t3new = t3p + r3p / d                              # stays packed
-    else:
-        eijkabc = (eia[:, None, None, :, None, None]
-                   + eia[None, :, None, None, :, None]
-                   + eia[None, None, :, None, None, :])
-        r3 = _t3_residual(t2, t3, ge, fdr, nocc, nmo)
-        t3new = pack_t3(t3 + r3 / eijkabc)
+    with timer('t3_residual'):
+        if _USE_CPACK:
+            r3p = _t3_residual_packed(t2, t3, ge, fdr, nocc, nmo)
+            oi, vi = _t3_tri(nocc, nvir)
+            mo_o = mo_e[:nocc]; eav = mo_e[nocc:] + cc.level_shift
+            eo = mo_o[oi[:, 0]] + mo_o[oi[:, 1]] + mo_o[oi[:, 2]]
+            ev = eav[vi[:, 0]] + eav[vi[:, 1]] + eav[vi[:, 2]]
+            d = (eo[:, None] - ev[None, :]).ravel()
+            t3new = t3p + r3p / d                              # stays packed
+        else:
+            eijkabc = (eia[:, None, None, :, None, None]
+                       + eia[None, :, None, None, :, None]
+                       + eia[None, None, :, None, None, :])
+            r3 = _t3_residual(t2, t3, ge, fdr, nocc, nmo)
+            t3new = pack_t3(t3 + r3 / eijkabc)
     return t1new, t2new, t3new
