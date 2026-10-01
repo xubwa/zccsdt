@@ -35,10 +35,13 @@ def main():
     niter = int(sys.argv[4]) if len(sys.argv) > 4 else 3
     frozen = int(sys.argv[5]) if len(sys.argv) > 5 else 0
     mol = gto.M(atom=GEOM[mol_name], basis=basis, spin=SPIN.get(mol_name, 0), verbose=0)
+    ru = os.environ.get('ZC_RU', '0') == '1' and kind == 'ghf'
     if kind == 'uhf':
         mf = scf.UHF(mol).run(conv_tol=1e-10)
     elif kind == 'x2c':
         mf = x2c.UHF(mol).run(conv_tol=1e-10)
+    elif ru:
+        mf = scf.RHF(mol).run(conv_tol=1e-10)
     else:
         mf = scf.addons.convert_to_ghf(scf.RHF(mol).run(conv_tol=1e-10))
     t0 = time.perf_counter()
@@ -48,12 +51,11 @@ def main():
         from zccsdt import eris_spin
         eris = eris_spin.from_scf(mf, frozen=frozen,
                                   vir_batch=int(os.environ.get('ZC_VBATCH', 16)))
-    elif os.environ.get('ZC_RU', '0') == '1' and kind == 'ghf':
+    elif ru:
         from zccsdt import eris_spin
-        rhf = scf.RHF(mol).run(conv_tol=1e-10)
-        eris = eris_spin.from_scf(rhf, frozen=frozen,
+        eris = eris_spin.from_scf(mf, frozen=frozen,
                                   vir_batch=int(os.environ.get('ZC_VBATCH', 16)))
-    if kind not in ('uhf',) and not (os.environ.get('ZC_RU', '0') == '1' and kind == 'ghf'):
+    else:
         eris = E.from_scf(mf, frozen=frozen, packed_vvvv=packed,
                           vir_batch=int(os.environ.get('ZC_VBATCH', 16)), spin_order=spin)
     t_ints = time.perf_counter() - t0
