@@ -21,7 +21,7 @@ import numpy as np
 from pyscf import lib
 
 from zccsdt.blas import gemm
-from zccsdt.cc import ccsd, t3pack
+from zccsdt.cc import ccsd, t3pack, t3kern
 from zccsdt.timing import timer
 
 einsum = lib.einsum
@@ -185,7 +185,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     nocc, nvir = t1.shape
     om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
     dtype = np.result_type(t1, t2, T3p, eris.oovv, eris.fock)
-    T3p = np.asarray(T3p, dtype=dtype).reshape(om.ntri, vm.ntri)
+    T3p = np.ascontiguousarray(np.asarray(T3p, dtype=dtype).reshape(om.ntri, vm.ntri))
     mo_e = eris.mo_energy
     eia = mo_e[:nocc, None] - (mo_e[None, nocc:] + opts.level_shift)
     eijab = eia[:, None, :, None] + eia[None, :, None, :]
@@ -227,30 +227,42 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
                            gvovv_Q.transpose(1, 2, 0)), axis=2)    # [m, R, a]
     G_mQ = G_mQ.reshape(nocc * vm.npair, nocc + nvir)
     fovT = np.ascontiguousarray(fov.T).ravel()                 # [(e, m)]
-    with timer('pass1'):
-        for pb in batches:
-            nbp = len(pb)
-            with timer('gather_half'):
-                T = t3pack.gather_half(T3p, om, vm, pb)     # (Pb, d, m, Q)
-            with timer('pass1_gemm'):
-                # sum over (P, d): dW_vvvo[i,e,Q] and C0[i,j,Q]
-                X = G_Pd[:, pb].reshape(nvir + nocc, nbp * nvir) @ \
-                    T.reshape(nbp * nvir, nocc * vm.npair)
-                X = X.reshape(nvir + nocc, nocc, vm.npair)
-                dWvT += X[:nvir].transpose(1, 0, 2)
-                C0 -= 2 * X[nvir:].transpose(1, 0, 2)
-                # sum over (m, Q): dW_vooo[m',a,P] and B0[P,a,b]
-                Y = T.reshape(nbp * nvir, nocc * vm.npair) @ G_mQ
-                Y = Y.reshape(nbp, nvir, nocc + nvir)
-                dWo[:, :, pb] = Y[:, :, :nocc].transpose(2, 1, 0)
-                B0[pb] = -2 * Y[:, :, nocc:].transpose(0, 2, 1)
-                # T3 -> T1: r1[a,i] += sum_{P,Q} g[P,Q] T[P,a,i,Q]
-                Tm = T.reshape(nbp, nvir * nocc, vm.npair)
-                for k, P in enumerate(pb):
-                    r1 += Tm[k] @ goovv_pp[P]
-                # T3 -> T2: rA[P,Q] = sum_{m,e} f[m,e] T[P,e,m,Q]
-                rA[pb] = np.matmul(fovT, Tm)
-            del T, Tm, X, Y
+    if t3kern.USE_C:
+        with timer('pass1'):
+            Xacc, Yall, r1, rA = t3kern.pass1(T3p, om, vm, nb, G_Pd, G_mQ,
+                                              goovv_pp, fovT)
+        dWvT = Xacc[:nvir].reshape(nvir, nocc, vm.npair).transpose(1, 0, 2)
+        C0 = -2 * Xacc[nvir:].reshape(nocc, nocc, vm.npair).transpose(1, 0, 2)
+        dWo = Yall[:, :, :nocc].transpose(2, 1, 0)
+        B0 = -2 * Yall[:, :, nocc:].transpose(0, 2, 1)
+    else:
+        with timer('pass1'):
+            for pb in batches:
+                nbp = len(pb)
+                with timer('gather_half'):
+                    T = t3pack.gather_half(T3p, om, vm, pb)     # (Pb, d, m, Q)
+                Tf = T.reshape(nbp * nvir, nocc * vm.npair)
+                with timer('pass1_gemm_Pd'):
+                    # sum over (P, d): dW_vvvo[i,e,Q] and C0[i,j,Q]
+                    X = np.matmul(np.ascontiguousarray(G_Pd[:, pb]).reshape(
+                        nvir + nocc, nbp * nvir), Tf)
+                    X = X.reshape(nvir + nocc, nocc, vm.npair)
+                    dWvT += X[:nvir].transpose(1, 0, 2)
+                    C0 -= 2 * X[nvir:].transpose(1, 0, 2)
+                with timer('pass1_gemm_mQ'):
+                    # sum over (m, Q): dW_vooo[m',a,P] and B0[P,a,b]
+                    Y = np.matmul(Tf, G_mQ)
+                    Y = Y.reshape(nbp, nvir, nocc + nvir)
+                    dWo[:, :, pb] = Y[:, :, :nocc].transpose(2, 1, 0)
+                    B0[pb] = -2 * Y[:, :, nocc:].transpose(0, 2, 1)
+                with timer('pass1_gemv'):
+                    # T3 -> T1: r1[a,i] += sum_{P,Q} g[P,Q] T[P,a,i,Q]
+                    Tm = T.reshape(nbp, nvir * nocc, vm.npair)
+                    for k, P in enumerate(pb):
+                        r1 += Tm[k] @ goovv_pp[P]
+                    # T3 -> T2: rA[P,Q] = sum_{m,e} f[m,e] T[P,e,m,Q]
+                    rA[pb] = np.matmul(fovT, Tm)
+                del T, Tm, X, Y
     r1 = r1.reshape(nvir, nocc).T
     dWv = dWvT.transpose(2, 1, 0)                       # [Q, e, i]
     t1new = t1new + r1 / eia
@@ -290,37 +302,47 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     WringT = Weff_ovvo.transpose(1, 3, 2, 0).reshape(nvir * nocc, nvir * nocc)
     WvT2 = np.ascontiguousarray(Wv.transpose(1, 2, 0)).reshape(nvir, -1)   # [e, (i,Q)]
     t2P_flat = t2P.reshape(nocc, -1)                                     # [m, (k,Q)]
-    with timer('pass2'):
-        for pb in batches:
-            nbp = len(pb)
-            with timer('gather_half'):
-                T = t3pack.gather_half(T3p, om, vm, pb)     # (Pb, d, m, Q)
-            with timer('ring_gemm'):
-                Z = np.empty((nbp, nvir * nocc, vm.npair), dtype=dtype)
-                Tm = T.reshape(nbp, nvir * nocc, vm.npair)
-                for k in range(nbp):
-                    gemm(WringT, Tm[k], Z[k])               # Z[P, a, i, Q]
-            del T, Tm
-            with timer('drive'):
-                Zf = Z.reshape(nbp * nvir, nocc * vm.npair)
-                # Xr1: Z[P,c,i,Q] -= sum_e t2mn[P,e,c] Wv[Q,e,i]
-                gemm(t2mn[pb].transpose(0, 2, 1).reshape(nbp * nvir, nvir), WvT2,
-                     Zf, alpha=-1.0, beta=1.0)
-                # Xr2: Z[P,a,k,Q] -= sum_m Wo[m,a,P] t2P[m,k,Q]
-                gemm(Wo[:, :, pb].transpose(2, 1, 0).reshape(nbp * nvir, nocc),
-                     t2P_flat, Zf, alpha=-1.0, beta=1.0)
-            with timer('reduce'):
-                t3pack.add_reduce_split(R, Z, om, vm, pb)
-                del Z
+    if t3kern.USE_C:
+        with timer('pass2'):
+            t3kern.pass2(T3p, om, vm, nb, WringT, t2mn.transpose(0, 2, 1), WvT2,
+                         Wo.transpose(2, 1, 0), t2P_flat, R)
+    else:
+        with timer('pass2'):
+            for pb in batches:
+                nbp = len(pb)
+                with timer('gather_half'):
+                    T = t3pack.gather_half(T3p, om, vm, pb)     # (Pb, d, m, Q)
+                with timer('ring_gemm'):
+                    Z = np.empty((nbp, nvir * nocc, vm.npair), dtype=dtype)
+                    Tm = T.reshape(nbp, nvir * nocc, vm.npair)
+                    for k in range(nbp):
+                        # numpy matmul is ~2x faster than SciPy's gemm for this
+                        # shape (same OpenBLAS); Z is overwritten, no beta needed
+                        np.matmul(WringT, Tm[k], out=Z[k])     # Z[P, a, i, Q]
+                del T, Tm
+                with timer('drive'):
+                    Zf = Z.reshape(nbp * nvir, nocc * vm.npair)
+                    # Xr1: Z[P,c,i,Q] -= sum_e t2mn[P,e,c] Wv[Q,e,i]
+                    gemm(t2mn[pb].transpose(0, 2, 1).reshape(nbp * nvir, nvir), WvT2,
+                         Zf, alpha=-1.0, beta=1.0)
+                    # Xr2: Z[P,a,k,Q] -= sum_m Wo[m,a,P] t2P[m,k,Q]
+                    gemm(Wo[:, :, pb].transpose(2, 1, 0).reshape(nbp * nvir, nocc),
+                         t2P_flat, Zf, alpha=-1.0, beta=1.0)
+                with timer('reduce'):
+                    t3pack.add_reduce_split(R, Z, om, vm, pb)
+                    del Z
 
     # ---- pp ladder (+F_vv) over batches of occupied triples
     with timer('pp_ladder'):
         nbt = max(1, int(mem_mb * 1e6 // (3 * vm.npair * nvir * np.dtype(dtype).itemsize)))
-        for rows in _batches(om.ntri, nbt):
-            T = t3pack.gather_vir_half(T3p, vm, rows)            # (Q, nb, c)
-            X = gemm(Wpp, T.reshape(vm.npair, -1))                # (Q', nb*c)
-            t3pack.add_reduce_pair_first(R, X, vm, rows)
-            del T, X
+        if t3kern.USE_C:
+            t3kern.pp_ladder(T3p, om, vm, nbt, Wpp, R)
+        else:
+            for rows in _batches(om.ntri, nbt):
+                T = t3pack.gather_vir_half(T3p, vm, rows)            # (Q, nb, c)
+                X = gemm(Wpp, T.reshape(vm.npair, -1))                # (Q', nb*c)
+                t3pack.add_reduce_pair_first(R, X, vm, rows)
+                del T, X
 
     # ---- hh ladder (+F_oo): occupied-space operator on packed T3
     with timer('hh_ladder'):
@@ -329,7 +351,11 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     with timer('t3_update'):
         eo = mo_e[:nocc][om.triples].sum(axis=1)
         ev = (mo_e[nocc:] + opts.level_shift)[vm.triples].sum(axis=1)
-        T3new = T3p + R / (eo[:, None] - ev[None, :])
+        if t3kern.USE_C:
+            T3new = T3p.copy()
+            t3kern.update(T3new, R, eo, ev)
+        else:
+            T3new = T3p + R / (eo[:, None] - ev[None, :])
     return t1new, t2new, T3new.ravel()
 
 

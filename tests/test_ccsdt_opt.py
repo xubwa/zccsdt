@@ -83,9 +83,14 @@ def test_add_one_body_pairs():
     np.testing.assert_allclose(W, 0.5 * full[md[:, None], ne[:, None], md, ne], atol=1e-14)
 
 
+@pytest.mark.parametrize('use_c', [True, False])
 @pytest.mark.parametrize('seed', [1, 2])
 @pytest.mark.parametrize('mem_mb', [2000, 0.5])      # one batch / many batches
-def test_step_matches_reference(fh, seed, mem_mb):
+def test_step_matches_reference(fh, seed, mem_mb, use_c, monkeypatch):
+    from zccsdt.cc import t3kern
+    if use_c and not t3kern.USE_C:
+        pytest.skip('C library not built')
+    monkeypatch.setattr(t3kern, 'USE_C', use_c)
     t1, t2, t3p = _rand_amps(fh, seed)
     opts = solver.Options()
     ref = ccsdt.update_amps(opts, t1, t2, t3p.astype(complex), fh)
