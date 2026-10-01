@@ -28,11 +28,11 @@ N2/cc-pVTZ has 120 (o = 14, v = 106).
 | CFOUR `ncc`, REF=RHF (spin-adapted) | 0.60 s | 1.78 s |
 | CFOUR `ecc`, REF=RHF | 6.8 s | 19.8 s |
 | CFOUR `ecc`, REF=UHF (spin-integrated) | 18.7 s | 57 s |
-| CFOUR `vcc`, REF=UHF (spin-integrated) | 16 s | about 60 s |
-| **zccsdt, real spin-orbital** | **3.8 s** | **10.0 s** |
-| **zccsdt, complex spinor (X2C)** | **10.5 s** | **20-25 s** |
+| CFOUR `vcc`, REF=UHF (spin-integrated) | 16 s | 56 s |
+| **zccsdt, real spin-orbital** | **3.2-3.6 s** | **6.7 s** |
+| **zccsdt, complex spinor (X2C)** | **6.6 s** | **16.9 s** |
 
-Peak memory of zccsdt: H2O 6.5 GB (real) and 17.7 GB (complex); N2 9.3 GB
+Peak memory of zccsdt: H2O 6.2 GB (real) and 17.8 GB (complex); N2 8.3 GB
 (real) and 20.3 GB (complex).
 
 ### Representation factor
@@ -54,33 +54,33 @@ An RHF spin-adapted code such as `ncc` saves several times more again.
 What this means for the comparison:
 
 - **Against CFOUR's spin-integrated codes** (`ecc`/`vcc`, REF=UHF; the
-  nonrelativistic analogue of a spinor calculation), zccsdt is **5-6 times
+  nonrelativistic analogue of a spinor calculation), zccsdt is **5-8 times
   faster in wall time**, while doing about 7.5 times more arithmetic.
-- **Against `ncc`**, zccsdt is about 6 times slower in wall time. The
+- **Against `ncc`**, zccsdt is 4-6 times slower in wall time. The
   representation factor is at least 7.5 (more, because of the RHF spin
-  adaptation), so per unit of work zccsdt is at least on par.
+  adaptation), so per unit of work zccsdt is ahead.
 - **Spinor case.** CFOUR has no spinor CCSDT, so there is no same-condition
-  comparison. The complex zccsdt iteration costs 2-2.5 times the real one
-  for 4 times the arithmetic.
+  comparison. The complex zccsdt iteration costs about 2.5 times the real
+  one for 4 times the arithmetic. The N2 complex iteration (16.9 s) is 1.9
+  times the floor of dominant flops at 2.4 TFLOPS (about 9 s).
 
 ## Where the time goes (N2/cc-pVTZ, complex)
 
-Per-iteration breakdown from the timers in `ccsdt_opt` and the C kernels:
+Per-iteration breakdown from the timers in `ccsdt_opt` and the C kernels
+(node c054, 16.9 s per iteration in total):
 
 | Step | Time | Comment |
 |---|---|---|
-| pass 2: ring + drive (C) | 5.4-7.2 s | GEMM part about 2.1 TFLOPS |
-| pp ladder (C) | 3.3-4.2 s | GEMM part about 3 TFLOPS |
-| pass 1: T3 -> T1/T2, W (C) | 2.3-2.5 s | |
-| T1 dressing (Python + MKL) | 2.6 s | packed vvvv dressing about 1.3 s |
-| CCSD part (Python) | 2.1-2.5 s | |
-| other intermediates (Python + MKL) | 1.6-2.2 s | packed W_vvvo about 1.0-1.5 s |
-| DIIS | 1.0-1.3 s | |
-| hh ladder, T3 update, gathers, reductions | about 1.5 s | |
+| pass 2: ring + drive (C) | 6.2 s | ring GEMM 4.4 s (about 2.0 TFLOPS), antisymmetrizing reduction 0.8 s, gather 0.35 s, drive GEMM about 0.5 s |
+| pp ladder (C) | 3.9 s | GEMM about 2.8 TFLOPS |
+| pass 1: T3 -> T1/T2, W (C) | 2.4 s | GEMM 1.6 s |
+| other intermediates (Python + MKL) | 1.5 s | packed W_vvvo 1.0 s |
+| T1 dressing (Python + MKL) | 1.3 s | packed vvvv dressing 0.5 s |
+| CCSD part, T1-dressed (Python + MKL) | 0.6 s | |
+| DIIS (OpenMP) | 0.3 s | |
 
-The theoretical floor (dominant flops / 2.4 TFLOPS) is about 9 s. About
-half of the remaining time is in Python-side intermediates and the CCSD
-part; these are being moved to C next.
+The T3 kernels (12.5 s) run their GEMMs at 2-2.8 TFLOPS. The Python-side
+remainder is about 3.7 s.
 
 ## Optimization history (H2O/cc-pVTZ, real, s/iteration)
 
@@ -95,6 +95,7 @@ part; these are being moved to C next.
 | OMP_WAIT_POLICY=PASSIVE | 5.6 | spinning OpenMP threads halved BLAS throughput |
 | MKL (GNU OpenMP layer) for the kernels | 4.4 | one thread pool for BLAS and loops |
 | packed W_vvvo and CCSD ladder, MKL for Python GEMMs | 3.8 | |
+| pair-antisymmetrize kernel, segment DIIS, merged drive GEMM, T1-dressed CCSD | 3.2-3.6 | N2 complex: 25 -> 16.9 s |
 
 ## Correctness references
 
