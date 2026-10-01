@@ -54,3 +54,19 @@ def test_ccsd_x2c_vs_socutils():
     ref.kernel()
     r = solver.kernel(E.from_scf(mf, frozen=2), 'ccsd', TIGHT)
     assert abs(r.e_corr - ref.e_corr) < 1e-9
+
+
+def test_packed_vvvv_ladder_matches_sym():
+    from zccsdt.cc import ccsd, gintermediates as imd
+    mf = water_ghf()
+    C = E.rotate_occ_vir(mf.mo_coeff, mf.mo_occ, seed=8, frozen=2)
+    e = E.from_scf(mf, mo_coeff=C, frozen=2)
+    rng = np.random.default_rng(2)
+    no, nv = e.nocc, e.nmo - e.nocc
+    t1 = 0.05 * (rng.random((no, nv)) + 1j * rng.random((no, nv)))
+    t2 = 0.05 * (rng.random((no, no, nv, nv)) + 1j * rng.random((no, no, nv, nv)))
+    t2 = t2 - t2.transpose(1, 0, 2, 3)
+    t2 = t2 - t2.transpose(0, 1, 3, 2)
+    tau = imd.make_tau(t2, t1, t1)
+    np.testing.assert_allclose(ccsd.update_t2_vvvv_packed(t1, t2, tau, e),
+                               imd.update_t2_vvvv_sym(t1, t2, tau, e), atol=1e-13)

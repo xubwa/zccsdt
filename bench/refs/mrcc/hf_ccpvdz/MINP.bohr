@@ -1,0 +1,15 @@
+basis=PVDZ
+calc=CCSDT
+core=corr
+mem=4GB
+symm=off
+scftype=RHF
+scftol=12
+cctol=11
+ccmaxit=200
+unit=bohr
+geom=xyz
+2
+
+F 0.000000000000000 0.000000000000000 0.000000000000000
+H 0.000000000000000 0.000000000000000 1.732878856226162

@@ -43,6 +43,8 @@ def gemm(A, B, C=None, alpha=1.0, beta=0.0):
     if C is None:
         C = np.empty((A.shape[0], B.shape[1]), dtype=dtype)
         beta = 0.0
+    # C must be the caller's own C-contiguous buffer: a reshape of a
+    # non-contiguous array would be a silent copy and the result lost
     assert C.flags.c_contiguous and C.shape == (A.shape[0], B.shape[1])
     m, k = A.shape
     n = B.shape[1]

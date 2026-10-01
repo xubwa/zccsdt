@@ -100,3 +100,12 @@ def test_step_matches_reference(fh, seed, mem_mb, use_c, monkeypatch):
         assert abs(a - b).max() < 1e-12 * scale, name
     if not np.iscomplexobj(fh.oovv):
         assert all(not np.iscomplexobj(x) for x in new)
+
+
+def test_step_does_not_modify_integrals(fh):
+    from zccsdt import eris as E
+    before = {k: np.array(getattr(fh, k)) for k in E.BLOCKS + ('fock',)}
+    t1, t2, t3p = _rand_amps(fh, 3)
+    ccsdt_opt.update_amps(solver.Options(), t1, t2, t3p, fh)
+    for k, v in before.items():
+        np.testing.assert_array_equal(getattr(fh, k), v, err_msg=k)

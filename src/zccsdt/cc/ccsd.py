@@ -14,7 +14,7 @@ from zccsdt.timing import timer
 einsum = lib.einsum
 
 
-def update_amps(cc, t1, t2, eris, alg='sym'):
+def update_amps(cc, t1, t2, eris, alg='packed'):
 
     nocc, nvir = t1.shape
     fock = eris.fock
@@ -67,6 +67,9 @@ def update_amps(cc, t1, t2, eris, alg='sym'):
     elif (alg == 'sym'):
         with timer('ccsd.vvvv'):
             t2new += imd.update_t2_vvvv_sym(t1, t2, tau, eris)
+    elif (alg == 'packed'):
+        with timer('ccsd.vvvv'):
+            t2new += update_t2_vvvv_packed(t1, t2, tau, eris)
     tmp = einsum('imae,mbej->ijab', t2, Wovvo)
     tmp -= -einsum('ie,ma,mbje->ijab', t1, t1, eris.ovov)
     tmp = tmp - tmp.transpose(1,0,2,3)
@@ -95,3 +98,30 @@ def energy(t1, t2, eris):
     e += 0.25 * einsum('ijab,ijab', t2, oovv)
     e += 0.5 * einsum('ia,jb,ijab', t1, t1, oovv)
     return e
+
+
+def update_t2_vvvv_packed(t1, t2, tau, eris):
+    '''Same result as gintermediates.update_t2_vvvv_sym, with the ladder
+    sum_{e<f} <ab||ef> tau_ij^ef done as one GEMM over packed pairs
+    (i<j) x (e<f) x (a<b) using the in-core packed vvvv shared with the T3
+    code (no scratch file).'''
+    from zccsdt.cc import t3pack
+    from zccsdt.cc.ccsdt_opt import vvvv_packed, _unpack_pairs
+    from zccsdt.blas import gemm
+    nocc, nvir = t1.shape
+    om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
+    mm, nn = om.pairs[:, 0], om.pairs[:, 1]
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    V = vvvv_packed(eris, vm)
+    tau_pp = np.ascontiguousarray(tau[mm, nn][:, md, ne])         # (ij, ef)
+    X = gemm(tau_pp, V.T)                                          # (ij, ab)
+    t2_new = _unpack_pairs(X, om, vm)
+
+    extra = np.zeros_like(t2_new)
+    eris_ovvv = np.asarray(eris.ovvv)
+    tmp = einsum('maef,ijef->maij', eris_ovvv, tau)
+    tmp = einsum('maij,mb->baij', tmp, t1)
+    extra += einsum('baij->ijab', tmp) - einsum('baij->ijba', tmp)
+    tmp = einsum('mnef,ijef->mnij', 0.25*np.asarray(eris.oovv), tau)
+    extra += einsum('mnij,mnab->ijab', tmp, tau)
+    return t2_new + 0.5 * extra

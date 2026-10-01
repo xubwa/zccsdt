@@ -1,0 +1,15 @@
+basis=6-31G
+calc=CCSDT
+core=corr
+mem=4GB
+symm=off
+scftype=RHF
+scftol=12
+cctol=11
+ccmaxit=200
+unit=angs
+geom=xyz
+2
+
+N 0.0 0.0 0.0
+N 0.0 0.0 1.0977

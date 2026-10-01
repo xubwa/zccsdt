@@ -98,19 +98,87 @@ def dress_block(eris, t1, key):
     return state[key]
 
 
+def vvvv_packed(eris, vm):
+    '''Undressed <ab||de> packed over a<b, d<e, cached on the integral object
+    (built once from the stored block).'''
+    cache = getattr(eris, '_vvvv_pp', None)
+    if cache is None:
+        md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+        cache = np.ascontiguousarray(np.asarray(eris.vvvv)[md[:, None], ne[:, None], md, ne])
+        try:
+            eris._vvvv_pp = cache
+        except AttributeError:
+            pass
+    return cache
+
+
+def _pair_t1_matrix(t1, vm):
+    '''M[R, (e, i)] with sum_R V[Q, R] M[R, (e, i)] = sum_f V[Q, e, f] t1[i, f]
+    for V antisymmetric in (e, f) and packed over R = (e' < f'):
+    M = delta(e, e') t1[i, f'] - delta(e, f') t1[i, e'].'''
+    nocc, nvir = t1.shape
+    M = np.zeros((vm.npair, nvir, nocc), dtype=t1.dtype)
+    R = np.arange(vm.npair)
+    e1, f1 = vm.pairs[:, 0], vm.pairs[:, 1]
+    M[R, e1] = t1[:, f1].T
+    M[R, f1] = -t1[:, e1].T
+    return M.reshape(vm.npair, nvir * nocc)
+
+
+def wvvvo_packed(eris, t1, t2, fov, ge, om, vm):
+    '''W_vvvo[Q(a<b), e, i] of the T3 drive term (without the T3 dressing),
+    computed packed and without the full dressed vvvv:
+      ~<ab||ei> = K_vv[ab] - L[a,b] + L[b,a] + sum_{m<n} tau[mn,ab] K_oo[mn]
+      K_xy = <xy||ei> + sum_f <xy||ef> t1[i,f],  L[a,b] = sum_m t1[m,a] K_ov[m,b]
+    plus the T2 terms of W_vvvo with the dressed oovo, ovvv and Fock.'''
+    nocc, nvir = t1.shape
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    mm, nn = om.pairs[:, 0], om.pairs[:, 1]
+    dtype = np.result_type(t1, t2, eris.oovv)
+    V = vvvv_packed(eris, vm)
+    # K_vv packed
+    W = np.array(get_block(eris, 'vvvo')[md, ne], dtype=dtype, order='C', copy=True)
+    gemm(V, _pair_t1_matrix(t1, vm), W.reshape(vm.npair, -1), beta=1.0)
+    # K_ov[m,b,e,i] and L
+    ovvv = np.asarray(eris.ovvv)
+    # explicit copies: get_block may return the stored array itself
+    Kov = np.array(get_block(eris, 'ovvo'), dtype=dtype, order='C', copy=True)
+    gemm(ovvv.reshape(-1, nvir), np.asfortranarray(t1.T), Kov.reshape(-1, nocc), beta=1.0)
+    L = gemm(np.asfortranarray(t1.T), Kov.reshape(nocc, -1)).reshape(nvir * nvir, -1)
+    W.reshape(vm.npair, -1)[:] -= np.take(L, md * nvir + ne, axis=0)
+    W.reshape(vm.npair, -1)[:] += np.take(L, ne * nvir + md, axis=0)
+    del L, Kov
+    # K_oo packed over m<n and the tau term
+    # contiguous copies: gemm writes into reshaped views of these
+    Koo = np.array(get_block(eris, 'oovo')[mm, nn], dtype=dtype, order='C', copy=True)
+    gemm(np.asarray(eris.oovv)[mm, nn].reshape(-1, nvir), np.asfortranarray(t1.T),
+         Koo.reshape(-1, nocc), beta=1.0)
+    tau = t1[mm][:, md] * t1[nn][:, ne] - t1[nn][:, md] * t1[mm][:, ne]      # (P, Q)
+    gemm(np.asfortranarray(tau.T), Koo.reshape(om.npair, -1), W.reshape(vm.npair, -1),
+         beta=1.0)
+    # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] = sum_{m<n} t2[mn,ab] ~oovo[mn,e,i]
+    t2mn_pp = t2[mm, nn][:, md, ne]
+    gemm(np.asfortranarray(t2mn_pp.T), np.ascontiguousarray(ge['oovo'][mm, nn]).reshape(
+        om.npair, -1), W.reshape(vm.npair, -1), beta=1.0)
+    # - P(ab) sum_{mf} ~<mb||ef> t2[mi,af]: X[(a,i),(b,e)] = t2[a,i,m,f] ovvv[m,f,b,e]
+    A = np.ascontiguousarray(t2.transpose(2, 1, 0, 3)).reshape(nvir * nocc, nocc * nvir)
+    B = np.ascontiguousarray(ge['ovvv'].transpose(0, 3, 1, 2)).reshape(nocc * nvir, -1)
+    X = gemm(A, B).reshape(nvir, nocc, nvir, nvir)                           # [a,i,b,e]
+    W -= (X[md, :, ne, :] - X[ne, :, md, :]).transpose(0, 2, 1)
+    del X, A, B
+    # - sum_m f[m,e] t2[m,i,a,b]
+    W -= gemm(np.asfortranarray(fov.T), t2[:, :, md, ne].reshape(nocc, -1)).reshape(
+        nvir, nocc, vm.npair).transpose(2, 0, 1)
+    return W
+
+
 def dressed_vvvv_pp(eris, t1, vm):
     '''Packed T1-dressed <ab||de> over a<b, d<e without the full v^4 array:
     ~<ab||de> = <ab||de> - Y[a,b,de] + Y[b,a,de] + Z[a,b,de],
     Y[x,y,Q] = sum_m t1[m,x] <my||Q>,  Z[a,b,Q] = sum_mn t1[m,a] t1[n,b] <mn||Q>.'''
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     nocc, nvir = t1.shape
-    cache = getattr(eris, '_vvvv_pp', None)
-    if cache is None:
-        cache = np.asarray(eris.vvvv)[md[:, None], ne[:, None], md, ne]
-        try:
-            eris._vvvv_pp = cache
-        except AttributeError:
-            pass
+    cache = vvvv_packed(eris, vm)
     ovvv_Q = np.asarray(eris.ovvv)[:, :, md, ne]                   # (m, y, Q)
     Y = gemm(np.ascontiguousarray(t1.T), ovvv_Q.reshape(nocc, -1))
     Y = Y.reshape(nvir * nvir, -1)                                 # [(x,y), Q]
@@ -195,8 +263,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     with timer('t1_dress'):
         fdr = dress_fock(eris, t1)
         ge = {}
-        for k in ('vvvo', 'ovoo', 'oooo', 'ovvo', 'oovv', 'ovvv', 'ooov', 'oovo',
-                  'vovv'):
+        for k in ('ovoo', 'oooo', 'ovvo', 'oovv', 'ovvv', 'ooov', 'oovo', 'vovv'):
             with timer('dress.' + k):
                 ge[k] = dress_block(eris, t1, k)
         with timer('dress.vvvv_pp'):
@@ -276,15 +343,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
 
     # ---- effective intermediates for the T3 residual
     with timer('intermediates'):
-        gvvvo, govoo = ge['vvvo'], ge['ovoo']
-        ovvv, ooov, oovo = ge['ovvv'], ge['ooov'], ge['oovo']
+        govoo = ge['ovoo']
+        ovvv, ooov = ge['ovvv'], ge['ooov']
         t_ = timer('imd.Wvvvo'); t_.__enter__()
-        Wvvvo = gvvvo.copy()
-        Wvvvo += 0.5 * einsum('mnei,mnab->abei', oovo, t2)
-        tmp = einsum('mbef,miaf->abei', ovvv, t2)
-        Wvvvo -= (tmp - tmp.transpose(1, 0, 2, 3))
-        Wvvvo -= einsum('me,miab->abei', fov, t2)
-        Wv = Wvvvo[md, ne] + dWv                         # [Q(ab), e, i]
+        Wv = wvvvo_packed(eris, t1, t2, fov, ge, om, vm) + dWv   # [Q(ab), e, i]
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wvooo'); t_.__enter__()
         Wvooo = govoo.copy()
