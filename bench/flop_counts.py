@@ -104,17 +104,18 @@ def ncc_model(o, v):
 if __name__ == '__main__':
     for name, o, v in [('H2O/cc-pVTZ', 5, 53), ('N2/cc-pVTZ', 7, 53),
                        ('H2S/cc-pVTZ', 9, 53), ('CH2O/cc-pVTZ', 8, 80),
-                       ('H2O/cc-pVQZ', 5, 110)]:
+                       ('H2O/cc-pVQZ', 5, 110), ('C2H4/cc-pVTZ', 8, 108),
+                       ('C6H6/cc-pVDZ fc', 15, 93)]:
         lf, ls, lr = ladder(o, v)
         rf, rs, rr = ring(o, v)
         nl, nrl, nrh = ncc_model(o, v)
         sl, sr = sa_model(o, v)
-        print('%-12s spin-orbital: ladder %.3e ring %.3e | Sz-blocked: ladder %.3e '
+        print('%-15s spin-orbital: ladder %.3e ring %.3e | Sz-blocked: ladder %.3e '
               'ring %.3e | RCCSDT: ladder %.3e ring %.3e | spin-adapted: ladder %.3e '
               'ring %.3e | ncc: ladder %.3e ring %.3e-%.3e'
               % (name, lf, rf, ls, rs, lr, rr, sl, sr, nl, nrl, nrh))
         tot, totsz, totr, tots = lf + rf, ls + rs, lr + rr, sl + sr
-        print('%-12s ratio spin-orbital/Sz-blocked %.1f   spin-orbital/ncc %.1f-%.1f   '
+        print('%-15s ratio spin-orbital/Sz-blocked %.1f   spin-orbital/ncc %.1f-%.1f   '
               'RCCSDT/ncc %.2f-%.2f   spin-adapted/ncc %.2f-%.2f'
               % ('', tot / totsz, tot / (nl + nrh), tot / (nl + nrl),
                  totr / (nl + nrh), totr / (nl + nrl), tots / (nl + nrh), tots / (nl + nrl)))

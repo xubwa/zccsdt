@@ -239,6 +239,14 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
         return _kernel(*args)
 
 
+def run(mf, ncore=0, **kwargs):
+    '''Closed-shell spin-adapted CCSDT for a PySCF RHF object, with ``ncore``
+    frozen core orbitals: the integral blocks are transformed from the AO
+    integrals as needed (no n^4 array), then kernel(ints, **kwargs).'''
+    from zccsdt.sa import rccsdt_ref
+    return kernel(rccsdt_ref.from_scf(mf, ncore=ncore, full=False), **kwargs)
+
+
 def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
             incore_complete):
     import time

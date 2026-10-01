@@ -147,7 +147,7 @@ def test_two_electrons_equal_fci():
     from pyscf import fci
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).run(conv_tol=1e-12)
-    r = E.kernel(R.from_scf(mf, full=False), conv_tol=1e-11, conv_tol_normt=1e-8)
+    r = E.run(mf, conv_tol=1e-11, conv_tol_normt=1e-8)
     assert r.converged and abs(r.e_tot - fci.FCI(mf).kernel()[0]) < 1e-9
 
 
