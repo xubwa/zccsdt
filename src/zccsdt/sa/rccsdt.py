@@ -217,22 +217,35 @@ def residuals_terms(ints, blocks, t1, t2, t3b):
 
 
 def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=8,
-           verbose=False):
-    '''Closed-shell spin-adapted CCSDT (Jacobi steps with DIIS).  numpy's own
-    BLAS (OpenBLAS) is kept single-threaded while it runs: its spinning
-    threads would otherwise compete with the MKL threads of zccsdt.blas.'''
+           verbose=False, diis_file=None, incore_complete=False):
+    '''Closed-shell spin-adapted CCSDT (Jacobi steps with DIIS).
+
+    DIIS storage follows the PySCF settings (zccsdt.cc.diis): unless
+    ``incore_complete``, the T3 part of the ``diis_space`` stored vectors and
+    error vectors lives in an HDF5 file, ``diis_file`` if given (kept), else a
+    temporary file in the scratch directory.  T1, T2 and T3 vectors below
+    diis.INCORE_SIZE elements stay in memory.
+
+    numpy's own BLAS (OpenBLAS) is kept single-threaded while it runs: its
+    spinning threads would otherwise compete with the MKL threads of
+    zccsdt.blas.'''
+    args = (ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
+            incore_complete)
     try:
         from threadpoolctl import threadpool_limits
     except ImportError:
-        return _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose)
+        return _kernel(*args)
     with threadpool_limits(limits={'openblas': 1}):
-        return _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose)
+        return _kernel(*args)
 
 
-def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose):
+def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
+            incore_complete):
+    import time
     from zccsdt.cc.diis import DIIS
     from zccsdt.sa import rccsdt_ref
     from zccsdt.sa.t3blocks import Blocks, jacobi
+    from zccsdt.timing import timer
     no, nv = ints.nocc, ints.nvir
     blocks = Blocks(no)
     e = ints.mo_energy
@@ -244,45 +257,49 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose):
     t2 = ints.block('oovv') / d2
     t3b = np.zeros((blocks.nblk, nv, nv, nv))
     r3b = np.empty_like(t3b)
-    adiis = DIIS(space=diis_space)
+    adiis = DIIS(space=diis_space, filename=diis_file, incore=incore_complete)
     # DIIS metric of the full t_ijk^abc: a block stands for 6 (distinct
     # occupied indices) or 3 (one repeated index) ordered triples; the T3
     # error vector carries the weight, the stored T3 vector does not
     wsq = np.sqrt(np.where(blocks.kind == 0, 6.0, 3.0))
     e_old = rccsdt_ref.energy(t1, t2, ints)
     conv = False
-    import time
-    from zccsdt.timing import timer
     timings = []
-    for cycle in range(max_cycle):
-        t0 = time.perf_counter()
-        r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b, r3b)
-        with timer('sa.diis'):
-            xs, es = adiis.recycle()
-            x3 = xs[2].reshape(t3b.shape) if xs else np.empty_like(t3b)
-            e3 = es[2].reshape(t3b.shape) if es else np.empty_like(t3b)
-            n3 = jacobi(eo3, ev, wsq, t3b, r3b, x3, e3)
-            normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.sqrt(n3))
-            q1, q2 = r1 / d1, r2 / d2
-            # the extrapolated T3 goes into the old t3b array (not a DIIS vector)
-            out = adiis.update([t1 + q1, t2 + q2, x3], errors=[q1, q2, e3],
-                               out=[None, None, t3b])
-        t1 = out[0].reshape(no, nv)
-        t2 = out[1].reshape(no, no, nv, nv)
-        t3b = out[2].reshape(t3b.shape)
-        e_new = rccsdt_ref.energy(t1, t2, ints)
-        timings.append(time.perf_counter() - t0)
-        if verbose:
-            print('cycle %3d  E_corr = %.15f  dE = %.3e  |r| = %.3e  %.2fs'
-                  % (cycle + 1, e_new, e_new - e_old, normt, timings[-1]))
-        done = abs(e_new - e_old) < conv_tol and normt < conv_tol_normt
-        e_old = e_new
-        if done:
-            conv = True
-            break
+    try:
+        for cycle in range(max_cycle):
+            t0 = time.perf_counter()
+            r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b, r3b)
+            with timer('sa.diis'):
+                # the new vector and its error are built in the DIIS storage
+                xs, es = adiis.buffers((t1, t2, t3b))
+                n3 = jacobi(eo3, ev, wsq, t3b, r3b, xs[2].reshape(t3b.shape),
+                            es[2].reshape(t3b.shape))
+                normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.sqrt(n3))
+                for k, (t, q) in enumerate(((t1, r1 / d1), (t2, r2 / d2))):
+                    xs[k][:] = (t + q).ravel()
+                    es[k][:] = q.ravel()
+                # the extrapolated T3 goes into the old t3b array (not a DIIS vector)
+                out = adiis.update(xs, errors=es, out=[None, None, t3b])
+            t1 = out[0].reshape(no, nv)
+            t2 = out[1].reshape(no, no, nv, nv)
+            t3b = out[2].reshape(t3b.shape)
+            e_new = rccsdt_ref.energy(t1, t2, ints)
+            timings.append(time.perf_counter() - t0)
+            if verbose:
+                print('cycle %3d  E_corr = %.15f  dE = %.3e  |r| = %.3e  %.2fs'
+                      % (cycle + 1, e_new, e_new - e_old, normt, timings[-1]))
+            done = abs(e_new - e_old) < conv_tol and normt < conv_tol_normt
+            e_old = e_new
+            if done:
+                conv = True
+                break
+        diis_on_disk = adiis.on_disk()
+    finally:
+        adiis.close()
     res = rccsdt_ref.Result(e_corr=e_old, e_tot=ints.e_hf + e_old, converged=conv,
                             ncycle=cycle + 1, t1=t1, t2=t2, t3=t3b)
     res.timings = timings
+    res.diis_on_disk = diis_on_disk
     return res
 
 

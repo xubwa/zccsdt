@@ -112,6 +112,23 @@ attached or block-local.
    the other two views follows from the other by symmetry.
 7. Null projection; Jacobi step with the DIIS vectors in one pass (the DIIS
    metric weights a block by the number of ordered triples it stands for).
+   The new vector and its error vector are written directly into the DIIS
+   storage.
+
+### Memory and DIIS storage
+
+In memory: T3 and its residual, the packed pp operator and bare vvvv (v^4
+elements together), ovvv-sized blocks, and the work arrays of the passes
+(a few T3- or o v^3-sized buffers, bounded by slabs where they would grow
+with o^2 v^3).
+
+The DIIS subspace needs 2 x `diis_space` T3-sized vectors, more than
+everything else for larger molecules.  As in PySCF they are stored in an HDF5
+scratch file unless `incore_complete=True` (`diis_file` names the file; the
+default is a temporary file in `ZCCSDT_TMPDIR` or PySCF's `lib.param.TMPDIR`).
+The file is memory-mapped: with enough free memory the vectors stay in the
+page cache and the DIIS step runs as fast as in memory, and under a memory
+limit the kernel pages them (`docs/benchmarks.md`, "DIIS storage").
 
 ### Leading arithmetic per iteration (FMA, o / v spatial)
 

@@ -145,6 +145,40 @@ void zc_vlincomb_##SFX(int64_t n, int64_t nk, const T **x, const T *c, T *out) \
         for (int64_t k = 0; k < nk; k++) s += c[k] * x[k][i];                  \
         out[i] = s;                                                            \
     }                                                                          \
+}                                                                              \
+/* res[k] = sum conj(a) x[k] for k < nk <= 64 in one pass over a (blocks of    \
+ * VB elements of a stay in cache while the x[k] stream by); per-thread        \
+ * partial sums, combined in thread order. */                                  \
+void zc_vmdot_##SFX(int64_t n, int64_t nk, const T *a, const T **x, T *res)    \
+{                                                                              \
+    enum { VB = 2048, MK = 64, MT = 256 };                                     \
+    T (*part)[MK] = calloc(MT, sizeof(*part));                                 \
+    int nt = 1;                                                                \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        const int id = omp_get_thread_num();                                   \
+        _Pragma("omp single")                                                  \
+        nt = omp_get_num_threads();                                            \
+        T acc[MK] = {0};                                                       \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t b0 = 0; b0 < n; b0 += VB) {                               \
+            const int64_t b1 = b0 + VB < n ? b0 + VB : n;                      \
+            for (int64_t k = 0; k < nk; k++) {                                 \
+                const T *xk = x[k];                                            \
+                T sk = 0;                                                      \
+                for (int64_t i = b0; i < b1; i++) sk += CONJ(a[i]) * xk[i];    \
+                acc[k] += sk;                                                  \
+            }                                                                  \
+        }                                                                      \
+        if (id < MT)                                                           \
+            for (int64_t k = 0; k < nk; k++) part[id][k] = acc[k];             \
+    }                                                                          \
+    for (int64_t k = 0; k < nk; k++) {                                         \
+        T sk = 0;                                                              \
+        for (int t = 0; t < nt && t < MT; t++) sk += part[t][k];               \
+        res[k] = sk;                                                           \
+    }                                                                          \
+    free(part);                                                                \
 }
 
 #include <omp.h>

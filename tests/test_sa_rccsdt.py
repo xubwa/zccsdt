@@ -159,3 +159,26 @@ def test_repeated_index_blocks_only():
     r = E.kernel(R.from_scf(mf, full=False), conv_tol=1e-11, conv_tol_normt=1e-8)
     ref = R.kernel(R.from_scf(mf), 'ccsdt', conv_tol=1e-11, conv_tol_normt=1e-8)
     assert r.converged and abs(r.e_tot - ref.e_tot) < 1e-10
+
+
+def test_diis_on_disk(monkeypatch, tmp_path):
+    '''T3 DIIS vectors in the HDF5 scratch file (PySCF-style settings): the
+    run converges like the one in memory; a named file is kept.'''
+    from zccsdt.cc import diis
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).run(conv_tol=1e-12)
+    ints = R.from_scf(mf, ncore=1, full=False)
+    ref = E.kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, incore_complete=True)
+    assert ref.converged and not ref.diis_on_disk
+    monkeypatch.setattr(diis, 'INCORE_SIZE', 1000)
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    r = E.kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7)
+    assert r.converged and r.diis_on_disk and abs(r.ncycle - ref.ncycle) <= 1
+    assert abs(r.e_tot - ref.e_tot) < 1e-9
+    assert list(tmp_path.iterdir()) == []
+    name = str(tmp_path / 'diis.h5')
+    r = E.kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, diis_file=name)
+    assert r.diis_on_disk and abs(r.e_tot - ref.e_tot) < 1e-9
+    import h5py
+    with h5py.File(name, 'r') as f:
+        assert 'x0.2' in f and 'e0.2' in f and f['x0.2'].shape == (r.t3.size,)

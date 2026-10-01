@@ -50,10 +50,10 @@ model over the spin-adapted engine (`bench/flop_counts.py`).
 - **Against the spin-orbital RCCSDT** (next section), the spin-adapted engine
   is 2.2 times faster for H2O/cc-pVQZ (5.1 s against 11.1 s on the same
   cores).
-- **Memory.** zccsdt keeps T3, the residual and the DIIS vectors in memory
-  (peak RSS 6.1 GB for H2O/cc-pVQZ in this 4-iteration run; a full DIIS
-  subspace of 8 holds 16 T3-sized vectors).  `ncc` keeps T3 on disk (3.5 GB
-  RSS).
+- **Memory.** These runs kept the DIIS vectors in memory (peak RSS 6.1 GB for
+  H2O/cc-pVQZ in this 4-iteration run; a full DIIS subspace of 8 holds 16
+  T3-sized vectors).  `ncc` keeps T3 on disk (3.5 GB RSS).  The DIIS vectors
+  can now live in a scratch file at almost no cost, see "DIIS storage" below.
 
 **Convergence.** H2O/cc-pVTZ converged tightly with both programs: they need
 the same number of iterations.  |E - E_conv| < 1e-8 Eh is reached after 11
@@ -73,6 +73,43 @@ Timers of `bench/profile_sa.py` (c571, cores 0-7, 8963bdb):
 | intermediates | 0.19 s | |
 | pp operator | 0.13 s | one pass over the packed bare vvvv |
 | CCSD part, null projection, dressing | 0.15 s | |
+
+### DIIS storage: memory or scratch file
+
+As in PySCF, the large parts of the DIIS vectors (here T3) are stored in an
+HDF5 file unless `incore_complete=True`: `diis_file` if given, else a
+temporary file in the scratch directory (`ZCCSDT_TMPDIR`, else PySCF's
+`lib.param.TMPDIR`); parts below 1e7 elements stay in memory.  The file's
+datasets are accessed through `numpy.memmap`, so the DIIS kernels work on the
+page cache without copies and the operating system pages the vectors out and
+in when memory is short (`zccsdt/cc/diis.py`).
+
+H2O/cc-pVQZ (T3 vector 320 MB), 12 iterations, DIIS subspace 8, c233 (same
+CPUs as c571, scratch on a local NVMe, Intel P4510: 2.4 GB/s sequential read),
+8 cores:
+
+| DIIS vectors | Memory limit | s/iteration, full subspace | Anonymous memory | File-backed pages |
+|---|---|---|---|---|
+| in memory (`incore_complete=True`) | none | 5.4-5.5 | 9.9 GB | -- |
+| scratch file (default) | none | 5.4 | 5.0 GB | 5.1 GB (reclaimable) |
+| scratch file (default) | 6 GB | 8.2 | 5.0 GB | at most 1 GB resident |
+| in memory | 6 GB | killed (out of memory) | | |
+
+- **With enough memory the scratch file costs nothing measurable:** the dot
+  products and the extrapolation take the same time as in memory (0.16 s and
+  0.13 s per iteration with 8 vectors), and building the new vector in mapped
+  file pages costs 0.06 s more.  The anonymous memory is halved; what is left
+  (5 GB) is the engine's own working arrays.
+- **Under a memory limit** (a job step with `--mem=6G`) the run completes with
+  the kernel paging the vectors: 14 T3-sized reads and 2 writes per iteration
+  (5.1 GB) at about 1.8 GB/s, near the speed of the device.  The same run with
+  the vectors in memory is killed.
+- An iteration with a full subspace of 8 takes about 0.3 s longer than the
+  first iterations timed in the table above (5.4 s against 5.1 s): the DIIS
+  step grows from 0.2 s to 0.4 s.
+- Explicit reads and writes (what `h5py` does) would cost more here even
+  from the page cache: 112 ms per 320 MB read and 129 ms per write, about
+  1.8 s per iteration, against 21 ms for a pass over the mapped vector.
 
 ### Optimization history (H2O/cc-pVQZ spin-adapted RCCSDT, s/iteration)
 

@@ -2,9 +2,12 @@
 
 usage: python bench/profile_sa.py MOLECULE BASIS [NITER] [NCORE]
   MOLECULE: h2o | n2 | h2s | ch2o     NCORE: frozen core (spatial orbitals)
+  ZC_INCORE=1: all DIIS vectors in memory (default: T3 vectors in the scratch
+  file, as in PySCF);  ZC_DIIS_SPACE: DIIS subspace size (default 8)
 '''
 import os
 import sys
+import threading
 import time
 import resource
 
@@ -22,6 +25,26 @@ GEOM = {
 }
 
 
+class MemWatch(threading.Thread):
+    '''Peak resident memory of this process, sampled: anonymous (the arrays
+    of the program) and file-backed (mapped DIIS vectors, reclaimable).'''
+
+    def __init__(self, dt=0.1):
+        super().__init__(daemon=True)
+        self.dt, self.anon, self.file, self._done = dt, 0, 0, threading.Event()
+
+    def run(self):
+        while not self._done.wait(self.dt):
+            with open('/proc/self/status') as f:
+                kb = {l.split(':')[0]: int(l.split()[1]) for l in f if l.startswith('Rss')}
+            self.anon = max(self.anon, kb.get('RssAnon', 0))
+            self.file = max(self.file, kb.get('RssFile', 0))
+
+    def stop(self):
+        self._done.set()
+        self.join()
+
+
 def main():
     name, basis = sys.argv[1:3]
     niter = int(sys.argv[3]) if len(sys.argv) > 3 else 3
@@ -32,16 +55,27 @@ def main():
     ints = rccsdt_ref.from_scf(mf, ncore=ncore, full=False)
     print('%s/%s  nocc=%d nvir=%d (spatial)  integrals %.1fs'
           % (name, basis, ints.nocc, ints.nvir, time.perf_counter() - t0))
+    opts = dict(incore_complete=os.environ.get('ZC_INCORE', '0') == '1',
+                diis_space=int(os.environ.get('ZC_DIIS_SPACE', '8')), verbose=True)
+    watch = MemWatch()
+    watch.start()
     timing.reset()
-    r = rccsdt.kernel(ints, max_cycle=niter + 1, verbose=True)
+    r = rccsdt.kernel(ints, max_cycle=niter + 1, **opts)
     timing.reset()
     # time a further run of niter iterations without the warm-up costs
-    r = rccsdt.kernel(ints, max_cycle=niter, verbose=True)
+    r = rccsdt.kernel(ints, max_cycle=niter, **opts)
+    watch.stop()
     print('iterations: ' + ' '.join('%.2f' % t for t in r.timings))
     print('mean iteration %.3fs' % np.mean(r.timings[1:] or r.timings))
+    if len(r.timings) > opts['diis_space'] + 2:
+        print('mean iteration with a full DIIS subspace %.3fs'
+              % np.mean(r.timings[opts['diis_space'] + 1:]))
     for k, sec, calls in timing.report(len(r.timings)):
         print('  %-14s %9.3fs  %5.1f calls' % (k, sec, calls))
-    print('peak RSS %.2f GB' % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6))
+    print('DIIS vectors: %s' % ('T3 part in the scratch file' if r.diis_on_disk else 'in memory'))
+    print('peak RSS %.2f GB (anonymous %.2f GB, file-backed %.2f GB)'
+          % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6, watch.anon / 1e6,
+             watch.file / 1e6))
 
 
 if __name__ == '__main__':

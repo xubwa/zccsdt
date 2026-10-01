@@ -21,6 +21,8 @@ class Options:
     conv_tol_normt: float = 1e-8
     max_cycle: int = 200
     diis_space: int = 8
+    diis_file: str = None       # HDF5 file of the DIIS vectors (default: temporary)
+    incore_complete: bool = False   # keep all DIIS vectors in memory (as in PySCF)
     mem_mb: float = 2000.0      # batch buffer budget of the packed-T3 code
     spin_flip: bool = False     # closed-shell alpha/beta symmetry (RCCSDT)
     verbose: bool = False
@@ -96,7 +98,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                                            opts.spin_flip).size, dtype=dtype)
 
     e_old = ccsd.energy(t1, t2, eris)
-    adiis = DIIS(space=opts.diis_space)
+    adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=opts.incore_complete)
     timings = []
     conv = False
     for icycle in range(opts.max_cycle):
@@ -134,6 +136,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
         if abs(de) < opts.conv_tol and normt < opts.conv_tol_normt:
             conv = True
             break
+    adiis.close()
     e_corr = e_old
     return Result(e_corr=e_corr, e_tot=eris.e_hf + e_corr.real, converged=conv,
                   ncycle=icycle + 1, t1=t1, t2=t2, t3=t3, timings=timings)
