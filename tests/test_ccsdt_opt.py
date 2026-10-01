@@ -109,3 +109,13 @@ def test_step_does_not_modify_integrals(fh):
     ccsdt_opt.update_amps(solver.Options(), t1, t2, t3p, fh)
     for k, v in before.items():
         np.testing.assert_array_equal(getattr(fh, k), v, err_msg=k)
+
+
+def test_ccsd_step_matches_gauss_stanton(fh):
+    from zccsdt.cc import ccsd
+    t1, t2, _ = _rand_amps(fh, 4)
+    opts = solver.Options()
+    a = ccsdt_opt.ccsd_update_amps(opts, t1, t2, fh)
+    b = ccsd.update_amps(opts, t1, t2, fh)
+    for x, y in zip(a, b):
+        assert abs(x - y).max() < 1e-12

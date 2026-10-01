@@ -101,7 +101,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
             else:
                 t1n, t2n, t3n = ccsdt.update_amps(opts, t1, t2, t3, eris)
         else:
-            t1n, t2n = ccsd.update_amps(opts, t1, t2, eris)
+            t1n, t2n = ccsdt_opt.ccsd_update_amps(opts, t1, t2, eris)
             t3n = None
         with timer('diis'):
             first = adiis.xprev is None
