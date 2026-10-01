@@ -8,7 +8,7 @@
 #SBATCH --partition=parallel
 #SBATCH --mem=60G
 # usage: sbatch bench/cfour/slurm_cfour.sh MOL BASIS CC_PROG REF MAXCYC
-mol=$1; basis=$2; prog=$3; ref=$4; maxcyc=${5:-6}
+mol=$1; basis=$2; prog=$3; ref=$4; maxcyc=${5:-6}; mult=1
 # threads = cores of the allocation (default 8; override with sbatch -c N --mem=...)
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8} MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export PATH=/home/xwang405/apps/cfour-x2cso/bin:$PATH
@@ -21,6 +21,11 @@ H 0.0 0.757 0.587
 H 0.0 -0.757 0.587";;
   n2) geom="N 0.0 0.0 0.0
 N 0.0 0.0 1.0977";;
+  nh2) geom="N 0.0 0.0 0.0
+H 0.0 0.8036 0.6347
+H 0.0 -0.8036 0.6347"; mult=2;;
+  o2) geom="O 0.0 0.0 0.0
+O 0.0 0.0 1.2075"; mult=3;;
   h2s) geom="S 0.0 0.0 0.0
 H 0.0 0.9618 0.9272
 H 0.0 -0.9618 0.9272";;
@@ -29,7 +34,7 @@ cat > ZMAT <<ZEOF
 $mol CCSDT $basis
 $geom
 
-*CFOUR(CALC=CCSDT,BASIS=$basis,REF=$ref,CC_PROG=$prog
+*CFOUR(CALC=CCSDT,BASIS=$basis,REF=$ref,CC_PROG=$prog,MULT=$mult
 COORDINATES=CARTESIAN,UNITS=ANGSTROM,SYMMETRY=OFF
 FROZEN_CORE=OFF,SCF_CONV=10,CC_CONV=10,CC_MAXCYC=$maxcyc
 SCF_MAXCYC=200,MEMORY_SIZE=150,MEM_UNIT=GB)
