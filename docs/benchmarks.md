@@ -2,12 +2,98 @@
 
 Wall time per CCSDT iteration of zccsdt and CFOUR, and where the time goes.
 
+## Closed-shell spin-adapted RCCSDT, 8 cores
+
+Fully spin-adapted closed-shell CCSDT on spatial orbitals (`zccsdt.sa.rccsdt`,
+design notes in `docs/spin_adapted.md`): RHF integrals in spatial form and
+NOSA T3 with one v^3 cube per sorted occupied triple.  This is the RCCSDT path
+for nonrelativistic closed shells.  CFOUR `ncc` is spin-adapted the same way
+(NOSA), so the two codes solve the same equations in the same representation.
+
+**Setup.**
+
+- **Same cores.** `bench/slurm_compare.sh` with `ZC_SA=1` runs zccsdt and
+  then CFOUR `ncc` on the same 8 cores.  Here: c571 (2 x Xeon Gold 6248R),
+  cores 0-7 pinned, one comparison at a time, the rest of the node idle.
+- **What is timed.** zccsdt (8963bdb; e9b32a7 has the same engine): mean of
+  3 iterations after one warm-up iteration (`bench/profile_sa.py`; integral
+  blocks transformed from the AO integrals, no n^4 array).  CFOUR: the
+  per-iteration wall times of iterations 2-5.
+- **Calculations.** All-electron, C1 symmetry.
+
+| System | o, v (spatial) | zccsdt | CFOUR `ncc` | `ncc` / zccsdt | arithmetic ratio (model) |
+|---|---|---|---|---|---|
+| H2O/cc-pVTZ | 5, 53 | 0.47 s | 1.00 s | 2.1 | 2.6-3.2 |
+| N2/cc-pVTZ | 7, 53 | 1.03 s | 3.81 s | 3.7 | 2.4-3.1 |
+| H2S/cc-pVTZ | 9, 53 | 2.11 s | 7.14 s | 3.4 | 2.3-3.0 |
+| CH2O/cc-pVTZ | 8, 80 | 6.43 s | 41.1 s | 6.4 | 2.4-3.0 |
+| H2O/cc-pVQZ | 5, 110 | 5.11 s | 17.0 s | 3.3 | 2.8-3.1 |
+
+The arithmetic ratio is the FMA count of the pp ladder and ring terms, `ncc`
+model over the spin-adapted engine (`bench/flop_counts.py`).
+
+**Reading the numbers.**
+
+- **zccsdt is 3.3-3.7 times faster than `ncc` from N2/cc-pVTZ upwards**,
+  somewhat above the arithmetic ratio.  The engine does about a third of the
+  arithmetic of `ncc` for the two dominant terms and runs it at a slightly
+  higher rate.  The pp ladder uses
+  (d,e)-symmetric / antisymmetric packed GEMMs, and blocks with a repeated
+  occupied index take less work.  The ring is four GEMM terms per occupied
+  pair.
+- **CH2O/cc-pVTZ:** `ncc` uses 150 s of CPU time per 41 s iteration, so only
+  3.7 of the 8 cores are busy (6.5-7.2 for the other systems).  In
+  core-seconds the ratio is 2.9, as the model predicts.
+- **H2O/cc-pVTZ** is small (the dominant terms are about 50 GFLOP), so the rest
+  of the iteration (DIIS, intermediates, dressing, Python-level work) is a
+  large share of its 0.47 s.
+- **Against the spin-orbital RCCSDT** (next section), the spin-adapted engine
+  is 2.2 times faster for H2O/cc-pVQZ (5.1 s against 11.1 s on the same
+  cores).
+- **Memory.** zccsdt keeps T3, the residual and the DIIS vectors in memory
+  (peak RSS 6.1 GB for H2O/cc-pVQZ in this 4-iteration run; a full DIIS
+  subspace of 8 holds 16 T3-sized vectors).  `ncc` keeps T3 on disk (3.5 GB
+  RSS).
+
+**Convergence.** H2O/cc-pVTZ converged tightly with both programs: they need
+the same number of iterations.  |E - E_conv| < 1e-8 Eh is reached after 11
+(zccsdt) and 13 (`ncc`) iterations, and < 1e-10 after 22 and 19.  The total
+CCSDT energies agree to 4.5e-10 Eh.
+
+### Where the time goes (H2O/cc-pVQZ, 8 cores, 5.1 s)
+
+Timers of `bench/profile_sa.py` (c571, cores 0-7, 8963bdb):
+
+| Step | Time | Comment |
+|---|---|---|
+| pp ladder | 2.02 s | GEMM 1.84 s (0.97 TFLOP, about 525 GFLOP/s; large-DGEMM rate on these cores about 583), pack / unpack 0.18 s |
+| pair pass | 2.00 s | ring GEMMs 1.07 s (0.44 TFLOP), T3 -> R1/R2/Wv/Wo 0.48 s, gather 0.27 s, scatter 0.15 s |
+| drive + hh ladder (k pass) | 0.41 s | scatter 0.15 s, gather 0.09 s, two GEMMs 0.16 s |
+| Jacobi step, DIIS | 0.26 s | |
+| intermediates | 0.19 s | |
+| pp operator | 0.13 s | one pass over the packed bare vvvv |
+| CCSD part, null projection, dressing | 0.15 s | |
+
+### Optimization history (H2O/cc-pVQZ spin-adapted RCCSDT, s/iteration)
+
+c571, cores 0-7 pinned.
+
+| Version | Time | Change |
+|---|---|---|
+| 1e56b2b | 7.4-7.6 | first engine with C kernels: fused pair gather, packed pp ladder, OpenBLAS kept single-threaded |
+| 6e08bf9 | 6.43 | x-major tiled gather; T3 -> R1/R2/W as stacked GEMMs; F_vv in the ring operator; fused Jacobi / DIIS step |
+| b49a7f0 | 5.45 | dressing from bare blocks; parallel permutations in `contract`; Wv in the drive layout; drive merged with the hh ladder; batched scatters |
+| f731460 | 5.43 | integral blocks from AO integrals (peak memory 6.1 -> 4.8 GB) |
+| 37e26ce | 5.40 | slab pair gather |
+| 8963bdb | 5.12 | work arrays kept between iterations |
+
 ## RCCSDT / UCCSDT on R/U-form integrals, 8 cores
 
 These runs use the nonrelativistic code path: integrals in R (RHF) or U
 (UHF) form, spin-blocked T3 (only Ms-conserving blocks) and, for closed
 shells, the alpha <-> beta spin flip (only T3 blocks with 0 or 1 beta
-indices are stored and computed; RCCSDT).
+indices are stored and computed; RCCSDT).  For closed shells this
+spin-orbital RCCSDT is superseded by the spin-adapted code above.
 
 **Setup.**
 
