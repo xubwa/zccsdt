@@ -151,6 +151,59 @@ c571, cores 0-7 pinned.
 | 37e26ce | 5.40 | slab pair gather |
 | 8963bdb | 5.12 | work arrays kept between iterations |
 
+## CCSDT(Q), closed shell, 8 cores
+
+The perturbative quadruples correction of `zccsdt.sa.rccsdt_q` (design notes
+in `docs/spin_adapted.md`) against CFOUR `ncc` (CALC=CCSDT(Q)), which is
+spin-adapted in the same way.
+
+**Setup.**  c233 (2 x Xeon Gold 6248R), cores 0-7, zccsdt 0253e6e and then
+`ncc` on the same cores (`bench/slurm_compare.sh` with `ZC_Q=1`).  zccsdt:
+wall time of the (Q) step.  `ncc`: its own "Non-iterative calculation of
+CCSDT(Q)" wall time.  The node was shared with other jobs (1-minute load
+10-25), so the times carry more noise than those of the sections above.  The
+cc-pVQZ pair did not run back to back: `ncc` ran on cores 24-31 of the same
+node while zccsdt ran on cores 0-7.
+
+| System | o, v | Quadruples | zccsdt (Q) | `ncc` (Q) | `ncc` / zccsdt | zccsdt CCSDT iteration | Memory: zccsdt (anonymous), `ncc` (RSS) |
+|---|---|---|---|---|---|---|---|
+| H2O/cc-pVTZ | 5, 53 | 45 | 6.8 s | 58.0 s | 8.6 | 0.49 s | 1.2 GB, 10.1 GB |
+| N2/cc-pVTZ | 7, 53 | 161 | 23.3 s | 290.7 s | 12.5 | 1.12 s | 1.4 GB, 17.7 GB |
+| H2S/cc-pVTZ | 9, 53 | 414 | 58.2 s | 613.1 s | 10.5 | 2.21 s | 1.3 GB, 23.2 GB |
+| H2O/cc-pVQZ | 5, 110 | 45 | 132 s | 3837 s | 29 | 5.4 s | 12 GB (work arrays), 22.0 GB |
+
+- **Energies.**  With CCSDT converged in both programs (to different
+  thresholds), the (Q) corrections agree to 1-2e-10 Eh: H2O -0.000367644522
+  (zccsdt) and -0.000367644322 (`ncc`), N2 -0.001823317881 and
+  -0.001823317657, H2S -0.000339324771 and -0.000339324630.  Against MRCC at
+  identical geometries and tight convergence the agreement is 1e-11 Eh
+  (`bench/refs`).
+- **Cost.**  The (Q) step takes as long as 14-26 CCSDT iterations of zccsdt
+  here; for `ncc` it is 58-86 of its own iterations at cc-pVTZ and 226 at
+  cc-pVQZ, where it keeps only 3 of its 8 cores busy (11522 s CPU in 3837 s).
+- **Memory.**  The work arrays are 10 v^4 (0.6 GB at v = 53, 11.7 GB at
+  v = 110), besides T3.  `ncc` needs 8-18 times more at cc-pVTZ and about
+  twice as much at cc-pVQZ.
+
+### Where the time goes (H2O/cc-pVQZ, 132 s, 45 quadruples)
+
+| Step | Time | Comment |
+|---|---|---|
+| T3 x `<vv\|vo>` products | 31.8 s | 135 GEMMs with K = 4v, 6.4e10 FMA each at 545 GFLOP/s |
+| energy kernel | 29.6 s | one pass over six 1.2 GB accumulators per quadruple (about 11 GB/s; the tiles' rows are scattered) |
+| I x T2 products | 27.7 s | 270 GEMMs of v^5 FMA; bound by memory traffic (each writes or updates a v^4 array) |
+| intermediates I | 19.3 s | 75 builds (2 v^5 each): 15 pairs and 2 per triple (i, j, k) |
+| T3 x `<ov\|oo>`, T2 x G | 16.4 s | small-K products, bound by the v^4 passes |
+| gathers, stacking | 2.8 s | |
+
+The two kinds of v^5 products run at or near the DGEMM rate; about half of
+the time is passes over v^4 arrays (kernel, accumulations) and the
+intermediates.  Known reserves: quadruples with a repeated index (40 of 45
+here, about half for 15 occupied orbitals) are computed like the others,
+although symmetry would save a third of their products; the o-contracted
+terms could be evaluated inside the energy kernel instead of in separate
+passes.
+
 ## RCCSDT / UCCSDT on R/U-form integrals, 8 cores
 
 These runs use the nonrelativistic code path: integrals in R (RHF) or U
