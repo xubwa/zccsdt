@@ -237,6 +237,12 @@ class SpinBlockT3:
         self.orng = [np.where(so == s)[0] for s in (0, 1)]
         self.vrng = [np.where(sv == s)[0] for s in (0, 1)]
         self.nb = pair_batch_size(om.n, vm.n, np.dtype(dtype).itemsize, mem_mb)
+        # pass 1 keeps one gathered block T[P, d, m, Q] (single spins of d, m)
+        # per pair alive: larger batches than pass 2, for larger GEMMs
+        nmax = max(len(r) for r in self.orng) * max(len(r) for r in self.vrng)
+        nqmax = max(vm.pair_off[g + 1] - vm.pair_off[g] for g in range(3))
+        per_pair = 2 * nmax * nqmax * np.dtype(dtype).itemsize
+        self.nb1 = max(self.nb, int(mem_mb * 1e6 // max(per_pair, 1)))
         # composite (d, m) / (a, i) index sets D_delta, delta = s(vir) - s(occ),
         # as lists of (s_vir, s_occ) sub-blocks, each vir-major
         self.dsub = {-1: [(0, 1)], 0: [(0, 0), (1, 1)], 1: [(1, 0)]}
@@ -477,15 +483,18 @@ def _spin_block_c_methods():
         def gy(sm, gQ, sy):
             key = (sm, gQ, sy)
             if key not in gy_cache:
-                (m0, m1), (j0, j1), (e0, e1) = orr[sm], orr[sy], vr[sy]
-                Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
-                G = np.concatenate((G3[m0:m1, Qlo:Qhi, j0:j1],
-                                    G3[m0:m1, Qlo:Qhi, nocc + e0:nocc + e1]), axis=2)
-                gy_cache[key] = np.ascontiguousarray(G).reshape((m1 - m0) * (Qhi - Qlo), -1)
+                with timer('pass1.gy'):
+                    (m0, m1), (j0, j1), (e0, e1) = orr[sm], orr[sy], vr[sy]
+                    Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
+                    nj = j1 - j0
+                    G = np.empty((m1 - m0, Qhi - Qlo, nj + e1 - e0), dtype=dtype)
+                    t3pack.axpby(G[:, :, :nj], G3[m0:m1, Qlo:Qhi, j0:j1], 1.0, 0.0)
+                    t3pack.axpby(G[:, :, nj:], G3[m0:m1, Qlo:Qhi, nocc + e0:nocc + e1], 1.0, 0.0)
+                    gy_cache[key] = G.reshape((m1 - m0) * (Qhi - Qlo), -1)
             return gy_cache[key]
 
         for gP in range(3):
-            for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
+            for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb1):
                 p0, p1 = pb[0], pb[-1] + 1
                 for sd in (0, 1):
                     for sm in (0, 1):

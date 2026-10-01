@@ -51,10 +51,10 @@ def init_amps(eris):
 
 
 def _parts(t1, t2, t3):
-    '''Amplitudes as a list of flat parts for DIIS (t2 packed over i<j, a<b).'''
-    om, vm = t3pack.triple_map(t1.shape[0]), t3pack.triple_map(t1.shape[1])
-    t2p = t2[om.pairs[:, 0][:, None], om.pairs[:, 1][:, None],
-             vm.pairs[:, 0], vm.pairs[:, 1]]
+    '''Amplitudes as a list of flat parts for DIIS (t2 packed over i<j, a<b
+    in triu order).'''
+    (m, n), (d, e) = np.triu_indices(t1.shape[0], 1), np.triu_indices(t1.shape[1], 1)
+    t2p = t2[m[:, None], n[:, None], d, e]
     parts = [t1.ravel(), t2p.ravel()]
     if t3 is not None:
         parts.append(t3)
@@ -63,9 +63,15 @@ def _parts(t1, t2, t3):
 
 def _from_parts(parts, nocc, nvir, with_t3):
     '''Inverse of _parts; keeps the dtype (real stays real).'''
-    om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
+    (m, n), (d, e) = np.triu_indices(nocc, 1), np.triu_indices(nvir, 1)
     t1 = parts[0].reshape(nocc, nvir)
-    t2 = ccsdt_opt._unpack_pairs(parts[1].reshape(om.npair, vm.npair), om, vm)
+    p = parts[1].reshape(len(m), len(d))
+    m, n = m[:, None], n[:, None]
+    t2 = np.zeros((nocc, nocc, nvir, nvir), dtype=p.dtype)
+    t2[m, n, d, e] = p
+    t2[n, m, d, e] = -p
+    t2[m, n, e, d] = -p
+    t2[n, m, e, d] = p
     t3 = parts[2] if with_t3 else None
     return t1, t2, t3
 
@@ -110,12 +116,14 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
             if first:
                 normt = np.linalg.norm(t1n - t1) + np.linalg.norm(t2n - t2)
                 if with_t3:
-                    normt += 6.0 * np.linalg.norm(t3n - t3)
+                    with timer('diis.norm0'):
+                        normt += 6.0 * np.linalg.norm(t3n - t3)
             else:
                 # ||dt2_full|| = 2 ||dt2_packed||, ||dt3_full|| = 6 ||dt3_packed||
                 en = adiis.err_norms
                 normt = en[0] + 2.0 * en[1] + (6.0 * en[2] if with_t3 else 0.0)
-            t1, t2, t3 = _from_parts(parts, nocc, nvir, with_t3)
+            with timer('diis.unpack'):
+                t1, t2, t3 = _from_parts(parts, nocc, nvir, with_t3)
         e_new = ccsd.energy(t1, t2, eris)
         timings.append(time.perf_counter() - t0)
         de = e_new - e_old

@@ -61,15 +61,17 @@ def main():
     nvir = eris.nmo - nocc
     print('%s/%s %s  nocc=%d nvir=%d dtype=%s  integrals %.1fs'
           % (mol_name, basis, kind, nocc, nvir, eris.dtype, t_ints))
+    kw = dict(verbose=True, mem_mb=float(os.environ.get('ZC_MEM_MB', 2000)),
+              spin_flip=os.environ.get('ZC_FLIP', '0') == '1')
+    # one warm-up iteration (engine setup, caches, buffers), then the timed ones
+    r0 = solver.kernel(eris, 'ccsdt', solver.Options(max_cycle=1, **kw))
     timing.reset()
-    opts = solver.Options(max_cycle=niter, verbose=True,
-                          mem_mb=float(os.environ.get('ZC_MEM_MB', 2000)),
-                          spin_flip=os.environ.get('ZC_FLIP', '0') == '1')
-    r = solver.kernel(eris, 'ccsdt', opts)
+    r = solver.kernel(eris, 'ccsdt', solver.Options(max_cycle=niter, **kw),
+                      t1=r0.t1, t2=r0.t2, t3=r0.t3)
     per = len(r.timings)
     print('iterations: ' + ' '.join('%.2f' % t for t in r.timings))
-    print('mean iteration %.3fs (first %.3fs)' % (np.mean(r.timings[1:] or r.timings),
-                                                  r.timings[0]))
+    print('mean iteration %.3fs (warm-up iteration %.3fs; timers below exclude it)'
+          % (np.mean(r.timings), r0.timings[0]))
     for name, sec, calls in timing.report(per):
         print('  %-14s %9.3fs  %5.1f calls' % (name, sec, calls))
     print('peak RSS %.2f GB' % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6))

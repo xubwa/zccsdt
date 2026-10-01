@@ -8,6 +8,7 @@ import numpy as np
 import scipy.linalg
 
 from zccsdt.cc import t3pack
+from zccsdt.timing import timer
 
 
 def _vec_c(name, dtype):
@@ -76,9 +77,11 @@ class DIIS:
             self.xs.pop(0)
             reuse = self.es.pop(0)          # recycle the oldest error vectors
             self.H = self.H[1:, 1:]
-        e = [_sub(a, b, None if reuse is None else r)
-             for a, b, r in zip(x, self.xprev, reuse or [None] * len(x))]
-        self.err_norms = [np.sqrt(abs(_dot(ei, ei))) for ei in e]
+        with timer('diis.sub'):
+            e = [_sub(a, b, None if reuse is None else r)
+                 for a, b, r in zip(x, self.xprev, reuse or [None] * len(x))]
+        with timer('diis.dot'):
+            self.err_norms = [np.sqrt(abs(_dot(ei, ei))) for ei in e]
         self.xs.append(x)
         self.es.append(e)
         n = len(self.es)
@@ -86,9 +89,10 @@ class DIIS:
         H = np.zeros((n, n), dtype=dtype)
         if self.H is not None:
             H[:n - 1, :n - 1] = self.H
-        for i in range(n):
-            H[n - 1, i] = sum(_dot(a, b) for a, b in zip(e, self.es[i]))
-            H[i, n - 1] = np.conj(H[n - 1, i])
+        with timer('diis.dot'):
+            for i in range(n):
+                H[n - 1, i] = sum(_dot(a, b) for a, b in zip(e, self.es[i]))
+                H[i, n - 1] = np.conj(H[n - 1, i])
         self.H = H
         B = np.zeros((n + 1, n + 1), dtype=dtype)
         B[0, 1:] = B[1:, 0] = 1
@@ -101,5 +105,6 @@ class DIIS:
             c = v[:, idx] @ ((v[:, idx].T.conj() @ g) / w[idx])
         else:
             c = np.linalg.solve(B, g)
-        self.xprev = [_lincomb([xk[j] for xk in self.xs], c[1:]) for j in range(len(x))]
+        with timer('diis.lincomb'):
+            self.xprev = [_lincomb([xk[j] for xk in self.xs], c[1:]) for j in range(len(x))]
         return self.xprev
