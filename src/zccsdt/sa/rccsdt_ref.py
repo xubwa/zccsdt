@@ -28,29 +28,61 @@ from zccsdt.sa.spinfree import evaluate
 class RHFIntegrals:
     nocc: int                  # active doubly occupied spatial orbitals
     fock: np.ndarray           # (n, n) MO Fock matrix, active space
-    V: np.ndarray              # (n, n, n, n) <pq|rs>, active space
+    V: np.ndarray              # (n, n, n, n) <pq|rs>, active space, or None
     mo_energy: np.ndarray
     e_hf: float
     e_nuc: float
+    mol: object = None         # with mo_coeff: blocks from AO integrals (V None)
+    mo_coeff: np.ndarray = None
 
     @property
     def nvir(self):
         return self.fock.shape[0] - self.nocc
 
+    def block(self, key):
+        '''<pq|rs> for an occupied / virtual block key such as 'ovvv' (cut from
+        V, or transformed from the AO integrals and cached).'''
+        cache = self.__dict__.setdefault('_blocks', {})
+        x = cache.get(key)
+        if x is None:
+            no, n = self.nocc, self.fock.shape[0]
+            sl = {'o': slice(0, no), 'v': slice(no, n)}
+            if self.V is not None:
+                x = np.ascontiguousarray(self.V[tuple(sl[c] for c in key)])
+            elif key == 'vvvo':                 # <ab|ei> = <ie|ba>
+                x = np.ascontiguousarray(self.block('ovvv').transpose(3, 2, 1, 0))
+            else:
+                C = [self.mo_coeff[:, sl[c]] for c in key]
+                x = ao_block(self.mol, C)
+            cache[key] = x
+        return x
 
-def from_scf(mf, ncore=0):
+
+def ao_block(mol, C):
+    '''<pq|rs> = (pr|qs) for MO coefficient blocks C = (Cp, Cq, Cr, Cs).'''
+    from pyscf import ao2mo
+    eri = ao2mo.general(mol, (C[0], C[2], C[1], C[3]), compact=False)
+    eri = eri.reshape(C[0].shape[1], C[2].shape[1], C[1].shape[1], C[3].shape[1])
+    return np.ascontiguousarray(eri.transpose(0, 2, 1, 3))
+
+
+def from_scf(mf, ncore=0, full=True):
     '''Spatial MO integrals from a PySCF RHF object; ``ncore`` frozen core
-    (spatial) orbitals.'''
+    (spatial) orbitals.  ``full``: build the whole n^4 <pq|rs> (needed by the
+    dense reference code); otherwise blocks are transformed on demand.'''
     from pyscf import ao2mo
     occ = np.asarray(mf.mo_occ) > 0
-    C = np.asarray(mf.mo_coeff)[:, ncore:]
+    C = np.ascontiguousarray(np.asarray(mf.mo_coeff)[:, ncore:])
     nocc = int(occ.sum()) - ncore
     n = C.shape[1]
-    eri = ao2mo.general(mf.mol, (C, C, C, C), compact=False).reshape(n, n, n, n)
-    V = np.ascontiguousarray(eri.transpose(0, 2, 1, 3))          # (pr|qs) -> <pq|rs>
+    V = None
+    if full:
+        eri = ao2mo.general(mf.mol, (C, C, C, C), compact=False).reshape(n, n, n, n)
+        V = np.ascontiguousarray(eri.transpose(0, 2, 1, 3))      # (pr|qs) -> <pq|rs>
     fock = C.T @ mf.get_fock() @ C
     return RHFIntegrals(nocc=nocc, fock=fock, V=V, mo_energy=fock.diagonal().copy(),
-                        e_hf=float(mf.e_tot), e_nuc=float(mf.energy_nuc()))
+                        e_hf=float(mf.e_tot), e_nuc=float(mf.energy_nuc()),
+                        mol=mf.mol, mo_coeff=C)
 
 
 def dress(V, F, t1, nocc):
@@ -116,7 +148,7 @@ def residuals(t1, t2, t3, ints):
 def energy(t1, t2, ints):
     no = ints.nocc
     fov = ints.fock[:no, no:]
-    W = ints.V[:no, :no, no:, no:]
+    W = ints.block('oovv')
     tau = t2 + np.einsum('ia,jb->ijab', t1, t1)
     return 2 * np.einsum('ia,ia', fov, t1) + \
         np.einsum('ijab,ijab', 2 * W - W.transpose(0, 1, 3, 2), tau)
@@ -144,7 +176,7 @@ def kernel(ints, method='ccsdt', conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=
     d2 = d1[:, None, :, None] + d1[None, :, None, :]
     with_t3 = method == 'ccsdt'
     t1 = np.zeros((no, nv))
-    W = ints.V[:no, :no, no:, no:]
+    W = ints.block('oovv')
     t2 = W / d2
     t3 = None
     if with_t3:

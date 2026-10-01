@@ -959,6 +959,37 @@ void zc_scatter_tiled_##SFX(int64_t ngroup, const int64_t *gptr, T **dptr,     \
 DEFINE_SCATTER_TILED(double, d)
 DEFINE_SCATTER_TILED(double complex, z)
 
+/* Packed bare <ab|de> from the 4-fold packed (ad|be) of PySCF (pairs i >= j
+ * at i(i+1)/2 + j):  Vs[(a<=b), (d<=e)] = (x + y)/2,  Va[(a<b), (d<e)] =
+ * (x - y)/2 with x = (ad|be), y = (ae|bd); rows and columns in
+ * numpy.triu_indices order. */
+static inline int64_t tri_idx(int64_t i, int64_t j)
+{
+    return i >= j ? i * (i + 1) / 2 + j : j * (j + 1) / 2 + i;
+}
+void zc_sa_vvvv_pack_d(const double *E, int64_t v, double *Vs, double *Va)
+{
+    const int64_t np_ = v * (v + 1) / 2, pa = v * (v - 1) / 2;
+    #pragma omp parallel for collapse(2) schedule(dynamic, 8)
+    for (int64_t a = 0; a < v; a++)
+    for (int64_t b = 0; b < v; b++) {
+        if (b < a) continue;
+        double *vs = Vs + (a * v - a * (a - 1) / 2 + (b - a)) * np_;
+        double *va = a < b ? Va + (a * v - a * (a + 1) / 2 + (b - a - 1)) * pa : NULL;
+        int64_t cs = 0, ca = 0;
+        for (int64_t d = 0; d < v; d++) {
+            const double *Ead = E + tri_idx(a, d) * np_;
+            const int64_t pbd = tri_idx(b, d);
+            for (int64_t e = d; e < v; e++) {
+                const double x = Ead[tri_idx(b, e)];
+                const double y = E[tri_idx(a, e) * np_ + pbd];
+                vs[cs++] = 0.5 * (x + y);
+                if (va != NULL && e > d) va[ca++] = 0.5 * (x - y);
+            }
+        }
+    }
+}
+
 /* Jacobi step of the spin-adapted T3 blocks with the DIIS vectors:
  *   q = r / (eo[b] - ev[x] - ev[y] - ev[z]),  xo = t + q,  eo_ = w[b] q
  * (w: DIIS metric weight of block b); returns sum r^2.  Real amplitudes. */

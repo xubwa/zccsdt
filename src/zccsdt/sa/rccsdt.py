@@ -233,7 +233,7 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose):
     d2 = d1[:, None, :, None] + d1[None, :, None, :]
     eo3 = eo[blocks.tri].sum(axis=1)
     t1 = np.zeros((no, nv))
-    t2 = ints.V[:no, :no, no:, no:] / d2
+    t2 = ints.block('oovv') / d2
     t3b = np.zeros((blocks.nblk, nv, nv, nv))
     r3b = np.empty_like(t3b)
     adiis = DIIS(space=diis_space)
@@ -709,9 +709,9 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None):
 
 class BareBlocks:
     '''Contiguous bare blocks <pq|rs> of the spatial integrals by block key
-    ('ovvv': occupied / virtual per slot), cut once from ints.V and cached on
-    the integral object, and the matrix of the T1 term of the dressed Fock
-    operator.'''
+    ('ovvv': occupied / virtual per slot), from ints.block (cut from the full
+    V or transformed from the AO integrals, cached), and the matrix of the
+    T1 term of the dressed Fock operator.'''
 
     def __init__(self, ints):
         self.ints = ints
@@ -726,22 +726,24 @@ class BareBlocks:
         return bb
 
     def get(self, key):
-        x = self._c.get(key)
-        if x is None:
-            n = self.ints.V.shape[0]
-            sl = {'o': slice(0, self.no), 'v': slice(self.no, n)}
-            x = self._c[key] = np.ascontiguousarray(self.ints.V[tuple(sl[c] for c in key)])
-        return x
+        return self.ints.block(key)
 
     def fock_t1(self):
         '''M[(r,s), (i,a)] = 2<ri|sa> - <ri|as>: F_rs + (M t1)_rs is the Fock
-        operator with the T1-dressed density.'''
+        operator with the T1-dressed density.  By (r,s) block, with pair
+        symmetry: <bi|la> = <ib|al>, <bi|ca> = <ib|ac>, ...'''
         M = self._c.get('fock_t1')
         if M is None:
-            V, no = self.ints.V, self.no
-            n = V.shape[0]
-            M = 2 * V[:, :no, :, no:].transpose(0, 2, 1, 3) - V[:, :no, no:, :].transpose(0, 3, 1, 2)
-            M = self._c['fock_t1'] = np.ascontiguousarray(M).reshape(n * n, -1)
+            no = self.no
+            n = self.ints.fock.shape[0]
+            v = n - no
+            g = self.get
+            M = np.empty((n, n, no, v))
+            M[:no, :no] = 2 * g('ooov').transpose(0, 2, 1, 3) - g('oovo').transpose(0, 3, 1, 2)
+            M[:no, no:] = 2 * g('oovv').transpose(0, 2, 1, 3) - g('oovv').transpose(0, 3, 1, 2)
+            M[no:, :no] = 2 * g('ovvo').transpose(1, 3, 0, 2) - g('ovov').transpose(1, 2, 0, 3)
+            M[no:, no:] = 2 * g('ovvv').transpose(1, 3, 0, 2) - g('ovvv').transpose(1, 2, 0, 3)
+            M = self._c['fock_t1'] = M.reshape(n * n, -1)
         return M
 
 
@@ -823,23 +825,59 @@ def vvvv_t1_packed(Ws, Wa, t1, out=None):
     return out
 
 
+def vvvv_packed(ints, max_bytes=1 << 30):
+    '''Bare <ab|de> symmetric / antisymmetric in (d,e), packed over rows
+    a<=b (a<b) and columns d<=e (d<e) in numpy.triu_indices order.  Without
+    the full V: from the 4-fold packed (ad|be) when it fits in ``max_bytes``,
+    else row batches of a from the AO integrals (<ab|de> = (ad|be)).'''
+    no, v = ints.nocc, ints.nvir
+    s0, s1 = np.triu_indices(v)
+    a0, a1 = np.triu_indices(v, 1)
+    if ints.V is not None:
+        Vv = ints.V[no:, no:, no:, no:]
+        Vs = 0.5 * (Vv[s0, s1][:, s0, s1] + Vv[s0, s1][:, s1, s0])
+        Va = 0.5 * (Vv[a0, a1][:, a0, a1] - Vv[a0, a1][:, a1, a0])
+        return Vs, Va
+    from zccsdt.cc import t3pack
+    from zccsdt.sa.rccsdt_ref import ao_block
+    Cv = np.ascontiguousarray(ints.mo_coeff[:, no:])
+    Vs = np.empty((len(s0), len(s0)))
+    Va = np.empty((len(a0), len(a0)))
+    lib = t3pack._lib
+    if (8 * len(s0) ** 2 <= max_bytes and t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_pack_d')):
+        # (ad|be) with 4-fold symmetry in one transformation, then repacked
+        from pyscf import ao2mo
+        E4 = np.ascontiguousarray(ao2mo.kernel(ints.mol, Cv, compact=True))
+        lib.zc_sa_vvvv_pack_d(t3pack._p(E4), t3pack._I64(v), t3pack._p(Vs), t3pack._p(Va))
+        return Vs, Va
+    nb = int(max(1, min(v, max_bytes // (8 * v ** 3))))
+    rs = ra = 0
+    for b0 in range(0, v, nb):
+        b1 = min(v, b0 + nb)
+        X = ao_block(ints.mol, (Cv[:, b0:b1], Cv, Cv, Cv))          # [a, b, d, e]
+        for a in range(b0, b1):
+            Y = X[a - b0, a:]                                       # rows (a, b >= a)
+            Vs[rs:rs + v - a] = 0.5 * (Y[:, s0, s1] + Y[:, s1, s0])
+            Va[ra:ra + v - a - 1] = 0.5 * (Y[1:, a0, a1] - Y[1:, a1, a0])
+            rs += v - a
+            ra += v - a - 1
+    return Vs, Va
+
+
 def bare_packed(ints):
     '''Bare <ab|de> symmetric / antisymmetric in (d,e), packed (a<=b, d<=e) /
     (a<b, d<e), with the matching packed ovvv (U) and oovv (G) parts; cached
     on the integral object.'''
     c = getattr(ints, '_sa_packed', None)
     if c is None:
-        no, n = ints.nocc, ints.V.shape[0]
-        v = n - no
+        no, v = ints.nocc, ints.nvir
         s0, s1 = np.triu_indices(v)
         a0, a1 = np.triu_indices(v, 1)
-        Vv = ints.V[no:, no:, no:, no:]
-        Vs = 0.5 * (Vv[s0, s1][:, s0, s1] + Vv[s0, s1][:, s1, s0])
-        Va = 0.5 * (Vv[a0, a1][:, a0, a1] - Vv[a0, a1][:, a1, a0])
-        U = ints.V[:no, no:, no:, no:]                          # <mb|de>
+        Vs, Va = vvvv_packed(ints)
+        U = ints.block('ovvv')                                  # <mb|de>
         Us = 0.5 * (U[:, :, s0, s1] + U[:, :, s1, s0])
         Ua = 0.5 * (U[:, :, a0, a1] - U[:, :, a1, a0])
-        Gf = ints.V[:no, :no, no:, no:].reshape(no * no, v, v)   # <mn|de>
+        Gf = ints.block('oovv').reshape(no * no, v, v)          # <mn|de>
         Gs = 0.5 * (Gf[:, s0, s1] + Gf[:, s1, s0])
         Ga = 0.5 * (Gf[:, a0, a1] - Gf[:, a1, a0])
         c = {k: np.ascontiguousarray(x) for k, x in

@@ -112,3 +112,30 @@ def test_drive_hh_equals_separate_terms(monkeypatch):
             r3b = np.zeros_like(t3b)
             E.drive_hh(B, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=mb)
             assert abs(r3b - ref).max() < 1e-10 * abs(ref).max()
+
+
+def test_blocks_from_ao_integrals():
+    '''Integral blocks transformed on demand from the AO integrals (no full V,
+    batched vvvv) reproduce the residuals built from the full V.'''
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).run(conv_tol=1e-12)
+    full = R.from_scf(mf, ncore=1)
+    lazy = R.from_scf(mf, ncore=1, full=False)
+    assert lazy.V is None
+    no, nv = full.nocc, full.nvir
+    Vs, Va = E.vvvv_packed(full)
+    for mb in (1 << 30, 8 * 3 * nv ** 3):            # 4-fold repack / batches of 3
+        Ls, La = E.vvvv_packed(lazy, max_bytes=mb)
+        assert abs(Vs - Ls).max() < 1e-12 and abs(Va - La).max() < 1e-12
+    for key in ('ovvv', 'vvvo', 'oovv', 'ovov'):
+        assert abs(full.block(key) - lazy.block(key)).max() < 1e-12, key
+    rng = np.random.default_rng(1)
+    B = Blocks(no)
+    t1 = 0.05 * rng.standard_normal((no, nv))
+    t2 = 0.05 * rng.standard_normal((no, no, nv, nv))
+    t2 = t2 + t2.transpose(1, 0, 3, 2)
+    t3b = 0.02 * rng.standard_normal((B.nblk, nv, nv, nv))
+    a = E.residuals(full, B, t1, t2, t3b)
+    b = E.residuals(lazy, B, t1, t2, t3b)
+    for x, y in zip(a, b):
+        assert abs(x - y).max() < 1e-11 * max(1.0, abs(x).max())
