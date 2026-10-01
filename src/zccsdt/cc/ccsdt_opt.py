@@ -112,19 +112,6 @@ def vvvv_packed(eris, vm):
     return cache
 
 
-def _pair_t1_matrix(t1, vm):
-    '''M[R, (e, i)] with sum_R V[Q, R] M[R, (e, i)] = sum_f V[Q, e, f] t1[i, f]
-    for V antisymmetric in (e, f) and packed over R = (e' < f'):
-    M = delta(e, e') t1[i, f'] - delta(e, f') t1[i, e'].'''
-    nocc, nvir = t1.shape
-    M = np.zeros((vm.npair, nvir, nocc), dtype=t1.dtype)
-    R = np.arange(vm.npair)
-    e1, f1 = vm.pairs[:, 0], vm.pairs[:, 1]
-    M[R, e1] = t1[:, f1].T
-    M[R, f1] = -t1[:, e1].T
-    return M.reshape(vm.npair, nvir * nocc)
-
-
 def bra_dressed_vvvo_pp(eris, t1, om, vm):
     '''<ab||ei> with only the bra (a, b) T1-dressed, packed over a<b:
     B = <ab||ei> - (L[a,b] - L[b,a]) + sum_{m<n} tau1[mn,ab] <mn||ei>,
@@ -163,7 +150,8 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm):
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     W = np.array(Bv, order='C', copy=True)
-    gemm(Vd, _pair_t1_matrix(t1, vm), W.reshape(vm.npair, -1), beta=1.0)
+    # sum_f ~<ab||ef> t1[i,f]: sparse in the packed (e<f) index, done directly
+    t3pack.pair_t1_contract(W, Vd, t1)
     # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] = sum_{m<n} t2[mn,ab] ~oovo[mn,e,i]
     t2mn_pp = t2[mm, nn][:, md, ne]
     gemm(np.asfortranarray(t2mn_pp.T), np.ascontiguousarray(ge['oovo'][mm, nn]).reshape(
@@ -258,16 +246,11 @@ def dressed_vvvv_pp(eris, t1, vm):
     # out[(x<y), Q] -= Y[x,y,Q];  out[(y<x), Q] += Y[x,y,Q], with
     # Y[x,y,Q] = sum_m t1[m,x] <my||Q>, built in batches of x (Y is v^2 n_Q)
     nb = max(1, int(2e9 // (nvir * vm.npair * out.itemsize)))
-    y = np.arange(nvir)
     for x0 in range(0, nvir, nb):
         x1 = min(x0 + nb, nvir)
         Y = gemm(np.ascontiguousarray(t1[:, x0:x1].T), ovvv_Q.reshape(nocc, -1))
         Y = Y.reshape(x1 - x0, nvir, vm.npair)
-        for x in range(x0, x1):
-            hi = y[x + 1:]
-            out[vm.pidx[x, hi]] -= Y[x - x0, hi]
-            lo = y[:x]
-            out[vm.pidx[lo, x]] += Y[x - x0, lo]
+        t3pack.pair_antisym_batch_add(out, Y, nvir, x0, alpha=-1.0)
         del Y
     # Z[(a<b), Q] = sum_{m<n} (t[m,a] t[n,b] - t[n,a] t[m,b]) <mn||Q>
     om = t3pack.triple_map(nocc)

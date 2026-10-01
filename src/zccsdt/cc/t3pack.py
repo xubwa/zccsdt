@@ -303,3 +303,42 @@ def pair_antisym_add(out, X, n, strides, alpha=1.0):
     out += alpha * (flat[(pa * sa + pb * sb)[:, None, None] + off]
                     - flat[(pb * sa + pa * sb)[:, None, None] + off])
     return out
+
+
+def pair_antisym_batch_add(out, Y, n, x0, alpha=1.0):
+    '''out[(a<b), :] += alpha (Y[a-x0, b] if x0 <= a < x1) - alpha (Y[b-x0, a]
+    if x0 <= b < x1), for Y of shape (x1 - x0, n, ncol).'''
+    x1 = x0 + Y.shape[0]
+    ncol = out.shape[1]
+    if USE_C and hasattr(_lib, 'zc_pair_antisym_batch_add_d') and out.flags.c_contiguous:
+        Y = np.ascontiguousarray(Y, dtype=out.dtype)
+        al = np.array(alpha, dtype=out.dtype)
+        getattr(_lib, 'zc_pair_antisym_batch_add_' + _sfx(out.dtype))(
+            _p(out), _p(Y), _I64(n), _I64(ncol), _I64(x0), _I64(x1), _p(al))
+        return out
+    pidx = triple_map(n).pidx
+    y = np.arange(n)
+    for x in range(x0, x1):
+        hi, lo = y[x + 1:], y[:x]
+        out[pidx[x, hi]] += alpha * Y[x - x0, hi]
+        out[pidx[lo, x]] -= alpha * Y[x - x0, lo]
+    return out
+
+
+def pair_t1_contract(out, V, t1):
+    '''out[Q, e, i] += sum_f V[Q, e, f] t1[i, f] for V antisymmetric in (e, f),
+    packed over e<f; out: (nq, n, no).'''
+    nq = V.shape[0]
+    no, n = t1.shape
+    if USE_C and hasattr(_lib, 'zc_pair_t1_contract_d') and out.flags.c_contiguous:
+        dt = out.dtype
+        getattr(_lib, 'zc_pair_t1_contract_' + _sfx(dt))(
+            _p(out), _p(np.ascontiguousarray(V, dtype=dt)),
+            _p(np.ascontiguousarray(t1, dtype=dt)), _I64(nq), _I64(n), _I64(no))
+        return out
+    vm = triple_map(n)
+    full = np.zeros((nq, n, n), dtype=np.result_type(V, out))
+    full[:, vm.pairs[:, 0], vm.pairs[:, 1]] = V
+    full[:, vm.pairs[:, 1], vm.pairs[:, 0]] = -V
+    out += full @ t1.T
+    return out

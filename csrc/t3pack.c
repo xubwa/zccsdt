@@ -175,3 +175,65 @@ void zc_pair_antisym_add_##SFX(T *out, const T *X, int64_t n, int64_t nx,      \
 }
 DEFINE_PAIRPACK(double, d)
 DEFINE_PAIRPACK(double complex, z)
+
+/* ---- packed-pair helpers for the T1 dressing of packed vvvv / vvvo ---- */
+
+#define DEFINE_PAIRHELP(T, SFX)                                                \
+/* out[(a<b), :] += alpha * (Y[a - x0, b, :] [a in batch]                      \
+ *                         - Y[b - x0, a, :] [b in batch])                     \
+ * Y: (x1 - x0, n, ncol) holds the rows of the first index x0 <= x < x1. */    \
+void zc_pair_antisym_batch_add_##SFX(T *out, const T *Y, int64_t n,            \
+                                     int64_t ncol, int64_t x0, int64_t x1,     \
+                                     const T *alpha)                           \
+{                                                                              \
+    const T al = *alpha;                                                       \
+    _Pragma("omp parallel for schedule(dynamic, 4)")                           \
+    for (int64_t a = 0; a < n; a++) {                                          \
+        int64_t Q = a * n - a * (a + 1) / 2;                                   \
+        int ina = (a >= x0 && a < x1);                                         \
+        for (int64_t b = a + 1; b < n; b++, Q++) {                             \
+            int inb = (b >= x0 && b < x1);                                     \
+            if (!ina && !inb) continue;                                        \
+            T *o = out + Q * ncol;                                             \
+            if (ina) {                                                         \
+                const T *y = Y + ((a - x0) * n + b) * ncol;                    \
+                for (int64_t k = 0; k < ncol; k++) o[k] += al * y[k];          \
+            }                                                                  \
+            if (inb) {                                                         \
+                const T *y = Y + ((b - x0) * n + a) * ncol;                    \
+                for (int64_t k = 0; k < ncol; k++) o[k] -= al * y[k];          \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* out[Q, e, i] += sum_{f != e} s(e,f) V[Q, pair(min(e,f), max(e,f))] t[i, f]  \
+ * with s = +1 for e < f, -1 for e > f: i.e. sum_f V[Q,e,f] t[i,f] for V      \
+ * antisymmetric in (e,f) and packed over e<f.  V: (nq, n(n-1)/2), t: (no, n), \
+ * out: (nq, n, no). */                                                        \
+void zc_pair_t1_contract_##SFX(T *out, const T *V, const T *t, int64_t nq,     \
+                               int64_t n, int64_t no)                          \
+{                                                                              \
+    const int64_t np = n * (n - 1) / 2;                                        \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t Q = 0; Q < nq; Q++) {                                         \
+        const T *v = V + Q * np;                                               \
+        T *o = out + Q * n * no;                                               \
+        for (int64_t e = 0; e < n; e++) {                                      \
+            T *oe = o + e * no;                                                \
+            /* f < e: pair (f, e), sign -1 */                                  \
+            for (int64_t f = 0; f < e; f++) {                                  \
+                T x = -v[f * n - f * (f + 1) / 2 + (e - f - 1)];               \
+                for (int64_t i = 0; i < no; i++) oe[i] += x * t[i * n + f];    \
+            }                                                                  \
+            /* f > e: pairs (e, f) are contiguous, sign +1 */                  \
+            const T *ve = v + e * n - e * (e + 1) / 2;                         \
+            for (int64_t f = e + 1; f < n; f++) {                              \
+                T x = ve[f - e - 1];                                           \
+                for (int64_t i = 0; i < no; i++) oe[i] += x * t[i * n + f];    \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_PAIRHELP(double, d)
+DEFINE_PAIRHELP(double complex, z)

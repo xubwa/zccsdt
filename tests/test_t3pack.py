@@ -120,3 +120,26 @@ def test_pair_antisym_add(cplx, impl):
     out = np.full((len(pa), nx, ny), 0.5, dtype=X.dtype)
     t3pack.pair_antisym_add(out, X, n, (sa, sb, sx, sy), alpha=2.0)
     np.testing.assert_allclose(out, want, atol=1e-13)
+
+
+@pytest.mark.parametrize('cplx', [False, True])
+def test_pair_batch_and_t1_contract(cplx, impl):
+    rng = np.random.default_rng(6)
+    n, ncol, no = 7, 5, 3
+    vm = t3pack.triple_map(n)
+    pa, pb = vm.pairs[:, 0], vm.pairs[:, 1]
+    Yfull = _rand((n, n, ncol), rng, cplx)
+    want = -(Yfull[pa, pb] - Yfull[pb, pa])
+    out = np.zeros((vm.npair, ncol), dtype=Yfull.dtype)
+    for x0 in (0, 3, 6):
+        x1 = min(x0 + 3, n)
+        t3pack.pair_antisym_batch_add(out, Yfull[x0:x1], n, x0, alpha=-1.0)
+    np.testing.assert_allclose(out, want, atol=1e-13)
+    V = _rand((4, vm.npair), rng, cplx)
+    t1 = _rand((no, n), rng, cplx)
+    full = np.zeros((4, n, n), dtype=V.dtype)
+    full[:, pa, pb] = V
+    full[:, pb, pa] = -V
+    out = np.ones((4, n, no), dtype=V.dtype)
+    t3pack.pair_t1_contract(out, V, t1)
+    np.testing.assert_allclose(out, 1 + np.einsum('qef,if->qei', full, t1), atol=1e-13)

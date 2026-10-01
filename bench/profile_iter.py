@@ -32,7 +32,8 @@ def main():
         mf = scf.addons.convert_to_ghf(scf.RHF(mol).run(conv_tol=1e-10))
     t0 = time.perf_counter()
     packed = os.environ.get('ZC_PACKED', '0') == '1'
-    eris = E.from_scf(mf, frozen=frozen, packed_vvvv=packed)
+    eris = E.from_scf(mf, frozen=frozen, packed_vvvv=packed,
+                      vir_batch=int(os.environ.get('ZC_VBATCH', 16)))
     t_ints = time.perf_counter() - t0
     nocc = eris.nocc
     nvir = eris.nmo - nocc
