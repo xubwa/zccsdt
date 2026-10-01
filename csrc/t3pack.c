@@ -762,6 +762,76 @@ void zc_sa_vvvv_t1_##SFX(T *out, const T *Ws, const T *Wa, const T *t,         \
 DEFINE_SA_VT1(double, d)
 DEFINE_SA_VT1(double complex, z)
 
+/* Gather of the cubes t_mpq (m = 0..n-1) of one occupied pair with all the
+ * layouts the ring and T3 -> T1/T2/W need, in one pass over the source:
+ *   T[m][x,y,z]   = s(x,y,z)                 s(x,y,z) = t_mpq^{xyz}
+ *   T2[m][x,y,z]  = s(y,x,z)
+ *   T3[m][x,y,z]  = s(y,z,x)
+ *   Y[m][x,y,z]   = 2 s(x,y,z) - s(y,x,z) - s(z,y,x)
+ *   Z[m][x,y,z]   = 2 s(x,z,y) - s(y,z,x) - s(z,x,y)
+ * Source cube m: src[off[m] + x*st[3m] + y*st[3m+1] + z*st[3m+2]] (off < 0:
+ * zero cube).  Every orbit {permutations of (x,y,z)} is read once. */
+static const int L_ORBIT[6][6] = {{0, 1, 2, 3, 4, 5}, {1, 0, 5, 4, 3, 2}, {2, 4, 0, 5, 1, 3}, {3, 5, 4, 0, 2, 1}, {4, 2, 3, 1, 5, 0}, {5, 3, 1, 2, 0, 4}};
+#define DEFINE_SA_GATHER(T, SFX)                                               \
+void zc_sa_pair_gather_##SFX(const T *src, int64_t n, int64_t v,               \
+                             const int64_t *off, const int64_t *st,            \
+                             T *To, T *T2, T *T3, T *Y, T *Z)                  \
+{                                                                              \
+    const int64_t v2 = v * v, v3 = v2 * v;                                     \
+    _Pragma("omp parallel for collapse(2) schedule(dynamic, 4)")               \
+    for (int64_t m = 0; m < n; m++)                                            \
+    for (int64_t x = 0; x < v; x++) {                                          \
+        const int64_t base = m * v3;                                           \
+        const int64_t s0 = st[3 * m], s1 = st[3 * m + 1], s2 = st[3 * m + 2];  \
+        const T *c = off[m] >= 0 ? src + off[m] : NULL;                        \
+        for (int64_t y = x; y < v; y++)                                        \
+        for (int64_t z = y; z < v; z++) {                                      \
+            /* the six positions p of the orbit and their source values */    \
+            const int64_t P[6][3] = {{x, y, z}, {y, x, z}, {z, y, x},          \
+                                     {x, z, y}, {y, z, x}, {z, x, y}};         \
+            T sv[6];                                                           \
+            for (int k = 0; k < 6; k++)                                        \
+                sv[k] = c ? c[P[k][0] * s0 + P[k][1] * s1 + P[k][2] * s2] : 0; \
+            /* output at position P[k]: the values at its permutations are \
+             * sv[L_ORBIT[k][.]] (L: composition table of the orbit) */         \
+            for (int k = 0; k < 6; k++) {                                      \
+                const int64_t o = base + P[k][0] * v2 + P[k][1] * v + P[k][2]; \
+                const T sabc = sv[L_ORBIT[k][0]], sbac = sv[L_ORBIT[k][1]], scba = sv[L_ORBIT[k][2]]; \
+                const T sacb = sv[L_ORBIT[k][3]], sbca = sv[L_ORBIT[k][4]], scab = sv[L_ORBIT[k][5]]; \
+                To[o] = sabc;                                                  \
+                T2[o] = sbac;                                                  \
+                T3[o] = sbca;                                                  \
+                Y[o] = 2 * sabc - sbac - scba;                                 \
+                Z[o] = 2 * sacb - sbca - scab;                                 \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* dst[x,y,z] += a0 s0[x,y,z] + a1 s1[x,y,z] + a2 s2[x,y,z] over a v^3 box,    \
+ * each source addressed through element strides (st[3k..3k+2]); dst          \
+ * through dstr[3].  Sources with null pointers are skipped. */              \
+void zc_add3_strided_##SFX(T *dst, const int64_t *dstr, int64_t v,             \
+                           const T *s0, const T *s1, const T *s2,              \
+                           const int64_t *st, const T *al)                     \
+{                                                                              \
+    const T *src[3] = {s0, s1, s2};                                            \
+    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
+    for (int64_t x = 0; x < v; x++)                                            \
+    for (int64_t y = 0; y < v; y++) {                                          \
+        T *d = dst + x * dstr[0] + y * dstr[1];                                \
+        for (int k = 0; k < 3; k++) {                                          \
+            if (src[k] == NULL) continue;                                      \
+            const T *p = src[k] + x * st[3 * k] + y * st[3 * k + 1];            \
+            const int64_t sz = st[3 * k + 2], dz = dstr[2];                    \
+            const T a = al[k];                                                 \
+            for (int64_t z = 0; z < v; z++) d[z * dz] += a * p[z * sz];        \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_SA_GATHER(double, d)
+DEFINE_SA_GATHER(double complex, z)
+
 /* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----
  * Element T3[I, A] = osig[I] vsig[A] T3b[obase[I] + vcol[A]] for occupied
  * triple I and virtual triple A of equal spin group. */

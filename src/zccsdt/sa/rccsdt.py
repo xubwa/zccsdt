@@ -219,6 +219,9 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
     t2 = ints.V[:no, :no, no:, no:] / d2
     t3b = np.zeros((blocks.nblk, nv, nv, nv))
     adiis = DIIS(space=diis_space)
+    # DIIS metric of the full t_ijk^abc: a block stands for 6 (distinct
+    # occupied indices) or 3 (one repeated index) ordered triples
+    wsq = np.sqrt(np.where(blocks.kind == 0, 6.0, 3.0))[:, None, None, None]
     e_old = rccsdt_ref.energy(t1, t2, ints)
     conv = False
     import time
@@ -229,10 +232,10 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
         r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b)
         normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.linalg.norm(r3b))
         with timer('sa.diis'):
-            out = adiis.update([t1 + r1 / d1, t2 + r2 / d2, t3b + r3b / d3])
+            out = adiis.update([t1 + r1 / d1, t2 + r2 / d2, wsq * (t3b + r3b / d3)])
         t1 = out[0].reshape(no, nv)
         t2 = out[1].reshape(no, no, nv, nv)
-        t3b = out[2].reshape(t3b.shape)
+        t3b = out[2].reshape(t3b.shape) / wsq
         e_new = rccsdt_ref.energy(t1, t2, ints)
         timings.append(time.perf_counter() - t0)
         if verbose:
@@ -372,13 +375,40 @@ def ccsd_residual(D, Fd, t2, imds, nocc, Ws, Wa, t1=None):
 def fvv_term(t3b, Fv, r3b):
     '''r3b += sum_d Fv_ad t^{dbc} on each of the three virtual axes of every
     cube (the F_vv term of all three positions).'''
+    from zccsdt.cc.t3pack import axpby
     nb, v = t3b.shape[0], t3b.shape[1]
+    FvT = np.ascontiguousarray(Fv.T)
+    tmp = np.empty((v, v, v))
     for b in range(nb):
-        c = t3b[b]
-        r3b[b] += gemm(Fv, c.reshape(v, -1)).reshape(v, v, v)
-        r3b[b] += gemm(c.reshape(-1, v), np.ascontiguousarray(Fv.T)).reshape(v, v, v)
-        r3b[b] += gemm(Fv, np.ascontiguousarray(c.transpose(1, 0, 2)).reshape(v, -1)) \
-            .reshape(v, v, v).transpose(1, 0, 2)
+        c, r = t3b[b], r3b[b]
+        gemm(Fv, c.reshape(v, -1), r.reshape(v, -1), beta=1.0)
+        gemm(c.reshape(-1, v), FvT, r.reshape(-1, v), beta=1.0)
+        axpby(tmp, c.transpose(1, 0, 2), 1.0, 0.0)
+        y = gemm(Fv, tmp.reshape(v, -1)).reshape(v, v, v)
+        axpby(r, y.transpose(1, 0, 2), 1.0)
+
+
+def add3(dst, srcs, alphas=(1.0, 1.0, 1.0)):
+    '''dst += sum_k alphas[k] srcs[k] for (v,v,v) arrays / strided views (C
+    kernel zc_add3_strided; dst C-contiguous).'''
+    from zccsdt.cc import t3pack
+    lib = t3pack._lib
+    if not (t3pack.USE_C and hasattr(lib, 'zc_add3_strided_d')):
+        for a, x in zip(alphas, srcs):
+            dst += a * x
+        return dst
+    isz = dst.itemsize
+    ptrs = [None] * 3
+    st = np.zeros(9, dtype=np.int64)
+    for k, x in enumerate(srcs):
+        ptrs[k] = t3pack.ctypes.c_void_p(x.ctypes.data)
+        st[3 * k:3 * k + 3] = [y // isz for y in x.strides]
+    dstr = np.array([y // isz for y in dst.strides], dtype=np.int64)
+    al = np.array(list(alphas) + [0.0] * (3 - len(alphas)), dtype=np.float64)
+    lib.zc_add3_strided_d(t3pack.ctypes.c_void_p(dst.ctypes.data), t3pack._p(dstr),
+                          t3pack._I64(dst.shape[0]), ptrs[0], ptrs[1], ptrs[2],
+                          t3pack._p(st), t3pack._p(al))
+    return dst
 
 
 def t3_pass(blocks, t3b, imds, D, nocc, r3b):
@@ -406,31 +436,50 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
     T = np.empty((no, v, v, v))
     T2g, T3g, Y, Z = (np.empty_like(T) for _ in range(4))
     ov, vv = no * v, v * v
+    from zccsdt.cc import t3pack
+    lib = t3pack._lib
+    use_c = t3pack.USE_C and hasattr(lib, 'zc_sa_pair_gather_d')
+    cst = np.array((v * v, v, 1), dtype=np.int64)
+    from zccsdt.timing import timer
     for p in range(no):
         for q in range(p, no):
-            for m in range(no):
-                axpby(T[m], blocks.cube(t3b, m, p, q), 1.0, 0.0)
-            axpby(T2g, T.transpose(0, 2, 1, 3), 1.0, 0.0)
-            axpby(T3g, T.transpose(0, 3, 1, 2), 1.0, 0.0)
-            axpby(Y, T, 2.0, 0.0)
-            axpby(Y, T.transpose(0, 2, 1, 3), -1.0)
-            axpby(Y, T.transpose(0, 3, 2, 1), -1.0)
-            axpby(Z, T.transpose(0, 1, 3, 2), 2.0, 0.0)
-            axpby(Z, T.transpose(0, 3, 1, 2), -1.0)
-            axpby(Z, T.transpose(0, 2, 3, 1), -1.0)
+            tg = timer('t3p.gather'); tg.__enter__()
+            if use_c:
+                off = np.array([blocks.blk[m, p, q] * v ** 3 if blocks.blk[m, p, q] >= 0 else -1
+                                for m in range(no)], dtype=np.int64)
+                st = np.ascontiguousarray(np.concatenate([cst[blocks.axes[m, p, q]] for m in range(no)]))
+                P = t3pack._p
+                lib.zc_sa_pair_gather_d(P(t3b), t3pack._I64(no), t3pack._I64(v), P(off), P(st),
+                                        P(T), P(T2g), P(T3g), P(Y), P(Z))
+            else:
+                for m in range(no):
+                    axpby(T[m], blocks.cube(t3b, m, p, q), 1.0, 0.0)
+                axpby(T2g, T.transpose(0, 2, 1, 3), 1.0, 0.0)
+                axpby(T3g, T.transpose(0, 3, 1, 2), 1.0, 0.0)
+                axpby(Y, T, 2.0, 0.0)
+                axpby(Y, T.transpose(0, 2, 1, 3), -1.0)
+                axpby(Y, T.transpose(0, 3, 2, 1), -1.0)
+                axpby(Z, T.transpose(0, 1, 3, 2), 2.0, 0.0)
+                axpby(Z, T.transpose(0, 3, 1, 2), -1.0)
+                axpby(Z, T.transpose(0, 2, 3, 1), -1.0)
+            tg.__exit__(None, None, None)
             T2, Y2 = T.reshape(ov, vv), Y.reshape(ov, vv)
             T2g2, T3g2 = T2g.reshape(ov, vv), T3g.reshape(ov, vv)
             # ---- ring: X_{i;pq}^{a;bc} = X1[(a,i),(b,c)] + X2[(b,i),(a,c)] + X3[(c,i),(a,b)]
+            tg = timer('t3p.ring_gemm'); tg.__enter__()
             X1 = gemm(J2, Y2)
             gemm(K2, T2, X1, alpha=-1.0, beta=1.0)
             X2 = gemm(K2, T2g2, alpha=-1.0).reshape(v, no, v, v)
             X3 = gemm(K2, T3g2, alpha=-1.0).reshape(v, no, v, v)
             X1 = X1.reshape(v, no, v, v)
+            tg.__exit__(None, None, None)
+            tg = timer('t3p.scatter'); tg.__enter__()
             for i in range(no):
                 parts = (X1[:, i], X2[:, i].transpose(1, 0, 2), X3[:, i].transpose(1, 2, 0))
                 for B, axes in blocks.uses_attached(i, p, q):
-                    for x in parts:
-                        axpby(r3b[B], x.transpose(axes), 1.0)
+                    add3(r3b[B], [x.transpose(axes) for x in parts])
+            tg.__exit__(None, None, None)
+            tg = timer('t3p.pass1'); tg.__enter__()
             # ---- pass 1: (A) (m,n) = (pp,qq) summed, external x;  (B) m = x summed
             orders = [(p, q, T2g, T3g, Y, Z, False)]
             if q != p:
@@ -464,6 +513,7 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
                 r2[pp, qq] += 0.5 * gemm(Vo, Yc.reshape(-1, v))
                 r2[pp, qq] += 0.5 * gemm(Vo, Zc.reshape(-1, v)).T
                 dWo[:, :, qq, pp] += gemm(Gm, Zc.reshape(-1, v))
+            tg.__exit__(None, None, None)
     r2 = r2 + r2a
     r2 = r2 + r2.transpose(1, 0, 3, 2)
     dWv = Eab.transpose(2, 3, 1, 0) + Eba.transpose(3, 2, 1, 0)

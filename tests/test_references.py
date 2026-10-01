@@ -69,3 +69,16 @@ def test_spin_adapted_ccsdt_vs_mrcc_cfour(name):
     assert rd.converged and rt.converged
     assert abs(rd.e_tot - ref['e_ccsd']) < 1e-8
     assert abs(rt.e_tot - ref['e_ccsdt']) < 1e-8
+
+
+@pytest.mark.parametrize('name', ['h2o_ccpvdz_fc', 'hf_ccpvdz', 'n2_631g'])
+def test_spin_adapted_block_ccsdt_vs_mrcc_cfour(name):
+    '''Block-stored spin-adapted CCSDT (zccsdt.sa.rccsdt) against the references.'''
+    from zccsdt.sa import rccsdt, rccsdt_ref
+    molname, basis, frozen = SYSTEMS[name]
+    atoms = sorted({a.split()[0] for a in GEOM[molname].split(';')})
+    mol = gto.M(atom=GEOM[molname], basis=_basis(atoms, basis), verbose=0)
+    rhf = scf.RHF(mol).run(conv_tol=1e-12)
+    r = rccsdt.kernel(rccsdt_ref.from_scf(rhf, ncore=frozen // 2), conv_tol=1e-11,
+                      conv_tol_normt=1e-8)
+    assert r.converged and abs(r.e_tot - REFS[name]['recommended']['e_ccsdt']) < 1e-8
