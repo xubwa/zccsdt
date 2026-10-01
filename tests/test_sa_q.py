@@ -140,3 +140,27 @@ def test_block_algorithm_equals_simple(h2o, monkeypatch):
         monkeypatch.setattr(t3pack, 'USE_C', use_c and t3pack._lib is not None)
         got = rccsdt_q.q_correction(ints, B, t2, t3b)
         assert abs(got[0] - ref[0]) < 1e-13 and abs(got[1] - ref[1]) < 1e-13
+
+
+def test_few_occupied_orbitals():
+    '''Two occupied orbitals: the only quadruple is (0,0,1,1); block algorithm
+    = dense evaluation.  One occupied orbital: no quadruples.'''
+    from pyscf import gto, scf
+    from zccsdt.sa import rccsdt, rccsdt_ref
+    from zccsdt.sa.t3blocks import Blocks
+    mf = scf.RHF(gto.M(atom='Be 0 0 0', basis='cc-pvdz', verbose=0)).run(conv_tol=1e-12)
+    ints = rccsdt_ref.from_scf(mf)
+    r = rccsdt.add_q(ints, rccsdt.kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7))
+    ref = rccsdt_ref.q_correction(r.t2, Blocks(ints.nocc).to_dense(r.t3), ints)
+    assert abs(r.e_q5 - ref[0]) < 1e-13 and abs(r.e_q - ref[1]) < 1e-13 and r.e_q < 0
+    mf = scf.RHF(gto.M(atom='H 0 0 0; H 0 0 0.74', basis='cc-pvdz', verbose=0)).run(conv_tol=1e-12)
+    r = rccsdt.run(mf, q=True)
+    assert r.e_q == 0 and r.e_tot_q == r.e_tot
+
+
+def test_memory_guard(h2o, monkeypatch):
+    from zccsdt.sa import rccsdt_q
+    ints, B, t2, t3b, t3, val = h2o
+    monkeypatch.setattr(rccsdt_q, '_available_memory', lambda: 1000)
+    with pytest.raises(MemoryError, match='10 v\\^4'):
+        rccsdt_q.kernel(ints, B, t2, t3b)

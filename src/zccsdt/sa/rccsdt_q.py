@@ -313,9 +313,27 @@ def memory_needed(nocc, nvir):
     return 8 * (10 * v ** 4 + (2 * nocc + 8) * v ** 3 + 3 * nocc * v ** 3)
 
 
+def _available_memory():
+    '''MemAvailable of /proc/meminfo in bytes, or None.'''
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable'):
+                    return 1024 * int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
+
 def kernel(ints, blocks, t2, t3b):
     '''(E[Q], E(Q)) for converged CCSDT amplitudes (q_correction, with
-    numpy's own BLAS kept single-threaded as in rccsdt.kernel).'''
+    numpy's own BLAS kept single-threaded as in rccsdt.kernel).  Raises
+    MemoryError if the work arrays (10 v^4) clearly do not fit in the
+    available memory.'''
+    need, avail = memory_needed(ints.nocc, ints.nvir), _available_memory()
+    if avail is not None and need > avail:
+        raise MemoryError('CCSDT(Q) needs about %.1f GB of work arrays (10 v^4, v = %d); '
+                          '%.1f GB are available' % (need / 1e9, ints.nvir, avail / 1e9))
     try:
         from threadpoolctl import threadpool_limits
     except ImportError:
