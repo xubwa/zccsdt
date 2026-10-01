@@ -116,16 +116,56 @@ def _pair_scatter_same_spin(out, Y, nloc, pa, pb, alpha):
 
 
 def bare_packed(se):
-    '''Bare ovvv packed over its virtual pair, [m, y, Q], and oovv packed over
-    both pairs, [P, Q] (SpinTensors), cached on the integral object.'''
+    '''Bare integrals in packed forms, cached on the integral object:
+    'ovvv_Q' [m, y, Q] and 'oovv_Q' [m, n, Q] (packed over the ket pair) and
+    'oovv_PQ' [P, Q] (both pairs), as SpinTensors.'''
     c = se.__dict__.get('_bare_packed')
     if c is None:
         om, vm = t3pack.maps_for(se)
         Qs, Ps = pair_space('Q', vm), pair_space('P', om)
-        c = (pack_pairs(se.g['ovvv'], 2, Qs),
-             pack_pairs(pack_pairs(se.g['oovv'], 2, Qs), 0, Ps))
+        oq = pack_pairs(se.g['oovv'], 2, Qs)
+        c = {'ovvv_Q': pack_pairs(se.g['ovvv'], 2, Qs), 'oovv_Q': oq,
+             'oovv_PQ': pack_pairs(oq, 0, Ps)}
         se.__dict__['_bare_packed'] = c
     return c
+
+
+def _flip_key(key, labels):
+    return tuple(l - k for k, l in zip(key, labels))
+
+
+def dressed_ovvv(se, t1):
+    '''T1-dressed ovvv, ~<mb||ef> = <mb||ef> - sum_n t1[n,b] <mn||ef> (only the
+    bra virtual is dressed), as a SpinTensor [m, b, e, f] and packed over the
+    ket pair, [m, b, Q]: parallel copies of the cached bare blocks plus one
+    GEMM per m.  For RHF the spin-flipped blocks are shared (closed-shell t1;
+    in packed form only between the aa and bb pair groups, as the flip
+    permutes the alpha-beta pairs).'''
+    o, v = se.spaces['o'], se.spaces['v']
+    dtype = np.result_type(t1, se.fock)
+    bp = bare_packed(se)
+    res = []
+    for src, oov, lab in ((se.g['ovvv'], se.g['oovv'], (1, 1, 1, 1)),
+                          (bp['ovvv_Q'], bp['oovv_Q'], (1, 1, 2))):
+        blocks = {}
+        for key, blk in src.blocks.items():
+            fk = _flip_key(key, lab)
+            if se.restricted and fk in blocks and (len(key) == 4 or key[2] != 1):
+                blocks[key] = blocks[fk]
+                continue
+            sb = key[1]
+            (n0, n1), (b0, b1) = o.groups[sb], v.groups[sb]
+            out = np.empty(blk.shape, dtype=dtype)
+            t3pack.axpby(out, np.asarray(blk, dtype=dtype), 1.0, 0.0)
+            ob = oov.blocks.get(key)                    # [m, n, ...], n of spin s_b
+            if ob is not None and n1 > n0:
+                ttT = np.ascontiguousarray(t1[n0:n1, b0:b1].T, dtype=dtype)   # (b, n)
+                for m in range(blk.shape[0]):
+                    gemm(ttT, np.asarray(ob[m], dtype=dtype).reshape(n1 - n0, -1),
+                         out[m].reshape(b1 - b0, -1), alpha=-1.0, beta=1.0)
+            blocks[key] = out
+        res.append(SpinTensor(src.spaces, blocks, dtype))
+    return res[0], res[1]
 
 
 def dressed_vvvv_blocks(se, t1, om, vm, t2pp=None, out=None):
@@ -138,7 +178,8 @@ def dressed_vvvv_blocks(se, t1, om, vm, t2pp=None, out=None):
     object).  ``out``: optional list of reusable buffers for the blocks.'''
     nocc, nvir = t1.shape
     o, v = se.spaces['o'], se.spaces['v']
-    G, oovv = bare_packed(se)
+    bp = bare_packed(se)
+    G, oovv = bp['ovvv_Q'], bp['oovv_PQ']
     oa, ob = o.groups[0], o.groups[1]
     va, vb = v.groups[0], v.groups[1]
     ta = np.ascontiguousarray(t1[oa[0]:oa[1], va[0]:va[1]])   # alpha block
@@ -209,7 +250,26 @@ def dressed_vvvv_blocks(se, t1, om, vm, t2pp=None, out=None):
     return res
 
 
-def bra_dressed_vvvo(se, t1, om, vm):
+def _bare_vvvo(se, vm, dtype):
+    '''<ab||ei> = -<ie||ab>^* packed over a<b, dense (npair_v, nvir, nocc),
+    cached on the integral object (t1-independent part of bra_dressed_vvvo).'''
+    c = se.__dict__.get('_bare_vvvo')
+    if c is None or c.dtype != dtype:
+        o, v = se.spaces['o'], se.spaces['v']
+        c = np.zeros((vm.npair, v.n, o.n), dtype=dtype)
+        for (si, se_, h), blk in bare_packed(se)['ovvv_Q'].blocks.items():
+            lo, hi = vm.blocks[h]
+            (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
+            blk = np.asarray(blk, dtype=dtype)
+            if np.iscomplexobj(blk):
+                blk = blk.conj()
+            # loop order (e, i, Q): contiguous reads of blk
+            t3pack.axpby(c[lo:hi, e0:e1, i0:i1].transpose(1, 2, 0), blk.transpose(1, 0, 2), -1.0)
+        se.__dict__['_bare_vvvo'] = c
+    return c
+
+
+def bra_dressed_vvvo(se, t1, om, vm, out=None):
     '''Bra-dressed <ab||ei> packed over a<b, dense (npair_v, nvir, nocc)
     (see ccsdt_opt.bra_dressed_vvvo_pp), written block by block:
       B[(ab), e, i] = <ab||ei> - L[a,b,e,i] + L[b,a,e,i] + sum_{m<n} tau1[mn,ab] <mn||ei>,
@@ -219,16 +279,10 @@ def bra_dressed_vvvo(se, t1, om, vm):
     o, v = se.spaces['o'], se.spaces['v']
     Ps = pair_space('P', om)
     dtype = np.result_type(t1, se.fock)
-    B = np.zeros((vm.npair, nvir, nocc), dtype=dtype)
-    G = bare_packed(se)[0]                                  # [i, e, Q] blocks
-    for (si, se_, h), blk in G.blocks.items():
-        lo, hi = vm.blocks[h]
-        (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
-        blk = np.asarray(blk, dtype=dtype)
-        if np.iscomplexobj(blk):
-            blk = blk.conj()
-        # loop order (e, i, Q): contiguous reads of blk
-        t3pack.axpby(B[lo:hi, e0:e1, i0:i1].transpose(1, 2, 0), blk.transpose(1, 0, 2), -1.0)
+    base = _bare_vvvo(se, vm, dtype)                        # <ab||ei>
+    B = out if out is not None and out.shape == base.shape and out.dtype == dtype \
+        else np.empty_like(base)
+    t3pack.axpby(B, base, 1.0, 0.0)
     ovvo = se.g['ovvo']                                     # [m, b, e, i] blocks
     oa, ob = o.groups
     va, vb = v.groups

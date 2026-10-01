@@ -406,8 +406,7 @@ def _spin_dressing(eris, t1, om, vm, t2pp=None, vd_out=None):
         with timer('dress.' + k):
             ge[k] = spin_imds.dress_block(eris, t1, k, mats).to_dense()
     with timer('dress.ovvv'):
-        ges['ovvv'] = spin_imds.dress_block(eris, t1, 'ovvv', mats)
-        ges['ovvv_Q'] = pack_pairs(ges['ovvv'], 2, pair_space('Q', vm))
+        ges['ovvv'], ges['ovvv_Q'] = spin_imds.dressed_ovvv(eris, t1)
     with timer('dress.vvvv_pp'):
         vvvv_pp = spin_imds.dressed_vvvv_blocks(eris, t1, om, vm, t2pp=t2pp, out=vd_out)
     return fdr, ge, ges, vvvv_pp
@@ -514,7 +513,9 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         t_ = timer('imd.Wvvvo'); t_.__enter__()
         with timer('wv.Bv'):
             if spin:
-                Bv = spin_imds.bra_dressed_vvvo(eris, t1, om, vm)
+                buf = _persistent(eris, 'bv')
+                Bv = spin_imds.bra_dressed_vvvo(eris, t1, om, vm, out=buf[0])
+                buf[0] = Bv
             else:
                 Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
         xterm = (lambda W: spin_imds.t2_ovvv_add(W, t2, ges['ovvv'], om, vm)) \
@@ -524,7 +525,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         oovo_extra = None
         if spin:     # vvvv_pp includes t2pp^T oovv: remove sum_f oovv[P,(e,f)] t1[i,f]
             with timer('wv.zcorr'):
-                Hb = spin_imds.bare_packed(eris)[1]
+                Hb = spin_imds.bare_packed(eris)['oovv_PQ']
                 Z = np.zeros((om.npair, nvir, nocc), dtype=dtype)
                 spin_imds.vvvv_t1_blocks(Z, [Hb.blocks.get((h, h)) for h in range(3)], t1,
                                          om, vm, rows=om.blocks)
@@ -560,7 +561,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         r1_vovv = _spin_r1_vovv(eris, ges, t2, vm) if spin else None
         ladder_t2 = None
         if spin:
-            Hb = spin_imds.bare_packed(eris)[1]
+            Hb = spin_imds.bare_packed(eris)['oovv_PQ']
             ladder_t2 = ([Hb.blocks.get((h, h)) for h in range(3)], t2pp_v)
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
                                       Feff_oo, Weff_ovvo, om, vm, r1_vovv, ladder_t2)
