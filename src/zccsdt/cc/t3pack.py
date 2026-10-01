@@ -279,3 +279,27 @@ def add_reduce_split(R, Z, om, vm, pairs, scale=1.0):
             _p(vm.free_c), _p(vm.pair_c))
         return
     scatter_occ(R, reduce_vir_split(Z, vm, om.n), om, pairs, scale)
+
+
+def pair_antisym_add(out, X, n, strides, alpha=1.0):
+    '''out[Q, x, y] += alpha * (X[a, b, x, y] - X[b, a, x, y]) for Q = (a<b),
+    where X[a, b, x, y] is addressed through element strides (sa, sb, sx, sy)
+    of the array X (any layout).  out: C-contiguous (npair, nx, ny).'''
+    nx, ny = out.shape[1], out.shape[2]
+    sa, sb, sx, sy = strides
+    if USE_C and hasattr(_lib, 'zc_pair_antisym_add_d') and out.flags.c_contiguous \
+            and X.dtype == out.dtype:
+        base = np.ascontiguousarray(X)
+        al = np.array(alpha, dtype=out.dtype)
+        getattr(_lib, 'zc_pair_antisym_add_' + _sfx(out.dtype))(
+            _p(out), _p(base), _I64(n), _I64(nx), _I64(ny), _I64(sa), _I64(sb),
+            _I64(sx), _I64(sy), _p(al))
+        return out
+    flat = np.ascontiguousarray(X).ravel()
+    pa, pb = np.triu_indices(n, 1)
+    x = np.arange(nx)[:, None]
+    y = np.arange(ny)[None, :]
+    off = x * sx + y * sy
+    out += alpha * (flat[(pa * sa + pb * sb)[:, None, None] + off]
+                    - flat[(pb * sa + pa * sb)[:, None, None] + off])
+    return out

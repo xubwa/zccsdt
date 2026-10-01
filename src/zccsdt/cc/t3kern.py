@@ -92,8 +92,8 @@ def pp_ladder(T3p, om, vm, batch, Wpp, R):
     _record('ppl', st)
 
 
-def update(T3p, R, eo, ev):
-    '''In place: T3p += R / (eo[:, None] - ev[None, :]).'''
+def update_into_r(T3p, R, eo, ev):
+    '''In place: R <- T3p + R / (eo[:, None] - ev[None, :]).'''
     getattr(_lib, 'zc_t3_update_' + _sfx(T3p.dtype))(
         _p(T3p), _p(R), _i(T3p.shape[0]), _i(T3p.shape[1]),
         _p(_c(eo, np.float64)), _p(_c(ev, np.float64)))

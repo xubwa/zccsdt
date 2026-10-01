@@ -51,18 +51,26 @@ def _lincomb(xs, c):
 
 
 class DIIS:
+    '''DIIS on a vector given as a list of arrays (e.g. [t1, t2, t3] parts),
+    so that no concatenated copy is ever formed.  update() returns the
+    extrapolated parts; after it, err_norms holds |x_new - x_prev| per part
+    (None on the first call).'''
+
     def __init__(self, space=8):
         self.space = space
         self.xs, self.es = [], []
         self.H = None
         self.xprev = None
+        self.err_norms = None
 
-    def update(self, x):
-        x = np.ascontiguousarray(x).ravel()
+    def update(self, parts):
+        x = [np.ascontiguousarray(p).ravel() for p in parts]
         if self.xprev is None:
             self.xprev = x
+            self.err_norms = None
             return x
-        e = _sub(x, self.xprev)
+        e = [_sub(a, b) for a, b in zip(x, self.xprev)]
+        self.err_norms = [np.sqrt(abs(_dot(ei, ei))) for ei in e]
         if len(self.xs) == self.space:
             self.xs.pop(0)
             self.es.pop(0)
@@ -70,17 +78,18 @@ class DIIS:
         self.xs.append(x)
         self.es.append(e)
         n = len(self.es)
-        H = np.zeros((n, n), dtype=x.dtype)
+        dtype = np.result_type(*[xi.dtype for xi in x])
+        H = np.zeros((n, n), dtype=dtype)
         if self.H is not None:
             H[:n - 1, :n - 1] = self.H
         for i in range(n):
-            H[n - 1, i] = _dot(e, self.es[i])
+            H[n - 1, i] = sum(_dot(a, b) for a, b in zip(e, self.es[i]))
             H[i, n - 1] = np.conj(H[n - 1, i])
         self.H = H
-        B = np.zeros((n + 1, n + 1), dtype=x.dtype)
+        B = np.zeros((n + 1, n + 1), dtype=dtype)
         B[0, 1:] = B[1:, 0] = 1
         B[1:, 1:] = H
-        g = np.zeros(n + 1, dtype=x.dtype)
+        g = np.zeros(n + 1, dtype=dtype)
         g[0] = 1
         w, v = scipy.linalg.eigh(B)
         if np.any(abs(w) < 1e-14):
@@ -88,5 +97,5 @@ class DIIS:
             c = v[:, idx] @ ((v[:, idx].T.conj() @ g) / w[idx])
         else:
             c = np.linalg.solve(B, g)
-        self.xprev = _lincomb(self.xs, c[1:])
+        self.xprev = [_lincomb([xk[j] for xk in self.xs], c[1:]) for j in range(len(x))]
         return self.xprev

@@ -150,3 +150,28 @@ void zc_vlincomb_##SFX(int64_t n, int64_t nk, const T **x, const T *c, T *out) \
 #define NOCONJ(x) (x)
 DEFINE_VECOPS(double, d, NOCONJ)
 DEFINE_VECOPS(double complex, z, conj)
+
+/* ---- antisymmetric pair packing of a 4-index intermediate ----
+ * out[Q, x, y] += alpha * (X[a sa + b sb + x sx + y sy] - X[b sa + a sb + x sx + y sy])
+ * for Q = (a < b) over the pairs of n indices (triu order), x < nx, y < ny.
+ * Strides are in elements; out is C-contiguous (npair, nx, ny). */
+#define DEFINE_PAIRPACK(T, SFX)                                                \
+void zc_pair_antisym_add_##SFX(T *out, const T *X, int64_t n, int64_t nx,      \
+                               int64_t ny, int64_t sa, int64_t sb, int64_t sx, \
+                               int64_t sy, const T *alpha)                     \
+{                                                                              \
+    const T al = *alpha;                                                       \
+    _Pragma("omp parallel for schedule(dynamic, 8)")                           \
+    for (int64_t a = 0; a < n; a++) {                                          \
+        int64_t Q = a * n - a * (a + 1) / 2;   /* index of pair (a, a+1) */    \
+        for (int64_t b = a + 1; b < n; b++, Q++) {                             \
+            T *o = out + Q * nx * ny;                                          \
+            const T *p = X + a * sa + b * sb, *q = X + b * sa + a * sb;        \
+            for (int64_t x = 0; x < nx; x++)                                   \
+                for (int64_t y = 0; y < ny; y++)                               \
+                    o[x * ny + y] += al * (p[x * sx + y * sy] - q[x * sx + y * sy]); \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_PAIRPACK(double, d)
+DEFINE_PAIRPACK(double complex, z)

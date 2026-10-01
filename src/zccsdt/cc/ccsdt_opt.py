@@ -144,9 +144,9 @@ def wvvvo_packed(eris, t1, t2, fov, ge, om, vm):
     # explicit copies: get_block may return the stored array itself
     Kov = np.array(get_block(eris, 'ovvo'), dtype=dtype, order='C', copy=True)
     gemm(ovvv.reshape(-1, nvir), np.asfortranarray(t1.T), Kov.reshape(-1, nocc), beta=1.0)
-    L = gemm(np.asfortranarray(t1.T), Kov.reshape(nocc, -1)).reshape(nvir * nvir, -1)
-    W.reshape(vm.npair, -1)[:] -= np.take(L, md * nvir + ne, axis=0)
-    W.reshape(vm.npair, -1)[:] += np.take(L, ne * nvir + md, axis=0)
+    L = gemm(np.asfortranarray(t1.T), Kov.reshape(nocc, -1))      # [a, (b, e, i)]
+    t3pack.pair_antisym_add(W, L, nvir, (nvir * nvir * nocc, nvir * nocc, nocc, 1),
+                            alpha=-1.0)
     del L, Kov
     # K_oo packed over m<n and the tau term
     # contiguous copies: gemm writes into reshaped views of these
@@ -163,8 +163,9 @@ def wvvvo_packed(eris, t1, t2, fov, ge, om, vm):
     # - P(ab) sum_{mf} ~<mb||ef> t2[mi,af]: X[(a,i),(b,e)] = t2[a,i,m,f] ovvv[m,f,b,e]
     A = np.ascontiguousarray(t2.transpose(2, 1, 0, 3)).reshape(nvir * nocc, nocc * nvir)
     B = np.ascontiguousarray(ge['ovvv'].transpose(0, 3, 1, 2)).reshape(nocc * nvir, -1)
-    X = gemm(A, B).reshape(nvir, nocc, nvir, nvir)                           # [a,i,b,e]
-    W -= (X[md, :, ne, :] - X[ne, :, md, :]).transpose(0, 2, 1)
+    X = gemm(A, B)                                                           # [a,i,b,e]
+    t3pack.pair_antisym_add(W, X, nvir, (nocc * nvir * nvir, nvir, 1, nvir * nvir),
+                            alpha=-1.0)
     del X, A, B
     # - sum_m f[m,e] t2[m,i,a,b]
     W -= gemm(np.asfortranarray(fov.T), t2[:, :, md, ne].reshape(nocc, -1)).reshape(
@@ -181,9 +182,10 @@ def dressed_vvvv_pp(eris, t1, vm):
     cache = vvvv_packed(eris, vm)
     ovvv_Q = np.asarray(eris.ovvv)[:, :, md, ne]                   # (m, y, Q)
     Y = gemm(np.ascontiguousarray(t1.T), ovvv_Q.reshape(nocc, -1))
-    Y = Y.reshape(nvir * nvir, -1)                                 # [(x,y), Q]
-    out = cache - np.take(Y, md * nvir + ne, axis=0)
-    out += np.take(Y, ne * nvir + md, axis=0)
+    # out[(a<b), Q] = cache - (Y[a,b,Q] - Y[b,a,Q]), one OpenMP pass
+    out = np.array(cache, dtype=np.result_type(cache, Y), copy=True)
+    t3pack.pair_antisym_add(out.reshape(vm.npair, vm.npair, 1), Y, nvir,
+                            (nvir * vm.npair, vm.npair, 1, 0), alpha=-1.0)
     del Y
     # Z[(a<b), Q] = sum_{m<n} (t[m,a] t[n,b] - t[n,a] t[m,b]) <mn||Q>
     om = t3pack.triple_map(nocc)
@@ -430,8 +432,8 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         eo = mo_e[:nocc][om.triples].sum(axis=1)
         ev = (mo_e[nocc:] + opts.level_shift)[vm.triples].sum(axis=1)
         if t3kern.USE_C:
-            T3new = T3p.copy()
-            t3kern.update(T3new, R, eo, ev)
+            t3kern.update_into_r(T3p, R, eo, ev)      # R <- T3p + R / D
+            T3new = R
         else:
             T3new = T3p + R / (eo[:, None] - ev[None, :])
     return t1new, t2new, T3new.ravel()

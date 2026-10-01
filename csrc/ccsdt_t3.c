@@ -267,17 +267,17 @@ void zc_t3_occop_##SFX(const T *O6, const T *T3p, int64_t nto, int64_t nvt,    \
     gemm_##SFX(0, 0, nto, nvt, nto, 1.0, O6, nto, T3p, nvt, 1.0, R, nvt);      \
 }                                                                              \
                                                                                \
-/* T3p[I, A] += R[I, A] / (eo[I] - ev[A]) */                                   \
-void zc_t3_update_##SFX(T *T3p, const T *R, int64_t nto, int64_t nvt,          \
+/* R[I, A] = T3p[I, A] + R[I, A] / (eo[I] - ev[A])  (new T3 written over R) */ \
+void zc_t3_update_##SFX(const T *T3p, T *R, int64_t nto, int64_t nvt,          \
                         const double *eo, const double *ev)                    \
 {                                                                              \
     _Pragma("omp parallel for schedule(static)")                               \
     for (int64_t it = 0; it < nto; it++) {                                     \
-        T *t = T3p + it * nvt;                                                 \
-        const T *r = R + it * nvt;                                             \
+        const T *t = T3p + it * nvt;                                           \
+        T *r = R + it * nvt;                                                   \
         const double e = eo[it];                                               \
         for (int64_t A = 0; A < nvt; A++)                                      \
-            t[A] += r[A] * (1.0 / (e - ev[A]));                                \
+            r[A] = t[A] + r[A] * (1.0 / (e - ev[A]));                          \
     }                                                                          \
 }
 

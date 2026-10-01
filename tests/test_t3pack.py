@@ -107,3 +107,16 @@ def test_occ_operator():
     x = np.einsum('mi,mjkabc->ijkabc', F, t3)
     ref = -(x - x.transpose(1, 0, 2, 3, 4, 5) - x.transpose(2, 1, 0, 3, 4, 5))
     np.testing.assert_allclose(O @ _pack(t3), _pack(ref), atol=1e-12)
+
+
+@pytest.mark.parametrize('cplx', [False, True])
+def test_pair_antisym_add(cplx, impl):
+    rng = np.random.default_rng(5)
+    n, nx, ny = 6, 4, 3
+    X = _rand((n, nx, n, ny), rng, cplx)                 # layout [a, x, b, y]
+    sa, sx, sb, sy = (s // X.itemsize for s in X.strides)
+    pa, pb = np.triu_indices(n, 1)
+    want = 0.5 + 2.0 * (X[pa, :, pb, :] - X[pb, :, pa, :])
+    out = np.full((len(pa), nx, ny), 0.5, dtype=X.dtype)
+    t3pack.pair_antisym_add(out, X, n, (sa, sb, sx, sy), alpha=2.0)
+    np.testing.assert_allclose(out, want, atol=1e-13)
