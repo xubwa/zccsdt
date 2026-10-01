@@ -241,14 +241,25 @@ void zc_t3_ppl_##SFX(const T *T3p, int64_t nto, int64_t nvt, int64_t nv,       \
     free(Tv); free(X);                                                         \
 }                                                                              \
                                                                                \
+/* R[I, A] += sum_J O6[I, J] T3p[J, A]  (hh ladder + F_oo operator) */       \
+void zc_t3_occop_##SFX(const T *O6, const T *T3p, int64_t nto, int64_t nvt,    \
+                       T *R)                                                   \
+{                                                                              \
+    gemm_##SFX(0, 0, nto, nvt, nto, 1.0, O6, nto, T3p, nvt, 1.0, R, nvt);      \
+}                                                                              \
+                                                                               \
 /* T3p[I, A] += R[I, A] / (eo[I] - ev[A]) */                                   \
 void zc_t3_update_##SFX(T *T3p, const T *R, int64_t nto, int64_t nvt,          \
                         const double *eo, const double *ev)                    \
 {                                                                              \
     _Pragma("omp parallel for schedule(static)")                               \
-    for (int64_t it = 0; it < nto; it++)                                          \
+    for (int64_t it = 0; it < nto; it++) {                                     \
+        T *t = T3p + it * nvt;                                                 \
+        const T *r = R + it * nvt;                                             \
+        const double e = eo[it];                                               \
         for (int64_t A = 0; A < nvt; A++)                                      \
-            T3p[it * nvt + A] += R[it * nvt + A] / (eo[it] - ev[A]);              \
+            t[A] += r[A] * (1.0 / (e - ev[A]));                                \
+    }                                                                          \
 }
 
 DEFINE_T3(double, d)

@@ -9,6 +9,7 @@ follow Gauss and Stanton, J. Chem. Phys. 103, 3561 (1995), Table III, and use
 import numpy as np
 from pyscf import lib
 from zccsdt.cc import gintermediates as imd
+from zccsdt.timing import timer
 
 einsum = lib.einsum
 
@@ -24,6 +25,7 @@ def update_amps(cc, t1, t2, eris, alg='sym'):
 
     tau = imd.make_tau(t2, t1, t1)
 
+    t_ = timer('ccsd.imds'); t_.__enter__()
     Fvv = imd.cc_Fvv(t1, t2, eris)
     Foo = imd.cc_Foo(t1, t2, eris)
     Fov = imd.cc_Fov(t1, t2, eris)
@@ -35,6 +37,8 @@ def update_amps(cc, t1, t2, eris, alg='sym'):
     Fvv[np.diag_indices(nvir)] -= mo_e_v
     Foo[np.diag_indices(nocc)] -= mo_e_o
 
+    t_.__exit__(None, None, None)
+    t_ = timer('ccsd.t1eq'); t_.__enter__()
     # T1 equation
     t1new  =  einsum('ie,ae->ia', t1, Fvv)
     t1new += -einsum('ma,mi->ia', t1, Foo)
@@ -44,6 +48,8 @@ def update_amps(cc, t1, t2, eris, alg='sym'):
     t1new += -0.5*einsum('mnae,mnie->ia', t2, eris.ooov)
     t1new += fov.conj()
 
+    t_.__exit__(None, None, None)
+    t_ = timer('ccsd.t2eq'); t_.__enter__()
     # T2 equation
     Ftmp = Fvv - 0.5*einsum('mb,me->be', t1, Fov)
     tmp = einsum('ijae,be->ijab', t2, Ftmp)
@@ -59,7 +65,8 @@ def update_amps(cc, t1, t2, eris, alg='sym'):
     elif (alg == 'new'):
         t2new += imd.update_t2_vvvv(t1, t2, tau, eris)
     elif (alg == 'sym'):
-        t2new += imd.update_t2_vvvv_sym(t1, t2, tau, eris)
+        with timer('ccsd.vvvv'):
+            t2new += imd.update_t2_vvvv_sym(t1, t2, tau, eris)
     tmp = einsum('imae,mbej->ijab', t2, Wovvo)
     tmp -= -einsum('ie,ma,mbje->ijab', t1, t1, eris.ovov)
     tmp = tmp - tmp.transpose(1,0,2,3)
@@ -70,6 +77,7 @@ def update_amps(cc, t1, t2, eris, alg='sym'):
     tmp = einsum('ma,ijmb->ijab', t1, np.asarray(eris.ooov).conj())
     t2new -= (tmp - tmp.transpose(0,1,3,2))
 
+    t_.__exit__(None, None, None)
     eia = mo_e_o[:,None] - mo_e_v
     eijab = lib.direct_sum('ia,jb->ijab', eia, eia)
     t1new /= eia

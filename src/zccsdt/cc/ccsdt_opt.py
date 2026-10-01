@@ -194,10 +194,13 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
 
     with timer('t1_dress'):
         fdr = dress_fock(eris, t1)
-        ge = {k: dress_block(eris, t1, k) for k in
-              ('vvvo', 'ovoo', 'oooo', 'ovvo', 'oovv', 'ovvv',
-               'ooov', 'oovo', 'vovv')}
-        vvvv_pp = dressed_vvvv_pp(eris, t1, vm)
+        ge = {}
+        for k in ('vvvo', 'ovoo', 'oooo', 'ovvo', 'oovv', 'ovvv', 'ooov', 'oovo',
+                  'vovv'):
+            with timer('dress.' + k):
+                ge[k] = dress_block(eris, t1, k)
+        with timer('dress.vvvv_pp'):
+            vvvv_pp = dressed_vvvv_pp(eris, t1, vm)
     foo, fov, fvv = fdr[:nocc, :nocc], fdr[:nocc, nocc:], fdr[nocc:, nocc:]
     goovv = ge['oovv']
 
@@ -275,25 +278,35 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     with timer('intermediates'):
         gvvvo, govoo = ge['vvvo'], ge['ovoo']
         ovvv, ooov, oovo = ge['ovvv'], ge['ooov'], ge['oovo']
+        t_ = timer('imd.Wvvvo'); t_.__enter__()
         Wvvvo = gvvvo.copy()
         Wvvvo += 0.5 * einsum('mnei,mnab->abei', oovo, t2)
         tmp = einsum('mbef,miaf->abei', ovvv, t2)
         Wvvvo -= (tmp - tmp.transpose(1, 0, 2, 3))
         Wvvvo -= einsum('me,miab->abei', fov, t2)
         Wv = Wvvvo[md, ne] + dWv                         # [Q(ab), e, i]
+        t_.__exit__(None, None, None)
+        t_ = timer('imd.Wvooo'); t_.__enter__()
         Wvooo = govoo.copy()
         tmp2 = einsum('mnie,jnbe->mbij', ooov, t2)
         Wvooo -= (tmp2 - tmp2.transpose(0, 1, 3, 2)).transpose(0, 1, 3, 2)
         Wvooo -= (0.5 * einsum('mbef,ijef->mbij', ovvv, t2)).transpose(0, 1, 3, 2)
         Wo = Wvooo[:, :, nn, mm] + dWo                   # [m, a, P(ij)]
+        t_.__exit__(None, None, None)
+        t_ = timer('imd.ring_F'); t_.__enter__()
         Weff_ovvo = ge['ovvo'] + einsum('mnde,inae->madi', goovv, t2)
         Feff_vv = fvv - einsum('Paf,Pdf->ad', t2mn, goovv_mn)
         Feff_oo = foo + einsum('mnP,inP->mi', goovv_P, t2P)
+        t_.__exit__(None, None, None)
+        t_ = timer('imd.Wpp'); t_.__enter__()
         Wpp = vvvv_pp + t2mn[:, md, ne].T @ goovv_pp
         # F_vv folded into the ladder: W(ab,de) += 1/2 A[F_ad delta_be]
         add_one_body_pairs(Wpp, Feff_vv, vm, 0.5)
+        t_.__exit__(None, None, None)
+        t_ = timer('imd.O6'); t_.__enter__()
         Weff_oooo = ge['oooo'] + einsum('mnP,ijP->mnij', goovv_P, t2P)
         O6 = t3pack.occ_operator(om, lambda t: _occ_apply(t, Weff_oooo, Feff_oo))
+        t_.__exit__(None, None, None)
 
     R = np.zeros((om.ntri, vm.ntri), dtype=dtype)
 
@@ -346,7 +359,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
 
     # ---- hh ladder (+F_oo): occupied-space operator on packed T3
     with timer('hh_ladder'):
-        R += O6.astype(dtype) @ T3p
+        if t3kern.USE_C:
+            t3kern.occ_operator(O6, T3p, R)
+        else:
+            R += O6.astype(dtype) @ T3p
 
     with timer('t3_update'):
         eo = mo_e[:nocc][om.triples].sum(axis=1)

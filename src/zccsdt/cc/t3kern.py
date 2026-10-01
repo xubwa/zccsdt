@@ -97,3 +97,10 @@ def update(T3p, R, eo, ev):
     getattr(_lib, 'zc_t3_update_' + _sfx(T3p.dtype))(
         _p(T3p), _p(R), _i(T3p.shape[0]), _i(T3p.shape[1]),
         _p(_c(eo, np.float64)), _p(_c(ev, np.float64)))
+
+
+def occ_operator(O6, T3p, R):
+    '''R += O6 @ T3p (in place, BLAS beta = 1).'''
+    dt = T3p.dtype
+    getattr(_lib, 'zc_t3_occop_' + _sfx(dt))(
+        _p(_c(O6, dt)), _p(T3p), _i(T3p.shape[0]), _i(T3p.shape[1]), _p(R))
