@@ -13,7 +13,8 @@ slots, the parts are sums over arrangements (p, q, r, s) of the pairs:
   B:  + Yv(p,q|r,s) = sum_f I_{pq}[x_q,x_p,x_r;f] t_{o_r o_s}^{f x_s}       (12)
         I_{pq}[x_q,x_p,y;f] = sum_e t_{o_p o_q}^{e x_q} <x_p y|e f>
       + sum_m t_{o_p m}^{x_p x_q} G(o_q,o_r,o_s)[m;x_r,x_s]                 (24)
-        G = 1/2 Go - G1 - G2 (oooo and the two ring integrals with one T2)
+        G = 1/2 Go - G1 - G2 (oooo and the two ring integrals with one T2;
+        formed per quadruple, o v^3 work)
   C:  t_{o_p o_q}^{x_p x_q} <o_r o_s|x_r x_s>                               (6)
 
 r and z are invariant under simultaneous permutations of the pairs, so only
@@ -57,12 +58,32 @@ class Context:
         self.ovoo = g('ovoo')                       # <md|kl>
         self.oovv = g('oovv')                       # <kl|cd>
         # (e x|y f) = <e y|x f>: Wc[e, x, y, f], contraction index e leading
-        self.Wc = np.ascontiguousarray(g('vvvv').transpose(0, 2, 1, 3))
-        # G[q,r,s][m; c, d] = 1/2 Go - G1 - G2
-        G = 0.5 * np.einsum('mnqs,rncd->qrsmcd', g('oooo'), t2, optimize=True)
-        G -= np.einsum('mdes,qrec->qrsmcd', g('ovvo'), t2, optimize=True)
-        G -= np.einsum('mcqe,rsed->qrsmcd', g('ovov'), t2, optimize=True)
-        self.G = G
+        if ints.V is not None:
+            self.Wc = np.ascontiguousarray(ints.V[no:, no:, no:, no:].transpose(0, 2, 1, 3))
+        else:
+            from pyscf import ao2mo
+            Cv = np.ascontiguousarray(ints.mo_coeff[:, no:])
+            self.Wc = np.ascontiguousarray(
+                ao2mo.general(ints.mol, (Cv, Cv, Cv, Cv), compact=False).reshape((v,) * 4))
+        # integrals of G with the summed index last / first
+        self._oooo = np.ascontiguousarray(g('oooo').transpose(2, 3, 0, 1))      # [q,s][m,n]
+        self._ovvo = np.ascontiguousarray(g('ovvo').transpose(3, 0, 1, 2))      # [s][m,d,e]
+        self._ovov = np.ascontiguousarray(g('ovov').transpose(2, 0, 1, 3))      # [q][m,c,e]
+
+    def G(self, q, r, s):
+        '''G[m; c, d] = 1/2 Go - G1 - G2 for the occupied indices (q, r, s):
+        Go = sum_n <mn|qs> t_rn^cd, G1 = sum_e <md|es> t_qr^ec,
+        G2 = sum_e <mc|qe> t_rs^ed (an o^4 v^2 array if stored for all).'''
+        no, v, t2 = self.no, self.nv, self.t2
+        out = gemm(self._oooo[q, s], t2[r].reshape(no, -1), alpha=0.5).reshape(no, v, v)
+        g1 = gemm(self._ovvo[s].reshape(no * v, v), t2[q, r]).reshape(no, v, v)      # [m,d,c]
+        out -= g1.transpose(0, 2, 1)
+        gemm(self._ovov[q].reshape(no * v, v), t2[r, s], out.reshape(no * v, v), alpha=-1.0, beta=1.0)
+        return out
+
+    def Gh(self, q, r, s):
+        '''G(q,r,s)[m; x_r, x_s] + G(q,s,r)[m; x_s, x_r].'''
+        return self.G(q, r, s) + self.G(q, s, r).transpose(0, 2, 1)
 
     def cube(self, p, q, r):
         return self.blocks.cube(self.t3b, p, q, r)
@@ -102,7 +123,7 @@ def quad_arrays(ctx, quad):
             x = gemm(ctx.I(o[p], o[q]).reshape(-1, v), np.ascontiguousarray(ctx.t2[o[r], o[s]]))
             _put(B, x.reshape((v,) * 4), (q, p, r, s))
         x = gemm(np.ascontiguousarray(ctx.t2[o[p]].transpose(1, 2, 0)).reshape(v * v, -1),
-                 ctx.G[o[q], o[r], o[s]].reshape(ctx.no, -1))
+                 ctx.G(o[q], o[r], o[s]).reshape(ctx.no, -1))
         _put(B, x.reshape((v,) * 4), (p, q, r, s))
     return A, B, C
 
@@ -191,7 +212,6 @@ def q_correction(ints, blocks, t2, t3b):
     eo, ev = ctx.eo, ctx.ev
     VO = np.ascontiguousarray(ctx.vvvo.transpose(3, 0, 1, 2))      # [o][c,d,e] = <cd|eo>
     ovoo, oovv = ctx.ovoo, ctx.oovv
-    Gh = ctx.G + ctx.G.transpose(0, 2, 1, 3, 5, 4)      # G[q,r,s][m,xr,xs] + G[q,s,r][m,xs,xr]
     Wc = ctx.Wc.reshape(v, v3)
     S = [np.empty((v,) * 4) for _ in range(6)]
     Ibar = [np.empty((v,) * 4) for _ in range(3)]
@@ -272,9 +292,9 @@ def q_correction(ints, blocks, t2, t3b):
                         with timer('q.G'):
                             As2[:, :, 0] = t2[ow].transpose(1, 2, 0)
                             As2[:, :, 1] = t2[ox].transpose(2, 1, 0)
-                            As2[:, :, 2] = Gh[o3, ow, ox].transpose(1, 2, 0)
-                            As2[:, :, 3] = Gh[oy, ow, ox].transpose(1, 2, 0)
-                            Bs2[0], Bs2[1] = Gh[ox, oy, o3], Gh[ow, oy, o3]
+                            As2[:, :, 2] = ctx.Gh(o3, ow, ox).transpose(1, 2, 0)
+                            As2[:, :, 3] = ctx.Gh(oy, ow, ox).transpose(1, 2, 0)
+                            Bs2[0], Bs2[1] = ctx.Gh(ox, oy, o3), ctx.Gh(ow, oy, o3)
                             Bs2[2], Bs2[3] = t2[oy], t2[o3].transpose(0, 2, 1)
                             gemm(As2.reshape(vv, 4 * no), Bs2.reshape(4 * no, vv),
                                  S[3 + c].reshape(vv, vv), beta=1.0)
