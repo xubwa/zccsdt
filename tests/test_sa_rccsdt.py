@@ -33,8 +33,12 @@ def test_blocks_roundtrip(setup):
 def test_residuals_equal_reference(setup):
     ints, t1, t2, t3 = setup
     B = Blocks(ints.nocc)
-    r1, r2, r3b = E.residuals(ints, B, t1, t2, B.from_dense(t3))
     a1, a2, a3 = R.residuals(t1, t2, t3, ints)
+    for fn in (E.residuals_terms, E.residuals):
+        r1, r2, r3b = fn(ints, B, t1, t2, B.from_dense(t3))
+        assert abs(r1 - a1).max() < 1e-12
+        assert abs(r2 - a2).max() < 1e-12
+        assert abs(B.to_dense(r3b) - R.project_null(a3)).max() < 1e-12
     assert abs(r1 - a1).max() < 1e-12
     assert abs(r2 - a2).max() < 1e-12
     # equal up to the redundant component
@@ -48,3 +52,20 @@ def test_energy_equals_reference():
     a = R.kernel(ints, 'ccsdt', conv_tol=1e-11, conv_tol_normt=1e-8)
     b = E.kernel(ints, conv_tol=1e-11, conv_tol_normt=1e-8)
     assert a.converged and b.converged and abs(a.e_tot - b.e_tot) < 1e-10
+
+
+def test_vvvv_t1_packed_c_equals_numpy(monkeypatch):
+    from zccsdt.cc import t3pack
+    rng = np.random.default_rng(1)
+    v, no = 6, 3
+    W = rng.standard_normal((v, v, v, v))
+    W = W + W.transpose(1, 0, 3, 2)                 # W_ab^ef = W_ba^fe
+    s0, s1 = np.triu_indices(v)
+    a0, a1 = np.triu_indices(v, 1)
+    Ws = np.ascontiguousarray(0.5 * (W + W.transpose(0, 1, 3, 2))[s0, s1][:, s0, s1])
+    Wa = np.ascontiguousarray(0.5 * (W - W.transpose(0, 1, 3, 2))[a0, a1][:, a0, a1])
+    t1 = rng.standard_normal((no, v))
+    ref = np.einsum('abef,if->abei', W, t1)
+    assert abs(E.vvvv_t1_packed(Ws, Wa, t1) - ref).max() < 1e-12
+    monkeypatch.setattr(t3pack, 'USE_C', False)
+    assert abs(E.vvvv_t1_packed(Ws, Wa, t1) - ref).max() < 1e-12

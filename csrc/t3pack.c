@@ -580,6 +580,188 @@ void zc_breduce2_##SFX(T *R, const int64_t *Rcol, int64_t ntg,                 \
 DEFINE_BREDUCE2(double, d)
 DEFINE_BREDUCE2(double complex, z)
 
+/* ---- spin-adapted (closed-shell) T3 cubes, zccsdt/sa ----
+ * Remove the redundant component of each v^3 cube in place:
+ * r[x] -= (1/6) sum_sigma r[sigma(x)] over the six permutations of (a,b,c). */
+#define DEFINE_SA_NULL(T, SFX)                                                 \
+void zc_sa_project_null_##SFX(T *r, int64_t nb, int64_t v)                     \
+{                                                                              \
+    const int64_t v2 = v * v, v3 = v2 * v;                                     \
+    _Pragma("omp parallel for collapse(2) schedule(dynamic, 4)")               \
+    for (int64_t b = 0; b < nb; b++)                                           \
+    for (int64_t a = 0; a < v; a++) {                                          \
+        T *c = r + b * v3;                                                     \
+        for (int64_t bb = a; bb < v; bb++)                                     \
+        for (int64_t cc = bb; cc < v; cc++) {                                  \
+            int64_t p[6] = {a * v2 + bb * v + cc, a * v2 + cc * v + bb,        \
+                            bb * v2 + a * v + cc, bb * v2 + cc * v + a,        \
+                            cc * v2 + a * v + bb, cc * v2 + bb * v + a};       \
+            T s = 0;                                                           \
+            for (int k = 0; k < 6; k++) s += c[p[k]];                          \
+            s *= (1.0 / 6.0);                                                  \
+            /* subtract once from every distinct position */                  \
+            for (int k = 0; k < 6; k++) {                                      \
+                int dup = 0;                                                   \
+                for (int l = 0; l < k; l++) if (p[l] == p[k]) dup = 1;         \
+                if (!dup) c[p[k]] -= s;                                        \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* Pair packing of views of cubes for the pp ladder.  View w is             \
+ * X_w[d, e, x] = src[off[w] + d*sd[w] + e*se[w] + x*sx[w]] (x < nx); its      \
+ * columns col0 = w*nx .. in the outputs (leading dimension ld):              \
+ *   S[(d<=e), col] = X[d,e,x] + X[e,d,x]  (X[d,d,x] on the diagonal)          \
+ *   A[(d<e), col]  = X[d,e,x] - X[e,d,x]                                      \
+ * pairs in numpy.triu_indices order (k=0 for S, k=1 for A). */               \
+void zc_sa_pair_pack_##SFX(const T *src, int64_t nview, const int64_t *off,    \
+                           const int64_t *sd, const int64_t *se,               \
+                           const int64_t *sx, int64_t v, int64_t nx,           \
+                           T *S, int64_t ld, T *A, int64_t lda)                \
+{                                                                              \
+    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
+    for (int64_t w = 0; w < nview; w++)                                        \
+    for (int64_t d = 0; d < v; d++) {                                          \
+        const T *X = src + off[w];                                             \
+        const int64_t col0 = w * nx;                                           \
+        const int64_t ps = d * v - d * (d - 1) / 2;    /* first (d,d) in S */  \
+        const int64_t pa = d * v - d * (d + 1) / 2;    /* first (d,d+1) in A */\
+        for (int64_t e = d; e < v; e++) {                                      \
+            const T *xde = X + d * sd[w] + e * se[w];                          \
+            const T *xed = X + e * sd[w] + d * se[w];                          \
+            T *srow = S + (ps + e - d) * ld + col0;                            \
+            if (e == d) {                                                      \
+                for (int64_t x = 0; x < nx; x++) srow[x] = xde[x * sx[w]];      \
+            } else if (A == NULL) {                                            \
+                for (int64_t x = 0; x < nx; x++)                               \
+                    srow[x] = xde[x * sx[w]] + xed[x * sx[w]];                 \
+            } else {                                                           \
+                T *arow = A + (pa + e - d - 1) * lda + col0;                   \
+                for (int64_t x = 0; x < nx; x++) {                             \
+                    const T p = xde[x * sx[w]], q = xed[x * sx[w]];            \
+                    srow[x] = p + q;                                           \
+                    arow[x] = p - q;                                           \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* Inverse of zc_sa_pair_pack for the results: Y_w[a,b,x] += S + A (a<b),     \
+ * S - A at (b,a), S at (a,a); Y_w addressed like X_w in zc_sa_pair_pack.     \
+ * Views must not overlap each other (each element written by one view). */  \
+void zc_sa_pair_unpack_add_##SFX(T *dst, int64_t nview, const int64_t *off,    \
+                                 const int64_t *sd, const int64_t *se,         \
+                                 const int64_t *sx, int64_t v, int64_t nx,     \
+                                 const T *S, int64_t ld, const T *A,           \
+                                 int64_t lda, const int64_t *cols)             \
+{                                                                              \
+    for (int64_t w = 0; w < nview; w++) {                                      \
+        T *Y = dst + off[w];                                                   \
+        const int64_t col0 = cols ? cols[w] * nx : w * nx;                     \
+        _Pragma("omp parallel for schedule(static)")                           \
+        for (int64_t a = 0; a < v; a++) {                                      \
+            const int64_t ps = a * v - a * (a - 1) / 2;                        \
+            const int64_t pa = a * v - a * (a + 1) / 2;                        \
+            for (int64_t b = a; b < v; b++) {                                  \
+                const T *srow = S + (ps + b - a) * ld + col0;                  \
+                T *yab = Y + a * sd[w] + b * se[w];                            \
+                if (b == a) {                                                  \
+                    for (int64_t x = 0; x < nx; x++) yab[x * sx[w]] += srow[x]; \
+                    continue;                                                  \
+                }                                                              \
+                T *yba = Y + b * sd[w] + a * se[w];                            \
+                if (A == NULL) {                                               \
+                    for (int64_t x = 0; x < nx; x++) {                         \
+                        yab[x * sx[w]] += srow[x];                             \
+                        yba[x * sx[w]] += srow[x];                             \
+                    }                                                          \
+                    continue;                                                  \
+                }                                                              \
+                const T *arow = A + (pa + b - a - 1) * lda + col0;             \
+                for (int64_t x = 0; x < nx; x++) {                             \
+                    yab[x * sx[w]] += srow[x] + arow[x];                       \
+                    yba[x * sx[w]] += srow[x] - arow[x];                       \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_SA_NULL(double, d)
+DEFINE_SA_NULL(double complex, z)
+
+/* out[a, b, e, i] += sum_f W_ab^ef t[i, f] for W given by its (e,f)
+ * symmetric part Ws[(a<=b), (e<=f)] and antisymmetric part Wa[(a<b), (e<f)]
+ * (pairs in numpy.triu_indices order): W_ab^ef = S_(ab)(ef) + A_(ab)(ef) and
+ * W_ba^ef = S - A, S symmetric and A antisymmetric in (e,f).  out (v,v,v,no)
+ * contiguous, t (no, v).  One pass over the rows of Ws / Wa. */
+#define DEFINE_SA_VT1(T, SFX)                                                  \
+void zc_sa_vvvv_t1_##SFX(T *out, const T *Ws, const T *Wa, const T *t,         \
+                         int64_t v, int64_t no)                                \
+{                                                                              \
+    const int64_t ps = v * (v + 1) / 2, pa = v * (v - 1) / 2;                  \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *Ys = malloc(sizeof(T) * (2 * v * no + 1));                          \
+        T *Ya = Ys + v * no;                                                   \
+        T *St = malloc(sizeof(T) * (2 * no * v + 1));    /* transposed [i,f] */\
+        T *At = St + no * v;                                                   \
+        _Pragma("omp for schedule(dynamic, 16)")                               \
+        for (int64_t r = 0; r < ps; r++) {                                     \
+            /* row pair (a, b), a <= b, of the symmetric part */               \
+            int64_t a = 0;                                                     \
+            while ((a + 1) * v - (a + 1) * a / 2 <= r) a++;                    \
+            const int64_t b = a + r - (a * v - a * (a - 1) / 2);               \
+            const T *ws = Ws + r * ps;                                         \
+            const T *wa = (a < b) ? Wa + (a * v - a * (a + 1) / 2 + b - a - 1) * pa : NULL; \
+            memset(Ys, 0, sizeof(T) * 2 * v * no);                             \
+            memset(St, 0, sizeof(T) * 2 * no * v);                             \
+            for (int64_t e = 0; e < v; e++) {                                  \
+                const T *se = ws + e * v - e * (e - 1) / 2 - e;   /* se[f] = S(e,f), f>=e */ \
+                for (int64_t i = 0; i < no; i++) {                             \
+                    const T *ti = t + i * v;                                   \
+                    T acc = 0;                                                 \
+                    _Pragma("omp simd reduction(+:acc)")                       \
+                    for (int64_t f = e; f < v; f++) acc += se[f] * ti[f];      \
+                    Ys[e * no + i] += acc;                                     \
+                    const T te = ti[e];                                        \
+                    T *sti = St + i * v;                                       \
+                    _Pragma("omp simd")                                        \
+                    for (int64_t f = e + 1; f < v; f++) sti[f] += te * se[f];  \
+                }                                                              \
+                if (wa != NULL && e + 1 < v) {                                 \
+                    const T *ae = wa + e * v - e * (e + 1) / 2 - (e + 1);  /* ae[f] = A(e,f), f>e */ \
+                    for (int64_t i = 0; i < no; i++) {                         \
+                        const T *ti = t + i * v;                               \
+                        T acc = 0;                                             \
+                        _Pragma("omp simd reduction(+:acc)")                   \
+                        for (int64_t f = e + 1; f < v; f++) acc += ae[f] * ti[f]; \
+                        Ya[e * no + i] += acc;                                 \
+                        const T te = ti[e];                                    \
+                        T *ati = At + i * v;                                   \
+                        _Pragma("omp simd")                                    \
+                        for (int64_t f = e + 1; f < v; f++) ati[f] -= te * ae[f]; \
+                    }                                                          \
+                }                                                              \
+            }                                                                  \
+            T *oab = out + (a * v + b) * v * no;                               \
+            T *oba = out + (b * v + a) * v * no;                               \
+            for (int64_t e = 0; e < v; e++)                                    \
+                for (int64_t i = 0; i < no; i++) {                             \
+                    const T s_ = Ys[e * no + i] + St[i * v + e];               \
+                    const T a_ = Ya[e * no + i] + At[i * v + e];               \
+                    oab[e * no + i] += s_ + a_;                                \
+                    if (a != b) oba[e * no + i] += s_ - a_;                    \
+                }                                                              \
+        }                                                                      \
+        free(Ys);                                                              \
+        free(St);                                                              \
+    }                                                                          \
+}
+DEFINE_SA_VT1(double, d)
+DEFINE_SA_VT1(double complex, z)
+
 /* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----
  * Element T3[I, A] = osig[I] vsig[A] T3b[obase[I] + vcol[A]] for occupied
  * triple I and virtual triple A of equal spin group. */

@@ -96,7 +96,15 @@ class Blocks:
 
 
 def project_null(r3b):
-    '''Remove the redundant component of every cube: r - (1/6) sum_sigma r^{sigma(abc)}.'''
+    '''Remove the redundant component of every cube: r - (1/6) sum_sigma
+    r^{sigma(abc)} (in place for C-contiguous float64 / complex128 input).'''
+    from zccsdt.cc import t3pack
+    lib = t3pack._lib
+    if (t3pack.USE_C and hasattr(lib, 'zc_sa_project_null_d') and r3b.flags.c_contiguous
+            and r3b.dtype in (np.float64, np.complex128)):
+        getattr(lib, 'zc_sa_project_null_' + t3pack._sfx(r3b.dtype))(
+            t3pack._p(r3b), t3pack._I64(r3b.shape[0]), t3pack._I64(r3b.shape[1]))
+        return r3b
     s = sum(r3b.transpose(0, 1 + p[0], 1 + p[1], 1 + p[2]) for p in permutations(range(3)))
     return r3b - s / 6
 
