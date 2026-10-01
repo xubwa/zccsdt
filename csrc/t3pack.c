@@ -369,6 +369,131 @@ void zc_axpby4_##SFX(T *out, const T *in, const int64_t *n, const int64_t *os, \
 DEFINE_AXPBY4(double, d)
 DEFINE_AXPBY4(double complex, z)
 
+/* T1/T2-dressed packed vvvv pair block in one pass over the bare block:
+ *   out[q, c] = bare[q, c] + sum_m tA[m, pa[q]] GA[m, pb[q], c]
+ *                          + sum_m tB[m, pb[q]] GB[m, pa[q], c]
+ *                          + sum_P CT[q, P] H[P, c]
+ * tA (nmA, ldA), GA (nmA, nxA, ncol), tB (nmB, ldB), GB (nmB, nxB, ncol),
+ * CT (nrow, nP), H (nP, ncol); pa / pb are local orbital indices.  Column
+ * tiles keep the G / H tiles in cache while the rows stream; tasks are
+ * (column tile, row chunk) pairs.  out may alias bare. */
+#define DRESS_TB 256
+#define DRESS_RB 512
+#define DEFINE_VVVV_DRESS(T, SFX)                                              \
+void zc_vvvv_dress_##SFX(T *out, const T *bare, int64_t nrow, int64_t ncol,    \
+                         const int64_t *pa, const int64_t *pb,                 \
+                         const T *tA, int64_t ldA, const T *GA, int64_t nmA,   \
+                         int64_t nxA,                                          \
+                         const T *tB, int64_t ldB, const T *GB, int64_t nmB,   \
+                         int64_t nxB,                                          \
+                         const T *CT, const T *H, int64_t nP)                  \
+{                                                                              \
+    const int64_t nct = (ncol + DRESS_TB - 1) / DRESS_TB;                      \
+    const int64_t nrc = (nrow + DRESS_RB - 1) / DRESS_RB;                      \
+    _Pragma("omp parallel for collapse(2) schedule(dynamic, 1)")               \
+    for (int64_t ct = 0; ct < nct; ct++)                                       \
+    for (int64_t rc = 0; rc < nrc; rc++) {                                     \
+        const int64_t c0 = ct * DRESS_TB;                                      \
+        const int64_t nc = (c0 + DRESS_TB < ncol ? c0 + DRESS_TB : ncol) - c0; \
+        const int64_t q0 = rc * DRESS_RB;                                      \
+        const int64_t q1 = q0 + DRESS_RB < nrow ? q0 + DRESS_RB : nrow;        \
+        T acc[DRESS_TB];                                                       \
+        for (int64_t q = q0; q < q1; q++) {                                    \
+            const T *b = bare + q * ncol + c0;                                 \
+            for (int64_t c = 0; c < nc; c++) acc[c] = b[c];                    \
+            const int64_t a = pa[q], bb = pb[q];                               \
+            for (int64_t m = 0; m < nmA; m++) {                                \
+                const T x = tA[m * ldA + a];                                   \
+                const T *g = GA + (m * nxA + bb) * ncol + c0;                  \
+                _Pragma("omp simd")                                            \
+                for (int64_t c = 0; c < nc; c++) acc[c] += x * g[c];           \
+            }                                                                  \
+            for (int64_t m = 0; m < nmB; m++) {                                \
+                const T x = tB[m * ldB + bb];                                  \
+                const T *g = GB + (m * nxB + a) * ncol + c0;                   \
+                _Pragma("omp simd")                                            \
+                for (int64_t c = 0; c < nc; c++) acc[c] += x * g[c];           \
+            }                                                                  \
+            const T *cq = CT + q * nP;                                         \
+            for (int64_t P = 0; P < nP; P++) {                                 \
+                const T x = cq[P];                                             \
+                const T *h = H + P * ncol + c0;                                \
+                _Pragma("omp simd")                                            \
+                for (int64_t c = 0; c < nc; c++) acc[c] += x * h[c];           \
+            }                                                                  \
+            T *o = out + q * ncol + c0;                                        \
+            for (int64_t c = 0; c < nc; c++) o[c] = acc[c];                    \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_VVVV_DRESS(double, d)
+DEFINE_VVVV_DRESS(double complex, z)
+
+/* One-body operator on both indices of packed pairs:
+ *   W[(a<b), (d<e)] += scale * (F_ad d_be - F_bd d_ae - F_ae d_bd + F_be d_ad)
+ * for the row pairs (pa[q], pb[q]) of one pair block; pidx (n, n) is the
+ * block-local pair index (-1 outside the block), F (n, ldf). */
+#define DEFINE_ONEBODY(T, SFX)                                                 \
+void zc_pair_one_body_add_##SFX(T *W, int64_t nq, int64_t ncol,                \
+                                const int64_t *pa, const int64_t *pb,          \
+                                const int64_t *pidx, int64_t n, const T *F,    \
+                                int64_t ldf, const T *scale)                   \
+{                                                                              \
+    const T s = *scale;                                                        \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t q = 0; q < nq; q++) {                                         \
+        const int64_t a = pa[q], b = pb[q];                                    \
+        T *w = W + q * ncol;                                                   \
+        for (int64_t y = 0; y < n; y++) {     /* acting on a: pair {y, b} */   \
+            if (y == b) continue;                                              \
+            const int64_t P = y < b ? pidx[y * n + b] : pidx[b * n + y];       \
+            if (P < 0) continue;                                               \
+            const T x = s * F[a * ldf + y];                                    \
+            w[P] += y < b ? x : -x;                                            \
+        }                                                                      \
+        for (int64_t y = 0; y < n; y++) {     /* acting on b: pair {y, a} */   \
+            if (y == a) continue;                                              \
+            const int64_t P = y < a ? pidx[y * n + a] : pidx[a * n + y];       \
+            if (P < 0) continue;                                               \
+            const T x = s * F[b * ldf + y];                                    \
+            w[P] += y < a ? -x : x;                                            \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_ONEBODY(double, d)
+DEFINE_ONEBODY(double complex, z)
+
+/* Spin-flip symmetrization X <- X + flip(X) of a strided 3-index array,
+ *   flip(X)[i, j, k] = s0[i] s1[j] s2[k] X[f0[i], f1[j], f2[k]],
+ * in place.  The f's are involutions with flip-invariant signs; rep lists one
+ * index of axis 0 per orbit of f0 (f0 maps rep outside rep), so every pair of
+ * elements {x, flip(x)} is visited once:  x <- x + s y,  y <- s x_new. */
+#define DEFINE_FLIPSYM(T, SFX)                                                 \
+void zc_flip_sym3_##SFX(T *X, const int64_t *n, const int64_t *st,             \
+                        const int64_t *f0, const int64_t *f1, const int64_t *f2, \
+                        const double *s0, const double *s1, const double *s2,  \
+                        const int64_t *rep, int64_t nrep)                      \
+{                                                                              \
+    const int64_t n1 = n[1], n2 = n[2], st2 = st[2];                           \
+    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
+    for (int64_t ir = 0; ir < nrep; ir++)                                      \
+    for (int64_t j = 0; j < n1; j++) {                                         \
+        const int64_t i = rep[ir];                                             \
+        const double sij = s0[i] * s1[j];                                      \
+        T *x = X + i * st[0] + j * st[1];                                      \
+        T *y = X + f0[i] * st[0] + f1[j] * st[1];                              \
+        for (int64_t k = 0; k < n2; k++) {                                     \
+            const double sg = sij * s2[k];                                     \
+            T *xk = x + k * st2, *yk = y + f2[k] * st2;                        \
+            const T v = *xk + sg * *yk;                                        \
+            *xk = v;                                                           \
+            *yk = sg * v;                                                      \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_FLIPSYM(double, d)
+DEFINE_FLIPSYM(double complex, z)
+
 /* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----
  * Element T3[I, A] = osig[I] vsig[A] T3b[obase[I] + vcol[A]] for occupied
  * triple I and virtual triple A of equal spin group. */

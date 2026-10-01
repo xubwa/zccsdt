@@ -388,6 +388,39 @@ def axpby(out, inp, alpha=1.0, beta=1.0):
     return out
 
 
+def flip_pairs(m):
+    '''alpha <-> beta flip of a spin-grouped map with equal numbers of alpha
+    and beta indices: (orbital map, pair map, pair re-sorting sign).'''
+    na = int(np.sum(m.spins == 0))
+    assert 2 * na == m.n, 'spin flip needs equal numbers of alpha and beta'
+    r = np.arange(m.n)
+    orb = np.where(r < na, r + na, r - na)
+    fp = orb[m.pairs]
+    sgn = np.where(fp[:, 0] < fp[:, 1], 1.0, -1.0)
+    pair = m.pidx[fp.min(axis=1), fp.max(axis=1)]
+    return orb, np.ascontiguousarray(pair, dtype=np.int64), sgn
+
+
+def flip_sym3(X, f, s, rep):
+    '''X <- X + flip(X) in place for a 3-index array or strided view, with
+    flip(X)[i,j,k] = s0[i] s1[j] s2[k] X[f0[i], f1[j], f2[k]] (involutions f,
+    flip-invariant signs s); rep: indices of axis 0, one per orbit of f0.'''
+    f = [np.ascontiguousarray(x, dtype=np.int64) for x in f]
+    s = [np.ascontiguousarray(x, dtype=np.float64) for x in s]
+    if USE_C and hasattr(_lib, 'zc_flip_sym3_d') and X.dtype in (np.float64, np.complex128):
+        isz = X.itemsize
+        n = np.array(X.shape, dtype=np.int64)
+        st = np.array([x // isz for x in X.strides], dtype=np.int64)
+        rep = np.ascontiguousarray(rep, dtype=np.int64)
+        getattr(_lib, 'zc_flip_sym3_' + _sfx(X.dtype))(
+            ctypes.c_void_p(X.ctypes.data), _p(n), _p(st), _p(f[0]), _p(f[1]), _p(f[2]),
+            _p(s[0]), _p(s[1]), _p(s[2]), _p(rep), _I64(len(rep)))
+        return X
+    sg = s[0][:, None, None] * s[1][None, :, None] * s[2][None, None, :]
+    X[...] = X + sg * X[np.ix_(f[0], f[1], f[2])]
+    return X
+
+
 def add_transposed(out, inp, alpha=1.0):
     '''out += alpha * inp.T for 2-D arrays (out: C-contiguous (nr, nc),
     inp: C-contiguous (nc, nr)), with a blocked C kernel.'''

@@ -166,3 +166,27 @@ def test_axpby_and_add_transposed(dtype):
     ref = X + 0.25 * Y.T
     t3pack.add_transposed(X, Y, 0.25)
     assert abs(X - ref).max() < 1e-14
+
+
+@pytest.mark.parametrize('dtype', [np.float64, np.complex128])
+def test_flip_sym3(dtype, monkeypatch):
+    '''X + flip(X) with orbital / pair flip maps: C kernel (strided view) vs numpy.'''
+    rng = np.random.default_rng(11)
+    om = t3pack.triple_map(6, np.array([0] * 3 + [1] * 3))
+    vm = t3pack.triple_map(8, np.array([0] * 4 + [1] * 4))
+    of, Pf, sP = t3pack.flip_pairs(om)
+    vf, Qf, sQ = t3pack.flip_pairs(vm)
+    assert np.all(of[of] == np.arange(6)) and np.all(Qf[Qf] == np.arange(vm.npair))
+    X = rng.standard_normal((om.npair, 8, 6)).astype(dtype)
+    if dtype == np.complex128:
+        X = X + 1j * rng.standard_normal(X.shape)
+    args = ((vf, Pf, of), (np.ones(8), sP, np.ones(6)), np.arange(4))
+    a = X.copy()
+    t3pack.flip_sym3(a.transpose(1, 0, 2), *args)
+    monkeypatch.setattr(t3pack, 'USE_C', False)
+    b = X.copy()
+    t3pack.flip_sym3(b.transpose(1, 0, 2), *args)
+    assert abs(a - b).max() < 1e-14
+    # the result is flip-invariant
+    c = b.transpose(1, 0, 2)
+    assert abs(c - sP[None, :, None] * c[np.ix_(vf, Pf, of)]).max() < 1e-14

@@ -115,68 +115,98 @@ def _pair_scatter_same_spin(out, Y, nloc, pa, pb, alpha):
     return out
 
 
-def dressed_vvvv_blocks(se, t1, om, vm):
-    '''Packed T1-dressed <ab||de> as the aa / ab / bb pair blocks, with the
-    alpha-beta Y terms written by GEMMs straight into the block.  For RHF the
-    beta-beta block is the alpha-alpha block (same object).'''
+def bare_packed(se):
+    '''Bare ovvv packed over its virtual pair, [m, y, Q], and oovv packed over
+    both pairs, [P, Q] (SpinTensors), cached on the integral object.'''
+    c = se.__dict__.get('_bare_packed')
+    if c is None:
+        om, vm = t3pack.maps_for(se)
+        Qs, Ps = pair_space('Q', vm), pair_space('P', om)
+        c = (pack_pairs(se.g['ovvv'], 2, Qs),
+             pack_pairs(pack_pairs(se.g['oovv'], 2, Qs), 0, Ps))
+        se.__dict__['_bare_packed'] = c
+    return c
+
+
+def dressed_vvvv_blocks(se, t1, om, vm, t2pp=None, out=None):
+    '''Packed T1-dressed <ab||de> as the aa / ab / bb pair blocks,
+      ~<ab||de> = <ab||de> - sum_m t1[m,a] <mb||de> + sum_m t1[m,b] <ma||de>
+                  + sum_{m<n} tau1[mn,ab] <mn||de>,
+    plus sum_{m<n} t2[mn,ab] <mn||de> if t2pp (packed (P, Q)) is given, which
+    is the T2 part of the T3 ladder operator.  One pass over each bare block
+    (C kernel).  For RHF the beta-beta block is the alpha-alpha block (same
+    object).  ``out``: optional list of reusable buffers for the blocks.'''
     nocc, nvir = t1.shape
     o, v = se.spaces['o'], se.spaces['v']
-    Qs = pair_space('Q', vm)
-    Ps = pair_space('P', om)
-    G = pack_pairs(se.g['ovvv'], 2, Qs)                    # (m, y, Q) blocks
-    oovv = pack_pairs(pack_pairs(se.g['oovv'], 2, Qs), 0, Ps)  # (P, Q) blocks
+    G, oovv = bare_packed(se)
     oa, ob = o.groups[0], o.groups[1]
     va, vb = v.groups[0], v.groups[1]
-    nva = va[1] - va[0]
     ta = np.ascontiguousarray(t1[oa[0]:oa[1], va[0]:va[1]])   # alpha block
     tb = np.ascontiguousarray(t1[ob[0]:ob[1], vb[0]:vb[1]])   # beta block
     from zccsdt.cc.ccsdt_opt import _tau1_pairs
-    tau = _tau1_pairs(t1, om, vm)
-    out = [None, None, None]
+    C = _tau1_pairs(t1, om, vm)
+    if t2pp is not None:
+        C = C + t2pp
+    lib = t3pack._lib
+    use_c = t3pack.USE_C and hasattr(lib, 'zc_vvvv_dress_d')
+    res = [None, None, None]
     for h in (0, 1, 2):
-        lo, hi = vm.blocks[h]
         if h == 2 and se.restricted:
-            out[2] = out[0]
+            res[2] = res[0]
             continue
-        blk = np.array(se.vvvv_blocks[h], dtype=np.result_type(se.vvvv_blocks[h], t1),
-                       order='C', copy=True)
-        if hi > lo:
-            if h in (0, 2):
-                s = h // 2
-                tt = ta if s == 0 else tb
-                Gs = G.blocks.get((s, s, h))
-                if Gs is not None and tt.size:
-                    nq = hi - lo
-                    off = va[0] if s == 0 else vb[0]
-                    nloc = Gs.shape[1]
-                    Y = gemm(np.ascontiguousarray(tt.T), Gs.reshape(Gs.shape[0], -1))
-                    Y = Y.reshape(nloc, nloc, nq)
-                    pa = vm.pa_c[lo:hi] - off
-                    pb = vm.pb_c[lo:hi] - off
-                    _pair_scatter_same_spin(blk, Y, nloc, pa, pb, -1.0)
-            else:
-                nq = hi - lo
-                G01 = G.blocks.get((0, 1, 1))                  # [m_a, b_b, Q]
-                G10 = G.blocks.get((1, 0, 1))                  # [m_b, a_a, Q]
-                blk3 = blk.reshape(nva, -1)                    # rows a, cols (b, Q)
-                if G01 is not None and ta.size:
-                    # blk[(a,b),Q] -= sum_m t1[m,a] <m b||Q>
-                    gemm(np.ascontiguousarray(ta.T), G01.reshape(G01.shape[0], -1), blk3,
-                         alpha=-1.0, beta=1.0)
-                if G10 is not None and tb.size:
-                    # blk[(a,b),Q] += sum_m t1[m,b] <m a||Q>
-                    tbT = np.ascontiguousarray(tb.T)
-                    for a in range(nva):
-                        Ga = np.ascontiguousarray(G10[:, a, :])
-                        gemm(tbT, Ga, blk[a * (tb.shape[1]):(a + 1) * tb.shape[1]],
-                             beta=1.0)
-            # + sum_{m<n} tau1[mn, ab] <mn||de> (only occupied pairs of group h)
-            ob_h = oovv.blocks.get((h, h))
-            if ob_h is not None:
-                plo, phi = om.blocks[h]
-                gemm(np.ascontiguousarray(tau[plo:phi, lo:hi].T), ob_h, blk, beta=1.0)
-        out[h] = blk
-    return out
+        lo, hi = vm.blocks[h]
+        plo, phi = om.blocks[h]
+        bare = se.vvvv_blocks[h]
+        dt = np.result_type(bare, t1, C)
+        blk = out[h] if out is not None else None
+        if blk is None or blk.shape != bare.shape or blk.dtype != dt:
+            blk = np.empty(bare.shape, dtype=dt)
+            if out is not None:
+                out[h] = blk
+        res[h] = blk
+        if h in (0, 2):
+            s_ = h // 2
+            tt = ta if s_ == 0 else tb
+            off = va[0] if s_ == 0 else vb[0]
+            GA = GB = G.blocks.get((s_, s_, h))           # [m, y, Q]
+            tA, tB = -tt, tt
+            pa, pb = vm.pa_c[lo:hi] - off, vm.pb_c[lo:hi] - off
+        else:
+            GA = G.blocks.get((0, 1, 1))                  # [m_a, b_b, Q]
+            GB = G.blocks.get((1, 0, 1))                  # [m_b, a_a, Q]
+            tA, tB = -ta, tb
+            pa, pb = vm.pa_c[lo:hi] - va[0], vm.pb_c[lo:hi] - vb[0]
+        H = oovv.blocks.get((h, h))
+        if hi == lo:
+            continue
+        if use_c:
+            def arr(x):
+                return None if x is None else np.ascontiguousarray(x, dtype=dt)
+            tA, tB, GA, GB, H = arr(tA), arr(tB), arr(GA), arr(GB), arr(H)
+            nmA = 0 if GA is None or tA.size == 0 else GA.shape[0]
+            nmB = 0 if GB is None or tB.size == 0 else GB.shape[0]
+            nP = 0 if H is None or phi == plo else H.shape[0]
+            CT = np.ascontiguousarray(C[plo:phi, lo:hi].T, dtype=dt)
+            ptr = lambda x: None if x is None else t3pack._p(x)   # noqa: E731
+            I64 = t3pack._I64
+            getattr(lib, 'zc_vvvv_dress_' + t3pack._sfx(dt))(
+                t3pack._p(blk), t3pack._p(np.ascontiguousarray(bare, dtype=dt)),
+                I64(hi - lo), I64(hi - lo), t3pack._p(pa), t3pack._p(pb),
+                ptr(tA), I64(tA.shape[1]), ptr(GA), I64(nmA),
+                I64(0 if GA is None else GA.shape[1]),
+                ptr(tB), I64(tB.shape[1]), ptr(GB), I64(nmB),
+                I64(0 if GB is None else GB.shape[1]),
+                t3pack._p(CT), ptr(H), I64(nP))
+            continue
+        blk[...] = bare
+        for tc, Gc, x, y in ((tA, GA, pa, pb), (tB, GB, pb, pa)):
+            if Gc is None or tc.size == 0:
+                continue
+            # blk[q] += sum_m tc[m, x_q] Gc[m, y_q]
+            blk += np.einsum('mq,mqc->qc', tc[:, x], Gc[:, y])
+        if H is not None and phi > plo:
+            blk += C[plo:phi, lo:hi].T @ H
+    return res
 
 
 def bra_dressed_vvvo(se, t1, om, vm):
@@ -187,10 +217,10 @@ def bra_dressed_vvvo(se, t1, om, vm):
     Only the Ms-allowed (e, i) blocks of each pair group are touched.'''
     nocc, nvir = t1.shape
     o, v = se.spaces['o'], se.spaces['v']
-    Qs, Ps = pair_space('Q', vm), pair_space('P', om)
+    Ps = pair_space('P', om)
     dtype = np.result_type(t1, se.fock)
     B = np.zeros((vm.npair, nvir, nocc), dtype=dtype)
-    G = pack_pairs(se.g['ovvv'], 2, Qs)                     # [i, e, Q] blocks
+    G = bare_packed(se)[0]                                  # [i, e, Q] blocks
     for (si, se_, h), blk in G.blocks.items():
         lo, hi = vm.blocks[h]
         (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
@@ -357,7 +387,7 @@ def t2_ovvv_add(W, t2, ovvv_d, om, vm, alpha=-1.0):
     return W
 
 
-def _vvvv_t1_c(lib, W, Vd, ta, tb, vm, nvs, nos):
+def _vvvv_t1_c(lib, W, Vd, ta, tb, rows, nvs, nos):
     '''C kernels of vvvv_t1_blocks: one pass over each pair block.'''
     dt = W.dtype
     sfx = t3pack._sfx(dt)
@@ -372,16 +402,16 @@ def _vvvv_t1_c(lib, W, Vd, ta, tb, vm, nvs, nos):
     def ptr(q, e, i):
         return ctypes.c_void_p(W.ctypes.data + dt.itemsize * (q * ldq + e * lde + i))
 
-    lo, hi = vm.blocks[1]
-    if hi > lo and noa + nob:
+    lo, hi = rows[1]
+    if hi > lo and noa + nob and Vd[1] is not None:
         V = np.ascontiguousarray(Vd[1], dtype=dt)
         getattr(lib, 'zc_vt1_ab_' + sfx)(
             ptr(lo, 0, noa), ptr(lo, nva, 0), t3pack._p(V), t3pack._p(ta),
             t3pack._p(tb), I64(hi - lo), I64(nva), I64(nvb), I64(noa), I64(nob),
             I64(ldq), I64(lde))
     for h, v0, n, o0, no, tt in ((0, 0, nva, 0, noa, ta), (2, nva, nvb, noa, nob, tb)):
-        lo, hi = vm.blocks[h]
-        if hi == lo or n < 2 or no == 0:
+        lo, hi = rows[h]
+        if hi == lo or n < 2 or no == 0 or Vd[h] is None:
             continue
         V = np.ascontiguousarray(Vd[h], dtype=dt)
         getattr(lib, 'zc_vt1_same_' + sfx)(
@@ -389,10 +419,13 @@ def _vvvv_t1_c(lib, W, Vd, ta, tb, vm, nvs, nos):
             I64(no), I64(ldq), I64(lde))
 
 
-def vvvv_t1_blocks(W, Vd, t1, om, vm, batch=512):
-    '''W[Q, e, i] += sum_f ~<ab||ef> t1[i, f] for spin-grouped pairs, as GEMMs
-    per spin block (t1 conserves spin; Vd are the aa / ab / bb pair blocks).
-    W: dense (npair_v, nvir, nocc).'''
+def vvvv_t1_blocks(W, Vd, t1, om, vm, batch=512, rows=None):
+    '''W[Q, e, i] += sum_f V[Q, (e,f)] t1[i, f] for V antisymmetric in (e, f)
+    with columns in the spin-grouped pairs of ``vm``: Vd are the aa / ab / bb
+    column blocks, whose rows are W[rows[h][0]:rows[h][1]] (default: the pair
+    blocks of vm, i.e. V = packed dressed vvvv).  t1 conserves spin.
+    W: dense (nrow, nvir, nocc).'''
+    rows = vm.blocks if rows is None else rows
     noa = int(np.sum(om.spins == 0))
     nva = int(np.sum(vm.spins == 0))
     nocc, nv = om.n, vm.n
@@ -403,12 +436,12 @@ def vvvv_t1_blocks(W, Vd, t1, om, vm, batch=512):
     nvb = nv - nva
     lib = t3pack._lib
     if (t3pack.USE_C and hasattr(lib, 'zc_vt1_same_d') and W.flags.c_contiguous
-            and W.shape == (vm.npair, nv, nocc)):
-        _vvvv_t1_c(lib, W, Vd, ta, tb, vm, (nva, nvb), (noa, nocc - noa))
+            and W.shape[1:] == (nv, nocc)):
+        _vvvv_t1_c(lib, W, Vd, ta, tb, rows, (nva, nvb), (noa, nocc - noa))
         return W
     # alpha-beta pair block: columns (e alpha, f beta), e-major
-    lo, hi = vm.blocks[1]
-    if hi > lo and nva and nvb:
+    lo, hi = rows[1]
+    if hi > lo and nva and nvb and Vd[1] is not None:
         V1 = Vd[1].reshape(hi - lo, nva, nvb)
         if tb.size:      # e alpha, i beta: sum_{f beta} V[Q, e, f] t[i, f]
             X = gemm(np.ascontiguousarray(V1).reshape(-1, nvb), np.asfortranarray(tb.T))
@@ -418,9 +451,9 @@ def vvvv_t1_blocks(W, Vd, t1, om, vm, batch=512):
             W[lo:hi, vb[0]:vb[1], oa[0]:oa[1]] -= X.transpose(0, 2, 1)
     # same-spin blocks: unpack V rows to antisymmetric (e, f), then GEMM
     for h, (v0, v1), (o0, o1), tt in ((0, va, oa, ta), (2, vb, ob, tb)):
-        lo, hi = vm.blocks[h]
+        lo, hi = rows[h]
         n = v1 - v0
-        if hi == lo or n < 2 or tt.size == 0:
+        if hi == lo or n < 2 or tt.size == 0 or Vd[h] is None:
             continue
         iu, ju = np.triu_indices(n, 1)
         ttT = np.asfortranarray(tt.T)

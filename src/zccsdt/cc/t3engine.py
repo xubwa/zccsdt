@@ -472,6 +472,7 @@ def _spin_block_c_methods():
         vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
         orr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.orng]
         gy_cache = {}           # Y-GEMM operands depend on (sm, gQ, sy) only
+        flip = self.L.flip      # closed shell: half of the spin combinations
 
         def gy(sm, gQ, sy):
             key = (sm, gQ, sy)
@@ -491,14 +492,18 @@ def _spin_block_c_methods():
                         gQ = gP + sm - sd
                         if not 0 <= gQ <= 2:
                             continue
+                        if flip and (gP, sd, sm) > (2 - gP, 1 - sd, 1 - sm):
+                            continue      # spin-flipped image of a computed combination
                         d, m = self.vrng[sd], self.orng[sm]
                         Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
                         nd, nm, nQ = len(d), len(m), Qhi - Qlo
                         if nd == 0 or nm == 0 or nQ == 0:
                             continue
+                        t_ = timer('pass1.gather'); t_.__enter__()
                         T = np.empty((len(pb), nd, nm, nQ), dtype=dtype)
                         _cgather(self, T3, pb, d, m, Qlo, Qhi, T, 0, nd * nm * nQ)
                         Tf = T.reshape(len(pb) * nd, nm * nQ)
+                        t_.__exit__(None, None, None)
                         sy = gP - sd
                         if 0 <= sy <= 1:
                             e0, e1 = vr[sy]
@@ -506,16 +511,25 @@ def _spin_block_c_methods():
                             G = np.concatenate((G_Pd[e0:e1, p0:p1, vr[sd][0]:vr[sd][1]],
                                                 G_Pd[nvir + j0:nvir + j1, p0:p1,
                                                      vr[sd][0]:vr[sd][1]]), axis=0)
+                            t_ = timer('pass1.gemm'); t_.__enter__()
                             X = gemm(np.ascontiguousarray(G).reshape(G.shape[0], -1), Tf)
+                            t_.__exit__(None, None, None)
+                            t_ = timer('pass1.acc'); t_.__enter__()
                             X = X.reshape(-1, nm, nQ)
                             m0, m1 = orr[sm]
                             Xacc[e0:e1, m0:m1, Qlo:Qhi] += X[:e1 - e0]
                             Xacc[nvir + j0:nvir + j1, m0:m1, Qlo:Qhi] += X[e1 - e0:]
+                            t_.__exit__(None, None, None)
+                            t_ = timer('pass1.gemm'); t_.__enter__()
                             Y = gemm(Tf, gy(sm, gQ, sy)).reshape(len(pb), nd, -1)
+                            t_.__exit__(None, None, None)
+                            t_ = timer('pass1.acc'); t_.__enter__()
                             d0, d1 = vr[sd]
                             Yall[p0:p1, d0:d1, j0:j1] += Y[:, :, :j1 - j0]
                             Yall[p0:p1, d0:d1, nocc + e0:nocc + e1] += Y[:, :, j1 - j0:]
+                            t_.__exit__(None, None, None)
                         if sd == sm:
+                            t_ = timer('pass1.r1rA'); t_.__enter__()
                             d0, d1 = vr[sd]
                             m0, m1 = orr[sm]
                             Tm = T.reshape(len(pb), nd * nm, nQ)
@@ -525,7 +539,30 @@ def _spin_block_c_methods():
                             r1[d0:d1, m0:m1] += acc.reshape(nd, nm)
                             fdm = np.ascontiguousarray(fov[m0:m1, d0:d1].T).ravel()
                             rA[p0:p1, Qlo:Qhi] += np.matmul(fdm, Tm)
+                            t_.__exit__(None, None, None)
+        if flip:
+            with timer('pass1.flip'):
+                self._flip_outputs(Xacc, Yall, r1, rA)
         return Xacc, Yall, r1, rA
+
+    def _flip_outputs(self, Xacc, Yall, r1, rA):
+        '''Complete the pass-1 outputs computed from half of the spin
+        combinations: X <- X + flip(X) (alpha <-> beta, pair re-sorting signs).'''
+        om, vm = self.om, self.vm
+        nocc, nvir = om.n, vm.n
+        of, Pf, sP = t3pack.flip_pairs(om)
+        vf, Qf, sQ = t3pack.flip_pairs(vm)
+        noa, nva = nocc // 2, nvir // 2
+        one = np.ones(nocc + nvir)
+        # Xacc[(e | j), m, Q]
+        t3pack.flip_sym3(Xacc, (np.concatenate((vf, nvir + of)), of, Qf),
+                         (one, one[:nocc], sQ),
+                         np.concatenate((np.arange(nva), nvir + np.arange(noa))))
+        # Yall[P, d, (j | e)] as the view (d, P, (j | e))
+        t3pack.flip_sym3(Yall.transpose(1, 0, 2), (vf, Pf, np.concatenate((of, nocc + vf))),
+                         (one[:nvir], sP, one), np.arange(nva))
+        r1 += r1[np.ix_(vf, of)]
+        rA += sP[:, None] * sQ[None, :] * rA[np.ix_(Pf, Qf)]
 
     def _residual_c(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6):
         om, vm, dtype, L = self.om, self.vm, self.dtype, self.L
@@ -682,11 +719,11 @@ def _spin_block_c_methods():
                    I_(A0), I_(A1), p_(vm.free_c), p_(vm.pair_c), p_(vspin), p_(hoff),
                    p_(ncs), p_(coff), p_(X[0]), p_(X[1]))
 
-    return _pass1_c, _residual_c, _pass2_c, _ppl_c
+    return _pass1_c, _flip_outputs, _residual_c, _pass2_c, _ppl_c
 
 
-(SpinBlockT3._pass1_c, SpinBlockT3._residual_c, SpinBlockT3._pass2_c,
- SpinBlockT3._ppl_c) = _spin_block_c_methods()
+(SpinBlockT3._pass1_c, SpinBlockT3._flip_outputs, SpinBlockT3._residual_c,
+ SpinBlockT3._pass2_c, SpinBlockT3._ppl_c) = _spin_block_c_methods()
 
 
 def make_engine(om, vm, dtype, mem_mb, flip=False):
