@@ -71,6 +71,25 @@ def triples(t):
     return out
 
 
+def quadruples(t):
+    '''t(i j k l, a b c d) = sum_pi sgn(pi) t_ijkl^{pi(abcd)} prod_n d(s_n, s'_{pi(n)})
+    for a spatial t[i,j,k,l,a,b,c,d] (as triples, for four pairs).'''
+    no, nv = t.shape[0], t.shape[4]
+    out = np.zeros((2 * no,) * 4 + (2 * nv,) * 4, dtype=t.dtype)
+    so = [slice(0, no), slice(no, 2 * no)]
+    sv = [slice(0, nv), slice(nv, 2 * nv)]
+    for pi in permutations(range(4)):
+        sg = _sign(pi)
+        inv = [pi.index(m) for m in range(4)]
+        tp = t.transpose((0, 1, 2, 3) + tuple(4 + x for x in inv))
+        for s in np.ndindex(2, 2, 2, 2):
+            vs = [None] * 4
+            for n in range(4):
+                vs[pi[n]] = s[n]
+            out[tuple(so[x] for x in s) + tuple(sv[x] for x in vs)] += sg * tp
+    return out
+
+
 def aab_block(r, no, nv):
     '''The alpha-alpha-beta block R(i a, j a, k b; a a, b a, c b) of a
     spin-orbital triples tensor.'''

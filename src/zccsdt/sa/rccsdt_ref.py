@@ -154,6 +154,26 @@ def energy(t1, t2, ints):
         np.einsum('ijab,ijab', 2 * W - W.transpose(0, 1, 3, 2), tau)
 
 
+def q_correction(t2, t3, ints):
+    '''(E[Q], E(Q)): the perturbative quadruples corrections to CCSDT from
+    converged spatial t2 and dense t3 (bare integrals, canonical orbitals),
+    term by term from zccsdt.sa.derive.q_spatial on dense o^4 v^4 arrays.
+    E[Q] is the fifth-order part (z from T2^+ only).  Needs the full V.'''
+    no, nv = ints.nocc, ints.nvir
+    q = derive.q_spatial()
+    arr = {'V': ints.V, 'T2': t2, 'T3': t3}
+    dims = {'o': no, 'v': nv}
+    val = {k: evaluate(terms, arr, 'ijklabcd', dims) for k, terms in q.items()}
+    r = val['R4.T3'] + val['R4.T2']
+    eo, ev = ints.mo_energy[:no], ints.mo_energy[no:]
+    d = sum(eo.reshape([-1 if x == n else 1 for x in range(8)]) for n in range(4)) \
+        - sum(ev.reshape([-1 if x == n else 1 for x in range(8)]) for n in range(4, 8))
+    rt = sum(w * r.transpose((0, 1, 2, 3) + tuple(4 + x for x in tau)) for tau, w in derive.q_metric())
+    rt = rt / d
+    e5 = float(np.vdot(val['Z4.T2'], rt)) / 24
+    return e5, e5 + float(np.vdot(val['Z4.T3'], rt)) / 24
+
+
 @dataclass
 class Result:
     e_corr: float

@@ -82,3 +82,22 @@ def test_spin_adapted_block_ccsdt_vs_mrcc_cfour(name):
     r = rccsdt.kernel(rccsdt_ref.from_scf(rhf, ncore=frozen // 2), conv_tol=1e-11,
                       conv_tol_normt=1e-8)
     assert r.converged and abs(r.e_tot - REFS[name]['recommended']['e_ccsdt']) < 1e-8
+
+
+def test_spin_adapted_ccsdt_q_dense_vs_mrcc_cfour():
+    '''CCSDT[Q] and CCSDT(Q) from the dense spin-adapted reference
+    (rccsdt_ref.q_correction) against MRCC (CFOUR ncc agrees on (Q)).'''
+    from zccsdt.sa import rccsdt, rccsdt_ref
+    from zccsdt.sa.t3blocks import Blocks
+    name = 'h2o_631g'
+    molname, basis, frozen = SYSTEMS[name]
+    atoms = sorted({a.split()[0] for a in GEOM[molname].split(';')})
+    mol = gto.M(atom=GEOM[molname], basis=_basis(atoms, basis), verbose=0)
+    rhf = scf.RHF(mol).run(conv_tol=1e-12)
+    ints = rccsdt_ref.from_scf(rhf, ncore=frozen // 2)
+    r = rccsdt.kernel(ints, conv_tol=1e-11, conv_tol_normt=1e-8)
+    e5, e6 = rccsdt_ref.q_correction(r.t2, Blocks(ints.nocc).to_dense(r.t3), ints)
+    ref = REFS[name]['recommended']
+    assert r.converged
+    assert abs(r.e_tot + e5 - ref['e_ccsdt[q]']) < 1e-9
+    assert abs(r.e_tot + e6 - ref['e_ccsdt(q)']) < 1e-9

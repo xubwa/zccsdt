@@ -21,6 +21,8 @@ Every 4-index intermediate N is spin-free:
 N(pqrs) = N.J_pqrs d(p,r) d(q,s) - N.K_pqrs d(p,s) d(q,r).
 '''
 
+from fractions import Fraction
+
 from zccsdt.sa.spinfree import (Term, antisymmetrize, P_one_two, P_pair, full_asym,
                                 trace_all, simplify, show)
 
@@ -129,6 +131,71 @@ def spatial_residuals():
     return {'R1': simplify(trace_all(t1_residual_terms(), EXT1), 'ia'),
             'R2': simplify(trace_all(t2_residual_terms(), EXT2), 'ijab'),
             'R3': simplify(trace_all(t3_residual_terms(), EXT3), 'ijkabc')}
+
+
+# ------------------------------------------------------------ CCSDT(Q)
+
+EXT4 = [('i', 'a'), ('j', 'b'), ('k', 'c'), ('l', 'd')]
+
+
+def q_terms():
+    '''Spin-orbital quantities of the CCSDT(Q) correction (bare integrals,
+    canonical HF orbitals; T1 does not enter):
+
+      r(ijkl,abcd) = <ijkl abcd| [W, T3] + 1/2 [[W, T2], T2] |0>,
+      z(ijkl,abcd) = <0| (T2^+ + T3^+) W |ijkl abcd>,
+      E(Q) = 1/(4!)^2 sum z r / (e_i + e_j + e_k + e_l - e_a - e_b - e_c - e_d),
+
+    each as the full antisymmetrizer over ijkl and abcd applied to one
+    representative product.  The coefficients were fixed by a brute-force
+    Fock-space evaluation (tests/test_sa_q.py); 'R4.T3' / 'R4.T2' are the two
+    parts of r and 'Z4.T2' (disconnected, fifth order: its part of the energy
+    is the [Q] correction) / 'Z4.T3' those of z.'''
+    A = full_asym('ijkl', 'abcd')
+
+    def asym(*base):
+        return [t for b in base for t in antisymmetrize(b, A)]
+    f24, f16 = Fraction(1, 24), Fraction(1, 16)
+    return {
+        'R4.T3': asym(T(f24, ('t3', 'ijkabe'), ('v', 'cdel')),
+                      T(-f24, ('t3', 'ijmabc'), ('v', 'mdkl'))),
+        'R4.T2': asym(T(f16, ('t2', 'ijae'), ('t2', 'klfd'), ('v', 'bcef')),
+                      T(f16, ('t2', 'imab'), ('t2', 'nlcd'), ('v', 'mnjk')),
+                      T(Fraction(1, 4), ('t2', 'ijae'), ('t2', 'mlcd'), ('v', 'mbek'))),
+        'Z4.T2': asym(T(f16, ('t2', 'ijab'), ('v', 'klcd'))),
+        'Z4.T3': asym(T(f24, ('t3', 'ijkabe'), ('v', 'elcd')),
+                      T(-f24, ('t3', 'ijmabc'), ('v', 'klmd'))),
+    }
+
+
+_Q_SPATIAL = {}
+
+
+def q_spatial():
+    '''Spatial (identity-pairing) coefficients r_ijkl^abcd and z_ijkl^abcd of
+    q_terms(), simplified; cached.'''
+    if not _Q_SPATIAL:
+        for name, terms in q_terms().items():
+            _Q_SPATIAL[name] = simplify(trace_all(terms, EXT4), 'ijklabcd')
+    return _Q_SPATIAL
+
+
+# weights sgn(tau) 2^cycles(tau) of the energy: with spatial z and r,
+#   E(Q) = 1/24 sum_{ijkl,abcd} z_ijkl^abcd / D sum_tau w(tau) r_ijkl^{tau(abcd)}
+def q_metric():
+    '''[(tau, sgn(tau) 2^cycles(tau))] for the 24 permutations of 4 slots.'''
+    from itertools import permutations
+    out = []
+    for tau in permutations(range(4)):
+        seen, cyc = set(), 0
+        for x in range(4):
+            if x not in seen:
+                cyc += 1
+                while x not in seen:
+                    seen.add(x)
+                    x = tau[x]
+        out.append((tau, (-1) ** (4 - cyc) * 2 ** cyc))
+    return out
 
 
 if __name__ == '__main__':

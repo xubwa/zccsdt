@@ -5,7 +5,8 @@
   "recommended": "Compare zccsdt against \"recommended\" (= bohr-geometry values; MRCC and all three CFOUR CC_PROGs agree to <=2e-12 there).",
   "basis": "Both programs read basis sets from bench/refs/GENBAS (copied as GENBAS into the run dir). cc-pVDZ = GENBAS PVDZ, identical to PySCF cc-pvdz (RHF agrees to 1e-12). 6-31G = GENBAS 6-31G which differs from PySCF built-in 6-31g at ~1e-7 in exponents/coefficients: PySCF built-in RHF is 2.8e-9 (H2O) and 8.9e-8 (N2) below; use bench/refs/genbas2pyscf.py read_genbas() to get the exact GENBAS basis in PySCF (RHF then agrees to <=3e-12).",
   "convergence": "MRCC scftol=12, cctol=11; CFOUR SCF_CONV=11, CC_CONV=11.",
-  "pyscf": "PySCF RHF conv_tol=1e-12; PySCF CCSD (conv_tol=1e-11) with GENBAS basis given as a sanity check (agrees to <=5e-10)."
+  "pyscf": "PySCF RHF conv_tol=1e-12; PySCF CCSD (conv_tol=1e-11) with GENBAS basis given as a sanity check (agrees to <=5e-10).",
+  "ccsdt(q)": "CCSDT[Q] and CCSDT(Q) total energies at the bohr geometries: MRCC calc=CCSDT(Q) (inputs MINP.q.bohr) and CFOUR CALC=CCSDT(Q), CC_PROG=NCC (ZMAT.q.bohr); the two programs agree to <= 3e-12 on CCSDT(Q)."
  },
  "h2o_631g": {
   "description": "H2O / 6-31G, all-electron",
@@ -21,7 +22,9 @@
     "e_ccsd": -76.119346380614,
     "e_ccsdt": -76.120425238932,
     "e_nuc": 9.188258417746,
-    "ccsdt_iterations": 21
+    "ccsdt_iterations": 21,
+    "e_ccsdt[q]": -76.120873753593,
+    "e_ccsdt(q)": -76.120881743524
    },
    "angstrom": {
     "e_scf": -75.98394849527278,
@@ -37,7 +40,8 @@
      "e_scf": -75.98394849527917,
      "e_ccsd": -76.1193463806124,
      "e_ccsdt": -76.12042523893223,
-     "e_nuc": 9.1882584177
+     "e_nuc": 9.1882584177,
+     "e_ccsdt(q)": -76.12088174352387
     },
     "angstrom": {
      "e_scf": -75.98394849230921,
@@ -79,7 +83,9 @@
    "e_scf": -75.98394849527953,
    "e_ccsd": -76.119346380614,
    "e_ccsdt": -76.120425238932,
-   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis"
+   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis",
+   "e_ccsdt[q]": -76.120873753593,
+   "e_ccsdt(q)": -76.120881743524
   },
   "notes": "CCSDT spread MRCC/NCC/ECC/VCC at bohr geometry: 5.8e-13. MRCC-vs-PySCF(builtin basis) RHF diff: 2.8e-09; MRCC-vs-PySCF(GENBAS basis) RHF diff: -4.3e-14. 6-31G in PySCF must be built from GENBAS (genbas2pyscf.py) to match these references."
  },
@@ -97,7 +103,9 @@
     "e_ccsd": -76.24010890732,
     "e_ccsdt": -76.243328878432,
     "e_nuc": 9.188258417746,
-    "ccsdt_iterations": 22
+    "ccsdt_iterations": 22,
+    "e_ccsdt[q]": -76.243768714649,
+    "e_ccsdt(q)": -76.243816460608
    },
    "angstrom": {
     "e_scf": -76.02676567309783,
@@ -113,7 +121,8 @@
      "e_scf": -76.02676567311983,
      "e_ccsd": -76.2401089073177,
      "e_ccsdt": -76.2433288784312,
-     "e_nuc": 9.1882584177
+     "e_nuc": 9.1882584177,
+     "e_ccsdt(q)": -76.24381646060762
     },
     "angstrom": {
      "e_scf": -76.02676566327867,
@@ -155,7 +164,9 @@
    "e_scf": -76.02676567312,
    "e_ccsd": -76.24010890732,
    "e_ccsdt": -76.243328878432,
-   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis"
+   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis",
+   "e_ccsdt[q]": -76.243768714649,
+   "e_ccsdt(q)": -76.243816460608
   },
   "notes": "CCSDT spread MRCC/NCC/ECC/VCC at bohr geometry: 1.5e-12. MRCC-vs-PySCF(builtin basis) RHF diff: -2.8e-14; MRCC-vs-PySCF(GENBAS basis) RHF diff: 1.4e-13."
  },
@@ -173,7 +184,9 @@
     "e_ccsd": -76.238014456053,
     "e_ccsdt": -76.241214515268,
     "e_nuc": 9.188258417746,
-    "ccsdt_iterations": 22
+    "ccsdt_iterations": 22,
+    "e_ccsdt[q]": -76.241651693712,
+    "e_ccsdt(q)": -76.241699129231
    },
    "angstrom": {
     "e_scf": -76.02676567309786,
@@ -189,7 +202,8 @@
      "e_scf": -76.0267656731198,
      "e_ccsd": -76.23801445605089,
      "e_ccsdt": -76.2412145152674,
-     "e_nuc": 9.1882584177
+     "e_nuc": 9.1882584177,
+     "e_ccsdt(q)": -76.24169912923111
     },
     "angstrom": {
      "e_scf": -76.02676566327864,
@@ -231,7 +245,9 @@
    "e_scf": -76.02676567312,
    "e_ccsd": -76.238014456053,
    "e_ccsdt": -76.241214515268,
-   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis"
+   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis",
+   "e_ccsdt[q]": -76.241651693712,
+   "e_ccsdt(q)": -76.241699129231
   },
   "notes": "CCSDT spread MRCC/NCC/ECC/VCC at bohr geometry: 8.0e-13. MRCC-vs-PySCF(builtin basis) RHF diff: 5.7e-14; MRCC-vs-PySCF(GENBAS basis) RHF diff: 1.4e-13. MRCC core=frozen and CFOUR FROZEN_CORE=ON both freeze exactly the O 1s orbital (2 electrons); zccsdt frozen=2 spin orbitals."
  },
@@ -249,7 +265,9 @@
     "e_ccsd": -109.095518216834,
     "e_ccsdt": -109.103041420178,
     "e_nuc": 23.621830495655,
-    "ccsdt_iterations": 22
+    "ccsdt_iterations": 22,
+    "e_ccsdt[q]": -109.104898623791,
+    "e_ccsdt(q)": -109.105013264327
    },
    "angstrom": {
     "e_scf": -108.86776328723082,
@@ -265,7 +283,8 @@
      "e_scf": -108.86776328725733,
      "e_ccsd": -109.09551821683617,
      "e_ccsdt": -109.10304142017698,
-     "e_nuc": 23.6218304957
+     "e_nuc": 23.6218304957,
+     "e_ccsdt(q)": -109.10501326432448
     },
     "angstrom": {
      "e_scf": -108.86776327441396,
@@ -307,7 +326,9 @@
    "e_scf": -108.86776328725972,
    "e_ccsd": -109.095518216834,
    "e_ccsdt": -109.103041420178,
-   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis"
+   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis",
+   "e_ccsdt[q]": -109.104898623791,
+   "e_ccsdt(q)": -109.105013264327
   },
   "notes": "CCSDT spread MRCC/NCC/ECC/VCC at bohr geometry: 2.1e-12. MRCC-vs-PySCF(builtin basis) RHF diff: 8.9e-08; MRCC-vs-PySCF(GENBAS basis) RHF diff: 4.7e-13. 6-31G in PySCF must be built from GENBAS (genbas2pyscf.py) to match these references."
  },
@@ -325,7 +346,9 @@
     "e_ccsd": -100.22815491224,
     "e_ccsdt": -100.230179772323,
     "e_nuc": 5.193669463773,
-    "ccsdt_iterations": 20
+    "ccsdt_iterations": 20,
+    "e_ccsdt[q]": -100.230560594564,
+    "e_ccsdt(q)": -100.230594323302
    },
    "angstrom": {
     "e_scf": -100.01941126915767,
@@ -341,7 +364,8 @@
      "e_scf": -100.01941126917269,
      "e_ccsd": -100.22815491223574,
      "e_ccsdt": -100.23017977232057,
-     "e_nuc": 5.1936694638
+     "e_nuc": 5.1936694638,
+     "e_ccsdt(q)": -100.23059432330044
     },
     "angstrom": {
      "e_scf": -100.01941126198487,
@@ -383,7 +407,9 @@
    "e_scf": -100.0194112691736,
    "e_ccsd": -100.22815491224,
    "e_ccsdt": -100.230179772323,
-   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis"
+   "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis",
+   "e_ccsdt[q]": -100.230560594564,
+   "e_ccsdt(q)": -100.230594323302
   },
   "notes": "CCSDT spread MRCC/NCC/ECC/VCC at bohr geometry: 2.4e-12. MRCC-vs-PySCF(builtin basis) RHF diff: 0.0e+00; MRCC-vs-PySCF(GENBAS basis) RHF diff: 4.3e-14."
  }
