@@ -169,7 +169,7 @@ def _tau1_pairs(t1, om, vm):
     return t1[mm][:, md] * t1[nn][:, ne] - t1[nn][:, md] * t1[mm][:, ne]
 
 
-def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None):
+def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None, inplace=False):
     '''W_vvvo[Q(a<b), e, i] of the T3 drive term (without the T3 dressing):
     the fully T1-dressed <ab||ei> = Bv + sum_f ~<ab||ef> t1[i,f] (Bv: bra-dressed
     vvvo, Vd: dressed packed vvvv), plus the T2 terms with the dressed oovo,
@@ -177,13 +177,16 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None):
     nocc, nvir = t1.shape
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
-    W = np.array(Bv, order='C', copy=True)
-    # sum_f ~<ab||ef> t1[i,f]: sparse in the packed (e<f) index, done directly,
-    # one diagonal pair block of the dressed vvvv at a time
+    W = Bv if inplace else np.array(Bv, order='C', copy=True)
+    # sum_f ~<ab||ef> t1[i,f]: sparse in the packed (e<f) index; GEMMs per spin
+    # block for spin-grouped pairs, a direct kernel otherwise
     with timer('wv.vvvv_t1'):
-        for h, (lo, hi) in enumerate(vm.blocks):
-            if hi > lo:
-                t3pack.pair_t1_contract(W[lo:hi], Vd[h], t1, vm, block=h)
+        if vm.spins is not None:
+            spin_imds.vvvv_t1_blocks(W, Vd, t1, om, vm)
+        else:
+            for h, (lo, hi) in enumerate(vm.blocks):
+                if hi > lo:
+                    t3pack.pair_t1_contract(W[lo:hi], Vd[h], t1, vm, block=h)
     # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] = sum_{m<n} t2[mn,ab] ~oovo[mn,e,i]
     t2mn_pp = t2[mm, nn][:, md, ne]
     gemm(np.asfortranarray(t2mn_pp.T), np.ascontiguousarray(ge['oovo'][mm, nn]).reshape(
@@ -472,7 +475,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         else:
             Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
             xterm = None
-        Wv = wvvvo_packed(Bv, vvvv_pp, t1, t2, fov, ge, om, vm, xterm) + dWv   # [Q(ab), e, i]
+        vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)        # needs Bv before W
+        Wv = wvvvo_packed(Bv, vvvv_pp, t1, t2, fov, ge, om, vm, xterm, inplace=True)
+        Wv += dWv                                             # [Q(ab), e, i]
+        del Bv
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wvooo'); t_.__enter__()
         Wvooo = govoo.copy()
@@ -495,7 +501,6 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         # CCSD residuals (T1-dressed) + T3 contributions, before the dressed
         # packed vvvv is turned into the T3 ladder operator in place
         t_ = timer('ccsd'); t_.__enter__()
-        vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)
         r1_vovv = _spin_r1_vovv(eris, ges, t2, vm) if spin else None
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
                                       Feff_oo, Weff_ovvo, om, vm, r1_vovv)

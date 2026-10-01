@@ -246,3 +246,43 @@ def t2_ovvv_term(se, t2, ovvv_d, vm):
     T2 = SpinTensor.from_dense(t2, (o, o, v, v), sig=(-1, -1, 1, 1))
     Y = einsum('miaf,mbef->abei', T2, ovvv_d)
     return np.ascontiguousarray(pack_pairs(Y - Y.transpose(1, 0, 2, 3), 0, Qs).to_dense())
+
+
+def vvvv_t1_blocks(W, Vd, t1, om, vm, batch=512):
+    '''W[Q, e, i] += sum_f ~<ab||ef> t1[i, f] for spin-grouped pairs, as GEMMs
+    per spin block (t1 conserves spin; Vd are the aa / ab / bb pair blocks).
+    W: dense (npair_v, nvir, nocc).'''
+    noa = int(np.sum(om.spins == 0))
+    nva = int(np.sum(vm.spins == 0))
+    nocc, nv = om.n, vm.n
+    va, vb = (0, nva), (nva, nv)
+    oa, ob = (0, noa), (noa, nocc)
+    ta = np.ascontiguousarray(t1[oa[0]:oa[1], va[0]:va[1]])
+    tb = np.ascontiguousarray(t1[ob[0]:ob[1], vb[0]:vb[1]])
+    nvb = nv - nva
+    # alpha-beta pair block: columns (e alpha, f beta), e-major
+    lo, hi = vm.blocks[1]
+    if hi > lo and nva and nvb:
+        V1 = Vd[1].reshape(hi - lo, nva, nvb)
+        if tb.size:      # e alpha, i beta: sum_{f beta} V[Q, e, f] t[i, f]
+            X = gemm(np.ascontiguousarray(V1).reshape(-1, nvb), np.asfortranarray(tb.T))
+            W[lo:hi, va[0]:va[1], ob[0]:ob[1]] += X.reshape(hi - lo, nva, -1)
+        if ta.size:      # e beta, i alpha: -sum_{f alpha} V[Q, f, e] t[i, f]
+            X = np.matmul(V1.transpose(0, 2, 1), ta.T)
+            W[lo:hi, vb[0]:vb[1], oa[0]:oa[1]] -= X
+    # same-spin blocks: unpack V rows to antisymmetric (e, f), then GEMM
+    for h, (v0, v1), (o0, o1), tt in ((0, va, oa, ta), (2, vb, ob, tb)):
+        lo, hi = vm.blocks[h]
+        n = v1 - v0
+        if hi == lo or n < 2 or tt.size == 0:
+            continue
+        iu, ju = np.triu_indices(n, 1)
+        ttT = np.asfortranarray(tt.T)
+        for q0 in range(lo, hi, batch):
+            q1 = min(q0 + batch, hi)
+            full = np.zeros((q1 - q0, n, n), dtype=np.result_type(Vd[h], tt))
+            full[:, iu, ju] = Vd[h][q0 - lo:q1 - lo]
+            full[:, ju, iu] = -Vd[h][q0 - lo:q1 - lo]
+            X = gemm(full.reshape(-1, n), ttT).reshape(q1 - q0, n, -1)
+            W[q0:q1, v0:v1, o0:o1] += X
+    return W
