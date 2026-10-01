@@ -1101,41 +1101,45 @@ void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const doubl
                         __builtin_prefetch(S[3 * k + 2] + i2 + n3 - 1, 0, 2);
                     }
                 }
+                /* c[x] = t01 g23 + t02 g13 + t12 g03 + g12 t03 + g02 t13 + g01 t23
+                 * (pair sets in the order of tc / gc), rows along x3 */
+                const double *t01 = tc, *t02 = tc + v2, *t03 = tc + 2 * v2;
+                const double *t12 = tc + 3 * v2, *t13 = tc + 4 * v2, *t23 = tc + 5 * v2;
+                const double *g23 = gc, *g13 = gc + v2, *g12 = gc + 2 * v2;
+                const double *g03 = gc + 3 * v2, *g02 = gc + 4 * v2, *g01 = gc + 5 * v2;
+#define Q_LOAD_ROW(N)                                                          \
+    for (int64_t u3 = 0; u3 < (N); u3++) {                                     \
+        const double a = s0[u3] + s1[u3] + s2[u3];                             \
+        ap[lo + u3 * l3] = a;                                                  \
+        rp[lo + u3 * l3] = a + s3[u3] + s4[u3] + s5[u3];                       \
+        cp[lo + u3 * l3] = c0 * p0[u3] + c1 * p1[u3] + c2 * p2[u3]             \
+                         + c3 * p3[u3] + c4 * p4[u3] + c5 * p5[u3];            \
+    }
                 for (int64_t u0 = 0; u0 < n0; u0++)
-                for (int64_t u1 = 0; u1 < n1; u1++)
-                for (int64_t u2 = 0; u2 < n2; u2++) {
-                    const int64_t x[3] = {b0 + u0, b1 + u1, b2 + u2};
-                    const int64_t i0 = x[0] * v3 + x[1] * v2 + x[2] * v + b3;
-                    const int64_t i1 = x[1] * v3 + x[2] * v2 + x[0] * v + b3;
-                    const int64_t i2 = x[2] * v3 + x[0] * v2 + x[1] * v + b3;
-                    const double *s0 = S[0] + i0, *s1 = S[1] + i1, *s2 = S[2] + i2;
-                    const double *s3 = S[3] + i0, *s4 = S[4] + i1, *s5 = S[5] + i2;
-                    double aa[QT], rr[QT], cc[QT] = {0};
-                    for (int64_t u3 = 0; u3 < n3; u3++) {
-                        aa[u3] = s0[u3] + s1[u3] + s2[u3];
-                        rr[u3] = aa[u3] + s3[u3] + s4[u3] + s5[u3];
-                    }
-                    /* c: T2 on the pair set (p,q), <oo|vv> on the complement */
-                    for (int k = 0; k < 6; k++) {
-                        const double *tk = tc + k * v2, *gk = gc + k * v2;
-                        const int *pq = PQ[k];
-                        if (pq[3] == 3) {
-                            const double tv = tk[x[pq[0]] * v + x[pq[1]]];
-                            const double *g = gk + x[pq[2]] * v + b3;
-                            for (int64_t u3 = 0; u3 < n3; u3++) cc[u3] += tv * g[u3];
+                for (int64_t u1 = 0; u1 < n1; u1++) {
+                    const int64_t x0 = b0 + u0, x1 = b1 + u1;
+                    const double c0 = t01[x0 * v + x1], c5 = g01[x0 * v + x1];
+                    const double *p1 = g13 + x1 * v + b3, *p2 = g03 + x0 * v + b3;
+                    const double *p3 = t03 + x0 * v + b3, *p4 = t13 + x1 * v + b3;
+                    for (int64_t u2 = 0; u2 < n2; u2++) {
+                        const int64_t x2 = b2 + u2;
+                        const int64_t i0 = x0 * v3 + x1 * v2 + x2 * v + b3;
+                        const int64_t i1 = x1 * v3 + x2 * v2 + x0 * v + b3;
+                        const int64_t i2 = x2 * v3 + x0 * v2 + x1 * v + b3;
+                        const double *s0 = S[0] + i0, *s1 = S[1] + i1, *s2 = S[2] + i2;
+                        const double *s3 = S[3] + i0, *s4 = S[4] + i1, *s5 = S[5] + i2;
+                        const double c1 = t02[x0 * v + x2], c2 = t12[x1 * v + x2];
+                        const double c3 = g12[x1 * v + x2], c4 = g02[x0 * v + x2];
+                        const double *p0 = g23 + x2 * v + b3, *p5 = t23 + x2 * v + b3;
+                        const int64_t lo = u0 * l0 + u1 * l1 + u2 * l2;
+                        if (n3 == QT) {
+                            Q_LOAD_ROW(QT)
                         } else {
-                            const double gv = gk[x[pq[2]] * v + x[pq[3]]];
-                            const double *tt = tk + x[pq[0]] * v + b3;
-                            for (int64_t u3 = 0; u3 < n3; u3++) cc[u3] += gv * tt[u3];
+                            Q_LOAD_ROW(n3)
                         }
                     }
-                    const int64_t lo = u0 * l0 + u1 * l1 + u2 * l2;
-                    for (int64_t u3 = 0; u3 < n3; u3++) {
-                        ap[lo + u3 * l3] = aa[u3];
-                        rp[lo + u3 * l3] = rr[u3];
-                        cp[lo + u3 * l3] = cc[u3];
-                    }
                 }
+#undef Q_LOAD_ROW
             }
             /* ---- M r and the energy, row by row of the base tile */
             const int rep = T[0] == T[1] || T[1] == T[2] || T[2] == T[3];
