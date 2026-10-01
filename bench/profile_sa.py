@@ -1,7 +1,7 @@
 '''Per-term timing of the closed-shell spin-adapted CCSDT (zccsdt.sa.rccsdt).
 
 usage: python bench/profile_sa.py MOLECULE BASIS [NITER] [NCORE]
-  MOLECULE: h2o | n2 | h2s | ch2o     NCORE: frozen core (spatial orbitals)
+  MOLECULE: h2o | n2 | h2s | ch2o | c2h4 | c6h6     NCORE: frozen core (spatial orbitals)
   ZC_INCORE=1: all DIIS vectors in memory (default: T3 vectors in the scratch
   file, as in PySCF);  ZC_DIIS_SPACE: DIIS subspace size (default 8)
 '''
@@ -22,6 +22,8 @@ GEOM = {
     'n2': 'N 0 0 0; N 0 0 1.0977',
     'h2s': 'S 0 0 0; H 0 0.9618 0.9272; H 0 -0.9618 0.9272',
     'ch2o': 'C 0 0 0; O 0 0 1.205; H 0 0.9447 -0.5847; H 0 -0.9447 -0.5847',
+    'c2h4': 'C 0.000000 0.000000 0.669500; C 0.000000 0.000000 -0.669500; H 0.000000 0.929781 1.232595; H 0.000000 -0.929781 1.232595; H 0.000000 0.929781 -1.232595; H 0.000000 -0.929781 -1.232595',
+    'c6h6': 'C 1.397000 0.000000 0.000000; C 0.698500 1.209837 0.000000; C -0.698500 1.209837 0.000000; C -1.397000 0.000000 0.000000; C -0.698500 -1.209837 0.000000; C 0.698500 -1.209837 0.000000; H 2.481000 0.000000 0.000000; H 1.240500 2.148609 0.000000; H -1.240500 2.148609 0.000000; H -2.481000 0.000000 0.000000; H -1.240500 -2.148609 0.000000; H 1.240500 -2.148609 0.000000',
 }
 
 
