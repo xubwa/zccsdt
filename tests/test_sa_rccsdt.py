@@ -69,3 +69,21 @@ def test_vvvv_t1_packed_c_equals_numpy(monkeypatch):
     assert abs(E.vvvv_t1_packed(Ws, Wa, t1) - ref).max() < 1e-12
     monkeypatch.setattr(t3pack, 'USE_C', False)
     assert abs(E.vvvv_t1_packed(Ws, Wa, t1) - ref).max() < 1e-12
+
+
+def test_pair_gather_c_equals_numpy(monkeypatch):
+    '''Tiled C gather against the numpy path, with partial and repeated tiles
+    (v not a multiple of the tile size) and a pair with a zero cube.'''
+    from zccsdt.cc import t3pack
+    if not t3pack.USE_C:
+        pytest.skip('no C library')
+    no, v = 4, 37
+    B = Blocks(no)
+    t3b = np.random.default_rng(5).standard_normal((B.nblk, v, v, v))
+    for p, q in ((0, 2), (1, 1), (3, 3)):
+        Wc = E.pair_gather(B, t3b, p, q, np.full((5, v, no, v, v), np.nan))
+        monkeypatch.setattr(t3pack, 'USE_C', False)
+        Wn = E.pair_gather(B, t3b, p, q, np.full((5, v, no, v, v), np.nan))
+        monkeypatch.setattr(t3pack, 'USE_C', True)
+        assert np.isfinite(Wc).all()
+        assert abs(Wc - Wn).max() < 1e-13

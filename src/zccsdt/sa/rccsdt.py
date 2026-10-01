@@ -218,21 +218,23 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
 def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose):
     from zccsdt.cc.diis import DIIS
     from zccsdt.sa import rccsdt_ref
-    from zccsdt.sa.t3blocks import Blocks, denominators
+    from zccsdt.sa.t3blocks import Blocks, jacobi
     no, nv = ints.nocc, ints.nvir
     blocks = Blocks(no)
     e = ints.mo_energy
     eo, ev = e[:no], e[no:]
     d1 = eo[:, None] - ev[None, :]
     d2 = d1[:, None, :, None] + d1[None, :, None, :]
-    d3 = denominators(blocks, eo, ev)
+    eo3 = eo[blocks.tri].sum(axis=1)
     t1 = np.zeros((no, nv))
     t2 = ints.V[:no, :no, no:, no:] / d2
     t3b = np.zeros((blocks.nblk, nv, nv, nv))
+    r3b = np.empty_like(t3b)
     adiis = DIIS(space=diis_space)
     # DIIS metric of the full t_ijk^abc: a block stands for 6 (distinct
-    # occupied indices) or 3 (one repeated index) ordered triples
-    wsq = np.sqrt(np.where(blocks.kind == 0, 6.0, 3.0))[:, None, None, None]
+    # occupied indices) or 3 (one repeated index) ordered triples; the T3
+    # error vector carries the weight, the stored T3 vector does not
+    wsq = np.sqrt(np.where(blocks.kind == 0, 6.0, 3.0))
     e_old = rccsdt_ref.energy(t1, t2, ints)
     conv = False
     import time
@@ -240,13 +242,20 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose):
     timings = []
     for cycle in range(max_cycle):
         t0 = time.perf_counter()
-        r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b)
-        normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.linalg.norm(r3b))
+        r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b, r3b)
         with timer('sa.diis'):
-            out = adiis.update([t1 + r1 / d1, t2 + r2 / d2, wsq * (t3b + r3b / d3)])
+            xs, es = adiis.recycle()
+            x3 = xs[2].reshape(t3b.shape) if xs else np.empty_like(t3b)
+            e3 = es[2].reshape(t3b.shape) if es else np.empty_like(t3b)
+            n3 = jacobi(eo3, ev, wsq, t3b, r3b, x3, e3)
+            normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.sqrt(n3))
+            q1, q2 = r1 / d1, r2 / d2
+            # the extrapolated T3 goes into the old t3b array (not a DIIS vector)
+            out = adiis.update([t1 + q1, t2 + q2, x3], errors=[q1, q2, e3],
+                               out=[None, None, t3b])
         t1 = out[0].reshape(no, nv)
         t2 = out[1].reshape(no, no, nv, nv)
-        t3b = out[2].reshape(t3b.shape) / wsq
+        t3b = out[2].reshape(t3b.shape)
         e_new = rccsdt_ref.energy(t1, t2, ints)
         timings.append(time.perf_counter() - t0)
         if verbose:
@@ -383,22 +392,6 @@ def ccsd_residual(D, Fd, t2, imds, nocc, Ws, Wa, t1=None):
     return r1, r2
 
 
-def fvv_term(t3b, Fv, r3b):
-    '''r3b += sum_d Fv_ad t^{dbc} on each of the three virtual axes of every
-    cube (the F_vv term of all three positions).'''
-    from zccsdt.cc.t3pack import axpby
-    nb, v = t3b.shape[0], t3b.shape[1]
-    FvT = np.ascontiguousarray(Fv.T)
-    tmp = np.empty((v, v, v))
-    for b in range(nb):
-        c, r = t3b[b], r3b[b]
-        gemm(Fv, c.reshape(v, -1), r.reshape(v, -1), beta=1.0)
-        gemm(c.reshape(-1, v), FvT, r.reshape(-1, v), beta=1.0)
-        axpby(tmp, c.transpose(1, 0, 2), 1.0, 0.0)
-        y = gemm(Fv, tmp.reshape(v, -1)).reshape(v, v, v)
-        axpby(r, y.transpose(1, 0, 2), 1.0)
-
-
 def add3(dst, srcs, alphas=(1.0, 1.0, 1.0)):
     '''dst += sum_k alphas[k] srcs[k] for (v,v,v) arrays / strided views (C
     kernel zc_add3_strided; dst C-contiguous).'''
@@ -422,120 +415,136 @@ def add3(dst, srcs, alphas=(1.0, 1.0, 1.0)):
     return dst
 
 
-def t3_pass(blocks, t3b, imds, D, nocc, r3b):
-    '''One loop over sorted occupied pairs (p <= q).  From the gathered cubes
-    T[m, x, y, z] = t_mpq^{xyz} it forms T2g = T(0,2,1,3), T3g = T(0,3,1,2),
-    Y = 2T - T(0,2,1,3) - T(0,3,2,1) (= t~ of the ring) and
-    Z = 2T(0,1,3,2) - T(0,3,1,2) - T(0,2,3,1); for the reversed pair (q, p)
-    the roles are T2g <-> T3g, Y <-> Z.  Adds the ring to r3b and returns the
-    T3 parts (r1, r2, dWv, dWo) of R1, R2, Wv (J) and Wo (J).'''
+def pair_gather(blocks, t3b, p, q, W):
+    '''W[k][x, m, y, z] for the cubes s(x,y,z) = t_mpq^{xyz} of the pair (p, q):
+    k = 0: Y = 2 s(x,y,z) - s(y,x,z) - s(z,y,x),  1: T = s(x,y,z),
+    2: T2 = s(y,x,z),  3: T3 = s(y,z,x),  4: Z = 2 s(x,z,y) - s(y,z,x) - s(z,x,y)
+    (Z is Y with y <-> z).'''
+    from zccsdt.cc import t3pack
     from zccsdt.cc.t3pack import axpby
     no, v = blocks.nocc, t3b.shape[1]
-    o, vs = slice(0, no), slice(no, None)
+    lib = t3pack._lib
+    if t3pack.USE_C and hasattr(lib, 'zc_sa_pair_gather_t_d') and t3b.dtype in (np.float64, np.complex128):
+        bl = blocks.blk[:, p, q]
+        off = np.where(bl >= 0, bl * v ** 3, -1).astype(np.int64)
+        cst = np.array((v * v, v, 1), dtype=np.int64)
+        st = np.ascontiguousarray(cst[blocks.axes[:, p, q]].ravel())
+        P = t3pack._p
+        ptr = [t3pack.ctypes.c_void_p(W[k].ctypes.data) for k in range(5)]
+        getattr(lib, 'zc_sa_pair_gather_t_' + t3pack._sfx(t3b.dtype))(
+            P(t3b), t3pack._I64(no), t3pack._I64(v), P(off), P(st), *ptr,
+            t3pack._I64(no * v * v), t3pack._I64(v * v))
+        return W
+    for m in range(no):
+        c = blocks.cube(t3b, m, p, q)
+        axpby(W[1][:, m], c, 1.0, 0.0)
+        axpby(W[2][:, m], c.transpose(1, 0, 2), 1.0, 0.0)
+        axpby(W[3][:, m], c.transpose(2, 0, 1), 1.0, 0.0)
+        axpby(W[0][:, m], 2 * c - c.transpose(1, 0, 2) - c.transpose(2, 1, 0), 1.0, 0.0)
+        axpby(W[4][:, m], 2 * c.transpose(0, 2, 1) - c.transpose(2, 0, 1) - c.transpose(1, 2, 0),
+              1.0, 0.0)
+    return W
+
+
+def t3_pass(blocks, t3b, imds, D, nocc, r3b):
+    '''One loop over sorted occupied pairs (p <= q) with the gathered cubes
+    W[k][x, m, y, z] of t_mpq (pair_gather; the contraction index (x, m) is
+    leading so that each contraction over the gathered cubes is one GEMM over
+    all m): adds the ring X_{i;pq}^{a;bc} (with F_vv) to r3b and returns the
+    T3 parts (r1, r2, dWv, dWo) of R1, R2, Wv (J) and Wo (J).  For the
+    reversed pair (q, p) the roles are T2 <-> T3 and Y <-> Z.'''
+    from zccsdt.timing import timer
+    no, v = blocks.nocc, t3b.shape[1]
+    ov, vv = no * v, v * v
     G, L, Fov = imds['G'], imds['L'], imds['Fov']
     oovo, ooov = D['oovo'], D['ooov']                              # <mn|ej>, <mn|je>
-    Vo = np.ascontiguousarray(D['ovvv'].transpose(1, 0, 2, 3)).reshape(v, -1)        # [a,(m,f,e)]
-    Gm = np.ascontiguousarray(G.transpose(1, 0, 2, 3)).reshape(no, -1)                 # [m,(n,f,e)]
-    J2 = np.ascontiguousarray(imds['WrJ'].transpose(1, 3, 0, 2)).reshape(v * no, no * v)
-    K2 = np.ascontiguousarray(imds['WrK'].transpose(1, 3, 0, 2)).reshape(v * no, no * v)
-    r1 = np.zeros((no, v))
+    # ring operators [(a,i), (d,m)]: J2 = WrJ[m,a,d,i], K2 = WrK[m,a,d,i]
+    J2 = imds['WrJ'].transpose(1, 3, 2, 0).reshape(ov, ov)
+    K2 = imds['WrK'].transpose(1, 3, 2, 0).reshape(ov, ov)
+    JK = np.ascontiguousarray(np.hstack((J2, -K2)))
+    mK2 = np.ascontiguousarray(-K2)
+    # F_vv of the attached position: X_{i;pq}^{a;bc} += sum_d Fv_ad t_ipq^{dbc}
+    JK5 = JK.reshape(v, no, 2, v, no)
+    for i in range(no):
+        JK5[:, i, 1, :, i] += imds['Fv']
+    # (B) operator [(a | m), (x, m', y)]: <m'a|xy> + 1/2 d_ay Fov[m',x] (the
+    # F_ov term rides in, since Z = Y with y <-> z), and G[m',m,x,y] for Wo
+    VG = np.empty((v + no, v, no, v))
+    VG[:v] = D['ovvv'].transpose(1, 2, 0, 3)
+    for a in range(v):
+        VG[a, :, :, a] += 0.5 * Fov.T
+    VG[v:] = G.transpose(1, 2, 0, 3)
+    VG = VG.reshape(v + no, -1)
+    r1x = np.zeros((v, no))                         # r1 as [a, i]
     r2 = np.zeros((no, no, v, v))
-    r2a = np.zeros((no, no, v, v))                  # [i, j, a, b], symmetrized at the end
-    Eab = np.zeros((no, v, v, v))                   # dWv as [i, e, a, b]
-    Eba = np.zeros((no, v, v, v))                   # dWv as [i, e, b, a]
+    # T3 -> W / R2 accumulators [row, i, y, z], rows: r2b (j; [j,i,b,a]),
+    # Eab (e; dWv[a,b,e,i]), r2a (j; [j,i,a,b]), Eba (e; dWv[b,a,e,i])
+    ACC = np.zeros((2 * no + 2 * v, no, v, v))
     dWo = np.zeros((no, v, no, no))
-    T = np.empty((no, v, v, v))
-    T2g, T3g, Y, Z = (np.empty_like(T) for _ in range(4))
-    ov, vv = no * v, v * v
-    from zccsdt.cc import t3pack
-    lib = t3pack._lib
-    use_c = t3pack.USE_C and hasattr(lib, 'zc_sa_pair_gather_d')
-    cst = np.array((v * v, v, 1), dtype=np.int64)
-    from zccsdt.timing import timer
+    W = np.empty((5, v, no, v, v))
+    Wm = W.reshape(5, v, no * vv)
     for p in range(no):
         for q in range(p, no):
-            tg = timer('t3p.gather'); tg.__enter__()
-            if use_c:
-                off = np.array([blocks.blk[m, p, q] * v ** 3 if blocks.blk[m, p, q] >= 0 else -1
-                                for m in range(no)], dtype=np.int64)
-                st = np.ascontiguousarray(np.concatenate([cst[blocks.axes[m, p, q]] for m in range(no)]))
-                P = t3pack._p
-                lib.zc_sa_pair_gather_d(P(t3b), t3pack._I64(no), t3pack._I64(v), P(off), P(st),
-                                        P(T), P(T2g), P(T3g), P(Y), P(Z))
-            else:
-                for m in range(no):
-                    axpby(T[m], blocks.cube(t3b, m, p, q), 1.0, 0.0)
-                axpby(T2g, T.transpose(0, 2, 1, 3), 1.0, 0.0)
-                axpby(T3g, T.transpose(0, 3, 1, 2), 1.0, 0.0)
-                axpby(Y, T, 2.0, 0.0)
-                axpby(Y, T.transpose(0, 2, 1, 3), -1.0)
-                axpby(Y, T.transpose(0, 3, 2, 1), -1.0)
-                axpby(Z, T.transpose(0, 1, 3, 2), 2.0, 0.0)
-                axpby(Z, T.transpose(0, 3, 1, 2), -1.0)
-                axpby(Z, T.transpose(0, 2, 3, 1), -1.0)
-            tg.__exit__(None, None, None)
-            T2, Y2 = T.reshape(ov, vv), Y.reshape(ov, vv)
-            T2g2, T3g2 = T2g.reshape(ov, vv), T3g.reshape(ov, vv)
+            with timer('t3p.gather'):
+                pair_gather(blocks, t3b, p, q, W)
             # ---- ring: X_{i;pq}^{a;bc} = X1[(a,i),(b,c)] + X2[(b,i),(a,c)] + X3[(c,i),(a,b)]
-            tg = timer('t3p.ring_gemm'); tg.__enter__()
-            X1 = gemm(J2, Y2)
-            gemm(K2, T2, X1, alpha=-1.0, beta=1.0)
-            X2 = gemm(K2, T2g2, alpha=-1.0).reshape(v, no, v, v)
-            X3 = gemm(K2, T3g2, alpha=-1.0).reshape(v, no, v, v)
-            X1 = X1.reshape(v, no, v, v)
-            tg.__exit__(None, None, None)
-            tg = timer('t3p.scatter'); tg.__enter__()
-            for i in range(no):
-                parts = (X1[:, i], X2[:, i].transpose(1, 0, 2), X3[:, i].transpose(1, 2, 0))
-                for B, axes in blocks.uses_attached(i, p, q):
-                    add3(r3b[B], [x.transpose(axes) for x in parts])
-            tg.__exit__(None, None, None)
-            tg = timer('t3p.pass1'); tg.__enter__()
-            # ---- pass 1: (A) (m,n) = (pp,qq) summed, external x;  (B) m = x summed
-            orders = [(p, q, T2g, T3g, Y, Z, False)]
-            if q != p:
-                orders.append((q, p, T3g, T2g, Z, Y, True))
-            for pp, qq, Tp, Tq, Yc, Zc, rev in orders:
-                Lpq = L[pp, qq]                                             # [e, f]
-                Gpq = G[pp, qq]
-                Lp = 2 * Gpq - Gpq.T                                        # [f, e]
-                A = -2 * oovo[pp, qq] + ooov[pp, qq].T                      # [e, j]
-                if not rev:
-                    r1 += (gemm(T2, Lpq.reshape(vv, 1)) - gemm(T3g2, np.ascontiguousarray(Lpq.T).reshape(vv, 1))).reshape(no, v)
-                else:
-                    r1 += (gemm(T2, np.ascontiguousarray(Lpq.T).reshape(vv, 1))
-                           - gemm(T2g2, np.ascontiguousarray(Lpq.T).reshape(vv, 1))).reshape(no, v)
-                LpT, AT, ooT = (np.ascontiguousarray(x.T) for x in (Lp, A, oovo[pp, qq]))
-                Gc = np.ascontiguousarray(Gpq)
+            with timer('t3p.ring_gemm'):
+                X1 = gemm(JK, W[0:2].reshape(2 * ov, vv)).reshape(v, no, v, v)
+                X2 = gemm(mK2, W[2].reshape(ov, vv)).reshape(v, no, v, v)
+                X3 = gemm(mK2, W[3].reshape(ov, vv)).reshape(v, no, v, v)
+            with timer('t3p.scatter'):
                 for i in range(no):
-                    # dWv: -sum_f Lp[f,e] C[i,b,f,a] + sum_f G[e,f] C[i,f,a,b]
-                    gemm(LpT, Tp[i].reshape(v, vv), Eba[i].reshape(v, vv), alpha=-1.0, beta=1.0)
-                    gemm(Gc, T[i].reshape(v, vv), (Eba if rev else Eab)[i].reshape(v, vv),
-                         beta=1.0)
-                    # R2 (oovo), i-part: sum_e A[e,j] C[i,a,e,b] + oovo[e,j] C[i,e,a,b]
-                    gemm(AT, Tp[i].reshape(v, vv), r2a[i].reshape(no, vv), beta=1.0)
-                    if rev:
-                        jb = gemm(ooT, T[i].reshape(v, vv)).reshape(no, v, v)   # [j, b, a]
-                        axpby(r2a[i], jb.transpose(0, 2, 1), 1.0)
-                    else:
-                        gemm(ooT, T[i].reshape(v, vv), r2a[i].reshape(no, vv), beta=1.0)
-                # (B): F, ovvv and Wo terms
-                r2[pp, qq] += 0.5 * gemm(Fov.reshape(1, -1), Yc.reshape(ov, vv)).reshape(v, v)
-                r2[pp, qq] += 0.5 * gemm(Vo, Yc.reshape(-1, v))
-                r2[pp, qq] += 0.5 * gemm(Vo, Zc.reshape(-1, v)).T
-                dWo[:, :, qq, pp] += gemm(Gm, Zc.reshape(-1, v))
-            tg.__exit__(None, None, None)
-    r2 = r2 + r2a
+                    parts = (X1[:, i], X2[:, i].transpose(1, 0, 2), X3[:, i].transpose(1, 2, 0))
+                    for B, axes in blocks.uses_attached(i, p, q):
+                        add3(r3b[B], [x.transpose(axes) for x in parts])
+            with timer('t3p.pass1'):
+                Gpq, Gqp = G[p, q], G[q, p]
+                Lp = lambda g: 2 * g - g.T                         # noqa: E731  [f, e]
+                A = lambda a, b: (-2 * oovo[a, b] + ooov[a, b].T).T   # noqa: E731  [j, e]
+                if p == q:
+                    # (A) contractions over x for i = m: rows Eab, r2a and r2a, Eba
+                    op1 = np.vstack((Gpq, oovo[p, p].T))
+                    gemm(op1, Wm[1], ACC[no:2 * no + v].reshape(no + v, -1), beta=1.0)
+                    op2 = np.vstack((A(p, p), -Lp(Gpq).T))
+                    gemm(op2, Wm[2], ACC[no + v:].reshape(no + v, -1), beta=1.0)
+                    lv = (L[p, p].ravel(), None, L[p, p].T.ravel())
+                    cf = 0.5
+                else:
+                    op1 = np.vstack((oovo[q, p].T, Gpq, oovo[p, q].T, Gqp))
+                    gemm(op1, Wm[1], ACC.reshape(2 * (no + v), -1), beta=1.0)
+                    op2 = np.empty((no + v, 2, v))
+                    op2[:no, 0], op2[:no, 1] = A(p, q), A(q, p)
+                    op2[no:, 0], op2[no:, 1] = -Lp(Gpq).T, -Lp(Gqp).T
+                    gemm(op2.reshape(no + v, 2 * v), Wm[2:4].reshape(2 * v, -1),
+                         ACC[no + v:].reshape(no + v, -1), beta=1.0)
+                    lv = ((L[p, q] + L[q, p].T).ravel(), L[q, p].T.ravel(), L[p, q].T.ravel())
+                    cf = 1.0
+                # R1: sum_{yz} over T (+), T2 and T3 (-)
+                for k, sgn in ((1, 1.0), (2, -1.0), (3, -1.0)):
+                    if lv[k - 1] is not None:
+                        gemm(W[k].reshape(ov, vv), np.ascontiguousarray(lv[k - 1]).reshape(vv, 1),
+                             r1x.reshape(ov, 1), alpha=sgn, beta=1.0)
+                # (B): R2 (ovvv, F_ov) and Wo: Y and Z against [Vo; G]
+                PY = gemm(VG, W[0].reshape(-1, v))
+                PZ = gemm(VG, W[4].reshape(-1, v))
+                r2[p, q] += cf * (PY[:v] + PZ[:v].T)
+                dWo[:, :, q, p] += PZ[v:]
+                if p != q:
+                    dWo[:, :, p, q] += PY[v:]
+    r2b, Eab = ACC[:no], ACC[no:no + v]
+    r2a, Eba = ACC[no + v:2 * no + v], ACC[2 * no + v:]
+    r2 = r2 + r2a.transpose(1, 0, 2, 3) + r2b.transpose(1, 0, 3, 2)
     r2 = r2 + r2.transpose(1, 0, 3, 2)
-    dWv = Eab.transpose(2, 3, 1, 0) + Eba.transpose(3, 2, 1, 0)
-    return r1, r2, dWv, dWo
+    dWv = Eab.transpose(2, 3, 0, 1) + Eba.transpose(3, 2, 0, 1)
+    return np.ascontiguousarray(r1x.T), r2, dWv, dWo
 
 
-def residuals(ints, blocks, t1, t2, t3b):
+def residuals(ints, blocks, t1, t2, t3b, r3b=None):
     '''(R1, R2, R3 blocks): dressed small blocks, the packed pp operator in
     one pass, explicit intermediates and CCSD part, one loop over occupied
-    pairs for the ring and T3 -> T1/T2/W, then drive, ladders and F terms.'''
-    from zccsdt.sa.t3blocks import project_null
+    pairs for the ring (with F_vv) and T3 -> T1/T2/W, then drive and the
+    ladders (F_oo in the hh operator).  ``r3b``: optional output array.'''
+    from zccsdt.sa.t3blocks import project_null, zero
     from zccsdt.timing import timer
     no = ints.nocc
     with timer('sa.dress'):
@@ -556,15 +565,13 @@ def residuals(ints, blocks, t1, t2, t3b):
         Bvo = dress_block(ints.V, t1, no, 'vvoo', ket=False)
         D['vvoo'] = Bvo + contract('if,abfj->abij', t1, B) + contract('jf,bafi->abij', t1, B)
         r1, r2 = ccsd_residual(D, Fd, t2, im, no, Ws, Wa, t1=t1)
-    r3b = np.zeros_like(t3b)
+    r3b = np.zeros_like(t3b) if r3b is None else zero(r3b)
     with timer('sa.t3_pass'):
         r1t, r2t, dWv, dWo = t3_pass(blocks, t3b, im, D, no, r3b)
     with timer('sa.drive'):
         drive(blocks, t2, im['WvJ'] + dWv, im['WoJ'] + dWo, r3b)
     with timer('sa.pp_ladder'):
         ladder_pp(blocks, t3b, Ws, Wa, r3b)
-    with timer('sa.fvv'):
-        fvv_term(t3b, im['Fv'], r3b)
     with timer('sa.hh_ladder'):
         ladder_hh(blocks, t3b, hh_operator(im['Whh'], im['Fo']), r3b)
     with timer('sa.project'):

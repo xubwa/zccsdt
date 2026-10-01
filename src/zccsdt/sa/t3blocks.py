@@ -21,6 +21,7 @@ computed term, so that blocks with repeated indices receive every
 contribution exactly once.
 '''
 
+import ctypes
 from itertools import permutations, product
 
 import numpy as np
@@ -109,9 +110,36 @@ def project_null(r3b):
     return r3b - s / 6
 
 
-def denominators(blocks, eo, ev):
-    '''e_i + e_j + e_k - e_a - e_b - e_c for every block.'''
-    t = blocks.tri
-    o = eo[t[:, 0]] + eo[t[:, 1]] + eo[t[:, 2]]
-    v = ev[:, None, None] + ev[None, :, None] + ev[None, None, :]
-    return o[:, None, None, None] - v[None]
+def jacobi(eo3, ev, w, t3b, r3b, x3, e3):
+    '''Jacobi step with the DIIS vectors in one pass: x3 = t3b + q and
+    e3 = w[B] q with q = r3b / (e_i + e_j + e_k - e_a - e_b - e_c), where
+    eo3[B] is the occupied part of block B and w[B] its DIIS metric weight.
+    Returns sum r3b^2.'''
+    from zccsdt.cc import t3pack
+    lib = t3pack._lib
+    arrs = (t3b, r3b, x3, e3)
+    if (t3pack.USE_C and hasattr(lib, 'zc_sa_jacobi_d')
+            and all(a.dtype == np.float64 and a.flags.c_contiguous for a in arrs)):
+        f = lib.zc_sa_jacobi_d
+        f.restype = ctypes.c_double
+        P, I64 = t3pack._p, t3pack._I64
+        c = [np.ascontiguousarray(a, dtype=np.float64) for a in (eo3, ev, w)]
+        return f(I64(t3b.shape[0]), I64(t3b.shape[1]), P(c[0]), P(c[1]), P(c[2]),
+                 P(t3b), P(r3b), P(x3), P(e3))
+    d = eo3[:, None, None, None] - (ev[:, None, None] + ev[None, :, None] + ev[None, None, :])
+    q = r3b / d
+    x3[...] = t3b + q
+    e3[...] = w[:, None, None, None] * q
+    return float(np.vdot(r3b, r3b).real)
+
+
+def zero(x):
+    '''x[...] = 0 with OpenMP threads (C-contiguous float64), else numpy.'''
+    from zccsdt.cc import t3pack
+    lib = t3pack._lib
+    if (t3pack.USE_C and hasattr(lib, 'zc_vzero_d') and x.dtype == np.float64
+            and x.flags.c_contiguous):
+        lib.zc_vzero_d(t3pack._I64(x.size), t3pack._p(x))
+    else:
+        x[...] = 0
+    return x

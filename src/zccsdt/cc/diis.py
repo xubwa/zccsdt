@@ -37,16 +37,20 @@ def _dot(a, b):
     return res[0]
 
 
-def _lincomb(xs, c):
+def _lincomb(xs, c, out=None):
     dtype = xs[0].dtype
     c = np.ascontiguousarray(c, dtype=dtype)
     f = _vec_c('vlincomb', dtype)
     if f is None:
-        out = c[0] * xs[0]
+        res = c[0] * xs[0]
         for ci, xi in zip(c[1:], xs[1:]):
-            out += ci * xi
+            res += ci * xi
+        if out is None:
+            return res
+        out[...] = res
         return out
-    out = np.empty_like(xs[0])
+    if out is None:
+        out = np.empty_like(xs[0])
     ptrs = (ctypes.c_void_p * len(xs))(*[x.ctypes.data for x in xs])
     f(ctypes.c_int64(out.size), ctypes.c_int64(len(xs)), ptrs, t3pack._p(c),
       t3pack._p(out))
@@ -57,7 +61,12 @@ class DIIS:
     '''DIIS on a vector given as a list of arrays (e.g. [t1, t2, t3] parts),
     so that no concatenated copy is ever formed.  update() returns the
     extrapolated parts; after it, err_norms holds |x_new - x_prev| per part
-    (None on the first call).'''
+    (None on the first call).
+
+    The caller may pass the error vectors itself (``errors``: x_new - x_prev
+    in any metric, e.g. the scaled Jacobi step), write the extrapolation into
+    its own arrays (``out``), and take the arrays of the vector that a full
+    subspace is about to drop (``recycle``) to build the next vector in.'''
 
     def __init__(self, space=8):
         self.space = space
@@ -66,20 +75,43 @@ class DIIS:
         self.xprev = None
         self.err_norms = None
 
-    def update(self, parts):
+    def recycle(self):
+        '''If the subspace is full, drop its oldest vector now and return its
+        (x parts, error parts) for the caller to overwrite; (None, None)
+        otherwise.'''
+        if len(self.xs) < self.space:
+            return None, None
+        self.H = self.H[1:, 1:]
+        return self.xs.pop(0), self.es.pop(0)
+
+    def update(self, parts, errors=None, out=None):
         x = [np.ascontiguousarray(p).ravel() for p in parts]
-        if self.xprev is None:
-            self.xprev = x
+        first = self.xprev is None and not self.xs
+        if first:
+            # the first vector only starts the sequence (as in pyscf)
+            self.xprev = x if errors is None else True
             self.err_norms = None
-            return x
+            if out is None:
+                return x
+            res = []
+            for xi, o in zip(x, out):
+                if o is None:
+                    res.append(xi)
+                else:
+                    o.ravel()[...] = xi
+                    res.append(o.ravel())
+            return res
         reuse = None
         if len(self.xs) == self.space:
             self.xs.pop(0)
             reuse = self.es.pop(0)          # recycle the oldest error vectors
             self.H = self.H[1:, 1:]
-        with timer('diis.sub'):
-            e = [_sub(a, b, None if reuse is None else r)
-                 for a, b, r in zip(x, self.xprev, reuse or [None] * len(x))]
+        if errors is not None:
+            e = [np.ascontiguousarray(p).ravel() for p in errors]
+        else:
+            with timer('diis.sub'):
+                e = [_sub(a, b, None if reuse is None else r)
+                     for a, b, r in zip(x, self.xprev, reuse or [None] * len(x))]
         with timer('diis.dot'):
             self.err_norms = [np.sqrt(abs(_dot(ei, ei))) for ei in e]
         self.xs.append(x)
@@ -105,6 +137,9 @@ class DIIS:
             c = v[:, idx] @ ((v[:, idx].T.conj() @ g) / w[idx])
         else:
             c = np.linalg.solve(B, g)
+        outs = [None] * len(x) if out is None else [None if o is None else o.ravel() for o in out]
         with timer('diis.lincomb'):
-            self.xprev = [_lincomb([xk[j] for xk in self.xs], c[1:]) for j in range(len(x))]
-        return self.xprev
+            res = [_lincomb([xk[j] for xk in self.xs], c[1:], outs[j]) for j in range(len(x))]
+        # with caller-supplied errors the previous extrapolation is not kept
+        self.xprev = res if errors is None else True
+        return res
