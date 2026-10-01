@@ -73,7 +73,12 @@ class Context:
     def G(self, q, r, s):
         '''G[m; c, d] = 1/2 Go - G1 - G2 for the occupied indices (q, r, s):
         Go = sum_n <mn|qs> t_rn^cd, G1 = sum_e <md|es> t_qr^ec,
-        G2 = sum_e <mc|qe> t_rs^ed (an o^4 v^2 array if stored for all).'''
+        G2 = sum_e <mc|qe> t_rs^ed (an o^4 v^2 array if stored for all).
+
+        The small products go through zccsdt.blas.gemm as well: calls into
+        numpy's own BLAS between the threaded GEMMs of the quadruple loop
+        (np.matmul is 2-3 times faster for these sizes alone) made those
+        twice as slow (the two libraries share the OpenMP thread pool).'''
         no, v, t2 = self.no, self.nv, self.t2
         out = gemm(self._oooo[q, s], t2[r].reshape(no, -1), alpha=0.5).reshape(no, v, v)
         g1 = gemm(self._ovvo[s].reshape(no * v, v), t2[q, r]).reshape(no, v, v)      # [m,d,c]
