@@ -139,3 +139,4 @@ def test_blocks_from_ao_integrals():
     b = E.residuals(lazy, B, t1, t2, t3b)
     for x, y in zip(a, b):
         assert abs(x - y).max() < 1e-11 * max(1.0, abs(x).max())
+

@@ -65,6 +65,12 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
     ps, pa = v * (v + 1) // 2, v * (v - 1) // 2
     I64, P = t3pack._I64, t3pack._p
     arr = lambda x: np.array(x, dtype=np.int64).reshape(-1, 4)   # noqa: E731
+    # work arrays for the largest batch (3 full views per block)
+    mcol = 3 * min(batch, nb) * v
+    buf = (lambda name, n: blocks.buffer(name, (n,))) if hasattr(blocks, 'buffer') \
+        else (lambda name, n: np.empty(n))
+    Tsb, Tab = buf('pp.Ts', ps * mcol), buf('pp.Ta', pa * mcol)
+    Sb, Ab = buf('pp.S', ps * mcol), buf('pp.A', pa * mcol)
     for b0 in range(0, nb, batch):
         full, sym, fplace, splace = [], [], [], []
         for b in range(b0, min(b0 + batch, nb)):
@@ -76,8 +82,8 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
                     plc.append((b * v3,) + view[pl] + (c,))
         nf, ns = len(full), len(sym)
         ncol = (nf + ns) * v
-        Ts = np.empty((ps, ncol))
-        Ta = np.empty((pa, nf * v))
+        Ts = Tsb[:ps * ncol].reshape(ps, ncol)
+        Ta = Tab[:pa * nf * v].reshape(pa, nf * v)
         F, S_ = arr(full), arr(sym)
         _t = timer('pp.pack'); _t.__enter__()
         if nf:
@@ -93,8 +99,8 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
                                   None, I64(0))
         _t.__exit__(None, None, None)
         with timer('pp.gemm'):
-            S = gemm(Ws, Ts)
-            A = gemm(Wa, Ta) if nf else None
+            S = gemm(Ws, Ts, Sb[:ps * ncol].reshape(ps, ncol))
+            A = gemm(Wa, Ta, Ab[:pa * nf * v].reshape(pa, nf * v)) if nf else None
         _t = timer('pp.unpack'); _t.__enter__()
         for plc, Sp, Ap, lda, coff in ((fplace, S, A, nf * v, 0), (splace, S, None, 0, nf)):
             if not plc:
@@ -511,7 +517,7 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
     T3 parts (r1, r2, Eab, Eba, dWo) of R1, R2, Wv (J) and Wo (J), with
     dWv[a,b,e,i] = Eab[e,i,a,b] + Eba[e,i,b,a].  For the
     reversed pair (q, p) the roles are T2 <-> T3 and Y <-> Z.'''
-    from zccsdt.sa.t3blocks import scatter
+    from zccsdt.sa.t3blocks import scatter, zero
     from zccsdt.timing import timer
     no, v = blocks.nocc, t3b.shape[1]
     ov, vv = no * v, v * v
@@ -538,19 +544,20 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
     r2 = np.zeros((no, no, v, v))
     # T3 -> W / R2 accumulators [row, i, y, z], rows: r2b (j; [j,i,b,a]),
     # Eab (e; dWv[a,b,e,i]), r2a (j; [j,i,a,b]), Eba (e; dWv[b,a,e,i])
-    ACC = np.zeros((2 * no + 2 * v, no, v, v))
+    ACC = zero(blocks.buffer('t3p.acc', (2 * no + 2 * v, no, v, v)))
     dWo = np.zeros((no, v, no, no))
-    W = np.empty((5, v, no, v, v))
+    W = blocks.buffer('t3p.W', (5, v, no, v, v))
     Wm = W.reshape(5, v, no * vv)
+    Xb = blocks.buffer('t3p.X', (3, ov, vv))
     for p in range(no):
         for q in range(p, no):
             with timer('t3p.gather'):
                 pair_gather(blocks, t3b, p, q, W)
             # ---- ring: X_{i;pq}^{a;bc} = X1[(a,i),(b,c)] + X2[(b,i),(a,c)] + X3[(c,i),(a,b)]
             with timer('t3p.ring_gemm'):
-                X1 = gemm(JK, W[0:2].reshape(2 * ov, vv)).reshape(v, no, v, v)
-                X2 = gemm(mK2, W[2].reshape(ov, vv)).reshape(v, no, v, v)
-                X3 = gemm(mK2, W[3].reshape(ov, vv)).reshape(v, no, v, v)
+                X1 = gemm(JK, W[0:2].reshape(2 * ov, vv), Xb[0]).reshape(v, no, v, v)
+                X2 = gemm(mK2, W[2].reshape(ov, vv), Xb[1]).reshape(v, no, v, v)
+                X3 = gemm(mK2, W[3].reshape(ov, vv), Xb[2]).reshape(v, no, v, v)
             with timer('t3p.scatter'):
                 items = []
                 for i in range(no):
@@ -623,8 +630,9 @@ def drive_hh(blocks, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=1 << 29):
     B[v:] = -Wo.transpose(0, 2, 3, 1)                   # [m, p, q, z] = -Wo[m,z,p,q]
     B = B.reshape(v + no, -1)
     nx = int(max(1, min(v, max_bytes // (8 * no * no * vv))))
-    Tbuf = np.empty(no * no * vv * nx)
-    Kbuf = np.empty(nx * vv * no * no)
+    Tbuf = blocks.buffer('dh.T', (no * no * vv * nx,))
+    Kbuf = blocks.buffer('dh.K', (nx * vv * no * no,))
+    Hbuf = blocks.buffer('dh.H', (len(pi) * vv * nx,))
     from zccsdt.cc.t3pack import axpby
     A = np.empty((v + no, v, v))
     for k in range(no):
@@ -646,7 +654,8 @@ def drive_hh(blocks, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=1 << 29):
             with timer('dh.gather'):
                 gather_boxes(t3b, np.where(off0 >= 0, off0 + x0 * st[:, 2], -1), st, T)
             with timer('dh.H_gemm'):
-                H = gemm(W2T, T.reshape(no * no, -1)).reshape(len(pi), v, v, n)
+                H = gemm(W2T, T.reshape(no * no, -1),
+                         Hbuf[:len(pi) * vv * n].reshape(len(pi), -1)).reshape(len(pi), v, v, n)
             with timer('dh.scatter'):
                 items = []
                 for c, (i, j) in enumerate(zip(pi, pj)):
@@ -656,6 +665,19 @@ def drive_hh(blocks, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=1 << 29):
                         lo = tuple(x0 if axes[a] == 0 else 0 for a in range(3))
                         items.append((Bk, lo, [x.transpose(axes) for x in srcs]))
                 scatter(r3b, items)
+
+
+def dressed_blocks(ints, t1):
+    '''(D, Fd): the T1-dressed blocks of DRESSED plus vovv, vooo and the bare
+    oovv, and the dressed Fock matrix.'''
+    bb = BareBlocks.of(ints)
+    memo = {}
+    D = {k: dress_block(bb, t1, k, memo=memo) for k in DRESSED}
+    # <am|fe> = <ma|ef> and <am|ji> = <ma|ij> after dressing as well
+    D['vovv'] = D['ovvv'].transpose(1, 0, 3, 2)
+    D['vooo'] = dress_block(bb, t1, 'ovoo', memo=memo).transpose(1, 0, 3, 2)
+    D['oovv'] = bb.get('oovv')
+    return D, dress_fock(bb, ints.fock, t1)
 
 
 def residuals(ints, blocks, t1, t2, t3b, r3b=None):
@@ -668,13 +690,8 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None):
     no = ints.nocc
     bb = BareBlocks.of(ints)
     with timer('sa.dress'):
-        memo = {}
-        D = {k: dress_block(bb, t1, k, memo=memo) for k in DRESSED}
-        # <am|fe> = <ma|ef> and <am|ji> = <ma|ij> after dressing as well
-        D['vovv'] = D['ovvv'].transpose(1, 0, 3, 2)
-        D['vooo'] = dress_block(bb, t1, 'ovoo', memo=memo).transpose(1, 0, 3, 2)
-        G = D['oovv'] = bb.get('oovv')
-        Fd = dress_fock(bb, ints.fock, t1)
+        D, Fd = dressed_blocks(ints, t1)
+        G = D['oovv']
     with timer('sa.Wpp'):
         Ws, Wa = pp_operator_packed(ints, t1, t2)
     with timer('sa.imds'):
@@ -905,7 +922,10 @@ def pp_operator_packed(ints, t1, t2):
     for (r0, r1), bare, U, G, sgnB in (((s0, s1), c['Vs'], c['Us'], c['Gs'], -1.0),
                                         ((a0, a1), c['Va'], c['Ua'], c['Ga'], 1.0)):
         CT = np.ascontiguousarray(tau[:, r0, r1].T)              # [(ab), (mn)]
-        W = np.empty_like(bare)
+        ws = ints.__dict__.setdefault('_sa_wpp', {})
+        W = ws.get(len(r0))
+        if W is None or W.shape != bare.shape:
+            W = ws[len(r0)] = np.empty_like(bare)
         tB = np.ascontiguousarray(sgnB * t1)
         lib.zc_vvvv_dress_d(P(W), P(bare), I64(len(r0)), I64(bare.shape[1]),
                             P(np.ascontiguousarray(r0, dtype=np.int64)),

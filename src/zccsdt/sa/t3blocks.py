@@ -84,6 +84,16 @@ class Blocks:
             self._ord[t] = out
         return self._ord[t]
 
+    def buffer(self, name, shape, dtype=np.float64):
+        '''Work array kept between iterations (contents undefined): large
+        temporaries are not reallocated, which would fault in fresh pages
+        each time.'''
+        ws = self.__dict__.setdefault('_ws', {})
+        x = ws.get(name)
+        if x is None or x.shape != tuple(shape) or x.dtype != dtype:
+            x = ws[name] = np.empty(shape, dtype=dtype)
+        return x
+
     def view(self, p, q, r, v):
         '''(element offset into t3b, strides) of the cube view t_pqr^{xyz}
         (offset -1 for p = q = r).'''
