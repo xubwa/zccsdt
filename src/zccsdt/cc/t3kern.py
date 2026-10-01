@@ -45,7 +45,9 @@ def _c(a, dtype):
 
 
 def _record(name, stats):
-    for k, part in enumerate(('gather', 'gemm', 'reduce')):
+    for k, part in enumerate(('gather', 'gemm', 'reduce', 'drive')):
+        if k >= len(stats) or (k == 3 and stats[k] == 0):
+            continue
         timing._totals['%s.%s' % (name, part)] += stats[k]
         timing._counts['%s.%s' % (name, part)] += 1
 
@@ -60,7 +62,7 @@ def pass1(T3p, om, vm, batch, GPd, GmQ, gpp, fT):
     r1 = np.zeros(nv * no, dtype=dt)
     rA = np.zeros((om.npair, vm.npair), dtype=dt)
     GPd, GmQ, gpp, fT = (_c(x, dt) for x in (GPd, GmQ, gpp, fT))
-    st = np.zeros(3)
+    st = np.zeros(4)
     getattr(_lib, 'zc_t3_pass1_' + _sfx(dt))(
         _p(T3p), _i(om.ntri), _i(vm.ntri), _i(no), _i(nv), _i(om.npair),
         _i(vm.npair), _p(om.tri_c), _p(om.sgn_c), _p(vm.tri_c), _p(vm.sgn_c),
@@ -70,21 +72,21 @@ def pass1(T3p, om, vm, batch, GPd, GmQ, gpp, fT):
     return Xacc, Yall, r1, rA
 
 
-def pass2(T3p, om, vm, batch, Wring, t2mnT, WvT2, WoT, t2P, R):
+def pass2(T3p, om, vm, batch, Wring, Adrv, Bdrv, R):
     dt = T3p.dtype
-    Wring, t2mnT, WvT2, WoT, t2P = (_c(x, dt) for x in (Wring, t2mnT, WvT2, WoT, t2P))
-    st = np.zeros(3)
+    Wring, Adrv, Bdrv = (_c(x, dt) for x in (Wring, Adrv, Bdrv))
+    st = np.zeros(4)
     getattr(_lib, 'zc_t3_pass2_' + _sfx(dt))(
         _p(T3p), _i(om.ntri), _i(vm.ntri), _i(om.n), _i(vm.n), _i(om.npair),
         _i(vm.npair), _p(om.tri_c), _p(om.sgn_c), _p(om.free_c), _p(om.pair_c),
         _p(vm.tri_c), _p(vm.sgn_c), _p(vm.free_c), _p(vm.pair_c), _i(batch),
-        _p(Wring), _p(t2mnT), _p(WvT2), _p(WoT), _p(t2P), _p(R), _p(st))
+        _p(Wring), _p(Adrv), _p(Bdrv), _p(R), _p(st))
     _record('pass2', st)
 
 
 def pp_ladder(T3p, om, vm, batch, Wpp, R):
     dt = T3p.dtype
-    st = np.zeros(3)
+    st = np.zeros(4)
     getattr(_lib, 'zc_t3_ppl_' + _sfx(dt))(
         _p(T3p), _i(om.ntri), _i(vm.ntri), _i(vm.n), _i(vm.npair),
         _p(vm.tri_c), _p(vm.sgn_c), _p(vm.free_c), _p(vm.pair_c), _i(batch),

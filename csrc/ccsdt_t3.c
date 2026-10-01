@@ -32,7 +32,8 @@
 #endif
 #include <omp.h>
 
-/* stats[]: accumulated wall seconds: 0 gather, 1 gemm, 2 reduce/other */
+/* stats[]: accumulated wall seconds: 0 gather, 1 gemm, 2 reduce/other,
+ * 3 drive GEMM (pass 2) */
 #define TIC(k) do { double _t = omp_get_wtime(); (void)0
 #define TOC(k) stats[k] += omp_get_wtime() - _t; } while (0)
 
@@ -160,12 +161,12 @@ void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                                                                                \
 /* Pass 2.  For every batch of pairs:                                          \
  *   Z[P, (a, i), Q]  = Wring[(a, i), (d, m)] T[P, (d, m), Q]                  \
- *   Z[(P, c), (i, Q)] -= t2mnT[P, c, e] WvT2[e, (i, Q)]                        \
- *   Z[(P, a), (k, Q)] -= WoT[P, a, m] t2P[m, (k, Q)]                           \
+ *   Z[(P, c), (i, Q)] -= Adrv[P, c, :] Bdrv[:, (i, Q)]   (both drive terms:   \
+ *       Adrv = [t2mnT | WoT] (npo, nv, nv + no), Bdrv = [WvT2; t2P])           \
  *   R[I, A] += sum_{r: pair_r(I) in batch} rs_r sum_s rs_s                    \
  *              Z[pair_r(I) - p0, a_s(A), free_r(I), Q_s(A)]                   \
- * Wring: (nv * no, nv * no); t2mnT: (npo, nv, nv); WvT2: (nv, no * nvp);      \
- * WoT: (npo, nv, no); t2P: (no, no * nvp). */                                 \
+ * Wring: (nv * no, nv * no); Adrv: (npo, nv, nv + no); Bdrv: (nv + no,       \
+ * no * nvp). */                                                               \
 void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                        int64_t no, int64_t nv, int64_t npo, int64_t nvp,       \
                        const int64_t *otri, const int8_t *osgn,                \
@@ -173,8 +174,8 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                        const int64_t *vtri, const int8_t *vsgn,                \
                        const int64_t *vfree, const int64_t *vpair,             \
                        int64_t batch,                                          \
-                       const T *Wring, const T *t2mnT, const T *WvT2,          \
-                       const T *WoT, const T *t2P, T *R, double *stats)                       \
+                       const T *Wring, const T *Adrv, const T *Bdrv,           \
+                       T *R, double *stats)                       \
 {                                                                              \
     const int64_t dm = nv * no;                                                \
     T *Tb = malloc(sizeof(T) * batch * dm * nvp);                              \
@@ -190,11 +191,13 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
         for (int64_t P = 0; P < nbp; P++)                                      \
             gemm_##SFX(0, 0, dm, nvp, dm, 1.0, Wring, dm, Tb + P * sP, nvp,    \
                        0.0, Z + P * sP, nvp);                                  \
-        gemm_##SFX(0, 0, nbp * nv, no * nvp, nv, -1.0, t2mnT + p0 * nv * nv,   \
-                   nv, WvT2, no * nvp, 1.0, Z, no * nvp);                      \
-        gemm_##SFX(0, 0, nbp * nv, no * nvp, no, -1.0, WoT + p0 * nv * no,     \
-                   no, t2P, no * nvp, 1.0, Z, no * nvp);                       \
         TOC(1);                                                                \
+        TIC(3);                                                                \
+        /* both drive terms in one GEMM: K = nv + no, one pass over Z */      \
+        gemm_##SFX(0, 0, nbp * nv, no * nvp, nv + no, -1.0,                    \
+                   Adrv + p0 * nv * (nv + no), nv + no, Bdrv, no * nvp, 1.0,   \
+                   Z, no * nvp);                                               \
+        TOC(3);                                                                \
         TIC(2);                                                                \
         _Pragma("omp parallel for schedule(dynamic, 4)")                       \
         for (int64_t it = 0; it < nto; it++) {                                    \

@@ -381,8 +381,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     t2P_flat = t2P.reshape(nocc, -1)                                     # [m, (k,Q)]
     if t3kern.USE_C:
         with timer('pass2'):
-            t3kern.pass2(T3p, om, vm, nb, WringT, t2mn.transpose(0, 2, 1), WvT2,
-                         Wo.transpose(2, 1, 0), t2P_flat, R)
+            Adrv = np.concatenate((t2mn.transpose(0, 2, 1), Wo.transpose(2, 1, 0)),
+                                  axis=2)                 # (P, c, e | m)
+            Bdrv = np.concatenate((WvT2, t2P_flat), axis=0)  # (e | m, (i, Q))
+            t3kern.pass2(T3p, om, vm, nb, WringT, Adrv, Bdrv, R)
     else:
         with timer('pass2'):
             for pb in batches:
