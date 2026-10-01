@@ -16,11 +16,13 @@ def _vec_c(name, dtype):
     return getattr(t3pack._lib, 'zc_%s_%s' % (name, t3pack._sfx(dtype)))
 
 
-def _sub(a, b):
+def _sub(a, b, out=None):
+    if out is None or out.shape != a.shape or out.dtype != a.dtype:
+        out = np.empty_like(a)
     f = _vec_c('vsub', a.dtype)
     if f is None:
-        return a - b
-    out = np.empty_like(a)
+        np.subtract(a, b, out=out)
+        return out
     f(ctypes.c_int64(a.size), t3pack._p(a), t3pack._p(b), t3pack._p(out))
     return out
 
@@ -69,12 +71,14 @@ class DIIS:
             self.xprev = x
             self.err_norms = None
             return x
-        e = [_sub(a, b) for a, b in zip(x, self.xprev)]
-        self.err_norms = [np.sqrt(abs(_dot(ei, ei))) for ei in e]
+        reuse = None
         if len(self.xs) == self.space:
             self.xs.pop(0)
-            self.es.pop(0)
+            reuse = self.es.pop(0)          # recycle the oldest error vectors
             self.H = self.H[1:, 1:]
+        e = [_sub(a, b, None if reuse is None else r)
+             for a, b, r in zip(x, self.xprev, reuse or [None] * len(x))]
+        self.err_norms = [np.sqrt(abs(_dot(ei, ei))) for ei in e]
         self.xs.append(x)
         self.es.append(e)
         n = len(self.es)

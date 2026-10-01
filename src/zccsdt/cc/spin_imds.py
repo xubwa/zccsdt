@@ -179,18 +179,62 @@ def dressed_vvvv_blocks(se, t1, om, vm):
 
 def bra_dressed_vvvo(se, t1, om, vm):
     '''Bra-dressed <ab||ei> packed over a<b, dense (npair_v, nvir, nocc)
-    (see ccsdt_opt.bra_dressed_vvvo_pp).'''
+    (see ccsdt_opt.bra_dressed_vvvo_pp), written block by block:
+      B[(ab), e, i] = <ab||ei> - L[a,b,e,i] + L[b,a,e,i] + sum_{m<n} tau1[mn,ab] <mn||ei>,
+      <ab||ei> = -<ie||ab>^*,  L[a,b,e,i] = sum_m t1[m,a] <mb||ei>.'''
+    nocc, nvir = t1.shape
     o, v = se.spaces['o'], se.spaces['v']
     Qs, Ps = pair_space('Q', vm), pair_space('P', om)
-    T1 = SpinTensor.from_dense(t1, (o, v), sig=(-1, 1))
-    vvvo = get_block(se, 'vvvo')
-    L = einsum('ma,mbei->abei', T1, get_block(se, 'ovvo'))
-    B = pack_pairs(vvvo - (L - L.transpose(1, 0, 2, 3)), 0, Qs)       # (Q, e, i)
+    dtype = np.result_type(t1, se.fock)
+    B = np.zeros((vm.npair, nvir, nocc), dtype=dtype)
+    G = pack_pairs(se.g['ovvv'], 2, Qs)                     # [i, e, Q] blocks
+    for (si, se_, h), blk in G.blocks.items():
+        lo, hi = vm.blocks[h]
+        (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
+        B[lo:hi, e0:e1, i0:i1] -= blk.transpose(2, 1, 0).conj()
+    ovvo = se.ovvo                                          # dense [m, b, e, i]
+    oa, ob = o.groups
+    va, vb = v.groups
+    ta = np.ascontiguousarray(t1[oa[0]:oa[1], va[0]:va[1]])
+    tb = np.ascontiguousarray(t1[ob[0]:ob[1], vb[0]:vb[1]])
+    nva, nvb = va[1] - va[0], vb[1] - vb[0]
+    # same-spin pair blocks: Y[x,y,e,i] = sum_m t[m,x] <my||ei>, then
+    # B[(x<y)] -= Y[x,y] - Y[y,x]
+    for h, tt, (m0, m1), (x0, x1) in ((0, ta, oa, va), (2, tb, ob, vb)):
+        lo, hi = vm.blocks[h]
+        nx = x1 - x0
+        if hi == lo or tt.size == 0:
+            continue
+        Y = gemm(np.ascontiguousarray(tt.T),
+                 np.ascontiguousarray(ovvo[m0:m1, x0:x1]).reshape(m1 - m0, -1))
+        Y = Y.reshape(nx, nx * nvir * nocc)
+        Bh = B[lo:hi].reshape(hi - lo, -1)
+        _pair_scatter_same_spin(Bh, Y.reshape(nx, nx, -1), nx, vm.pa_c[lo:hi] - x0,
+                                vm.pb_c[lo:hi] - x0, -1.0)
+    # alpha-beta block (a alpha, b beta), rows a-major
+    lo, hi = vm.blocks[1]
+    if hi > lo:
+        B1 = B[lo:hi].reshape(nva, nvb * nvir * nocc)
+        if ta.size:      # -L[a,b] = -sum_{m alpha} t[m,a] <m b||e i>
+            gemm(np.ascontiguousarray(ta.T),
+                 np.ascontiguousarray(ovvo[oa[0]:oa[1], vb[0]:vb[1]]).reshape(oa[1] - oa[0], -1),
+                 B1, alpha=-1.0, beta=1.0)
+        if tb.size:      # +L[b,a] = sum_{m beta} t[m,b] <m a||e i>
+            tbT = np.ascontiguousarray(tb.T)
+            for a in range(nva):
+                Ga = np.ascontiguousarray(ovvo[ob[0]:ob[1], va[0] + a]).reshape(ob[1] - ob[0], -1)
+                gemm(tbT, Ga, B[lo + a * nvb:lo + (a + 1) * nvb].reshape(nvb, -1), beta=1.0)
+    # + sum_{m<n} tau1[mn, ab] <mn||ei>, per pair group
     from zccsdt.cc.ccsdt_opt import _tau1_pairs
-    tau = SpinTensor.from_dense(_tau1_pairs(t1, om, vm), (Ps, Qs), sig=(-1, 1))
-    oovo = pack_pairs(get_block(se, 'oovo'), 0, Ps)                   # (P, e, i)
-    B = B + einsum('PQ,Pei->Qei', tau, oovo)
-    return np.ascontiguousarray(B.to_dense())
+    tau = _tau1_pairs(t1, om, vm)
+    oovo = pack_pairs(get_block(se, 'oovo'), 0, Ps)        # [P, e, i] blocks
+    for (h, se_, si), blk in oovo.blocks.items():
+        lo, hi = vm.blocks[h]
+        plo, phi = om.blocks[h]
+        (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
+        if hi > lo and phi > plo:
+            B[lo:hi, e0:e1, i0:i1] += np.einsum('PQ,Pei->Qei', tau[plo:phi, lo:hi], blk)
+    return B
 
 
 def t2_ovvv_term(se, t2, ovvv_d, vm):
