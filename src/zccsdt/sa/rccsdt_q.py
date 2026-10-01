@@ -212,7 +212,9 @@ def q_correction(ints, blocks, t2, t3b):
            [(x_w x_x), 4o] x [4o, (x_y x_3)] product.
 
     The energy of the quadruple is one tiled pass over the six accumulators
-    (quad_energy).  Memory: 10 v^4.'''
+    (quad_energy).  Quadruples with i = j or j = k use the exchange symmetry
+    of the two equal pairs (fill_sym): about 60% of the v^5 work.
+    Memory: 10 v^4.'''
     from zccsdt.cc.t3pack import axpby
     from zccsdt.sa.t3blocks import gather_boxes
     from zccsdt.timing import timer
