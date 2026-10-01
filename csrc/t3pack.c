@@ -762,79 +762,6 @@ void zc_sa_vvvv_t1_##SFX(T *out, const T *Ws, const T *Wa, const T *t,         \
 DEFINE_SA_VT1(double, d)
 DEFINE_SA_VT1(double complex, z)
 
-/* Gather of the cubes t_mpq (m = 0..n-1) of one occupied pair with all the
- * layouts the ring and T3 -> T1/T2/W need, in one pass over the source:
- *   T[m][x,y,z]   = s(x,y,z)                 s(x,y,z) = t_mpq^{xyz}
- *   T2[m][x,y,z]  = s(y,x,z)
- *   T3[m][x,y,z]  = s(y,z,x)
- *   Y[m][x,y,z]   = 2 s(x,y,z) - s(y,x,z) - s(z,y,x)
- *   Z[m][x,y,z]   = 2 s(x,z,y) - s(y,z,x) - s(z,x,y)
- * Source cube m: src[off[m] + x*st[3m] + y*st[3m+1] + z*st[3m+2]] (off < 0:
- * zero cube).  Every orbit {permutations of (x,y,z)} is read once. */
-static const int L_ORBIT[6][6] = {{0, 1, 2, 3, 4, 5}, {1, 0, 5, 4, 3, 2}, {2, 4, 0, 5, 1, 3}, {3, 5, 4, 0, 2, 1}, {4, 2, 3, 1, 5, 0}, {5, 3, 1, 2, 0, 4}};
-#define DEFINE_SA_GATHER(T, SFX)                                               \
-void zc_sa_pair_gather_##SFX(const T *src, int64_t n, int64_t v,               \
-                             const int64_t *off, const int64_t *st,            \
-                             T *To, T *T2, T *T3, T *Y, T *Z,                  \
-                             const int64_t *ost)                               \
-{                                                                              \
-    /* output k (To, T2, T3, Y, Z) element [m][x][y][z] at                    \
-     * m*ost[2k] + x*ost[2k+1] + y*v + z */                                    \
-    const int64_t v2 = v * v;                                                  \
-    _Pragma("omp parallel for collapse(2) schedule(dynamic, 4)")               \
-    for (int64_t m = 0; m < n; m++)                                            \
-    for (int64_t x = 0; x < v; x++) {                                          \
-                                                                            \
-        const int64_t s0 = st[3 * m], s1 = st[3 * m + 1], s2 = st[3 * m + 2];  \
-        const T *c = off[m] >= 0 ? src + off[m] : NULL;                        \
-        for (int64_t y = x; y < v; y++)                                        \
-        for (int64_t z = y; z < v; z++) {                                      \
-            /* the six positions p of the orbit and their source values */    \
-            const int64_t P[6][3] = {{x, y, z}, {y, x, z}, {z, y, x},          \
-                                     {x, z, y}, {y, z, x}, {z, x, y}};         \
-            T sv[6];                                                           \
-            for (int k = 0; k < 6; k++)                                        \
-                sv[k] = c ? c[P[k][0] * s0 + P[k][1] * s1 + P[k][2] * s2] : 0; \
-            /* output at position P[k]: the values at its permutations are \
-             * sv[L_ORBIT[k][.]] (L: composition table of the orbit) */         \
-            for (int k = 0; k < 6; k++) {                                      \
-                const int64_t yz = P[k][1] * v + P[k][2];                      \
-                const int64_t x0 = P[k][0];                                    \
-                const T sabc = sv[L_ORBIT[k][0]], sbac = sv[L_ORBIT[k][1]], scba = sv[L_ORBIT[k][2]]; \
-                const T sacb = sv[L_ORBIT[k][3]], sbca = sv[L_ORBIT[k][4]], scab = sv[L_ORBIT[k][5]]; \
-                To[m * ost[0] + x0 * ost[1] + yz] = sabc;                      \
-                T2[m * ost[2] + x0 * ost[3] + yz] = sbac;                      \
-                T3[m * ost[4] + x0 * ost[5] + yz] = sbca;                      \
-                Y[m * ost[6] + x0 * ost[7] + yz] = 2 * sabc - sbac - scba;     \
-                Z[m * ost[8] + x0 * ost[9] + yz] = 2 * sacb - sbca - scab;     \
-            }                                                                  \
-        }                                                                      \
-    }                                                                          \
-}                                                                              \
-                                                                               \
-/* dst[x,y,z] += a0 s0[x,y,z] + a1 s1[x,y,z] + a2 s2[x,y,z] over a v^3 box,    \
- * each source addressed through element strides (st[3k..3k+2]); dst          \
- * through dstr[3].  Sources with null pointers are skipped. */              \
-void zc_add3_strided_##SFX(T *dst, const int64_t *dstr, int64_t v,             \
-                           const T *s0, const T *s1, const T *s2,              \
-                           const int64_t *st, const T *al)                     \
-{                                                                              \
-    const T *src[3] = {s0, s1, s2};                                            \
-    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
-    for (int64_t x = 0; x < v; x++)                                            \
-    for (int64_t y = 0; y < v; y++) {                                          \
-        T *d = dst + x * dstr[0] + y * dstr[1];                                \
-        for (int k = 0; k < 3; k++) {                                          \
-            if (src[k] == NULL) continue;                                      \
-            const T *p = src[k] + x * st[3 * k] + y * st[3 * k + 1];            \
-            const int64_t sz = st[3 * k + 2], dz = dstr[2];                    \
-            const T a = al[k];                                                 \
-            for (int64_t z = 0; z < v; z++) d[z * dz] += a * p[z * sz];        \
-        }                                                                      \
-    }                                                                          \
-}
-DEFINE_SA_GATHER(double, d)
-DEFINE_SA_GATHER(double complex, z)
 
 /* Tiled gather of the cubes t_mpq (m < n) of one occupied pair with all the
  * layouts the ring and T3 -> T1/T2/W need:
@@ -942,6 +869,95 @@ void zc_sa_pair_gather_t_##SFX(const T *src, int64_t n, int64_t v,             \
 }
 DEFINE_SA_GATHER_T(double, d)
 DEFINE_SA_GATHER_T(double complex, z)
+
+/* dst[c] (contiguous n0 x n1 x n2) = box c of the source, element [x,y,z]
+ * at src[off[c] + x st[3c] + y st[3c+1] + z st[3c+2]] (off < 0: zeros), for
+ * c < nc, in GT^3 tiles (strided reads stay within a cached tile). */
+#define DEFINE_CUBES_TILED(T, SFX)                                             \
+void zc_cubes_tiled_##SFX(T *dst, const T *src, int64_t nc, const int64_t *off, \
+                          const int64_t *st, int64_t n0, int64_t n1, int64_t n2) \
+{                                                                              \
+    const int64_t t0 = (n0 + GT - 1) / GT, t1 = (n1 + GT - 1) / GT;            \
+    const int64_t t2 = (n2 + GT - 1) / GT, nb = n0 * n1 * n2;                  \
+    _Pragma("omp parallel for collapse(4) schedule(dynamic, 4)")               \
+    for (int64_t c = 0; c < nc; c++)                                           \
+    for (int64_t X = 0; X < t0; X++)                                           \
+    for (int64_t Y = 0; Y < t1; Y++)                                           \
+    for (int64_t Z = 0; Z < t2; Z++) {                                         \
+        const int64_t x0 = X * GT, y0 = Y * GT, z0 = Z * GT;                   \
+        const int64_t x1 = x0 + GT < n0 ? x0 + GT : n0;                        \
+        const int64_t y1 = y0 + GT < n1 ? y0 + GT : n1;                        \
+        const int64_t z1 = z0 + GT < n2 ? z0 + GT : n2;                        \
+        T *d = dst + c * nb;                                                   \
+        if (off[c] < 0) {                                                      \
+            for (int64_t x = x0; x < x1; x++)                                  \
+            for (int64_t y = y0; y < y1; y++)                                  \
+            for (int64_t z = z0; z < z1; z++) d[(x * n1 + y) * n2 + z] = 0;     \
+            continue;                                                          \
+        }                                                                      \
+        const T *sp = src + off[c];                                            \
+        const int64_t s0 = st[3 * c], s1 = st[3 * c + 1], s2 = st[3 * c + 2];  \
+        for (int64_t x = x0; x < x1; x++)                                      \
+        for (int64_t y = y0; y < y1; y++) {                                    \
+            const T *q = sp + x * s0 + y * s1;                                 \
+            T *o = d + (x * n1 + y) * n2;                                      \
+            for (int64_t z = z0; z < z1; z++) o[z] = q[z * s2];                \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_CUBES_TILED(double, d)
+DEFINE_CUBES_TILED(double complex, z)
+
+/* Batched strided adds into T3 blocks.  Placement k adds into the box
+ * [lo, lo+n) (box[6k..6k+2] = lo, box[6k+3..6k+5] = n) of its destination
+ * block at dptr[k] (strides dstr[3k..]):
+ *   dst[x,y,z] += sum_s al[s] src_{k,s}[x-lo0, y-lo1, z-lo2],
+ * source s at sptr[k*ns+s] with strides sstr[3(k*ns+s)..] (in destination
+ * orientation).  Placements are grouped by destination block (group g:
+ * gptr[g] .. gptr[g+1]-1, applied in order) and the tasks are (group, GT^3
+ * tile of the N0 x N1 x N2 destination), so no element is written twice
+ * at the same time. */
+#define DEFINE_SCATTER_TILED(T, SFX)                                           \
+void zc_scatter_tiled_##SFX(int64_t ngroup, const int64_t *gptr, T **dptr,     \
+                            const int64_t *dstr, const int64_t *box,           \
+                            int64_t ns, const T **sptr, const int64_t *sstr,   \
+                            const T *al, int64_t N0, int64_t N1, int64_t N2)   \
+{                                                                              \
+    const int64_t t0 = (N0 + GT - 1) / GT, t1 = (N1 + GT - 1) / GT;            \
+    const int64_t t2 = (N2 + GT - 1) / GT;                                     \
+    _Pragma("omp parallel for collapse(4) schedule(dynamic, 2)")               \
+    for (int64_t g = 0; g < ngroup; g++)                                       \
+    for (int64_t X = 0; X < t0; X++)                                           \
+    for (int64_t Y = 0; Y < t1; Y++)                                           \
+    for (int64_t Z = 0; Z < t2; Z++) {                                         \
+        for (int64_t k = gptr[g]; k < gptr[g + 1]; k++) {                      \
+            const int64_t *b = box + 6 * k;                                    \
+            int64_t lo[3], hi[3], skip = 0;                                    \
+            const int64_t tl[3] = {X * GT, Y * GT, Z * GT};                    \
+            for (int a = 0; a < 3; a++) {                                      \
+                lo[a] = tl[a] > b[a] ? tl[a] : b[a];                           \
+                hi[a] = tl[a] + GT < b[a] + b[3 + a] ? tl[a] + GT : b[a] + b[3 + a]; \
+                if (lo[a] >= hi[a]) skip = 1;                                  \
+            }                                                                  \
+            if (skip) continue;                                                \
+            T *d = dptr[k];                                                    \
+            const int64_t *ds = dstr + 3 * k;                                  \
+            for (int64_t q = 0; q < ns; q++) {                                 \
+                const int64_t *ss = sstr + 3 * (k * ns + q);                   \
+                const T *sp = sptr[k * ns + q] - b[0] * ss[0] - b[1] * ss[1] - b[2] * ss[2]; \
+                const T a = al[q];                                             \
+                for (int64_t x = lo[0]; x < hi[0]; x++)                        \
+                for (int64_t y = lo[1]; y < hi[1]; y++) {                      \
+                    const T *src = sp + x * ss[0] + y * ss[1];                 \
+                    T *o = d + x * ds[0] + y * ds[1];                          \
+                    for (int64_t z = lo[2]; z < hi[2]; z++) o[z * ds[2]] += a * src[z * ss[2]]; \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_SCATTER_TILED(double, d)
+DEFINE_SCATTER_TILED(double complex, z)
 
 /* Jacobi step of the spin-adapted T3 blocks with the DIIS vectors:
  *   q = r / (eo[b] - ev[x] - ev[y] - ev[z]),  xo = t + q,  eo_ = w[b] q

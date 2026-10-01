@@ -87,3 +87,28 @@ def test_pair_gather_c_equals_numpy(monkeypatch):
         monkeypatch.setattr(t3pack, 'USE_C', True)
         assert np.isfinite(Wc).all()
         assert abs(Wc - Wn).max() < 1e-13
+
+
+def test_drive_hh_equals_separate_terms(monkeypatch):
+    '''Merged hh ladder + drive (attached form, virtual slabs) against the
+    separate ordered drive and hh ladder; C kernels and numpy fallbacks.'''
+    from zccsdt.cc import t3pack
+    no, v = 3, 19
+    rng = np.random.default_rng(3)
+    B = Blocks(no)
+    t3b = rng.standard_normal((B.nblk, v, v, v))
+    t2 = rng.standard_normal((no, no, v, v))
+    t2 = t2 + t2.transpose(1, 0, 3, 2)
+    Wv = rng.standard_normal((v, v, v, no))
+    Wo = rng.standard_normal((no, v, no, no))
+    Wh = rng.standard_normal((no, no, no, no))
+    Wh = Wh + Wh.transpose(1, 0, 3, 2)
+    ref = np.zeros_like(t3b)
+    E.drive(B, t2, Wv, Wo, ref)
+    E.ladder_hh(B, t3b, Wh, ref)
+    for use_c in (True, False):
+        monkeypatch.setattr(t3pack, 'USE_C', use_c and t3pack._lib is not None)
+        for mb in (1 << 29, 8 * no * no * v * v * 4):          # one slab / slabs of 4
+            r3b = np.zeros_like(t3b)
+            E.drive_hh(B, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=mb)
+            assert abs(r3b - ref).max() < 1e-10 * abs(ref).max()

@@ -55,6 +55,7 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
     antisymmetric parts as half-size GEMMs, using the extra symmetry of the
     blocks with a repeated occupied index.'''
     from zccsdt.cc import t3pack
+    from zccsdt.timing import timer
     lib = t3pack._lib
     nb, v = t3b.shape[0], t3b.shape[1]
     v2, v3 = v * v, v * v * v
@@ -76,6 +77,7 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
         Ts = np.empty((ps, ncol))
         Ta = np.empty((pa, nf * v))
         F, S_ = arr(full), arr(sym)
+        _t = timer('pp.pack'); _t.__enter__()
         if nf:
             lib.zc_sa_pair_pack_d(P(t3b), I64(nf), P(np.ascontiguousarray(F[:, 0])),
                                   P(np.ascontiguousarray(F[:, 1])), P(np.ascontiguousarray(F[:, 2])),
@@ -87,8 +89,11 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
                                   P(np.ascontiguousarray(S_[:, 3])), I64(v), I64(v),
                                   t3pack.ctypes.c_void_p(Ts.ctypes.data + 8 * nf * v), I64(ncol),
                                   None, I64(0))
-        S = gemm(Ws, Ts)
-        A = gemm(Wa, Ta) if nf else None
+        _t.__exit__(None, None, None)
+        with timer('pp.gemm'):
+            S = gemm(Ws, Ts)
+            A = gemm(Wa, Ta) if nf else None
+        _t = timer('pp.unpack'); _t.__enter__()
         for plc, Sp, Ap, lda, coff in ((fplace, S, A, nf * v, 0), (splace, S, None, 0, nf)):
             if not plc:
                 continue
@@ -99,6 +104,7 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
                                         P(np.ascontiguousarray(Q[:, 3])), I64(v), I64(v),
                                         P(Sp), I64(ncol), None if Ap is None else P(Ap), I64(lda),
                                         P(cols))
+        _t.__exit__(None, None, None)
 
 
 def ladder_hh(blocks, t3b, Wh, r3b):
@@ -274,25 +280,70 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose):
 
 # ------------------------------------------------------- explicit (v2) pieces
 
-def contract(spec, A, B):
-    '''Two-operand einsum without traces or batch indices, as one MKL GEMM
-    (transpose, transpose, GEMM, transpose).'''
-    lhs, out = spec.replace(' ', '').split('->')
+def permute(A, perm, out=None):
+    '''A.transpose(perm) as a C-contiguous array (``out`` if given); large
+    arrays are copied with the OpenMP strided kernel (numpy copies on one
+    thread).'''
+    from zccsdt.cc.t3pack import axpby
+    V = A.transpose(perm)
+    if out is None and V.flags.c_contiguous:
+        return V
+    if V.ndim <= 4 and V.size >= 1 << 15 and V.dtype in (np.float64, np.complex128):
+        return axpby(np.empty(V.shape, dtype=V.dtype) if out is None else out, V, 1.0, 0.0)
+    if out is None:
+        return np.ascontiguousarray(V)
+    out[...] = V
+    return out
+
+
+def _matrix(X, sx, rows, cols, dims):
+    '''X as a 2-D (rows, cols) operand for gemm: a view when the axes are
+    already in (rows, cols) or (cols, rows) order, else a parallel copy.'''
+    m = int(np.prod([dims[c] for c in rows], dtype=np.int64))
+    n = int(np.prod([dims[c] for c in cols], dtype=np.int64))
+    V = X.transpose([sx.index(c) for c in rows + cols])
+    if V.flags.c_contiguous:
+        return V.reshape(m, n)
+    W = X.transpose([sx.index(c) for c in cols + rows])
+    if W.flags.c_contiguous:
+        return W.reshape(n, m).T
+    return permute(X, [sx.index(c) for c in rows + cols]).reshape(m, n)
+
+
+def contract(spec, A, B, out=None, alpha=1.0, beta=0.0):
+    '''Two-operand einsum without traces or batch indices as one MKL GEMM.
+    Operands are passed as (transposed) views where possible, else permuted
+    in parallel; the GEMM orientation follows the output order when it can.
+    With ``out``: out = alpha * result + beta * out (in place).'''
+    from zccsdt.cc.t3pack import axpby
+    lhs, res = spec.replace(' ', '').split('->')
     sa, sb = lhs.split(',')
     k = [c for c in sa if c in sb]
     fa = [c for c in sa if c not in k]
     fb = [c for c in sb if c not in k]
     dims = dict(zip(sa, A.shape))
     dims.update(zip(sb, B.shape))
-    At = np.ascontiguousarray(A.transpose([sa.index(c) for c in fa + k])) if fa + k != list(sa) else A
-    Bt = np.ascontiguousarray(B.transpose([sb.index(c) for c in k + fb])) if k + fb != list(sb) else B
-    m = int(np.prod([dims[c] for c in fa], dtype=np.int64))
-    kk = int(np.prod([dims[c] for c in k], dtype=np.int64))
-    n = int(np.prod([dims[c] for c in fb], dtype=np.int64))
-    C = gemm(np.ascontiguousarray(At).reshape(m, kk), np.ascontiguousarray(Bt).reshape(kk, n))
-    C = C.reshape([dims[c] for c in fa + fb])
-    order = [(fa + fb).index(c) for c in out]
-    return C.transpose(order) if order != list(range(len(order))) else C
+    res = list(res)
+    if res == fb + fa and res != fa + fb:            # C^T = B^T A^T lands in place
+        A, B, sa, sb, fa, fb = B, A, sb, sa, fb, fa
+    Am = _matrix(A, sa, fa, k, dims)
+    Bm = _matrix(B, sb, k, fb, dims)
+    shape = [dims[c] for c in fa + fb]
+    order = [(fa + fb).index(c) for c in res]
+    if order == list(range(len(order))):
+        if out is None:
+            return gemm(Am, Bm, alpha=alpha).reshape(shape)
+        if out.flags.c_contiguous:
+            gemm(Am, Bm, out.reshape(Am.shape[0], Bm.shape[1]), alpha=alpha, beta=beta)
+            return out
+    C = gemm(Am, Bm, alpha=alpha if out is None else 1.0).reshape(shape)
+    if out is None:
+        return permute(C, order)
+    if out.ndim <= 4:
+        return axpby(out, C.transpose(order), alpha, beta)
+    out *= beta
+    out += alpha * C.transpose(order)
+    return out
 
 
 _einsum = contract
@@ -317,11 +368,18 @@ def dress(V, F, t1, nocc):
     return Vd, X @ Fd @ Y.T
 
 
-def intermediates(D, Fd, t2, nocc):
+def intermediates(D, Fd, t2, nocc, P=None, t1=None):
     '''T2 parts of the intermediates (spatial J / K components of
     zccsdt.sa.derive) from the T1-dressed blocks D (see DRESSED, plus the
     bare 'oovv') and Fock.  The pp ladder operator is built separately
-    (pp_operator_packed).'''
+    (pp_operator_packed).
+
+    Wv (J) is returned as 'WvT'[i, e, b, a] = Wv[a, b, e, i] (the layout of
+    the drive GEMM), from P[a,b,e,i]: the dressed <ab|ei> without its
+    t2 (G t1) part (default D['vvvo'] with t1 = None), which is overwritten.
+    Its t2 terms are one GEMM against
+      Q[m,n,e,i] = <mn|ei> - sum_f <mn|ef> t1[i,f] - d_ni Fov[m,e],
+    and its three ovvv terms two GEMMs sharing the operand <ma|ef>.'''
     o, v = slice(0, nocc), slice(nocc, None)
     G = D['oovv']
     L = 2 * G - G.transpose(0, 1, 3, 2)                  # L_mnef = 2<mn|ef> - <mn|fe>
@@ -332,11 +390,31 @@ def intermediates(D, Fd, t2, nocc):
     out['Whh'] = D['oooo'] + contract('mnef,ijef->mnij', G, t2)
     out['WrJ'] = D['ovvo'] + contract('mnde,inae->madi', L, t2) - contract('mnde,inea->madi', G, t2)
     out['WrK'] = D['ovov'].transpose(0, 1, 3, 2) - contract('mned,inea->madi', G, t2)
+    no, nv = t2.shape[0], t2.shape[2]
+    ov, vv = no * nv, nv * nv
+    if P is None:
+        P = np.array(D['vvvo'])
+    Q = np.array(D['oovo'])                              # [m, n, e, i]
+    if t1 is not None:
+        Q -= contract('mnef,if->mnei', G, t1)
+    for i in range(no):
+        Q[:, i, :, i] -= Fd[o, v]
+    gemm(t2.reshape(no * no, vv).T, Q.reshape(no * no, ov), P.reshape(vv, ov), beta=1.0)
     ovvv = D['ovvv']                                     # <ma|fe>
-    out['WvJ'] = D['vvvo'] - contract('me,miab->abei', Fd[o, v], t2) \
-        + contract('mnab,mnei->abei', t2, D['oovo']) \
-        + contract('mafe,mifb->abei', ovvv, 2 * t2 - t2.transpose(0, 1, 3, 2)) \
-        - contract('maef,mifb->abei', ovvv, t2) - contract('mbef,miaf->abei', ovvv, t2)
+    A12 = np.empty((nv, nv, 2, no, nv))                  # [(a,e), (<ma|fe> | <ma|ef>), (m,f)]
+    permute(ovvv, (1, 3, 0, 2), out=A12[:, :, 0])
+    permute(ovvv, (1, 2, 0, 3), out=A12[:, :, 1])
+    Bst = np.empty((2, no, nv, no, nv))                  # [(t2b | -t2)[m,i,f,b] as (m,f), (i,b)]
+    permute(2 * t2 - t2.transpose(0, 1, 3, 2), (0, 2, 1, 3), out=Bst[0])
+    permute(-t2, (0, 2, 1, 3), out=Bst[1])
+    C45 = gemm(A12.reshape(vv, 2 * ov), Bst.reshape(2 * ov, ov)).reshape(nv, nv, no, nv)
+    C6 = gemm(A12[:, :, 1].reshape(vv, ov), permute(-t2, (0, 3, 1, 2)).reshape(ov, ov))
+    C6 = C6.reshape(nv, nv, no, nv)                      # [b, e, i, a]
+    WvT = permute(P, (3, 2, 1, 0), out=np.empty((no, nv, nv, nv)))
+    from zccsdt.cc.t3pack import axpby
+    axpby(WvT, C45.transpose(2, 1, 3, 0), 1.0, 1.0)
+    axpby(WvT, C6.transpose(2, 1, 0, 3), 1.0, 1.0)
+    out['WvT'] = WvT
     oovo, ooov = D['oovo'], D['ooov']
     out['WoJ'] = D['vooo'].transpose(1, 0, 3, 2) \
         + contract('nmej,niea->maji', oovo, 2 * t2) - contract('nmje,niea->maji', ooov, t2) \
@@ -392,29 +470,6 @@ def ccsd_residual(D, Fd, t2, imds, nocc, Ws, Wa, t1=None):
     return r1, r2
 
 
-def add3(dst, srcs, alphas=(1.0, 1.0, 1.0)):
-    '''dst += sum_k alphas[k] srcs[k] for (v,v,v) arrays / strided views (C
-    kernel zc_add3_strided; dst C-contiguous).'''
-    from zccsdt.cc import t3pack
-    lib = t3pack._lib
-    if not (t3pack.USE_C and hasattr(lib, 'zc_add3_strided_d')):
-        for a, x in zip(alphas, srcs):
-            dst += a * x
-        return dst
-    isz = dst.itemsize
-    ptrs = [None] * 3
-    st = np.zeros(9, dtype=np.int64)
-    for k, x in enumerate(srcs):
-        ptrs[k] = t3pack.ctypes.c_void_p(x.ctypes.data)
-        st[3 * k:3 * k + 3] = [y // isz for y in x.strides]
-    dstr = np.array([y // isz for y in dst.strides], dtype=np.int64)
-    al = np.array(list(alphas) + [0.0] * (3 - len(alphas)), dtype=np.float64)
-    lib.zc_add3_strided_d(t3pack.ctypes.c_void_p(dst.ctypes.data), t3pack._p(dstr),
-                          t3pack._I64(dst.shape[0]), ptrs[0], ptrs[1], ptrs[2],
-                          t3pack._p(st), t3pack._p(al))
-    return dst
-
-
 def pair_gather(blocks, t3b, p, q, W):
     '''W[k][x, m, y, z] for the cubes s(x,y,z) = t_mpq^{xyz} of the pair (p, q):
     k = 0: Y = 2 s(x,y,z) - s(y,x,z) - s(z,y,x),  1: T = s(x,y,z),
@@ -451,8 +506,10 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
     W[k][x, m, y, z] of t_mpq (pair_gather; the contraction index (x, m) is
     leading so that each contraction over the gathered cubes is one GEMM over
     all m): adds the ring X_{i;pq}^{a;bc} (with F_vv) to r3b and returns the
-    T3 parts (r1, r2, dWv, dWo) of R1, R2, Wv (J) and Wo (J).  For the
+    T3 parts (r1, r2, Eab, Eba, dWo) of R1, R2, Wv (J) and Wo (J), with
+    dWv[a,b,e,i] = Eab[e,i,a,b] + Eba[e,i,b,a].  For the
     reversed pair (q, p) the roles are T2 <-> T3 and Y <-> Z.'''
+    from zccsdt.sa.t3blocks import scatter
     from zccsdt.timing import timer
     no, v = blocks.nocc, t3b.shape[1]
     ov, vv = no * v, v * v
@@ -493,10 +550,12 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
                 X2 = gemm(mK2, W[2].reshape(ov, vv)).reshape(v, no, v, v)
                 X3 = gemm(mK2, W[3].reshape(ov, vv)).reshape(v, no, v, v)
             with timer('t3p.scatter'):
+                items = []
                 for i in range(no):
                     parts = (X1[:, i], X2[:, i].transpose(1, 0, 2), X3[:, i].transpose(1, 2, 0))
                     for B, axes in blocks.uses_attached(i, p, q):
-                        add3(r3b[B], [x.transpose(axes) for x in parts])
+                        items.append((B, (0, 0, 0), [x.transpose(axes) for x in parts]))
+                scatter(r3b, items)
             with timer('t3p.pass1'):
                 Gpq, Gqp = G[p, q], G[q, p]
                 Lp = lambda g: 2 * g - g.T                         # noqa: E731  [f, e]
@@ -535,8 +594,66 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
     r2a, Eba = ACC[no + v:2 * no + v], ACC[2 * no + v:]
     r2 = r2 + r2a.transpose(1, 0, 2, 3) + r2b.transpose(1, 0, 3, 2)
     r2 = r2 + r2.transpose(1, 0, 3, 2)
-    dWv = Eab.transpose(2, 3, 0, 1) + Eba.transpose(3, 2, 0, 1)
-    return np.ascontiguousarray(r1x.T), r2, dWv, dWo
+    return np.ascontiguousarray(r1x.T), r2, Eab, Eba, dWo
+
+
+def drive_hh(blocks, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=1 << 29):
+    '''r3b += the attached terms of single index k and pair (i <= j):
+
+      hh ladder  sum_mn Wh[m,n,i,j] t_mnk^{abc}  (= X_{k;ij}^{c;ab}, F_oo in Wh),
+      drive      P[D + E] = sum_positions X, X_{k;ij}^{x;yz} = K_{k;ij}^{x;yz} + K_{k;ji}^{x;zy},
+                 K_{k;pq}^{x;yz} = sum_e Wv[y,x,e,k] t_qp^{ze} - sum_m Wo[m,z,p,q] t_mk^{yx}
+
+    (K_{k;pq}^{x;yz} = G_{qpk}^{zyx} for the ordered term G = D + E of the
+    module docstring).  One loop over k: K from one GEMM over all (p, q),
+    the hh terms from one GEMM over the gathered t_mnk, then a single tiled
+    scatter of their sum.  The virtual of k (x) is processed in slabs so that
+    K and the gathered cubes stay within ``max_bytes`` each.  ``Wv``: the
+    array Wv[a,b,e,i], or a function Wv(k, out) writing out[e,x,y] = Wv[y,x,e,k].'''
+    from zccsdt.sa.t3blocks import gather_boxes, scatter
+    from zccsdt.timing import timer
+    no, v = blocks.nocc, t3b.shape[1]
+    vv = v * v
+    pi, pj = np.triu_indices(no)
+    W2T = np.ascontiguousarray(Wh.reshape(no * no, no * no)[:, pi * no + pj].T)   # [(i<=j), (m,n)]
+    B = np.empty((v + no, no, no, v))
+    B[:v] = t2.transpose(3, 1, 0, 2)                    # [e, p, q, z] = t_qp^{ze}
+    B[v:] = -Wo.transpose(0, 2, 3, 1)                   # [m, p, q, z] = -Wo[m,z,p,q]
+    B = B.reshape(v + no, -1)
+    nx = int(max(1, min(v, max_bytes // (8 * no * no * vv))))
+    Tbuf = np.empty(no * no * vv * nx)
+    Kbuf = np.empty(nx * vv * no * no)
+    from zccsdt.cc.t3pack import axpby
+    A = np.empty((v + no, v, v))
+    for k in range(no):
+        if callable(Wv):
+            Wv(k, A[:v])                                  # [e, x, y] = Wv[y,x,e,k]
+        else:
+            axpby(A[:v], Wv[:, :, :, k].transpose(2, 1, 0), 1.0, 0.0)
+        A[v:] = t2[:, k].transpose(0, 2, 1)               # [m, x, y] = t_mk^{yx}
+        Am = A.reshape(v + no, vv).T
+        views = [blocks.view(m, n, k, v) for m in range(no) for n in range(no)]
+        off0 = np.array([o for o, _ in views], dtype=np.int64)
+        st = np.array([s_ for _, s_ in views], dtype=np.int64)
+        for x0 in range(0, v, nx):
+            n = min(nx, v - x0)
+            with timer('dh.K_gemm'):
+                K = gemm(Am[x0 * v:(x0 + n) * v], B,
+                         Kbuf[:n * vv * no * no].reshape(n * v, -1)).reshape(n, v, no, no, v)
+            T = Tbuf[:no * no * vv * n].reshape(no * no, v, v, n)        # t_mnk^{ab, x0+c}
+            with timer('dh.gather'):
+                gather_boxes(t3b, np.where(off0 >= 0, off0 + x0 * st[:, 2], -1), st, T)
+            with timer('dh.H_gemm'):
+                H = gemm(W2T, T.reshape(no * no, -1)).reshape(len(pi), v, v, n)
+            with timer('dh.scatter'):
+                items = []
+                for c, (i, j) in enumerate(zip(pi, pj)):
+                    srcs = (H[c].transpose(2, 0, 1), K[:, :, i, j], K[:, :, j, i].transpose(0, 2, 1))
+                    for Bk, axes in blocks.uses_attached(k, i, j):
+                        # block axis a carries source axis axes[a]; the slab is on source axis 0
+                        lo = tuple(x0 if axes[a] == 0 else 0 for a in range(3))
+                        items.append((Bk, lo, [x.transpose(axes) for x in srcs]))
+                scatter(r3b, items)
 
 
 def residuals(ints, blocks, t1, t2, t3b, r3b=None):
@@ -547,33 +664,42 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None):
     from zccsdt.sa.t3blocks import project_null, zero
     from zccsdt.timing import timer
     no = ints.nocc
+    bb = BareBlocks.of(ints)
     with timer('sa.dress'):
-        D = {k: dress_block(ints.V, t1, no, k) for k in DRESSED}
-        G = D['oovv'] = np.ascontiguousarray(ints.V[:no, :no, no:, no:])
-        Fd = dress_fock(ints.V, ints.fock, t1, no)
+        memo = {}
+        D = {k: dress_block(bb, t1, k, memo=memo) for k in DRESSED}
+        # <am|fe> = <ma|ef> and <am|ji> = <ma|ij> after dressing as well
+        D['vovv'] = D['ovvv'].transpose(1, 0, 3, 2)
+        D['vooo'] = dress_block(bb, t1, 'ovoo', memo=memo).transpose(1, 0, 3, 2)
+        G = D['oovv'] = bb.get('oovv')
+        Fd = dress_fock(bb, ints.fock, t1)
     with timer('sa.Wpp'):
         Ws, Wa = pp_operator_packed(ints, t1, t2)
     with timer('sa.imds'):
         # vvvo: bra-dressed part + sum_f t1[i,f] (bra-dressed vvvv = W - t2.G)
-        B = dress_block(ints.V, t1, no, 'vvvo', ket=False)
-        D['vvvo'] = B + vvvv_t1_packed(Ws, Wa, t1) \
-            - contract('mnab,mnei->abei', t2, contract('mnef,if->mnei', G, t1))
-        im = intermediates(D, Fd, t2, no)
+        B = dress_block(bb, t1, 'vvvo', ket=False)
+        P = vvvv_t1_packed(Ws, Wa, t1, out=permute(B, (0, 1, 2, 3), out=np.empty(B.shape)))
+        im = intermediates(D, Fd, t2, no, P=P, t1=t1)
     with timer('sa.ccsd'):
         # vvoo: bra-dressed part and the single-t1 ket terms; the t1 t1 vvvv
         # term rides with the CCSD ladder (tau = t2 + t1 t1)
-        Bvo = dress_block(ints.V, t1, no, 'vvoo', ket=False)
+        Bvo = dress_block(bb, t1, 'vvoo', ket=False)
         D['vvoo'] = Bvo + contract('if,abfj->abij', t1, B) + contract('jf,bafi->abij', t1, B)
         r1, r2 = ccsd_residual(D, Fd, t2, im, no, Ws, Wa, t1=t1)
     r3b = np.zeros_like(t3b) if r3b is None else zero(r3b)
     with timer('sa.t3_pass'):
-        r1t, r2t, dWv, dWo = t3_pass(blocks, t3b, im, D, no, r3b)
-    with timer('sa.drive'):
-        drive(blocks, t2, im['WvJ'] + dWv, im['WoJ'] + dWo, r3b)
+        r1t, r2t, Eab, Eba, dWo = t3_pass(blocks, t3b, im, D, no, r3b)
+    with timer('sa.drive_hh'):
+        from zccsdt.cc.t3pack import axpby
+        WvT = im['WvT']
+
+        def Wv(k, out):                     # out[e,x,y] = Wv[y,x,e,k] incl. the T3 part
+            axpby(out, WvT[k], 1.0, 0.0)
+            axpby(out, Eab[:, k].transpose(0, 2, 1), 1.0, 1.0)
+            axpby(out, Eba[:, k], 1.0, 1.0)
+        drive_hh(blocks, t3b, t2, Wv, im['WoJ'] + dWo, hh_operator(im['Whh'], im['Fo']), r3b)
     with timer('sa.pp_ladder'):
         ladder_pp(blocks, t3b, Ws, Wa, r3b)
-    with timer('sa.hh_ladder'):
-        ladder_hh(blocks, t3b, hh_operator(im['Whh'], im['Fo']), r3b)
     with timer('sa.project'):
         r3b = project_null(r3b)
     return r1 + r1t, r2 + r2t, r3b
@@ -581,58 +707,99 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None):
 
 # ------------------------------------------------- block dressing and W_pp
 
-def dress_block(V, t1, nocc, key, ket=True):
-    '''One T1-dressed block of <pq|rs> (key like 'vvvo'), from the bare full V:
+class BareBlocks:
+    '''Contiguous bare blocks <pq|rs> of the spatial integrals by block key
+    ('ovvv': occupied / virtual per slot), cut once from ints.V and cached on
+    the integral object, and the matrix of the T1 term of the dressed Fock
+    operator.'''
+
+    def __init__(self, ints):
+        self.ints = ints
+        self.no = ints.nocc
+        self._c = {}
+
+    @classmethod
+    def of(cls, ints):
+        bb = getattr(ints, '_sa_bare', None)
+        if bb is None:
+            bb = ints._sa_bare = cls(ints)
+        return bb
+
+    def get(self, key):
+        x = self._c.get(key)
+        if x is None:
+            n = self.ints.V.shape[0]
+            sl = {'o': slice(0, self.no), 'v': slice(self.no, n)}
+            x = self._c[key] = np.ascontiguousarray(self.ints.V[tuple(sl[c] for c in key)])
+        return x
+
+    def fock_t1(self):
+        '''M[(r,s), (i,a)] = 2<ri|sa> - <ri|as>: F_rs + (M t1)_rs is the Fock
+        operator with the T1-dressed density.'''
+        M = self._c.get('fock_t1')
+        if M is None:
+            V, no = self.ints.V, self.no
+            n = V.shape[0]
+            M = 2 * V[:, :no, :, no:].transpose(0, 2, 1, 3) - V[:, :no, no:, :].transpose(0, 3, 1, 2)
+            M = self._c['fock_t1'] = np.ascontiguousarray(M).reshape(n * n, -1)
+        return M
+
+
+def dress_block(bb, t1, key, ket=True, memo=None):
+    '''One T1-dressed block (key like 'ovvo') from the cached bare blocks:
     bra virtual slots transform with X = 1 - t1^T, ket occupied slots with
-    Y = 1 + t1 (only if ``ket``); other slots are plain slices.  Ket
-    (occupied) slots first.'''
-    n = V.shape[0]
-    sl = {'o': slice(0, nocc), 'v': slice(nocc, n)}
-    X = np.eye(n)
-    X[nocc:, :nocc] -= t1.T
-    Y = np.eye(n)
-    Y[:nocc, nocc:] += t1
-    mats, idx = [], []
-    for pos, c in enumerate(key):
-        if pos < 2 and c == 'v':
-            mats.append(np.ascontiguousarray(X[nocc:]))
-            idx.append(slice(None))
-        elif pos >= 2 and c == 'o' and ket:
-            mats.append(np.ascontiguousarray(Y[:nocc]))
-            idx.append(slice(None))
-        else:
-            mats.append(None)
-            idx.append(sl[c])
-    out = V[tuple(idx)]
-    order = sorted((p for p in range(4) if mats[p] is not None),
-                   key=lambda p: mats[p].shape[0])
-    for pos in order:
-        x = np.ascontiguousarray(np.moveaxis(out, pos, 0))
-        shape = x.shape
-        y = gemm(mats[pos], x.reshape(shape[0], -1)).reshape((mats[pos].shape[0],) + shape[1:])
-        out = np.moveaxis(y, 0, pos)
-    return np.ascontiguousarray(out)
+    Y = 1 + t1 (only if ``ket``), slot by slot as bare + t1 corrections,
+    <..a..> - sum_m t1[m,a] <..m..> and <..i..> + sum_e t1[i,e] <..e..>
+    (the corrections use blocks with that slot switched).  ``memo`` shares
+    partially dressed blocks between calls.  The result must not be
+    modified (it may be a cached bare block).'''
+    slots = [s for s in range(4)
+             if (s < 2 and key[s] == 'v') or (s >= 2 and key[s] == 'o' and ket)]
+    return _dress(bb, t1, key, tuple(slots), {} if memo is None else memo)
 
 
-def dress_fock(V, F, t1, nocc):
+def _dress(bb, t1, key, slots, memo):
+    if not slots:
+        return bb.get(key)
+    if (key, slots) in memo:
+        return memo[key, slots]
+    s, rest = slots[-1], slots[:-1]
+    sw = key[:s] + ('o' if key[s] == 'v' else 'v') + key[s + 1:]
+    base = _dress(bb, t1, key, rest, memo)
+    C = _dress(bb, t1, sw, rest, memo)
+    out = permute(base, (0, 1, 2, 3), out=np.empty(base.shape))
+    lab = 'pqrs'
+    cl = lab[:s] + 'x' + lab[s + 1:]
+    if key[s] == 'v':                       # bra virtual: - sum_m t1[m,a] C[..m..]
+        contract('x%s,%s->%s' % (lab[s], cl, lab), t1, C, out=out, alpha=-1.0, beta=1.0)
+    else:                                   # ket occupied: + sum_e t1[i,e] C[..e..]
+        contract('%sx,%s->%s' % (lab[s], cl, lab), t1, C, out=out, alpha=1.0, beta=1.0)
+    memo[key, slots] = out
+    return out
+
+
+def dress_fock(bb, F, t1):
+    '''T1-dressed Fock matrix X (F + M t1) Y^T (see BareBlocks.fock_t1).'''
+    no = t1.shape[0]
     n = F.shape[0]
     X = np.eye(n)
-    X[nocc:, :nocc] -= t1.T
+    X[no:, :no] -= t1.T
     Y = np.eye(n)
-    Y[:nocc, nocc:] += t1
-    o, v = slice(0, nocc), slice(nocc, n)
-    Fd = F + np.einsum('risa,ia->rs', 2 * V[:, o, :, v] - V[:, o, v, :].transpose(0, 1, 3, 2), t1)
+    Y[:no, no:] += t1
+    Fd = F + gemm(bb.fock_t1(), t1.reshape(-1, 1)).reshape(n, n)
     return X @ Fd @ Y.T
 
 
-DRESSED = ('oooo', 'ooov', 'oovo', 'ovov', 'ovvo', 'ovvv', 'vovv', 'vooo')
+DRESSED = ('oooo', 'ooov', 'oovo', 'ovov', 'ovvo', 'ovvv')
 
 
-def vvvv_t1_packed(Ws, Wa, t1):
-    '''X[a,b,e,i] = sum_f W_ab^ef t1[i,f] from the packed parts of W.'''
+def vvvv_t1_packed(Ws, Wa, t1, out=None):
+    '''X[a,b,e,i] = sum_f W_ab^ef t1[i,f] from the packed parts of W (added
+    to ``out`` if given).'''
     from zccsdt.cc import t3pack
     no, v = t1.shape
-    out = np.zeros((v, v, v, no))
+    if out is None:
+        out = np.zeros((v, v, v, no))
     lib = t3pack._lib
     if t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_t1_d'):
         lib.zc_sa_vvvv_t1_d(t3pack._p(out), t3pack._p(Ws), t3pack._p(Wa),
@@ -652,7 +819,8 @@ def vvvv_t1_packed(Ws, Wa, t1):
     W[s0[s0 == s1], s1[s0 == s1]] -= S[s0 == s1]
     W[a0, a1] += A
     W[a1, a0] -= A
-    return np.einsum('abef,if->abei', W, t1)
+    out += np.einsum('abef,if->abei', W, t1)
+    return out
 
 
 def bare_packed(ints):
