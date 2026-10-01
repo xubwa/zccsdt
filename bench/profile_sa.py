@@ -26,6 +26,12 @@ GEOM = {
     'c6h6': 'C 1.397000 0.000000 0.000000; C 0.698500 1.209837 0.000000; C -0.698500 1.209837 0.000000; C -1.397000 0.000000 0.000000; C -0.698500 -1.209837 0.000000; C 0.698500 -1.209837 0.000000; H 2.481000 0.000000 0.000000; H 1.240500 2.148609 0.000000; H -1.240500 2.148609 0.000000; H -2.481000 0.000000 0.000000; H -1.240500 -2.148609 0.000000; H 1.240500 -2.148609 0.000000',
 }
 
+# Angstrom per bohr of CFOUR (PySCF: 0.52917721092).  With it the geometry is
+# the one CFOUR builds from the same Cartesian input, and the energies of
+# every iteration can be compared with its output (the two constants shift
+# the geometry by 2e-7 and the H2O/cc-pVTZ SCF energy by 1.4e-8 Eh).
+CFOUR_BOHR = 0.5291771
+
 
 class MemWatch(threading.Thread):
     '''Peak resident memory of this process, sampled: anonymous (the arrays
@@ -51,7 +57,7 @@ def main():
     name, basis = sys.argv[1:3]
     niter = int(sys.argv[3]) if len(sys.argv) > 3 else 3
     ncore = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-    mol = gto.M(atom=GEOM[name], basis=basis, verbose=0)
+    mol = gto.M(atom=GEOM[name], basis=basis, unit=CFOUR_BOHR, verbose=0)
     mf = scf.RHF(mol).run(conv_tol=1e-10)
     t0 = time.perf_counter()
     ints = rccsdt_ref.from_scf(mf, ncore=ncore, full=False)
@@ -63,6 +69,7 @@ def main():
     watch.start()
     timing.reset()
     r = rccsdt.kernel(ints, max_cycle=niter + 1, **opts)
+    del r                       # its T3 must not count in the memory of the timed run
     timing.reset()
     # time a further run of niter iterations without the warm-up costs
     r = rccsdt.kernel(ints, max_cycle=niter, **opts)

@@ -32,6 +32,25 @@ for nonrelativistic closed shells.  CFOUR `ncc` is spin-adapted the same way
 The arithmetic ratio is the FMA count of the pp ladder and ring terms, `ncc`
 model over the spin-adapted engine (`bench/flop_counts.py`).
 
+Larger systems, same procedure on c233 (same CPUs; the node was shared, with
+a 1-minute load of 4-24 during the runs), zccsdt 0154ff2 with the T3 DIIS
+vectors in the scratch file:
+
+| System | o, v | T3 vector | zccsdt | CFOUR `ncc` | `ncc` / zccsdt | arithmetic ratio (model) | Memory: zccsdt anonymous, `ncc` RSS |
+|---|---|---|---|---|---|---|---|
+| C2H4/cc-pVTZ | 8, 108 | 1.1 GB | 19.4 s | 135.3 s | 7.0 | 2.4-2.9 | 7.6 GB, 5.0 GB |
+| C6H6/cc-pVDZ, frozen core | 15, 93 | 4.3 GB | 85.7 s | 455.7 s | 5.3 | 2.2-2.9 | 13.7 GB, 14.1 GB |
+
+- `ncc` keeps 3.5 of the 8 cores busy for C2H4 (477 s CPU per iteration) and
+  7.0 for benzene (3189 s); in core-seconds the ratios are 3.1 and 4.6.
+- At CFOUR's geometry (see "Convergence and energies") the correlation
+  energies of the first two iterations, before the two DIIS schemes diverge,
+  agree with `ncc` to 4.4e-10 and 2.6e-10 Eh for benzene, and the SCF energy
+  to 6e-12 Eh.
+- Benzene, where the time goes (85.7 s): ring GEMMs 31.5 s and pp ladder GEMMs
+  22.6 s (both about 515 GFLOP/s), T3 -> R1/R2/Wv/Wo 7.0 s, drive + hh ladder
+  7.1 s, pair gather 4.3 s, Jacobi step and DIIS 4.3 s, ring scatter 2.3 s.
+
 **Reading the numbers.**
 
 - **zccsdt is 3.3-3.7 times faster than `ncc` from N2/cc-pVTZ upwards**,
@@ -55,10 +74,18 @@ model over the spin-adapted engine (`bench/flop_counts.py`).
   T3-sized vectors).  `ncc` keeps T3 on disk (3.5 GB RSS).  The DIIS vectors
   can now live in a scratch file at almost no cost, see "DIIS storage" below.
 
-**Convergence.** H2O/cc-pVTZ converged tightly with both programs: they need
-the same number of iterations.  |E - E_conv| < 1e-8 Eh is reached after 11
-(zccsdt) and 13 (`ncc`) iterations, and < 1e-10 after 22 and 19.  The total
-CCSDT energies agree to 4.5e-10 Eh.
+**Convergence and energies.** H2O/cc-pVTZ converged tightly with both
+programs: they need the same number of iterations.  |E - E_conv| < 1e-8 Eh is
+reached after 11 (zccsdt) and 13 (`ncc`) iterations, and < 1e-10 after 22 and
+19.  At the same geometry the SCF energies agree to 2e-12 Eh and the
+converged CCSDT energies to 4e-11 Eh.
+
+The same geometry needs care: CFOUR converts Angstrom to bohr with
+0.5291771 and PySCF with 0.52917721092, so one Cartesian input in Angstrom
+gives geometries that differ by 2e-7.  That shifts the H2O/cc-pVTZ SCF energy
+by 1.4e-8 Eh (3.4e-8 Eh for benzene/cc-pVDZ) and the CCSDT energy by 4.5e-10
+Eh.  `bench/profile_sa.py` now uses CFOUR's constant; the timings above were
+taken with PySCF's.
 
 ### Where the time goes (H2O/cc-pVQZ, 8 cores, 5.1 s)
 
@@ -90,16 +117,16 @@ CPUs as c571, scratch on a local NVMe, Intel P4510: 2.4 GB/s sequential read),
 
 | DIIS vectors | Memory limit | s/iteration, full subspace | Anonymous memory | File-backed pages |
 |---|---|---|---|---|
-| in memory (`incore_complete=True`) | none | 5.4-5.5 | 9.9 GB | -- |
-| scratch file (default) | none | 5.4 | 5.0 GB | 5.1 GB (reclaimable) |
-| scratch file (default) | 6 GB | 8.2 | 5.0 GB | at most 1 GB resident |
+| in memory (`incore_complete=True`) | none | 5.4-5.5 | 9.7 GB | -- |
+| scratch file (default) | none | 5.4 | 4.6 GB | 5.1 GB (reclaimable) |
+| scratch file (default) | 6 GB | 8.2 | 4.6 GB | 1-2 GB resident |
 | in memory | 6 GB | killed (out of memory) | | |
 
 - **With enough memory the scratch file costs nothing measurable:** the dot
   products and the extrapolation take the same time as in memory (0.16 s and
   0.13 s per iteration with 8 vectors), and building the new vector in mapped
   file pages costs 0.06 s more.  The anonymous memory is halved; what is left
-  (5 GB) is the engine's own working arrays.
+  (4.6 GB) is the engine's own working arrays.
 - **Under a memory limit** (a job step with `--mem=6G`) the run completes with
   the kernel paging the vectors: 14 T3-sized reads and 2 writes per iteration
   (5.1 GB) at about 1.8 GB/s, near the speed of the device.  The same run with
