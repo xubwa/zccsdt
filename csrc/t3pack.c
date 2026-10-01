@@ -1081,12 +1081,38 @@ void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const doubl
                 nn[k] = v - bb[k] < QT ? v - bb[k] : QT;
             }
             /* ---- load the 24 tiles: position k of pi is the base index pi[k] */
+            const int rep = T[0] == T[1] || T[1] == T[2] || T[2] == T[3];
             for (int pi = 0; pi < 24; pi++) {
                 const int *P = Q_PERM[pi];
                 const int64_t b0 = bb[P[0]], b1 = bb[P[1]], b2 = bb[P[2]], b3 = bb[P[3]];
                 const int64_t n0 = nn[P[0]], n1 = nn[P[1]], n2 = nn[P[2]], n3 = nn[P[3]];
                 const int64_t l0 = QS[P[0]], l1 = QS[P[1]], l2 = QS[P[2]], l3 = QS[P[3]];
                 double *ap = al + pi * Q4, *cp = cl + pi * Q4, *rp = rl + pi * Q4;
+                if (rep) {
+                    /* coinciding tiles: the same tile position may have been
+                     * loaded for an earlier permutation; copy it in cache */
+                    int p0 = -1;
+                    for (int q = 0; q < pi && p0 < 0; q++)
+                        if (T[Q_PERM[q][0]] == T[P[0]] && T[Q_PERM[q][1]] == T[P[1]]
+                            && T[Q_PERM[q][2]] == T[P[2]] && T[Q_PERM[q][3]] == T[P[3]]) p0 = q;
+                    if (p0 >= 0) {
+                        const int *P0 = Q_PERM[p0];
+                        const int64_t m0 = QS[P0[0]], m1 = QS[P0[1]], m2 = QS[P0[2]], m3 = QS[P0[3]];
+                        const double *a0 = al + p0 * Q4, *c0 = cl + p0 * Q4, *r0 = rl + p0 * Q4;
+                        for (int64_t u0 = 0; u0 < n0; u0++)
+                        for (int64_t u1 = 0; u1 < n1; u1++)
+                        for (int64_t u2 = 0; u2 < n2; u2++) {
+                            const int64_t lo = u0 * l0 + u1 * l1 + u2 * l2;
+                            const int64_t mo = u0 * m0 + u1 * m1 + u2 * m2;
+                            for (int64_t u3 = 0; u3 < n3; u3++) {
+                                ap[lo + u3 * l3] = a0[mo + u3 * m3];
+                                rp[lo + u3 * l3] = r0[mo + u3 * m3];
+                                cp[lo + u3 * l3] = c0[mo + u3 * m3];
+                            }
+                        }
+                        continue;
+                    }
+                }
                 /* the rows of a tile are scattered over the accumulators:
                  * request them all before use, so that the misses overlap */
                 for (int64_t u0 = 0; u0 < n0; u0++)
@@ -1161,7 +1187,6 @@ void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const doubl
                     }
                 }
             /* ---- M r and the energy, row by row of the base tile */
-            const int rep = T[0] == T[1] || T[1] == T[2] || T[2] == T[3];
             const int64_t m3 = nn[3];
             for (int64_t u0 = 0; u0 < nn[0]; u0++)
             for (int64_t u1 = 0; u1 < nn[1]; u1++)
