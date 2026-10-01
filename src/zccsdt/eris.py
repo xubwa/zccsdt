@@ -98,6 +98,9 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None):
     eri = _mo_chemist(mf.mol, C, kind)
     g = eri.transpose(0, 2, 1, 3)              # <pq|rs> = (pr|qs)
     g = g - g.transpose(0, 1, 3, 2)            # <pq||rs>
+    # enforce the bra antisymmetry exactly as well (the MO transformation
+    # leaves ~1e-14 noise in <pp||rs>, which packed storage would drop)
+    g = 0.5 * (g - g.transpose(1, 0, 2, 3))
     o, v = slice(0, nocc), slice(nocc, None)
     blocks = {name: np.ascontiguousarray(
         g[tuple(o if c == 'o' else v for c in name)]) for name in BLOCKS}
