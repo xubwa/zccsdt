@@ -157,52 +157,74 @@ The perturbative quadruples correction of `zccsdt.sa.rccsdt_q` (design notes
 in `docs/spin_adapted.md`) against CFOUR `ncc` (CALC=CCSDT(Q)), which is
 spin-adapted in the same way.
 
-**Setup.**  c233 (2 x Xeon Gold 6248R), cores 0-7, zccsdt 0253e6e and then
-`ncc` on the same cores (`bench/slurm_compare.sh` with `ZC_Q=1`).  zccsdt:
-wall time of the (Q) step.  `ncc`: its own "Non-iterative calculation of
-CCSDT(Q)" wall time.  The node was shared with other jobs (1-minute load
-10-25), so the times carry more noise than those of the sections above.  The
-cc-pVQZ pair did not run back to back: `ncc` ran on cores 24-31 of the same
-node while zccsdt ran on cores 0-7.
+**Setup.**  c233 (2 x Xeon Gold 6248R), 8 cores of one socket, zccsdt 0212757.
+zccsdt: wall time of the (Q) step (`bench/profile_sa.py` with `ZC_Q=1`).
+`ncc`: its own "Non-iterative calculation of CCSDT(Q)" wall time.  The
+cc-pVTZ runs of both programs used cores 0-7, one after the other; the
+cc-pVQZ runs used cores 24-31.  The node was shared with other jobs (1-minute
+load 3-20); `ncc` for H2O and N2 was run twice, at load 10-20 and at load
+6-8, and its times agreed to 3%.
 
-| System | o, v | Quadruples | zccsdt (Q) | `ncc` (Q) | `ncc` / zccsdt | zccsdt CCSDT iteration | Memory: zccsdt (anonymous), `ncc` (RSS) |
+| System | o, v | Quadruples | zccsdt (Q) | `ncc` (Q) | `ncc` / zccsdt | zccsdt CCSDT iteration | Memory: zccsdt, `ncc` (RSS) |
 |---|---|---|---|---|---|---|---|
-| H2O/cc-pVTZ | 5, 53 | 45 | 6.8 s | 58.0 s | 8.6 | 0.49 s | 1.2 GB, 10.1 GB |
-| N2/cc-pVTZ | 7, 53 | 161 | 23.3 s | 290.7 s | 12.5 | 1.12 s | 1.4 GB, 17.7 GB |
-| H2S/cc-pVTZ | 9, 53 | 414 | 58.2 s | 613.1 s | 10.5 | 2.21 s | 1.3 GB, 23.2 GB |
-| H2O/cc-pVQZ | 5, 110 | 45 | 132 s | 3837 s | 29 | 5.4 s | 12 GB (work arrays), 22.0 GB |
+| H2O/cc-pVTZ | 5, 53 | 45 | 5.2 s | 57.4 s | 11 | 0.45 s | 1.1 GB, 10.1 GB |
+| N2/cc-pVTZ | 7, 53 | 161 | 18.5 s | 282.5 s | 15 | 1.06 s | 1.2 GB, 17.7 GB |
+| H2S/cc-pVTZ | 9, 53 | 414 | 48.6 s | 613.1 s | 13 | 2.18 s | 1.3 GB, 23.2 GB |
+| H2O/cc-pVQZ | 5, 110 | 45 | 103 s | 3837 s | 37 | 5.4 s | 12 GB, 22.0 GB |
+| C6H6/cc-pVDZ, frozen core | 15, 93 | 2835 | 3223 s | not run | | 87.7 s | 6.5 GB + T3 (4.3 GB) |
+
+The zccsdt memory is the peak anonymous memory of the (Q) step at cc-pVTZ and
+the size of its work arrays (10 v^4 and smaller ones) for the two larger
+cases.
 
 - **Energies.**  With CCSDT converged in both programs (to different
-  thresholds), the (Q) corrections agree to 1-2e-10 Eh: H2O -0.000367644522
-  (zccsdt) and -0.000367644322 (`ncc`), N2 -0.001823317881 and
-  -0.001823317657, H2S -0.000339324771 and -0.000339324630.  Against MRCC at
-  identical geometries and tight convergence the agreement is 1e-11 Eh
-  (`bench/refs`).
-- **Cost.**  The (Q) step takes as long as 14-26 CCSDT iterations of zccsdt
-  here; for `ncc` it is 58-86 of its own iterations at cc-pVTZ and 226 at
-  cc-pVQZ, where it keeps only 3 of its 8 cores busy (11522 s CPU in 3837 s).
-- **Memory.**  The work arrays are 10 v^4 (0.6 GB at v = 53, 11.7 GB at
-  v = 110), besides T3.  `ncc` needs 8-18 times more at cc-pVTZ and about
-  twice as much at cc-pVQZ.
+  thresholds), the (Q) corrections agree to 3e-11 - 2e-10 Eh:
 
-### Where the time goes (H2O/cc-pVQZ, 132 s, 45 quadruples)
+  | System | zccsdt | `ncc` |
+  |---|---|---|
+  | H2O/cc-pVTZ | -0.000367644522 | -0.000367644322 |
+  | N2/cc-pVTZ | -0.001823317881 | -0.001823317657 |
+  | H2S/cc-pVTZ | -0.000339324771 | -0.000339324630 |
+  | H2O/cc-pVQZ | -0.000429291177 | -0.000429291148 |
 
-| Step | Time | Comment |
-|---|---|---|
-| T3 x `<vv\|vo>` products | 31.8 s | 135 GEMMs with K = 4v, 6.4e10 FMA each at 545 GFLOP/s |
-| energy kernel | 29.6 s | one pass over six 1.2 GB accumulators per quadruple (about 11 GB/s; the tiles' rows are scattered) |
-| I x T2 products | 27.7 s | 270 GEMMs of v^5 FMA; bound by memory traffic (each writes or updates a v^4 array) |
-| intermediates I | 19.3 s | 75 builds (2 v^5 each): 15 pairs and 2 per triple (i, j, k) |
-| T3 x `<ov\|oo>`, T2 x G | 16.4 s | small-K products, bound by the v^4 passes |
-| gathers, stacking | 2.8 s | |
+  Against MRCC at identical geometries and tight convergence the agreement is
+  1e-11 Eh (`bench/refs`).
+- **Cost.**  The (Q) step takes as long as 12-22 CCSDT iterations of zccsdt
+  for the small molecules and 37 for benzene; for `ncc` it is 57-86 of its
+  own iterations at cc-pVTZ and 226 at cc-pVQZ, where it keeps only 3 of its
+  8 cores busy (11522 s CPU in 3837 s).
+- **Benzene.**  CCSDT converged in 14 iterations (correlation energy
+  -0.859518675 Eh, energy threshold 1e-7); E[Q] = -0.000887989 Eh and
+  E(Q) = -0.002741990 Eh in 54 minutes.  `ncc` was not run: scaled from its
+  H2S time with o^4 v^5 it would take about a day.
+- **Memory.**  The work arrays are 10 v^4 (0.6 GB at v = 53, 6.0 GB at v = 93,
+  11.7 GB at v = 110), besides T3.  `ncc` needs 9-18 times more at cc-pVTZ
+  and about twice as much at cc-pVQZ.
 
-The two kinds of v^5 products run at or near the DGEMM rate; about half of
-the time is passes over v^4 arrays (kernel, accumulations) and the
-intermediates.  Known reserves: quadruples with a repeated index (40 of 45
-here, about half for 15 occupied orbitals) are computed like the others,
-although symmetry would save a third of their products; the o-contracted
-terms could be evaluated inside the energy kernel instead of in separate
-passes.
+### Where the time goes
+
+| Step | H2O/cc-pVQZ (103 s) | C6H6/cc-pVDZ (3223 s) | Comment |
+|---|---|---|---|
+| T3 x `<vv\|vo>` products | 23.3 s | 706 s | stacked GEMMs (K = 3v or 4v) at 540-570 GFLOP/s |
+| I x T2 products | 21.8 s | 732 s | v^5 FMA each; bound by memory traffic (each reads one v^4 array and writes or updates another), about half the DGEMM rate |
+| energy kernel | 22.1 s | 725 s | one pass over six v^4 accumulators per quadruple, 3.4 ns per element; the rows of a tile are scattered, so the pass is bound by memory latency |
+| T3 x `<ov\|oo>`, T2 x G, gathers | 16.4 s | 899 s | small-K products (K = 2o .. 4o); each is a pass over a v^4 accumulator |
+| intermediates I | 15.4 s | 129 s | 2 v^5 per build: once per pair (i, j) and twice per triple (i, j, k) |
+| stacking | 0.6 s | 28 s | |
+
+Only the T3 x `<vv|vo>` products run at the DGEMM rate; everything else is
+passes over v^4 arrays.  For 15 occupied orbitals the o-contracted terms take
+28% of the time.
+
+### Optimization history (H2O/cc-pVTZ and H2O/cc-pVQZ, (Q) step, seconds)
+
+| Version | cc-pVTZ | cc-pVQZ | Change |
+|---|---|---|---|
+| 37a52dc | 244 | | one product and one transposed v^4 add per term (numpy) |
+| 47ecd0d | 6.9 | 132 | cyclic accumulator layouts, stacked GEMMs, symmetrized intermediates, tiled energy kernel (cc-pVQZ: with the factorized metric already) |
+| 2591f48 | 6.8 | | base-ordered tile buffers in the kernel, intermediates without a transposed copy |
+| 2c26c97 | 5.4 | | exchange symmetry of quadruples with a repeated index |
+| e2314da | 5.2 | 103 | coinciding tiles copied in cache |
 
 ## RCCSDT / UCCSDT on R/U-form integrals, 8 cores
 
