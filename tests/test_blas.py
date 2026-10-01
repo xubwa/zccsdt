@@ -15,3 +15,7 @@ def test_gemm_accumulate(dtype):
     assert got is C
     np.testing.assert_allclose(C, want, atol=1e-12)
     np.testing.assert_allclose(gemm(A, B), A @ B, atol=1e-12)
+    # transposed (F-contiguous) operands
+    np.testing.assert_allclose(gemm(B.T.copy().T.T, A.T), B.T @ A.T, atol=1e-12)
+    At = np.asfortranarray(A)
+    np.testing.assert_allclose(gemm(At, B), A @ B, atol=1e-12)

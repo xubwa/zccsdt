@@ -71,6 +71,25 @@ static void gemv_z(int trans, int64_t m, int64_t n, double complex alpha,
                 a, lda, x, 1, &beta, y, 1);
 }
 
+/* Plain row-major GEMM, C = alpha op(A) op(B) + beta C, exported so that
+ * Python-side contractions use the same BLAS (and thread pool) as the
+ * kernels.  alpha/beta are passed by pointer (complex for _z). */
+void zc_gemm_d(int ta, int tb, int64_t m, int64_t n, int64_t k,
+               const double *alpha, const double *a, int64_t lda,
+               const double *b, int64_t ldb, const double *beta, double *c,
+               int64_t ldc)
+{
+    gemm_d(ta, tb, m, n, k, *alpha, a, lda, b, ldb, *beta, c, ldc);
+}
+
+void zc_gemm_z(int ta, int tb, int64_t m, int64_t n, int64_t k,
+               const double complex *alpha, const double complex *a, int64_t lda,
+               const double complex *b, int64_t ldb, const double complex *beta,
+               double complex *c, int64_t ldc)
+{
+    gemm_z(ta, tb, m, n, k, *alpha, a, lda, b, ldb, *beta, c, ldc);
+}
+
 #define DEFINE_T3(T, SFX)                                                      \
                                                                                \
 /* T[P - p0, d, m, Q] = osgn * vsgn * T3p[otri[m, P], vtri[d, Q]] */          \
