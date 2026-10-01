@@ -106,3 +106,47 @@ void zc_reduce_pair_first_##SFX(T *R, int64_t nvtri, const T *X,               \
 
 DEFINE_KERNELS(double, d)
 DEFINE_KERNELS(double complex, z)
+
+/* ---- large-vector helpers for DIIS (OpenMP, double and complex) ---- */
+
+#define DEFINE_VECOPS(T, SFX, CONJ)                                            \
+/* out = a - b */                                                              \
+void zc_vsub_##SFX(int64_t n, const T *a, const T *b, T *out)                  \
+{                                                                              \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t i = 0; i < n; i++) out[i] = a[i] - b[i];                      \
+}                                                                              \
+/* *res = sum conj(a) b, per-thread partial sums (deterministic order) */      \
+void zc_vdot_##SFX(int64_t n, const T *a, const T *b, T *res)                  \
+{                                                                              \
+    T part[256] = {0};                                                         \
+    int nt = 1;                                                                \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        int id = omp_get_thread_num();                                         \
+        _Pragma("omp single")                                                  \
+        nt = omp_get_num_threads();                                            \
+        T acc = 0;                                                             \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t i = 0; i < n; i++) acc += CONJ(a[i]) * b[i];              \
+        if (id < 256) part[id] = acc;                                          \
+    }                                                                          \
+    T s = 0;                                                                   \
+    for (int t = 0; t < nt && t < 256; t++) s += part[t];                      \
+    *res = s;                                                                  \
+}                                                                              \
+/* out = sum_k c[k] * x[k] for k < nk (x: array of pointers) */                \
+void zc_vlincomb_##SFX(int64_t n, int64_t nk, const T **x, const T *c, T *out) \
+{                                                                              \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t i = 0; i < n; i++) {                                          \
+        T s = 0;                                                               \
+        for (int64_t k = 0; k < nk; k++) s += c[k] * x[k][i];                  \
+        out[i] = s;                                                            \
+    }                                                                          \
+}
+
+#include <omp.h>
+#define NOCONJ(x) (x)
+DEFINE_VECOPS(double, d, NOCONJ)
+DEFINE_VECOPS(double complex, z, conj)

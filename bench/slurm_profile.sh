@@ -12,6 +12,7 @@
 export OMP_NUM_THREADS=48
 export MKL_NUM_THREADS=48
 export OPENBLAS_NUM_THREADS=48
+export OMP_WAIT_POLICY=${OMP_WAIT_POLICY:-PASSIVE}
 cd /home/xwang405/apps/zccsdt
 echo "host $(hostname)  $(date)"
 lscpu | grep 'Model name'

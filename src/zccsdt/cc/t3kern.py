@@ -9,16 +9,22 @@ import os
 import numpy as np
 
 from zccsdt.cc.t3pack import _sfx
+from zccsdt import timing
 
 
 def _load():
-    path = os.environ.get('ZCCSDT_T3_LIB') or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'lib', 'libzc_ccsdt_t3.so')
-    try:
-        return ctypes.CDLL(path)
-    except OSError:
-        return None
+    '''Prefer the MKL build (BLAS threads share the OpenMP pool), then the
+    OpenBLAS build; $ZCCSDT_T3_LIB overrides.'''
+    libdir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib')
+    env = os.environ.get('ZCCSDT_T3_LIB')
+    cands = [env] if env else [os.path.join(libdir, 'libzc_ccsdt_t3_mkl.so'),
+                               os.path.join(libdir, 'libzc_ccsdt_t3.so')]
+    for path in cands:
+        try:
+            return ctypes.CDLL(path)
+        except OSError:
+            continue
+    return None
 
 
 _lib = _load()
@@ -38,6 +44,12 @@ def _c(a, dtype):
     return np.ascontiguousarray(a, dtype=dtype)
 
 
+def _record(name, stats):
+    for k, part in enumerate(('gather', 'gemm', 'reduce')):
+        timing._totals['%s.%s' % (name, part)] += stats[k]
+        timing._counts['%s.%s' % (name, part)] += 1
+
+
 def pass1(T3p, om, vm, batch, GPd, GmQ, gpp, fT):
     '''Returns Xacc (nv+no, no*nvp), Yall (npo, nv, ny), r1 (nv*no), rA (npo, nvp).'''
     dt = T3p.dtype
@@ -48,30 +60,36 @@ def pass1(T3p, om, vm, batch, GPd, GmQ, gpp, fT):
     r1 = np.zeros(nv * no, dtype=dt)
     rA = np.zeros((om.npair, vm.npair), dtype=dt)
     GPd, GmQ, gpp, fT = (_c(x, dt) for x in (GPd, GmQ, gpp, fT))
+    st = np.zeros(3)
     getattr(_lib, 'zc_t3_pass1_' + _sfx(dt))(
         _p(T3p), _i(om.ntri), _i(vm.ntri), _i(no), _i(nv), _i(om.npair),
         _i(vm.npair), _p(om.tri_c), _p(om.sgn_c), _p(vm.tri_c), _p(vm.sgn_c),
         _i(batch), _p(GPd), _p(GmQ), _i(ny), _p(gpp), _p(fT),
-        _p(Xacc), _p(Yall), _p(r1), _p(rA))
+        _p(Xacc), _p(Yall), _p(r1), _p(rA), _p(st))
+    _record('pass1', st)
     return Xacc, Yall, r1, rA
 
 
 def pass2(T3p, om, vm, batch, Wring, t2mnT, WvT2, WoT, t2P, R):
     dt = T3p.dtype
     Wring, t2mnT, WvT2, WoT, t2P = (_c(x, dt) for x in (Wring, t2mnT, WvT2, WoT, t2P))
+    st = np.zeros(3)
     getattr(_lib, 'zc_t3_pass2_' + _sfx(dt))(
         _p(T3p), _i(om.ntri), _i(vm.ntri), _i(om.n), _i(vm.n), _i(om.npair),
         _i(vm.npair), _p(om.tri_c), _p(om.sgn_c), _p(om.free_c), _p(om.pair_c),
         _p(vm.tri_c), _p(vm.sgn_c), _p(vm.free_c), _p(vm.pair_c), _i(batch),
-        _p(Wring), _p(t2mnT), _p(WvT2), _p(WoT), _p(t2P), _p(R))
+        _p(Wring), _p(t2mnT), _p(WvT2), _p(WoT), _p(t2P), _p(R), _p(st))
+    _record('pass2', st)
 
 
 def pp_ladder(T3p, om, vm, batch, Wpp, R):
     dt = T3p.dtype
+    st = np.zeros(3)
     getattr(_lib, 'zc_t3_ppl_' + _sfx(dt))(
         _p(T3p), _i(om.ntri), _i(vm.ntri), _i(vm.n), _i(vm.npair),
         _p(vm.tri_c), _p(vm.sgn_c), _p(vm.free_c), _p(vm.pair_c), _i(batch),
-        _p(_c(Wpp, dt)), _p(R))
+        _p(_c(Wpp, dt)), _p(R), _p(st))
+    _record('ppl', st)
 
 
 def update(T3p, R, eo, ev):

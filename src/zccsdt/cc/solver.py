@@ -10,6 +10,7 @@ import numpy as np
 from pyscf import lib
 
 from zccsdt.cc import ccsd, ccsdt, ccsdt_opt, t3pack
+from zccsdt.cc.diis import DIIS
 from zccsdt.timing import timer
 
 
@@ -20,7 +21,6 @@ class Options:
     conv_tol_normt: float = 1e-8
     max_cycle: int = 200
     diis_space: int = 8
-    diis_incore: bool = True    # PySCF's default keeps DIIS vectors on disk
     mem_mb: float = 2000.0      # batch buffer budget of the packed-T3 code
     verbose: bool = False
 
@@ -90,8 +90,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                       dtype=dtype)
 
     e_old = ccsd.energy(t1, t2, eris)
-    adiis = lib.diis.DIIS(incore=opts.diis_incore)
-    adiis.space = opts.diis_space
+    adiis = DIIS(space=opts.diis_space)
     timings = []
     conv = False
     for icycle in range(opts.max_cycle):

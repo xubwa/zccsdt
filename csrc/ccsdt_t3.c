@@ -25,7 +25,16 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef ZC_USE_MKL
+#include <mkl_cblas.h>
+#else
 #include <cblas.h>
+#endif
+#include <omp.h>
+
+/* stats[]: accumulated wall seconds: 0 gather, 1 gemm, 2 reduce/other */
+#define TIC(k) do { double _t = omp_get_wtime(); (void)0
+#define TOC(k) stats[k] += omp_get_wtime() - _t; } while (0)
 
 static const double RSGN[3] = {1.0, -1.0, 1.0};
 
@@ -45,6 +54,21 @@ static void gemm_z(int ta, int tb, int64_t m, int64_t n, int64_t k, double compl
     cblas_zgemm(CblasRowMajor, ta ? CblasTrans : CblasNoTrans,
                 tb ? CblasTrans : CblasNoTrans, m, n, k, &alpha, a, lda, b, ldb,
                 &beta, c, ldc);
+}
+
+static void gemv_d(int trans, int64_t m, int64_t n, double alpha, const double *a,
+                   int64_t lda, const double *x, double beta, double *y)
+{
+    cblas_dgemv(CblasRowMajor, trans ? CblasTrans : CblasNoTrans, m, n, alpha,
+                a, lda, x, 1, beta, y, 1);
+}
+
+static void gemv_z(int trans, int64_t m, int64_t n, double complex alpha,
+                   const double complex *a, int64_t lda, const double complex *x,
+                   double complex beta, double complex *y)
+{
+    cblas_zgemv(CblasRowMajor, trans ? CblasTrans : CblasNoTrans, m, n, &alpha,
+                a, lda, x, 1, &beta, y, 1);
 }
 
 #define DEFINE_T3(T, SFX)                                                      \
@@ -85,39 +109,32 @@ void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                        int64_t batch,                                          \
                        const T *GPd, const T *GmQ, int64_t ny,                 \
                        const T *gpp, const T *fT,                              \
-                       T *Xacc, T *Yall, T *r1, T *rA)                         \
+                       T *Xacc, T *Yall, T *r1, T *rA, double *stats)                         \
 {                                                                              \
     (void)nto;                                                                 \
     const int64_t dm = nv * no;                                                \
     T *buf = malloc(sizeof(T) * batch * dm * nvp);                             \
     for (int64_t p0 = 0; p0 < npo; p0 += batch) {                              \
         int64_t nbp = (p0 + batch <= npo) ? batch : npo - p0;                  \
+        TIC(0);                                                                \
         gather_half_##SFX(T3p, nvt, p0, nbp, no, nv, npo, nvp, otri, osgn,     \
                           vtri, vsgn, buf);                                    \
+        TOC(0);                                                                \
+        TIC(1);                                                                \
         gemm_##SFX(0, 0, nv + no, no * nvp, nbp * nv, 1.0, GPd + p0 * nv,      \
                    npo * nv, buf, no * nvp, 1.0, Xacc, no * nvp);              \
         gemm_##SFX(0, 0, nbp * nv, ny, no * nvp, 1.0, buf, no * nvp, GmQ, ny,  \
                    0.0, Yall + p0 * nv * ny, ny);                              \
-        _Pragma("omp parallel for schedule(static)")                           \
-        for (int64_t x = 0; x < dm; x++) {                                     \
-            T acc = 0;                                                         \
-            for (int64_t P = 0; P < nbp; P++) {                                \
-                const T *t = buf + (P * dm + x) * nvp;                         \
-                const T *g = gpp + (p0 + P) * nvp;                             \
-                for (int64_t Q = 0; Q < nvp; Q++) acc += t[Q] * g[Q];          \
-            }                                                                  \
-            r1[x] += acc;                                                      \
-        }                                                                      \
-        _Pragma("omp parallel for schedule(static)")                           \
+        TOC(1);                                                                \
+        TIC(2);                                                                \
+        /* r1 += T[P] (dm x nvp) gpp[P];  rA[P] = fT (dm) . T[P] */          \
         for (int64_t P = 0; P < nbp; P++) {                                    \
-            T *ra = rA + (p0 + P) * nvp;                                       \
-            memset(ra, 0, sizeof(T) * nvp);                                    \
-            for (int64_t x = 0; x < dm; x++) {                                 \
-                const T *t = buf + (P * dm + x) * nvp;                         \
-                T f = fT[x];                                                   \
-                for (int64_t Q = 0; Q < nvp; Q++) ra[Q] += f * t[Q];           \
-            }                                                                  \
+            gemv_##SFX(0, dm, nvp, 1.0, buf + P * dm * nvp, nvp,               \
+                       gpp + (p0 + P) * nvp, 1.0, r1);                         \
+            gemv_##SFX(1, dm, nvp, 1.0, buf + P * dm * nvp, nvp, fT, 0.0,      \
+                       rA + (p0 + P) * nvp);                                   \
         }                                                                      \
+        TOC(2);                                                                \
     }                                                                          \
     free(buf);                                                                 \
 }                                                                              \
@@ -138,7 +155,7 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                        const int64_t *vfree, const int64_t *vpair,             \
                        int64_t batch,                                          \
                        const T *Wring, const T *t2mnT, const T *WvT2,          \
-                       const T *WoT, const T *t2P, T *R)                       \
+                       const T *WoT, const T *t2P, T *R, double *stats)                       \
 {                                                                              \
     const int64_t dm = nv * no;                                                \
     T *Tb = malloc(sizeof(T) * batch * dm * nvp);                              \
@@ -146,8 +163,11 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
     const int64_t sP = dm * nvp, sa = no * nvp;                                \
     for (int64_t p0 = 0; p0 < npo; p0 += batch) {                              \
         int64_t nbp = (p0 + batch <= npo) ? batch : npo - p0;                  \
+        TIC(0);                                                                \
         gather_half_##SFX(T3p, nvt, p0, nbp, no, nv, npo, nvp, otri, osgn,     \
                           vtri, vsgn, Tb);                                     \
+        TOC(0);                                                                \
+        TIC(1);                                                                \
         for (int64_t P = 0; P < nbp; P++)                                      \
             gemm_##SFX(0, 0, dm, nvp, dm, 1.0, Wring, dm, Tb + P * sP, nvp,    \
                        0.0, Z + P * sP, nvp);                                  \
@@ -155,6 +175,8 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                    nv, WvT2, no * nvp, 1.0, Z, no * nvp);                      \
         gemm_##SFX(0, 0, nbp * nv, no * nvp, no, -1.0, WoT + p0 * nv * no,     \
                    no, t2P, no * nvp, 1.0, Z, no * nvp);                       \
+        TOC(1);                                                                \
+        TIC(2);                                                                \
         _Pragma("omp parallel for schedule(dynamic, 4)")                       \
         for (int64_t it = 0; it < nto; it++) {                                    \
             T *r = R + it * nvt;                                                \
@@ -171,6 +193,7 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                 }                                                              \
             }                                                                  \
         }                                                                      \
+        TOC(2);                                                                \
     }                                                                          \
     free(Tb); free(Z);                                                         \
 }                                                                              \
@@ -182,12 +205,13 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
 void zc_t3_ppl_##SFX(const T *T3p, int64_t nto, int64_t nvt, int64_t nv,       \
                      int64_t nvp, const int64_t *vtri, const int8_t *vsgn,     \
                      const int64_t *vfree, const int64_t *vpair,               \
-                     int64_t batch, const T *Wpp, T *R)                        \
+                     int64_t batch, const T *Wpp, T *R, double *stats)                        \
 {                                                                              \
     T *Tv = malloc(sizeof(T) * batch * nvp * nv);                              \
     T *X = malloc(sizeof(T) * batch * nvp * nv);                               \
     for (int64_t i0 = 0; i0 < nto; i0 += batch) {                              \
         int64_t nb = (i0 + batch <= nto) ? batch : nto - i0;                   \
+        TIC(0);                                                                \
         _Pragma("omp parallel for collapse(2) schedule(static)")               \
         for (int64_t Q = 0; Q < nvp; Q++)                                      \
         for (int64_t ib = 0; ib < nb; ib++) {                                  \
@@ -196,8 +220,12 @@ void zc_t3_ppl_##SFX(const T *T3p, int64_t nto, int64_t nvt, int64_t nv,       \
             for (int64_t c = 0; c < nv; c++)                                   \
                 o[c] = vsgn[c * nvp + Q] * row[vtri[c * nvp + Q]];             \
         }                                                                      \
+        TOC(0);                                                                \
+        TIC(1);                                                                \
         gemm_##SFX(0, 0, nvp, nb * nv, nvp, 1.0, Wpp, nvp, Tv, nb * nv, 0.0,   \
                    X, nb * nv);                                                \
+        TOC(1);                                                                \
+        TIC(2);                                                                \
         const int64_t sQ = nb * nv;                                            \
         _Pragma("omp parallel for schedule(static)")                           \
         for (int64_t ib = 0; ib < nb; ib++) {                                  \
@@ -208,6 +236,7 @@ void zc_t3_ppl_##SFX(const T *T3p, int64_t nto, int64_t nvt, int64_t nv,       \
                       - x[vpair[nvt + A] * sQ + vfree[nvt + A]]                \
                       + x[vpair[2 * nvt + A] * sQ + vfree[2 * nvt + A]];       \
         }                                                                      \
+        TOC(2);                                                                \
     }                                                                          \
     free(Tv); free(X);                                                         \
 }                                                                              \

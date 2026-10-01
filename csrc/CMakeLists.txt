@@ -31,3 +31,20 @@ get_filename_component(ZC_BLAS_DIR ${ZC_BLAS_LIB} DIRECTORY)
 set_target_properties(zc_ccsdt_t3 PROPERTIES
   BUILD_RPATH ${ZC_BLAS_DIR} INSTALL_RPATH ${ZC_BLAS_DIR}
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
+
+# Optional MKL build of the same kernels (GNU OpenMP threading layer, so BLAS
+# and the OpenMP loops share one thread pool).  Select it at run time with
+# ZCCSDT_T3_LIB=.../libzc_ccsdt_t3_mkl.so
+set(ZC_MKL_DIR "" CACHE PATH "MKL lib/intel64 directory (empty: skip)")
+if(ZC_MKL_DIR)
+  add_library(zc_ccsdt_t3_mkl SHARED ccsdt_t3.c)
+  target_compile_definitions(zc_ccsdt_t3_mkl PRIVATE ZC_USE_MKL)
+  target_include_directories(zc_ccsdt_t3_mkl PRIVATE ${ZC_BLAS_INC})
+  target_compile_options(zc_ccsdt_t3_mkl PRIVATE -O3 -march=native)
+  target_link_libraries(zc_ccsdt_t3_mkl PUBLIC
+    ${ZC_MKL_DIR}/libmkl_intel_lp64.so ${ZC_MKL_DIR}/libmkl_gnu_thread.so
+    ${ZC_MKL_DIR}/libmkl_core.so OpenMP::OpenMP_C m dl)
+  set_target_properties(zc_ccsdt_t3_mkl PROPERTIES
+    BUILD_RPATH ${ZC_MKL_DIR} INSTALL_RPATH ${ZC_MKL_DIR}
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
+endif()

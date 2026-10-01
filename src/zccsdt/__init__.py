@@ -1,1 +1,7 @@
 '''zccsdt: spin-orbital / spinor CCSDT.'''
+
+import os
+
+# OpenMP threads of the C kernels must not spin while BLAS threads run (and
+# vice versa); this only takes effect if libgomp is not loaded yet.
+os.environ.setdefault('OMP_WAIT_POLICY', 'PASSIVE')
