@@ -221,24 +221,32 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
     adiis = DIIS(space=diis_space)
     e_old = rccsdt_ref.energy(t1, t2, ints)
     conv = False
+    import time
+    from zccsdt.timing import timer
+    timings = []
     for cycle in range(max_cycle):
+        t0 = time.perf_counter()
         r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b)
         normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.linalg.norm(r3b))
-        out = adiis.update([t1 + r1 / d1, t2 + r2 / d2, t3b + r3b / d3])
+        with timer('sa.diis'):
+            out = adiis.update([t1 + r1 / d1, t2 + r2 / d2, t3b + r3b / d3])
         t1 = out[0].reshape(no, nv)
         t2 = out[1].reshape(no, no, nv, nv)
         t3b = out[2].reshape(t3b.shape)
         e_new = rccsdt_ref.energy(t1, t2, ints)
+        timings.append(time.perf_counter() - t0)
         if verbose:
-            print('cycle %3d  E_corr = %.15f  dE = %.3e  |r| = %.3e'
-                  % (cycle + 1, e_new, e_new - e_old, normt))
+            print('cycle %3d  E_corr = %.15f  dE = %.3e  |r| = %.3e  %.2fs'
+                  % (cycle + 1, e_new, e_new - e_old, normt, timings[-1]))
         done = abs(e_new - e_old) < conv_tol and normt < conv_tol_normt
         e_old = e_new
         if done:
             conv = True
             break
-    return rccsdt_ref.Result(e_corr=e_old, e_tot=ints.e_hf + e_old, converged=conv,
-                             ncycle=cycle + 1, t1=t1, t2=t2, t3=t3b)
+    res = rccsdt_ref.Result(e_corr=e_old, e_tot=ints.e_hf + e_old, converged=conv,
+                            ncycle=cycle + 1, t1=t1, t2=t2, t3=t3b)
+    res.timings = timings
+    return res
 
 
 # ------------------------------------------------------- explicit (v2) pieces
@@ -467,28 +475,40 @@ def residuals(ints, blocks, t1, t2, t3b):
     one pass, explicit intermediates and CCSD part, one loop over occupied
     pairs for the ring and T3 -> T1/T2/W, then drive, ladders and F terms.'''
     from zccsdt.sa.t3blocks import project_null
+    from zccsdt.timing import timer
     no = ints.nocc
-    D = {k: dress_block(ints.V, t1, no, k) for k in DRESSED}
-    G = D['oovv'] = np.ascontiguousarray(ints.V[:no, :no, no:, no:])
-    Fd = dress_fock(ints.V, ints.fock, t1, no)
-    Ws, Wa = pp_operator_packed(ints, t1, t2)
-    # vvvo: bra-dressed part + sum_f t1[i,f] (bra-dressed vvvv = W - t2.G)
-    B = dress_block(ints.V, t1, no, 'vvvo', ket=False)
-    D['vvvo'] = B + vvvv_t1_packed(Ws, Wa, t1) \
-        - contract('mnab,mnei->abei', t2, contract('mnef,if->mnei', G, t1))
-    im = intermediates(D, Fd, t2, no)
-    # vvoo: bra-dressed part and the single-t1 ket terms; the t1 t1 vvvv term
-    # rides with the CCSD ladder (tau = t2 + t1 t1)
-    Bvo = dress_block(ints.V, t1, no, 'vvoo', ket=False)
-    D['vvoo'] = Bvo + contract('if,abfj->abij', t1, B) + contract('jf,bafi->abij', t1, B)
-    r1, r2 = ccsd_residual(D, Fd, t2, im, no, Ws, Wa, t1=t1)
+    with timer('sa.dress'):
+        D = {k: dress_block(ints.V, t1, no, k) for k in DRESSED}
+        G = D['oovv'] = np.ascontiguousarray(ints.V[:no, :no, no:, no:])
+        Fd = dress_fock(ints.V, ints.fock, t1, no)
+    with timer('sa.Wpp'):
+        Ws, Wa = pp_operator_packed(ints, t1, t2)
+    with timer('sa.imds'):
+        # vvvo: bra-dressed part + sum_f t1[i,f] (bra-dressed vvvv = W - t2.G)
+        B = dress_block(ints.V, t1, no, 'vvvo', ket=False)
+        D['vvvo'] = B + vvvv_t1_packed(Ws, Wa, t1) \
+            - contract('mnab,mnei->abei', t2, contract('mnef,if->mnei', G, t1))
+        im = intermediates(D, Fd, t2, no)
+    with timer('sa.ccsd'):
+        # vvoo: bra-dressed part and the single-t1 ket terms; the t1 t1 vvvv
+        # term rides with the CCSD ladder (tau = t2 + t1 t1)
+        Bvo = dress_block(ints.V, t1, no, 'vvoo', ket=False)
+        D['vvoo'] = Bvo + contract('if,abfj->abij', t1, B) + contract('jf,bafi->abij', t1, B)
+        r1, r2 = ccsd_residual(D, Fd, t2, im, no, Ws, Wa, t1=t1)
     r3b = np.zeros_like(t3b)
-    r1t, r2t, dWv, dWo = t3_pass(blocks, t3b, im, D, no, r3b)
-    drive(blocks, t2, im['WvJ'] + dWv, im['WoJ'] + dWo, r3b)
-    ladder_pp(blocks, t3b, Ws, Wa, r3b)
-    fvv_term(t3b, im['Fv'], r3b)
-    ladder_hh(blocks, t3b, hh_operator(im['Whh'], im['Fo']), r3b)
-    return r1 + r1t, r2 + r2t, project_null(r3b)
+    with timer('sa.t3_pass'):
+        r1t, r2t, dWv, dWo = t3_pass(blocks, t3b, im, D, no, r3b)
+    with timer('sa.drive'):
+        drive(blocks, t2, im['WvJ'] + dWv, im['WoJ'] + dWo, r3b)
+    with timer('sa.pp_ladder'):
+        ladder_pp(blocks, t3b, Ws, Wa, r3b)
+    with timer('sa.fvv'):
+        fvv_term(t3b, im['Fv'], r3b)
+    with timer('sa.hh_ladder'):
+        ladder_hh(blocks, t3b, hh_operator(im['Whh'], im['Fo']), r3b)
+    with timer('sa.project'):
+        r3b = project_null(r3b)
+    return r1 + r1t, r2 + r2t, r3b
 
 
 # ------------------------------------------------- block dressing and W_pp
