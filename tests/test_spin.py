@@ -143,6 +143,7 @@ def test_spin_block_c_equals_numpy(system, cplx):
     t2P = rnd(no, no, npv) * (so[:, None, None] + so[None, :, None] == gQ[None, None, :])
     Wpp = rnd(npv, npv) * (gQ[:, None] == gQ[None, :])
     O6 = rnd(om.ntri, om.ntri) * (om.tri_grp[:, None] == om.tri_grp[None, :])
+    Wpp = [np.ascontiguousarray(Wpp[lo:hi, lo:hi]) for lo, hi in vm.blocks]
     rargs = (T3, Wr.reshape(nv * no, -1), t2mn, Wv, Wo, t2P, Wpp, O6)
     np.testing.assert_allclose(eng._residual_c(*rargs), eng._residual_np(*rargs), atol=1e-11)
 

@@ -220,7 +220,9 @@ void zc_pair_t1_contract_##SFX(T *out, const T *V, const T *t, int64_t nq,     \
             T *oe = o + e * no;                                                \
             for (int64_t f = 0; f < n; f++) {                                  \
                 if (f == e) continue;                                          \
-                T x = (f > e) ? v[pidx[e * n + f]] : -v[pidx[f * n + e]];      \
+                const int64_t ix = (f > e) ? pidx[e * n + f] : pidx[f * n + e];\
+                if (ix < 0) continue;              /* pair outside the block */\
+                T x = (f > e) ? v[ix] : -v[ix];                                \
                 for (int64_t i = 0; i < no; i++) oe[i] += x * t[i * n + f];    \
             }                                                                  \
         }                                                                      \

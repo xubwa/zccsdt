@@ -79,6 +79,14 @@ class DenseT3:
         om, vm, dtype = self.om, self.vm, self.dtype
         nocc, nvir = om.n, vm.n
         T3p = self.view(T3)
+        if isinstance(Wpp, (list, tuple)):          # diagonal pair blocks
+            if len(Wpp) == 1:
+                Wpp = Wpp[0]
+            else:                                   # (dense engine on spin maps)
+                full = np.zeros((vm.npair, vm.npair), dtype=np.result_type(*Wpp))
+                for (lo, hi), blk in zip(vm.blocks, Wpp):
+                    full[lo:hi, lo:hi] = blk
+                Wpp = full
         R = np.zeros((om.ntri, vm.ntri), dtype=dtype)
         WvT2 = np.ascontiguousarray(Wv.transpose(1, 2, 0)).reshape(nvir, -1)   # [e,(i,Q)]
         t2P_flat = t2P.reshape(nocc, -1)                                     # [m,(k,Q)]
@@ -406,7 +414,7 @@ class SpinBlockT3:
                 sv = vm.sgn[c[None, :], Q[:, None]] * L.vsig[A]
                 addr = L.obase[rows][None, :, None] + L.vcol[A][:, None, :]
                 T = T3[addr] * L.osig[rows][None, :, None] * sv[:, None, :]
-                Wh = np.ascontiguousarray(Wpp[Qlo:Qhi, Qlo:Qhi])
+                Wh = np.ascontiguousarray(Wpp[h])
                 X = (Wh @ T.reshape(Qhi - Qlo, -1)).reshape(Qhi - Qlo, len(rows), len(c))
                 Xfull[Qlo:Qhi, :, c[0]:c[-1] + 1] = X
             t3pack.add_reduce_pair_first(Rd, Xfull, vm, rows)
@@ -626,7 +634,7 @@ def _spin_block_c_methods():
         Wh = {}
         for h in range(3):
             Qlo, Qhi = vm.pair_off[h], vm.pair_off[h + 1]
-            Wh[h] = np.ascontiguousarray(Wpp[Qlo:Qhi, Qlo:Qhi], dtype=dtype)
+            Wh[h] = np.ascontiguousarray(Wpp[h], dtype=dtype)
         vspin = np.ascontiguousarray(vm.spins, dtype=np.int64)
         coff = np.array([vr[0][0], vr[1][0]], dtype=np.int64)
         ncs = np.array([vr[0][1] - vr[0][0], vr[1][1] - vr[1][0]], dtype=np.int64)

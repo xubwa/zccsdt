@@ -99,33 +99,40 @@ def dress_block(eris, t1, key):
 
 
 def vvvv_packed(eris, vm):
-    '''Undressed <ab||de> packed over the pairs of ``vm`` (both indices),
-    cached on the integral object.  The stored packed form (from the generator
-    or the HDF5 file, attribute _vvvv_pp) is in triu (lexicographic) pair
-    order; a spin-grouped ``vm`` gets a permuted copy.'''
+    '''Undressed <ab||de> packed over a<b, d<e as the list of diagonal pair
+    blocks of ``vm`` (one block with everything for maps without spins;
+    alpha-alpha, alpha-beta, beta-beta blocks otherwise, the off-diagonal
+    blocks vanish by spin conservation).  Cached on the integral object.  The
+    stored packed form (generator / HDF5 attribute _vvvv_pp) is in triu
+    (lexicographic) pair order.'''
+    cached = getattr(eris, '_vvvv_blocks', None)
+    if cached is not None and cached[0] is vm:
+        return cached[1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    n = vm.n
     lex = getattr(eris, '_vvvv_pp', None)
-    if vm.spins is None:
-        if lex is None:
-            lex = np.ascontiguousarray(np.asarray(eris.vvvv)[md[:, None], ne[:, None], md, ne])
+    if vm.spins is None and lex is not None:
+        blocks = [lex]
+    else:
+        blocks = []
+        for lo, hi in vm.blocks:
+            a, b = md[lo:hi], ne[lo:hi]
+            if lex is not None:
+                perm = a * n - a * (a + 1) // 2 + (b - a - 1)       # triu index
+                blk = lex[perm[:, None], perm]
+            else:
+                blk = np.asarray(eris.vvvv)[a[:, None], b[:, None], a, b]
+            blocks.append(np.ascontiguousarray(blk))
+        if vm.spins is None:
             try:
-                eris._vvvv_pp = lex
+                eris._vvvv_pp = blocks[0]
             except AttributeError:
                 pass
-        return lex
-    cache = getattr(eris, '_vvvv_pp_spin', None)
-    if cache is None:
-        if lex is not None:
-            n = vm.n
-            perm = md * n - md * (md + 1) // 2 + (ne - md - 1)      # triu index
-            cache = np.ascontiguousarray(lex[perm[:, None], perm])
-        else:
-            cache = np.ascontiguousarray(np.asarray(eris.vvvv)[md[:, None], ne[:, None], md, ne])
-        try:
-            eris._vvvv_pp_spin = cache
-        except AttributeError:
-            pass
-    return cache
+    try:
+        eris._vvvv_blocks = (vm, blocks)
+    except AttributeError:
+        pass
+    return blocks
 
 
 def bra_dressed_vvvo_pp(eris, t1, om, vm):
@@ -166,8 +173,11 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm):
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     W = np.array(Bv, order='C', copy=True)
-    # sum_f ~<ab||ef> t1[i,f]: sparse in the packed (e<f) index, done directly
-    t3pack.pair_t1_contract(W, Vd, t1, vm)
+    # sum_f ~<ab||ef> t1[i,f]: sparse in the packed (e<f) index, done directly,
+    # one diagonal pair block of the dressed vvvv at a time
+    for h, (lo, hi) in enumerate(vm.blocks):
+        if hi > lo:
+            t3pack.pair_t1_contract(W[lo:hi], Vd[h], t1, vm, block=h)
     # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] = sum_{m<n} t2[mn,ab] ~oovo[mn,e,i]
     t2mn_pp = t2[mm, nn][:, md, ne]
     gemm(np.asfortranarray(t2mn_pp.T), np.ascontiguousarray(ge['oovo'][mm, nn]).reshape(
@@ -231,7 +241,10 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
     R1 -= einsum('Pic,Pac->ia', ge['ooov'][mm, nn], t2[mm, nn])
     # R2: driving + ladder (with the t1 t1 part of the vvoo dressing) + hh
     R2 = np.array(vvoo_pp, order='C', copy=True)
-    gemm(t2pp + _tau1_pairs(t1, om, vm), Vd.T, R2, beta=1.0)
+    tt = t2pp + _tau1_pairs(t1, om, vm)
+    for h, (lo, hi) in enumerate(vm.blocks):
+        if hi > lo:
+            R2[:, lo:hi] += gemm(np.ascontiguousarray(tt[:, lo:hi]), Vd[h].T)
     Wkl = np.ascontiguousarray(ge['oooo'][mm, nn][:, mm, nn])           # (kl, ij)
     gemm(goovv_pp, t2pp.T, Wkl, beta=1.0)
     gemm(np.asfortranarray(Wkl.T), t2pp, R2, beta=1.0)
@@ -251,45 +264,54 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
 
 
 def dressed_vvvv_pp(eris, t1, om, vm):
-    '''Packed T1-dressed <ab||de> over a<b, d<e without the full v^4 array:
+    '''Packed T1-dressed <ab||de> (list of diagonal pair blocks, see
+    vvvv_packed) without the full v^4 array:
     ~<ab||de> = <ab||de> - Y[a,b,de] + Y[b,a,de] + Z[a,b,de],
     Y[x,y,Q] = sum_m t1[m,x] <my||Q>,  Z[a,b,Q] = sum_mn t1[m,a] t1[n,b] <mn||Q>.'''
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
-    nocc, nvir = t1.shape
-    cache = vvvv_packed(eris, vm)
-    ovvv_Q = np.ascontiguousarray(np.asarray(eris.ovvv)[:, :, md, ne])  # (m, y, Q)
-    out = np.array(cache, dtype=np.result_type(cache, ovvv_Q, t1), copy=True)
-    # out[(x<y), Q] -= Y[x,y,Q];  out[(y<x), Q] += Y[x,y,Q], with
-    # Y[x,y,Q] = sum_m t1[m,x] <my||Q>, built in batches of x (Y is v^2 n_Q)
-    nb = max(1, int(2e9 // (nvir * vm.npair * out.itemsize)))
-    for x0 in range(0, nvir, nb):
-        x1 = min(x0 + nb, nvir)
-        Y = gemm(np.ascontiguousarray(t1[:, x0:x1].T), ovvv_Q.reshape(nocc, -1))
-        Y = Y.reshape(x1 - x0, nvir, vm.npair)
-        t3pack.pair_antisym_batch_add(out, Y, vm, x0, alpha=-1.0)
-        del Y
-    # Z[(a<b), Q] = sum_{m<n} (t[m,a] t[n,b] - t[n,a] t[m,b]) <mn||Q>
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
-    tau = (t1[mm][:, md] * t1[nn][:, ne] - t1[nn][:, md] * t1[mm][:, ne])   # (mn, ab)
+    nocc, nvir = t1.shape
+    V = vvvv_packed(eris, vm)
+    ovvv_Q = np.ascontiguousarray(np.asarray(eris.ovvv)[:, :, md, ne])   # (m, y, Q)
+    tau = _tau1_pairs(t1, om, vm)                                        # (mn, ab)
     oovv_pp = np.asarray(eris.oovv)[mm, nn][:, md, ne]
-    gemm(np.ascontiguousarray(tau.T), oovv_pp, out, beta=1.0)
+    out = []
+    for h, (lo, hi) in enumerate(vm.blocks):
+        nq = hi - lo
+        blk = np.array(V[h], dtype=np.result_type(V[h], ovvv_Q, t1), order='C', copy=True)
+        if nq:
+            a, b = md[lo:hi], ne[lo:hi]
+            x0, x1 = int(min(a.min(), b.min())), int(max(a.max(), b.max())) + 1
+            G = np.ascontiguousarray(ovvv_Q[:, :, lo:hi]).reshape(nocc, -1)
+            # blk[(a<b), Q] -= Y[a,b,Q] - Y[b,a,Q], Y built in batches of x
+            nb = max(1, int(2e9 // (nvir * nq * blk.itemsize)))
+            for xb in range(x0, x1, nb):
+                xe = min(xb + nb, x1)
+                Y = gemm(np.ascontiguousarray(t1[:, xb:xe].T), G).reshape(xe - xb, nvir, nq)
+                t3pack.pair_antisym_batch_add(blk, Y, vm, xb, alpha=-1.0, block=h)
+                del Y
+            gemm(np.ascontiguousarray(tau[:, lo:hi].T), np.ascontiguousarray(oovv_pp[:, lo:hi]),
+                 blk, beta=1.0)
+        out.append(blk)
     return out
 
 
-def add_one_body_pairs(W, F, vm, scale):
+def add_one_body_pairs(W, F, vm, scale, block=0):
     '''W[(a<b),(d<e)] += scale * (F_ad d_be - F_bd d_ae - F_ae d_bd + F_be d_ad),
-    the antisymmetrized one-body operator F acting on either pair index.
+    the antisymmetrized one-body operator F acting on either pair index, for
+    W holding pair block ``block`` of ``vm`` (rows and columns block-local).
 
     Grouped by the index F acts on: acting on a, the column pair is {y, b}
     with value +F[a,y] if y < b else -F[a,y]; acting on b, the column pair
     is {y, a} with value -F[b,y] if y < a else +F[b,y].'''
-    a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+    lo, hi = vm.blocks[block]
+    a, b = vm.pairs[lo:hi, 0], vm.pairs[lo:hi, 1]
     y = np.arange(vm.n)[None, :]
-    rows = np.broadcast_to(np.arange(vm.npair)[:, None], (vm.npair, vm.n))
+    rows = np.broadcast_to(np.arange(hi - lo)[:, None], (hi - lo, vm.n))
     for keep, act, s_lt, s_gt in ((b, a, 1, -1), (a, b, -1, 1)):
         k = keep[:, None]
-        valid = y != k
-        col = vm.pidx[np.minimum(y, k), np.maximum(y, k)]
+        col = vm.pidx[np.minimum(y, k), np.maximum(y, k)] - lo
+        valid = (y != k) & (col >= 0) & (col < hi - lo)
         val = scale * np.where(y < k, s_lt, s_gt) * F[act[:, None], y]
         W[rows[valid], col[valid]] += val[valid]
     return W
@@ -418,11 +440,15 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         del vvoo_pp, R1, R2
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wpp'); t_.__enter__()
-        Wpp = vvvv_pp                     # in place: W(ab,de) = ~<ab||de> + ...
+        Wpp = vvvv_pp            # in place, per pair block: W(ab,de) = ~<ab||de> + ...
         del vvvv_pp
-        gemm(np.asfortranarray(t2mn[:, md, ne].T), goovv_pp, Wpp, beta=1.0)
-        # F_vv folded into the ladder: W(ab,de) += 1/2 A[F_ad delta_be]
-        add_one_body_pairs(Wpp, Feff_vv, vm, 0.5)
+        t2pp_v = t2mn[:, md, ne]
+        for h, (lo, hi) in enumerate(vm.blocks):
+            if hi > lo:
+                gemm(np.asfortranarray(t2pp_v[:, lo:hi].T),
+                     np.ascontiguousarray(goovv_pp[:, lo:hi]), Wpp[h], beta=1.0)
+                # F_vv folded into the ladder: W(ab,de) += 1/2 A[F_ad delta_be]
+                add_one_body_pairs(Wpp[h], Feff_vv, vm, 0.5, block=h)
         t_.__exit__(None, None, None)
         t_ = timer('imd.O6'); t_.__enter__()
         Weff_oooo = ge['oooo'] + einsum('mnP,ijP->mnij', goovv_P, t2P)

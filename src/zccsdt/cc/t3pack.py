@@ -124,6 +124,17 @@ class TripleMap:
         self.pa_c = np.ascontiguousarray(self.pairs[:, 0])
         self.pb_c = np.ascontiguousarray(self.pairs[:, 1])
         self.pidx_c = np.ascontiguousarray(self.pidx)
+        # pair blocks (a whole-range block, or the alpha-alpha / alpha-beta /
+        # beta-beta blocks) and, per block, pidx in block-local numbering
+        # (-1 for pairs outside the block)
+        if spins is None:
+            self.blocks = [(0, self.npair)]
+        else:
+            self.blocks = [(int(self.pair_off[h]), int(self.pair_off[h + 1])) for h in range(3)]
+        self.pidx_blk = []
+        for lo, hi in self.blocks:
+            loc = np.where((pidx >= lo) & (pidx < hi), pidx - lo, -1)
+            self.pidx_blk.append(np.ascontiguousarray(loc, dtype=np.int64))
 
 
 def triple_map(n, spins=None):
@@ -346,41 +357,48 @@ def pair_antisym_add(out, X, vm, strides, alpha=1.0):
     return out
 
 
-def pair_antisym_batch_add(out, Y, vm, x0, alpha=1.0):
+def pair_antisym_batch_add(out, Y, vm, x0, alpha=1.0, block=None):
     '''out[(a,b), :] += alpha (Y[a-x0, b] if x0 <= a < x1) - alpha (Y[b-x0, a]
-    if x0 <= b < x1) for the pairs of ``vm``, Y of shape (x1 - x0, n, ncol).'''
+    if x0 <= b < x1) for the pairs of ``vm`` (rows of out), or for the pairs
+    of block ``block`` of ``vm`` (out then holds only that block's rows);
+    Y has shape (x1 - x0, n, ncol).'''
     x1 = x0 + Y.shape[0]
     ncol = out.shape[1]
     n = vm.n
+    lo, hi = (0, vm.npair) if block is None else vm.blocks[block]
+    pa, pb = vm.pa_c[lo:hi], vm.pb_c[lo:hi]
     if USE_C and hasattr(_lib, 'zc_pair_antisym_batch_add_d') and out.flags.c_contiguous:
         Y = np.ascontiguousarray(Y, dtype=out.dtype)
         al = np.array(alpha, dtype=out.dtype)
         getattr(_lib, 'zc_pair_antisym_batch_add_' + _sfx(out.dtype))(
-            _p(out), _p(Y), _I64(n), _I64(vm.npair), _p(vm.pa_c), _p(vm.pb_c),
-            _I64(ncol), _I64(x0), _I64(x1), _p(al))
+            _p(out), _p(Y), _I64(n), _I64(hi - lo), _p(np.ascontiguousarray(pa)),
+            _p(np.ascontiguousarray(pb)), _I64(ncol), _I64(x0), _I64(x1), _p(al))
         return out
-    y = np.arange(n)
-    for x in range(x0, x1):
-        hi, lo = y[x + 1:], y[:x]
-        out[vm.pidx[x, hi]] += alpha * Y[x - x0, hi]
-        out[vm.pidx[lo, x]] -= alpha * Y[x - x0, lo]
+    ina = (pa >= x0) & (pa < x1)
+    inb = (pb >= x0) & (pb < x1)
+    q = np.arange(hi - lo)
+    out[q[ina]] += alpha * Y[pa[ina] - x0, pb[ina]]
+    out[q[inb]] -= alpha * Y[pb[inb] - x0, pa[inb]]
     return out
 
 
-def pair_t1_contract(out, V, t1, vm):
+def pair_t1_contract(out, V, t1, vm, block=0):
     '''out[Q, e, i] += sum_f V[Q, e, f] t1[i, f] for V antisymmetric in (e, f),
-    packed over the pairs of ``vm``; out: (nq, n, no).'''
+    with the (e<f) columns of V in the numbering of pair block ``block`` of
+    ``vm`` (the whole range for maps without spins); out: (nq, n, no).'''
     nq = V.shape[0]
     no, n = t1.shape
+    pidx = vm.pidx_blk[block]
     if USE_C and hasattr(_lib, 'zc_pair_t1_contract_d') and out.flags.c_contiguous:
         dt = out.dtype
         getattr(_lib, 'zc_pair_t1_contract_' + _sfx(dt))(
             _p(out), _p(np.ascontiguousarray(V, dtype=dt)),
             _p(np.ascontiguousarray(t1, dtype=dt)), _I64(nq), _I64(n),
-            _I64(vm.npair), _p(vm.pidx_c), _I64(no))
+            _I64(V.shape[1]), _p(pidx), _I64(no))
         return out
     full = np.zeros((nq, n, n), dtype=np.result_type(V, out))
-    full[:, vm.pairs[:, 0], vm.pairs[:, 1]] = V
-    full[:, vm.pairs[:, 1], vm.pairs[:, 0]] = -V
+    e, f = np.nonzero(pidx >= 0)
+    full[:, e, f] = V[:, pidx[e, f]]
+    full[:, f, e] = -V[:, pidx[e, f]]
     out += full @ t1.T
     return out

@@ -114,7 +114,10 @@ def update_t2_vvvv_packed(t1, t2, tau, eris):
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     V = vvvv_packed(eris, vm)
     tau_pp = np.ascontiguousarray(tau[mm, nn][:, md, ne])         # (ij, ef)
-    X = gemm(tau_pp, V.T)                                          # (ij, ab)
+    X = np.zeros((om.npair, vm.npair), dtype=np.result_type(tau_pp, V[0]))
+    for h, (lo, hi) in enumerate(vm.blocks):                      # (ij, ab)
+        if hi > lo:
+            X[:, lo:hi] = gemm(np.ascontiguousarray(tau_pp[:, lo:hi]), V[h].T)
     t2_new = _unpack_pairs(X, om, vm)
 
     extra = np.zeros_like(t2_new)
