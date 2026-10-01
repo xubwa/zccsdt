@@ -1,7 +1,7 @@
 '''Per-term timing of CCSDT iterations.
 
 usage: python bench/profile_iter.py MOLECULE BASIS KIND [NITER] [FROZEN]
-  MOLECULE: h2o | n2     KIND: ghf | x2c
+  MOLECULE: h2o | n2 | h2s     KIND: ghf | x2c
 environment: ZC_PACKED=1 builds the integrals block-wise with packed vvvv
              (needed for large bases); ZC_MEM_MB sets the batch buffer budget.
 '''
@@ -18,6 +18,7 @@ from zccsdt.cc import solver
 GEOM = {
     'h2o': 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
     'n2': 'N 0 0 0; N 0 0 1.0977',
+    'h2s': 'S 0 0 0; H 0 0.9618 0.9272; H 0 -0.9618 0.9272',
 }
 
 

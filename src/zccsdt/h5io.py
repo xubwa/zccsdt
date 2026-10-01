@@ -65,6 +65,9 @@ def save(path, eris):
             f.attrs[k] = getattr(eris, k)
         f['fock'] = np.asarray(eris.fock)
         f['mo_energy'] = np.asarray(eris.mo_energy)
+        if getattr(eris, 'spin_occ', None) is not None:
+            f['spin_occ'] = np.asarray(eris.spin_occ)
+            f['spin_vir'] = np.asarray(eris.spin_vir)
         for name in BLOCKS:
             if name == 'vvvv' and eris.vvvv is None:
                 f['eri/vvvv'] = np.asarray(eris._vvvv_pp)   # already in file layout
@@ -93,4 +96,7 @@ def load(path, full_vvvv=True):
                     source=str(f.attrs['source']), **blocks)
         if not full_vvvv:
             eris._vvvv_pp = np.ascontiguousarray(f['eri/vvvv'][()])
+        if 'spin_occ' in f:
+            eris.spin_occ = f['spin_occ'][()]
+            eris.spin_vir = f['spin_vir'][()]
         return eris

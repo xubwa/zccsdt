@@ -35,6 +35,8 @@ class ERIs:
     vvvv: np.ndarray            # None if only the packed form _vvvv_pp is kept
     e_nuc: float = 0.0
     source: str = ''
+    spin_occ: np.ndarray = None    # 0/1 = alpha/beta per spin orbital (alpha first),
+    spin_vir: np.ndarray = None    # only for pure-spin orbitals and spin_order=True
 
     @property
     def nmo(self):
@@ -129,7 +131,7 @@ def _orbital_kind(mf):
 
 
 def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=False,
-             vir_batch=16):
+             vir_batch=16, spin_order=False):
     '''Build spin-orbital ERIs from a converged SCF object.
 
     ``mo_coeff`` may be any orbitals spanning the same occupied space as the
@@ -151,6 +153,19 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=Fa
 
     C = np.hstack((mo_coeff[:, occ[frozen:]], mo_coeff[:, vir]))
     nocc = len(occ) - frozen
+    spins = None
+    if spin_order:
+        if kind != 'ghf':
+            raise ValueError('spin_order needs GHF-form orbitals of a nonrelativistic reference')
+        nao = mf.mol.nao_nr()
+        wa = np.einsum('mp,mp->p', C[:nao].conj(), C[:nao]).real
+        wb = np.einsum('mp,mp->p', C[nao:].conj(), C[nao:]).real
+        if np.max(np.minimum(wa, wb) / (wa + wb)) > 1e-10:
+            raise ValueError('spin_order needs orbitals of pure alpha or beta spin')
+        spins = (wb > wa).astype(np.int64)
+        perm = np.concatenate((np.argsort(spins[:nocc], kind='stable'),
+                               nocc + np.argsort(spins[nocc:], kind='stable')))
+        C, spins = C[:, perm], spins[perm]
     fock = C.conj().T @ fock_ao @ C
     if packed_vvvv and not (kind == 'ghf' and np.iscomplexobj(C)):
         g, vpp = _blocks_by_ao2mo(mf.mol, kind, C[:, :nocc], C[:, nocc:], vir_batch)
@@ -162,6 +177,8 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=Fa
                    e_hf=e_hf, e_nuc=float(mf.energy_nuc()),
                    source='%s:%s' % (type(mf).__name__, kind), vvvv=None, **g)
         out._vvvv_pp = np.ascontiguousarray(vpp)
+        if spins is not None:
+            out.spin_occ, out.spin_vir = spins[:nocc], spins[nocc:]
         return out
     eri = _mo_chemist(mf.mol, C, kind)
     g = eri.transpose(0, 2, 1, 3)              # <pq|rs> = (pr|qs)
@@ -175,9 +192,12 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=Fa
     if not np.iscomplexobj(mo_coeff) and kind == 'ghf':
         fock = fock.real
         blocks = {k: b.real for k, b in blocks.items()}
-    return ERIs(nocc=nocc, fock=fock, mo_energy=fock.diagonal().real.copy(),
-                e_hf=e_hf, e_nuc=float(mf.energy_nuc()),
-                source='%s:%s' % (type(mf).__name__, kind), **blocks)
+    out = ERIs(nocc=nocc, fock=fock, mo_energy=fock.diagonal().real.copy(),
+               e_hf=e_hf, e_nuc=float(mf.energy_nuc()),
+               source='%s:%s' % (type(mf).__name__, kind), **blocks)
+    if spins is not None:
+        out.spin_occ, out.spin_vir = spins[:nocc], spins[nocc:]
+    return out
 
 
 def reference_energy(eris):

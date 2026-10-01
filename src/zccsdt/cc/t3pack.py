@@ -52,21 +52,46 @@ _I64 = ctypes.c_int64
 
 
 class TripleMap:
-    def __init__(self, n):
+    '''Pairs p<q and triples p<q<s of n indices with their index maps.
+
+    Without ``spins`` the enumeration is lexicographic.  With ``spins`` (one
+    0/1 = alpha/beta label per index, alpha indices first) pairs and triples
+    are grouped by their number of beta indices (stable within a group), so
+    Ms-conserving blocks are contiguous ranges: pair_off[g] .. pair_off[g+1]
+    and tri_off[g] .. tri_off[g+1] hold the members with g beta indices.
+    All other maps only depend on this enumeration.'''
+
+    def __init__(self, n, spins=None):
         self.n = n
         pi, pj = np.triu_indices(n, 1)
+        tri = np.array([(i, j, k) for i in range(n) for j in range(i + 1, n)
+                        for k in range(j + 1, n)], dtype=np.int64).reshape(-1, 3)
+        if spins is None:
+            self.spins = None
+        else:
+            spins = np.asarray(spins, dtype=np.int64)
+            assert spins.shape == (n,) and np.all(np.diff(spins) >= 0), \
+                'spins must be 0/1 with alpha indices first'
+            self.spins = spins
+            order = np.argsort(spins[pi] + spins[pj], kind='stable')
+            pi, pj = pi[order], pj[order]
+            if len(tri):
+                tri = tri[np.argsort(spins[tri].sum(axis=1), kind='stable')]
         self.npair = len(pi)
         self.pairs = np.stack((pi, pj), axis=1)
         pidx = -np.ones((n, n), dtype=np.int64)
         pidx[pi, pj] = np.arange(self.npair)
         self.pidx = pidx
-        tri = np.array([(i, j, k) for i in range(n) for j in range(i + 1, n)
-                        for k in range(j + 1, n)], dtype=np.int64).reshape(-1, 3)
         self.triples = tri
         self.ntri = len(tri)
         tidx = -np.ones((n, n, n), dtype=np.int64)
         if self.ntri:
             tidx[tri[:, 0], tri[:, 1], tri[:, 2]] = np.arange(self.ntri)
+        if spins is not None:
+            self.pair_grp = spins[pi] + spins[pj]
+            self.tri_grp = spins[tri].sum(axis=1) if self.ntri else np.zeros(0, np.int64)
+            self.pair_off = np.searchsorted(self.pair_grp, np.arange(4))
+            self.tri_off = np.searchsorted(self.tri_grp, np.arange(5))
 
         # (free, pair) -> triple, sign
         self.tri = np.zeros((n, self.npair), dtype=np.int64)
@@ -96,12 +121,27 @@ class TripleMap:
         self.sgn_c = np.ascontiguousarray(self.sgn)
         self.free_c = np.ascontiguousarray(self.free)
         self.pair_c = np.ascontiguousarray(self.pair)
+        self.pa_c = np.ascontiguousarray(self.pairs[:, 0])
+        self.pb_c = np.ascontiguousarray(self.pairs[:, 1])
+        self.pidx_c = np.ascontiguousarray(self.pidx)
 
 
-def triple_map(n):
-    if n not in _CACHE:
-        _CACHE[n] = TripleMap(n)
-    return _CACHE[n]
+def triple_map(n, spins=None):
+    key = (n, None if spins is None else tuple(int(x) for x in spins))
+    if key not in _CACHE:
+        _CACHE[key] = TripleMap(n, spins)
+    return _CACHE[key]
+
+
+def maps_for(eris):
+    '''(om, vm) for an integral object: spin-grouped enumerations if the
+    orbitals carry spin labels (eris.spin_occ / eris.spin_vir), otherwise
+    lexicographic.'''
+    so = getattr(eris, 'spin_occ', None)
+    sv = getattr(eris, 'spin_vir', None)
+    nocc = eris.nocc
+    nvir = np.asarray(eris.fock).shape[0] - nocc
+    return triple_map(nocc, so), triple_map(nvir, sv)
 
 
 def gather_half(T3p, om, vm, pairs):
@@ -182,7 +222,7 @@ def reduce_vir_split(Z, vm, n_mid):
     '''P(a/bc)-type reduction for Z[B, a, x, Q] (free virtual a, any middle
     index x of length n_mid, virtual pair Q) -> R[B, x, A].  Gathers straight
     from this layout through precomputed flat indices (no transpose).'''
-    key = (vm.n, n_mid)
+    key = (id(vm), n_mid)
     if key not in _SPLIT_CACHE:
         x = np.arange(n_mid)[:, None]
         _SPLIT_CACHE[key] = [
@@ -281,10 +321,11 @@ def add_reduce_split(R, Z, om, vm, pairs, scale=1.0):
     scatter_occ(R, reduce_vir_split(Z, vm, om.n), om, pairs, scale)
 
 
-def pair_antisym_add(out, X, n, strides, alpha=1.0):
-    '''out[Q, x, y] += alpha * (X[a, b, x, y] - X[b, a, x, y]) for Q = (a<b),
-    where X[a, b, x, y] is addressed through element strides (sa, sb, sx, sy)
-    of the array X (any layout).  out: C-contiguous (npair, nx, ny).'''
+def pair_antisym_add(out, X, vm, strides, alpha=1.0):
+    '''out[Q, x, y] += alpha * (X[a, b, x, y] - X[b, a, x, y]) for the pairs
+    Q = (a, b) of the map ``vm``, where X[a, b, x, y] is addressed through
+    element strides (sa, sb, sx, sy) of the array X (any layout).
+    out: C-contiguous (npair, nx, ny).'''
     nx, ny = out.shape[1], out.shape[2]
     sa, sb, sx, sy = strides
     if USE_C and hasattr(_lib, 'zc_pair_antisym_add_d') and out.flags.c_contiguous \
@@ -292,11 +333,11 @@ def pair_antisym_add(out, X, n, strides, alpha=1.0):
         base = np.ascontiguousarray(X)
         al = np.array(alpha, dtype=out.dtype)
         getattr(_lib, 'zc_pair_antisym_add_' + _sfx(out.dtype))(
-            _p(out), _p(base), _I64(n), _I64(nx), _I64(ny), _I64(sa), _I64(sb),
-            _I64(sx), _I64(sy), _p(al))
+            _p(out), _p(base), _I64(vm.npair), _p(vm.pa_c), _p(vm.pb_c), _I64(nx),
+            _I64(ny), _I64(sa), _I64(sb), _I64(sx), _I64(sy), _p(al))
         return out
     flat = np.ascontiguousarray(X).ravel()
-    pa, pb = np.triu_indices(n, 1)
+    pa, pb = vm.pairs[:, 0], vm.pairs[:, 1]
     x = np.arange(nx)[:, None]
     y = np.arange(ny)[None, :]
     off = x * sx + y * sy
@@ -305,38 +346,39 @@ def pair_antisym_add(out, X, n, strides, alpha=1.0):
     return out
 
 
-def pair_antisym_batch_add(out, Y, n, x0, alpha=1.0):
-    '''out[(a<b), :] += alpha (Y[a-x0, b] if x0 <= a < x1) - alpha (Y[b-x0, a]
-    if x0 <= b < x1), for Y of shape (x1 - x0, n, ncol).'''
+def pair_antisym_batch_add(out, Y, vm, x0, alpha=1.0):
+    '''out[(a,b), :] += alpha (Y[a-x0, b] if x0 <= a < x1) - alpha (Y[b-x0, a]
+    if x0 <= b < x1) for the pairs of ``vm``, Y of shape (x1 - x0, n, ncol).'''
     x1 = x0 + Y.shape[0]
     ncol = out.shape[1]
+    n = vm.n
     if USE_C and hasattr(_lib, 'zc_pair_antisym_batch_add_d') and out.flags.c_contiguous:
         Y = np.ascontiguousarray(Y, dtype=out.dtype)
         al = np.array(alpha, dtype=out.dtype)
         getattr(_lib, 'zc_pair_antisym_batch_add_' + _sfx(out.dtype))(
-            _p(out), _p(Y), _I64(n), _I64(ncol), _I64(x0), _I64(x1), _p(al))
+            _p(out), _p(Y), _I64(n), _I64(vm.npair), _p(vm.pa_c), _p(vm.pb_c),
+            _I64(ncol), _I64(x0), _I64(x1), _p(al))
         return out
-    pidx = triple_map(n).pidx
     y = np.arange(n)
     for x in range(x0, x1):
         hi, lo = y[x + 1:], y[:x]
-        out[pidx[x, hi]] += alpha * Y[x - x0, hi]
-        out[pidx[lo, x]] -= alpha * Y[x - x0, lo]
+        out[vm.pidx[x, hi]] += alpha * Y[x - x0, hi]
+        out[vm.pidx[lo, x]] -= alpha * Y[x - x0, lo]
     return out
 
 
-def pair_t1_contract(out, V, t1):
+def pair_t1_contract(out, V, t1, vm):
     '''out[Q, e, i] += sum_f V[Q, e, f] t1[i, f] for V antisymmetric in (e, f),
-    packed over e<f; out: (nq, n, no).'''
+    packed over the pairs of ``vm``; out: (nq, n, no).'''
     nq = V.shape[0]
     no, n = t1.shape
     if USE_C and hasattr(_lib, 'zc_pair_t1_contract_d') and out.flags.c_contiguous:
         dt = out.dtype
         getattr(_lib, 'zc_pair_t1_contract_' + _sfx(dt))(
             _p(out), _p(np.ascontiguousarray(V, dtype=dt)),
-            _p(np.ascontiguousarray(t1, dtype=dt)), _I64(nq), _I64(n), _I64(no))
+            _p(np.ascontiguousarray(t1, dtype=dt)), _I64(nq), _I64(n),
+            _I64(vm.npair), _p(vm.pidx_c), _I64(no))
         return out
-    vm = triple_map(n)
     full = np.zeros((nq, n, n), dtype=np.result_type(V, out))
     full[:, vm.pairs[:, 0], vm.pairs[:, 1]] = V
     full[:, vm.pairs[:, 1], vm.pairs[:, 0]] = -V

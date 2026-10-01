@@ -66,7 +66,8 @@ def test_dressing_matches_reference(fh):
     vm = t3pack.triple_map(fh.nmo - fh.nocc)
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     ref = ge[v, v, v, v][md[:, None], ne[:, None], md, ne]
-    np.testing.assert_allclose(dressed_vvvv_pp(fh, t1, vm), ref, atol=1e-12)
+    om = t3pack.triple_map(fh.nocc)
+    np.testing.assert_allclose(dressed_vvvv_pp(fh, t1, om, vm), ref, atol=1e-12)
 
 
 def test_add_one_body_pairs():

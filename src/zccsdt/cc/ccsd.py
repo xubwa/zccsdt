@@ -109,7 +109,7 @@ def update_t2_vvvv_packed(t1, t2, tau, eris):
     from zccsdt.cc.ccsdt_opt import vvvv_packed, _unpack_pairs
     from zccsdt.blas import gemm
     nocc, nvir = t1.shape
-    om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
+    om, vm = t3pack.maps_for(eris)
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     V = vvvv_packed(eris, vm)

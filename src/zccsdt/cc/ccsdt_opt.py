@@ -99,14 +99,30 @@ def dress_block(eris, t1, key):
 
 
 def vvvv_packed(eris, vm):
-    '''Undressed <ab||de> packed over a<b, d<e, cached on the integral object
-    (built once from the stored block).'''
-    cache = getattr(eris, '_vvvv_pp', None)
+    '''Undressed <ab||de> packed over the pairs of ``vm`` (both indices),
+    cached on the integral object.  The stored packed form (from the generator
+    or the HDF5 file, attribute _vvvv_pp) is in triu (lexicographic) pair
+    order; a spin-grouped ``vm`` gets a permuted copy.'''
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    lex = getattr(eris, '_vvvv_pp', None)
+    if vm.spins is None:
+        if lex is None:
+            lex = np.ascontiguousarray(np.asarray(eris.vvvv)[md[:, None], ne[:, None], md, ne])
+            try:
+                eris._vvvv_pp = lex
+            except AttributeError:
+                pass
+        return lex
+    cache = getattr(eris, '_vvvv_pp_spin', None)
     if cache is None:
-        md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
-        cache = np.ascontiguousarray(np.asarray(eris.vvvv)[md[:, None], ne[:, None], md, ne])
+        if lex is not None:
+            n = vm.n
+            perm = md * n - md * (md + 1) // 2 + (ne - md - 1)      # triu index
+            cache = np.ascontiguousarray(lex[perm[:, None], perm])
+        else:
+            cache = np.ascontiguousarray(np.asarray(eris.vvvv)[md[:, None], ne[:, None], md, ne])
         try:
-            eris._vvvv_pp = cache
+            eris._vvvv_pp_spin = cache
         except AttributeError:
             pass
     return cache
@@ -124,7 +140,7 @@ def bra_dressed_vvvo_pp(eris, t1, om, vm):
     B = np.array(get_block(eris, 'vvvo')[md, ne], dtype=dtype, order='C', copy=True)
     ovvo = np.ascontiguousarray(get_block(eris, 'ovvo'), dtype=dtype)
     L = gemm(np.asfortranarray(t1.T), ovvo.reshape(nocc, -1))      # [a, (b, e, i)]
-    t3pack.pair_antisym_add(B, L, nvir, (nvir * nvir * nocc, nvir * nocc, nocc, 1),
+    t3pack.pair_antisym_add(B, L, vm, (nvir * nvir * nocc, nvir * nocc, nocc, 1),
                             alpha=-1.0)
     del L
     tau = _tau1_pairs(t1, om, vm)                                    # (mn, ab)
@@ -151,7 +167,7 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm):
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     W = np.array(Bv, order='C', copy=True)
     # sum_f ~<ab||ef> t1[i,f]: sparse in the packed (e<f) index, done directly
-    t3pack.pair_t1_contract(W, Vd, t1)
+    t3pack.pair_t1_contract(W, Vd, t1, vm)
     # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] = sum_{m<n} t2[mn,ab] ~oovo[mn,e,i]
     t2mn_pp = t2[mm, nn][:, md, ne]
     gemm(np.asfortranarray(t2mn_pp.T), np.ascontiguousarray(ge['oovo'][mm, nn]).reshape(
@@ -160,7 +176,7 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm):
     A = np.ascontiguousarray(t2.transpose(2, 1, 0, 3)).reshape(nvir * nocc, nocc * nvir)
     B = np.ascontiguousarray(ge['ovvv'].transpose(0, 3, 1, 2)).reshape(nocc * nvir, -1)
     X = gemm(A, B)                                                           # [a,i,b,e]
-    t3pack.pair_antisym_add(W, X, nvir, (nocc * nvir * nvir, nvir, 1, nvir * nvir),
+    t3pack.pair_antisym_add(W, X, vm, (nocc * nvir * nvir, nvir, 1, nvir * nvir),
                             alpha=-1.0)
     del X, A, B
     # - sum_m f[m,e] t2[m,i,a,b]
@@ -183,7 +199,7 @@ def dressed_vvoo_pp(eris, t1, Bv, om, vm):
     G = np.array(vvoo[md, ne][:, mm, nn], order='C', copy=True)         # (Q, P)
     ovoo = np.ascontiguousarray(get_block(eris, 'ovoo')[:, :, mm, nn], dtype=dtype)
     L = gemm(np.asfortranarray(t1.T), ovoo.reshape(nocc, -1))           # [a, (b, P)]
-    t3pack.pair_antisym_add(G.reshape(vm.npair, om.npair, 1), L, nvir,
+    t3pack.pair_antisym_add(G.reshape(vm.npair, om.npair, 1), L, vm,
                             (nvir * om.npair, om.npair, 1, 0), alpha=-1.0)
     oooo = np.ascontiguousarray(np.asarray(eris.oooo)[mm, nn][:, mm, nn], dtype=dtype)
     gemm(np.asfortranarray(_tau1_pairs(t1, om, vm).T), oooo, G, beta=1.0)
@@ -234,7 +250,7 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
     return R1, R2
 
 
-def dressed_vvvv_pp(eris, t1, vm):
+def dressed_vvvv_pp(eris, t1, om, vm):
     '''Packed T1-dressed <ab||de> over a<b, d<e without the full v^4 array:
     ~<ab||de> = <ab||de> - Y[a,b,de] + Y[b,a,de] + Z[a,b,de],
     Y[x,y,Q] = sum_m t1[m,x] <my||Q>,  Z[a,b,Q] = sum_mn t1[m,a] t1[n,b] <mn||Q>.'''
@@ -250,10 +266,9 @@ def dressed_vvvv_pp(eris, t1, vm):
         x1 = min(x0 + nb, nvir)
         Y = gemm(np.ascontiguousarray(t1[:, x0:x1].T), ovvv_Q.reshape(nocc, -1))
         Y = Y.reshape(x1 - x0, nvir, vm.npair)
-        t3pack.pair_antisym_batch_add(out, Y, nvir, x0, alpha=-1.0)
+        t3pack.pair_antisym_batch_add(out, Y, vm, x0, alpha=-1.0)
         del Y
     # Z[(a<b), Q] = sum_{m<n} (t[m,a] t[n,b] - t[n,a] t[m,b]) <mn||Q>
-    om = t3pack.triple_map(nocc)
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     tau = (t1[mm][:, md] * t1[nn][:, ne] - t1[nn][:, md] * t1[mm][:, ne])   # (mn, ab)
     oovv_pp = np.asarray(eris.oovv)[mm, nn][:, md, ne]
@@ -318,7 +333,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     '''One Jacobi step.  T3p is packed (notri, nvtri) or flat; returns
     (t1new, t2new, T3p_new) with T3p_new flat.'''
     nocc, nvir = t1.shape
-    om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
+    om, vm = t3pack.maps_for(eris)
     dtype = np.result_type(t1, t2, T3p, eris.oovv, eris.fock)
     T3p = np.ascontiguousarray(np.asarray(T3p, dtype=dtype).reshape(om.ntri, vm.ntri))
     mo_e = eris.mo_energy
@@ -334,7 +349,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
             with timer('dress.' + k):
                 ge[k] = dress_block(eris, t1, k)
         with timer('dress.vvvv_pp'):
-            vvvv_pp = dressed_vvvv_pp(eris, t1, vm)
+            vvvv_pp = dressed_vvvv_pp(eris, t1, om, vm)
     foo, fov, fvv = fdr[:nocc, :nocc], fdr[:nocc, nocc:], fdr[nocc:, nocc:]
     goovv = ge['oovv']
 
@@ -519,7 +534,7 @@ def ccsd_update_amps(opts, t1, t2, eris):
     '''One Jacobi step of CCSD in the T1-dressed formalism (the CCSD part of
     update_amps without T3).'''
     nocc, nvir = t1.shape
-    om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
+    om, vm = t3pack.maps_for(eris)
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     mo_e = eris.mo_energy
@@ -529,7 +544,7 @@ def ccsd_update_amps(opts, t1, t2, eris):
         fdr = dress_fock(eris, t1)
         ge = {k: dress_block(eris, t1, k)
               for k in ('oooo', 'ovvo', 'oovv', 'ooov', 'vovv')}
-        vvvv_pp = dressed_vvvv_pp(eris, t1, vm)
+        vvvv_pp = dressed_vvvv_pp(eris, t1, om, vm)
         Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
     with timer('ccsd'):
         goovv = ge['oovv']
