@@ -145,7 +145,14 @@ class _Scratch:
                              h5py.h5s.create_simple((n,)), dcpl)
         offset = ds.get_offset()
         self.h5.flush()
-        os.posix_fallocate(self.raw.fileno(), offset, n * dtype.itemsize)
+        try:
+            os.posix_fallocate(self.raw.fileno(), offset, n * dtype.itemsize)
+        except OSError as err:
+            raise OSError(err.errno, 'cannot allocate %.1f GB for a DIIS vector in %s (%s); '
+                          'choose another scratch directory (ZCCSDT_TMPDIR / PYSCF_TMPDIR) or '
+                          'diis_file, a smaller diis_space, or keep the vectors in memory '
+                          '(incore_complete)' % (n * dtype.itemsize / 1e9, self.filename,
+                                                 err.strerror)) from err
         return np.memmap(self.raw, dtype=dtype, mode='r+', offset=offset, shape=(n,))
 
     def close(self):
