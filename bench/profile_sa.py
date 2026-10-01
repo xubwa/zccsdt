@@ -1,7 +1,7 @@
 '''Per-term timing of the closed-shell spin-adapted CCSDT (zccsdt.sa.rccsdt).
 
 usage: python bench/profile_sa.py MOLECULE BASIS [NITER] [NCORE]
-  MOLECULE: h2o | n2 | h2s     NCORE: frozen core (spatial orbitals)
+  MOLECULE: h2o | n2 | h2s | ch2o     NCORE: frozen core (spatial orbitals)
 '''
 import os
 import sys
@@ -18,6 +18,7 @@ GEOM = {
     'h2o': 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
     'n2': 'N 0 0 0; N 0 0 1.0977',
     'h2s': 'S 0 0 0; H 0 0.9618 0.9272; H 0 -0.9618 0.9272',
+    'ch2o': 'C 0 0 0; O 0 0 1.205; H 0 0.9447 -0.5847; H 0 -0.9447 -0.5847',
 }
 
 
