@@ -69,3 +69,42 @@ def test_energy_metric():
     w = dict(derive.q_metric())
     assert w[(0, 1, 2, 3)] == 16 and w[(1, 0, 2, 3)] == -8 and w[(1, 2, 0, 3)] == 4
     assert w[(1, 0, 3, 2)] == 4 and w[(1, 2, 3, 0)] == -2
+
+
+@pytest.fixture(scope='module')
+def h2o():
+    '''H2O / 6-31G, frozen core: integrals, blocks, amplitudes after a few
+    CCSDT iterations, and the dense spatial r / z arrays.'''
+    from pyscf import gto, scf
+    from zccsdt.sa import rccsdt, rccsdt_ref
+    from zccsdt.sa.t3blocks import Blocks
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).run(conv_tol=1e-12)
+    ints = rccsdt_ref.from_scf(mf, ncore=1)
+    r = rccsdt.kernel(ints, max_cycle=4)
+    B = Blocks(ints.nocc)
+    t3 = B.to_dense(r.t3)
+    arr = {'V': ints.V, 'T2': r.t2, 'T3': t3}
+    dims = {'o': ints.nocc, 'v': ints.nvir}
+    val = {k: evaluate(terms, arr, 'ijklabcd', dims) for k, terms in derive.q_spatial().items()}
+    return ints, B, r.t2, r.t3, t3, val
+
+
+def test_quadruple_blocks_equal_dense(h2o):
+    '''A, B, C of single occupied quadruples (distinct, permuted, repeated
+    indices) and the energies of the per-quadruple algorithm against the
+    dense term-by-term evaluation.'''
+    from zccsdt.sa import rccsdt_q, rccsdt_ref
+    ints, B, t2, t3b, t3, val = h2o
+    assert abs(val['Z4.T3'] - val['R4.T3']).max() < 1e-14      # real orbitals, bare integrals
+    ctx = rccsdt_q.Context(ints, B, t2, t3b)
+    for quad in ((0, 1, 2, 3), (2, 0, 3, 1), (0, 0, 1, 2), (1, 3, 3, 0), (1, 1, 2, 2)):
+        A, Bq, C = rccsdt_q.quad_arrays(ctx, quad)
+        assert abs(A - val['R4.T3'][quad]).max() < 1e-13
+        assert abs(Bq - val['R4.T2'][quad]).max() < 1e-13
+        assert abs(C - val['Z4.T2'][quad]).max() < 1e-13
+    ref = rccsdt_ref.q_correction(t2, t3, ints)
+    got = rccsdt_q.q_correction_simple(ints, B, t2, t3b)
+    assert abs(got[0] - ref[0]) < 1e-13 and abs(got[1] - ref[1]) < 1e-13
+    quads = rccsdt_q.unique_quadruples(ints.nocc)
+    assert sum(m for _, m in quads) == 4 ** 4 - 4 * (1 + 4 * 3)   # no index three or four times
