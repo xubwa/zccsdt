@@ -317,6 +317,58 @@ void zc_vt1_ab_##SFX(T *oa, T *ob, const T *V, const T *ta, const T *tb,       \
 DEFINE_VT1(double, d)
 DEFINE_VT1(double complex, z)
 
+/* out[r * ldo + c] += alpha * in[c * ldi + r] for r < nr, c < nc: a blocked
+ * transpose-add (both operands row-major). */
+#define DEFINE_ADDT(T, SFX)                                                    \
+void zc_add_transposed_##SFX(T *out, const T *in, int64_t nr, int64_t nc,      \
+                             int64_t ldo, int64_t ldi, const T *alpha)         \
+{                                                                              \
+    const T al = *alpha;                                                       \
+    const int64_t B = 32;                                                      \
+    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
+    for (int64_t r0 = 0; r0 < nr; r0 += B)                                     \
+    for (int64_t c0 = 0; c0 < nc; c0 += B) {                                   \
+        const int64_t r1 = r0 + B < nr ? r0 + B : nr;                          \
+        const int64_t c1 = c0 + B < nc ? c0 + B : nc;                          \
+        for (int64_t r = r0; r < r1; r++) {                                    \
+            T *o = out + r * ldo;                                              \
+            for (int64_t c = c0; c < c1; c++) o[c] += al * in[c * ldi + r];    \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_ADDT(double, d)
+DEFINE_ADDT(double complex, z)
+
+/* out = beta * out + alpha * in over a 4-index box n[0..3], both operands
+ * addressed through element strides os / is (any layout, e.g. transposed
+ * or sliced numpy views); beta == 0 overwrites out without reading it.
+ * Parallel over the first two indices; the last index is the inner loop. */
+#define DEFINE_AXPBY4(T, SFX)                                                  \
+void zc_axpby4_##SFX(T *out, const T *in, const int64_t *n, const int64_t *os, \
+                     const int64_t *is, const T *alpha, const T *beta)         \
+{                                                                              \
+    const T al = *alpha, be = *beta;                                           \
+    const int64_t n0 = n[0], n1 = n[1], n2 = n[2], n3 = n[3];                  \
+    const int64_t o3 = os[3], i3 = is[3];                                      \
+    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
+    for (int64_t a = 0; a < n0; a++)                                           \
+    for (int64_t b = 0; b < n1; b++) {                                         \
+        T *o = out + a * os[0] + b * os[1];                                    \
+        const T *p = in + a * is[0] + b * is[1];                               \
+        for (int64_t c = 0; c < n2; c++) {                                     \
+            T *oc = o + c * os[2];                                             \
+            const T *pc = p + c * is[2];                                       \
+            if (be == 0)                                                       \
+                for (int64_t d = 0; d < n3; d++) oc[d * o3] = al * pc[d * i3]; \
+            else                                                               \
+                for (int64_t d = 0; d < n3; d++)                               \
+                    oc[d * o3] = be * oc[d * o3] + al * pc[d * i3];            \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_AXPBY4(double, d)
+DEFINE_AXPBY4(double complex, z)
+
 /* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----
  * Element T3[I, A] = osig[I] vsig[A] T3b[obase[I] + vcol[A]] for occupied
  * triple I and virtual triple A of equal spin group. */

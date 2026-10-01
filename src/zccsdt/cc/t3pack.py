@@ -332,28 +332,74 @@ def add_reduce_split(R, Z, om, vm, pairs, scale=1.0):
     scatter_occ(R, reduce_vir_split(Z, vm, om.n), om, pairs, scale)
 
 
-def pair_antisym_add(out, X, vm, strides, alpha=1.0):
+def pair_antisym_add(out, X, vm, strides, alpha=1.0, pairs=None):
     '''out[Q, x, y] += alpha * (X[a, b, x, y] - X[b, a, x, y]) for the pairs
-    Q = (a, b) of the map ``vm``, where X[a, b, x, y] is addressed through
-    element strides (sa, sb, sx, sy) of the array X (any layout).
-    out: C-contiguous (npair, nx, ny).'''
+    Q = (a, b) of the map ``vm`` (or of the explicit lists pairs = (pa, pb)),
+    where X[a, b, x, y] is addressed through element strides (sa, sb, sx, sy)
+    of the array X (any layout).  out: C-contiguous (npair, nx, ny).'''
     nx, ny = out.shape[1], out.shape[2]
     sa, sb, sx, sy = strides
+    if pairs is None:
+        pa, pb = vm.pa_c, vm.pb_c
+    else:
+        pa, pb = (np.ascontiguousarray(x, dtype=np.int64) for x in pairs)
     if USE_C and hasattr(_lib, 'zc_pair_antisym_add_d') and out.flags.c_contiguous \
             and X.dtype == out.dtype:
         base = np.ascontiguousarray(X)
         al = np.array(alpha, dtype=out.dtype)
         getattr(_lib, 'zc_pair_antisym_add_' + _sfx(out.dtype))(
-            _p(out), _p(base), _I64(vm.npair), _p(vm.pa_c), _p(vm.pb_c), _I64(nx),
+            _p(out), _p(base), _I64(len(pa)), _p(pa), _p(pb), _I64(nx),
             _I64(ny), _I64(sa), _I64(sb), _I64(sx), _I64(sy), _p(al))
         return out
     flat = np.ascontiguousarray(X).ravel()
-    pa, pb = vm.pairs[:, 0], vm.pairs[:, 1]
     x = np.arange(nx)[:, None]
     y = np.arange(ny)[None, :]
     off = x * sx + y * sy
     out += alpha * (flat[(pa * sa + pb * sb)[:, None, None] + off]
                     - flat[(pb * sa + pa * sb)[:, None, None] + off])
+    return out
+
+
+def axpby(out, inp, alpha=1.0, beta=1.0):
+    '''out = beta * out + alpha * inp for arrays (or strided views) of the same
+    shape with at most 4 axes, in a C kernel that reads the numpy strides
+    (beta = 0 overwrites).  The first two axes are split over threads and the
+    last axis is the inner loop, so order the axes accordingly.'''
+    assert out.shape == inp.shape and out.ndim <= 4
+    if not (USE_C and hasattr(_lib, 'zc_axpby4_d') and inp.dtype == out.dtype
+            and out.dtype in (np.float64, np.complex128)):
+        if beta == 0:
+            out[...] = alpha * inp
+        else:
+            if beta != 1:
+                out *= beta
+            out += alpha * inp
+        return out
+    pad = 4 - out.ndim
+    isz = out.itemsize
+    n = np.array((1,) * pad + out.shape, dtype=np.int64)
+    os_ = np.array((0,) * pad + tuple(x // isz for x in out.strides), dtype=np.int64)
+    is_ = np.array((0,) * pad + tuple(x // isz for x in inp.strides), dtype=np.int64)
+    al = np.array(alpha, dtype=out.dtype)
+    be = np.array(beta, dtype=out.dtype)
+    getattr(_lib, 'zc_axpby4_' + _sfx(out.dtype))(
+        ctypes.c_void_p(out.ctypes.data), ctypes.c_void_p(inp.ctypes.data), _p(n),
+        _p(os_), _p(is_), _p(al), _p(be))
+    return out
+
+
+def add_transposed(out, inp, alpha=1.0):
+    '''out += alpha * inp.T for 2-D arrays (out: C-contiguous (nr, nc),
+    inp: C-contiguous (nc, nr)), with a blocked C kernel.'''
+    nr, nc = out.shape
+    assert inp.shape == (nc, nr)
+    if USE_C and hasattr(_lib, 'zc_add_transposed_d') and out.flags.c_contiguous \
+            and inp.flags.c_contiguous and inp.dtype == out.dtype:
+        al = np.array(alpha, dtype=out.dtype)
+        getattr(_lib, 'zc_add_transposed_' + _sfx(out.dtype))(
+            _p(out), _p(inp), _I64(nr), _I64(nc), _I64(nc), _I64(nr), _p(al))
+        return out
+    out += alpha * inp.T
     return out
 
 

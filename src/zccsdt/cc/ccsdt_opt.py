@@ -187,14 +187,20 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None, inplace=False):
             for h, (lo, hi) in enumerate(vm.blocks):
                 if hi > lo:
                     t3pack.pair_t1_contract(W[lo:hi], Vd[h], t1, vm, block=h)
-    # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] = sum_{m<n} t2[mn,ab] ~oovo[mn,e,i]
-    t2mn_pp = t2[mm, nn][:, md, ne]
-    gemm(np.asfortranarray(t2mn_pp.T), np.ascontiguousarray(ge['oovo'][mm, nn]).reshape(
-        om.npair, -1), W.reshape(vm.npair, -1), beta=1.0)
+    # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] - sum_m f[m,e] t2[m,i,a,b]
+    #   = sum_{m<n} t2[mn,ab] (~oovo[mn,e,i] - f[m,e] d[n,i] + f[n,e] d[m,i])
+    with timer('wv.oovo'):
+        t2mn_pp = t2[mm, nn][:, md, ne]
+        G = np.array(ge['oovo'][mm, nn], dtype=W.dtype, order='C', copy=True)  # [P, e, i]
+        P = np.arange(om.npair)
+        G[P, :, nn] -= fov[mm]
+        G[P, :, mm] += fov[nn]
+        gemm(np.asfortranarray(t2mn_pp.T), G.reshape(om.npair, -1),
+             W.reshape(vm.npair, -1), beta=1.0)
     # - P(ab) sum_{mf} ~<mb||ef> t2[mi,af]: X[(a,i),(b,e)] = t2[a,i,m,f] ovvv[m,f,b,e]
     with timer('wv.t2ovvv'):
-        if xterm is not None:          # precomputed (spin-blocked) X[(a<b), e, i]
-            W -= xterm
+        if xterm is not None:          # callable adding the term to W (spin-blocked)
+            xterm(W)
         else:
             A = np.ascontiguousarray(t2.transpose(2, 1, 0, 3)).reshape(nvir * nocc,
                                                                        nocc * nvir)
@@ -204,9 +210,6 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None, inplace=False):
             t3pack.pair_antisym_add(W, X, vm, (nocc * nvir * nvir, nvir, 1, nvir * nvir),
                                     alpha=-1.0)
             del X, A, B
-    # - sum_m f[m,e] t2[m,i,a,b]
-    W -= gemm(np.asfortranarray(fov.T), t2[:, :, md, ne].reshape(nocc, -1)).reshape(
-        nvir, nocc, vm.npair).transpose(2, 0, 1)
     return W
 
 
@@ -453,12 +456,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     G_mQ = G_mQ.reshape(nocc * vm.npair, nocc + nvir)
     with timer('pass1'):
         Xacc, Yall, r1, rA = eng.pass1(T3p, G_Pd, G_mQ, goovv_pp, fov)
-    dWvT = Xacc[:nvir].transpose(1, 0, 2)                  # [i, e, Q(ab)]
     C0 = -2 * Xacc[nvir:].transpose(1, 0, 2)               # [i, j, Q]
     dWo = Yall[:, :, :nocc].transpose(2, 1, 0)             # [m, a, P(ij)]
     B0 = -2 * Yall[:, :, nocc:].transpose(0, 2, 1)         # [P, a, b]
     r1 = r1.T
-    dWv = dWvT.transpose(2, 1, 0)                       # [Q, e, i]
     # T3 contributions to the T1 / T2 residuals (r2 packed over i<j, a<b)
     rB = 0.5 * (B0[:, md, ne] - B0[:, ne, md])
     rC = -0.5 * (C0[mm, nn] - C0[nn, mm])
@@ -469,15 +470,19 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         govoo = ge['ovoo']
         ooov = ge['ooov']
         t_ = timer('imd.Wvvvo'); t_.__enter__()
-        if spin:
-            Bv = spin_imds.bra_dressed_vvvo(eris, t1, om, vm)
-            xterm = spin_imds.t2_ovvv_term(eris, t2, ges['ovvv'], vm)
-        else:
-            Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
-            xterm = None
-        vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)        # needs Bv before W
+        with timer('wv.Bv'):
+            if spin:
+                Bv = spin_imds.bra_dressed_vvvo(eris, t1, om, vm)
+            else:
+                Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
+        xterm = (lambda W: spin_imds.t2_ovvv_add(W, t2, ges['ovvv'], om, vm)) \
+            if spin else None
+        with timer('wv.vvoo'):
+            vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)    # needs Bv before W
         Wv = wvvvo_packed(Bv, vvvv_pp, t1, t2, fov, ge, om, vm, xterm, inplace=True)
-        Wv += dWv                                             # [Q(ab), e, i]
+        with timer('wv.dWv'):                                 # Wv[Q, e, i] += Xacc[e, i, Q]
+            t3pack.add_transposed(Wv.reshape(vm.npair, -1),
+                                  Xacc[:nvir].reshape(nvir * nocc, vm.npair))
         del Bv
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wvooo'); t_.__enter__()

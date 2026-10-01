@@ -143,3 +143,26 @@ def test_pair_batch_and_t1_contract(cplx, impl):
     out = np.ones((4, n, no), dtype=V.dtype)
     t3pack.pair_t1_contract(out, V, t1, vm)
     np.testing.assert_allclose(out, 1 + np.einsum('qef,if->qei', full, t1), atol=1e-13)
+
+
+@pytest.mark.parametrize('dtype', [np.float64, np.complex128])
+def test_axpby_and_add_transposed(dtype):
+    rng = np.random.default_rng(7)
+
+    def rand(*shape):
+        x = rng.standard_normal(shape)
+        return (x + 1j * rng.standard_normal(shape)).astype(dtype) if dtype == np.complex128 \
+            else x.astype(dtype)
+
+    A, B = rand(7, 6, 5, 4), rand(6, 4, 7, 5)
+    out, ref = A.copy(), A.copy()
+    t3pack.axpby(out[:, 1:5, ::-1], B[1:5].transpose(2, 0, 3, 1), 0.5, 2.0)
+    ref[:, 1:5, ::-1] = 2.0 * ref[:, 1:5, ::-1] + 0.5 * B[1:5].transpose(2, 0, 3, 1)
+    assert abs(out - ref).max() < 1e-14
+    o2 = rand(7, 4)
+    t3pack.axpby(o2, A[:, 2, 3, :], -1.0, 0.0)          # beta = 0 overwrites
+    assert abs(o2 + A[:, 2, 3, :]).max() == 0
+    X, Y = rand(70, 45), rand(45, 70)
+    ref = X + 0.25 * Y.T
+    t3pack.add_transposed(X, Y, 0.25)
+    assert abs(X - ref).max() < 1e-14

@@ -183,7 +183,8 @@ def bra_dressed_vvvo(se, t1, om, vm):
     '''Bra-dressed <ab||ei> packed over a<b, dense (npair_v, nvir, nocc)
     (see ccsdt_opt.bra_dressed_vvvo_pp), written block by block:
       B[(ab), e, i] = <ab||ei> - L[a,b,e,i] + L[b,a,e,i] + sum_{m<n} tau1[mn,ab] <mn||ei>,
-      <ab||ei> = -<ie||ab>^*,  L[a,b,e,i] = sum_m t1[m,a] <mb||ei>.'''
+      <ab||ei> = -<ie||ab>^*,  L[a,b,e,i] = sum_m t1[m,a] <mb||ei>.
+    Only the Ms-allowed (e, i) blocks of each pair group are touched.'''
     nocc, nvir = t1.shape
     o, v = se.spaces['o'], se.spaces['v']
     Qs, Ps = pair_space('Q', vm), pair_space('P', om)
@@ -193,39 +194,52 @@ def bra_dressed_vvvo(se, t1, om, vm):
     for (si, se_, h), blk in G.blocks.items():
         lo, hi = vm.blocks[h]
         (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
-        B[lo:hi, e0:e1, i0:i1] -= blk.transpose(2, 1, 0).conj()
-    ovvo = se.ovvo                                          # dense [m, b, e, i]
+        blk = np.asarray(blk, dtype=dtype)
+        if np.iscomplexobj(blk):
+            blk = blk.conj()
+        # loop order (e, i, Q): contiguous reads of blk
+        t3pack.axpby(B[lo:hi, e0:e1, i0:i1].transpose(1, 2, 0), blk.transpose(1, 0, 2), -1.0)
+    ovvo = se.g['ovvo']                                     # [m, b, e, i] blocks
     oa, ob = o.groups
     va, vb = v.groups
-    ta = np.ascontiguousarray(t1[oa[0]:oa[1], va[0]:va[1]])
-    tb = np.ascontiguousarray(t1[ob[0]:ob[1], vb[0]:vb[1]])
+    ta = np.ascontiguousarray(t1[oa[0]:oa[1], va[0]:va[1]], dtype=dtype)
+    tb = np.ascontiguousarray(t1[ob[0]:ob[1], vb[0]:vb[1]], dtype=dtype)
     nva, nvb = va[1] - va[0], vb[1] - vb[0]
-    # same-spin pair blocks: Y[x,y,e,i] = sum_m t[m,x] <my||ei>, then
-    # B[(x<y)] -= Y[x,y] - Y[y,x]
-    for h, tt, (m0, m1), (x0, x1) in ((0, ta, oa, va), (2, tb, ob, vb)):
+    # same-spin pair blocks (all four indices of spin s):
+    # Y[x,y,e,i] = sum_m t[m,x] <my||ei>,  B[(x<y)] -= Y[x,y] - Y[y,x]
+    for h, s, tt in ((0, 0, ta), (2, 1, tb)):
         lo, hi = vm.blocks[h]
-        nx = x1 - x0
-        if hi == lo or tt.size == 0:
+        blk = ovvo.blocks.get((s, s, s, s))
+        if hi == lo or tt.size == 0 or blk is None:
             continue
-        Y = gemm(np.ascontiguousarray(tt.T),
-                 np.ascontiguousarray(ovvo[m0:m1, x0:x1]).reshape(m1 - m0, -1))
-        Y = Y.reshape(nx, nx * nvir * nocc)
-        Bh = B[lo:hi].reshape(hi - lo, -1)
-        _pair_scatter_same_spin(Bh, Y.reshape(nx, nx, -1), nx, vm.pa_c[lo:hi] - x0,
+        (x0, x1), (i0, i1) = v.groups[s], o.groups[s]
+        nx, ni = x1 - x0, i1 - i0
+        Y = gemm(np.ascontiguousarray(tt.T), np.asarray(blk, dtype=dtype).reshape(blk.shape[0], -1))
+        tmp = np.zeros((hi - lo, nx * ni), dtype=dtype)
+        _pair_scatter_same_spin(tmp, Y.reshape(nx, nx, -1), nx, vm.pa_c[lo:hi] - x0,
                                 vm.pb_c[lo:hi] - x0, -1.0)
-    # alpha-beta block (a alpha, b beta), rows a-major
+        t3pack.axpby(B[lo:hi, x0:x1, i0:i1].transpose(0, 2, 1),
+                     tmp.reshape(hi - lo, nx, ni).transpose(0, 2, 1))
+    # alpha-beta pair block (a alpha, b beta; rows a-major), (e, i) of opposite spins
     lo, hi = vm.blocks[1]
     if hi > lo:
-        B1 = B[lo:hi].reshape(nva, nvb * nvir * nocc)
-        if ta.size:      # -L[a,b] = -sum_{m alpha} t[m,a] <m b||e i>
-            gemm(np.ascontiguousarray(ta.T),
-                 np.ascontiguousarray(ovvo[oa[0]:oa[1], vb[0]:vb[1]]).reshape(oa[1] - oa[0], -1),
-                 B1, alpha=-1.0, beta=1.0)
-        if tb.size:      # +L[b,a] = sum_{m beta} t[m,b] <m a||e i>
-            tbT = np.ascontiguousarray(tb.T)
-            for a in range(nva):
-                Ga = np.ascontiguousarray(ovvo[ob[0]:ob[1], va[0] + a]).reshape(ob[1] - ob[0], -1)
-                gemm(tbT, Ga, B[lo + a * nvb:lo + (a + 1) * nvb].reshape(nvb, -1), beta=1.0)
+        B1 = B[lo:hi].reshape(nva, nvb, nvir, nocc)
+        for se_, si in ((0, 1), (1, 0)):
+            (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
+            ne, ni = e1 - e0, i1 - i0
+            if ne == 0 or ni == 0:
+                continue
+            out = B1[:, :, e0:e1, i0:i1].transpose(0, 1, 3, 2)     # (a, b, i, e)
+            blk = ovvo.blocks.get((0, 1, se_, si))
+            if ta.size and blk is not None:   # -L[a,b] = -sum_{m alpha} t[m,a] <m b||e i>
+                X = gemm(np.ascontiguousarray(ta.T),
+                         np.asarray(blk, dtype=dtype).reshape(blk.shape[0], -1))
+                t3pack.axpby(out, X.reshape(nva, nvb, ne, ni).transpose(0, 1, 3, 2), -1.0)
+            blk = ovvo.blocks.get((1, 0, se_, si))
+            if tb.size and blk is not None:   # +L[b,a] = sum_{m beta} t[m,b] <m a||e i>
+                X = gemm(np.ascontiguousarray(tb.T),
+                         np.asarray(blk, dtype=dtype).reshape(blk.shape[0], -1))
+                t3pack.axpby(out, X.reshape(nvb, nva, ne, ni).transpose(1, 0, 3, 2))
     # + sum_{m<n} tau1[mn, ab] <mn||ei>, per pair group
     from zccsdt.cc.ccsdt_opt import _tau1_pairs
     tau = _tau1_pairs(t1, om, vm)
@@ -235,7 +249,10 @@ def bra_dressed_vvvo(se, t1, om, vm):
         plo, phi = om.blocks[h]
         (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
         if hi > lo and phi > plo:
-            B[lo:hi, e0:e1, i0:i1] += np.einsum('PQ,Pei->Qei', tau[plo:phi, lo:hi], blk)
+            X = gemm(np.ascontiguousarray(tau[plo:phi, lo:hi].T),
+                     np.asarray(blk, dtype=dtype).reshape(phi - plo, -1))
+            t3pack.axpby(B[lo:hi, e0:e1, i0:i1].transpose(0, 2, 1),
+                         X.reshape(hi - lo, e1 - e0, i1 - i0).transpose(0, 2, 1))
     return B
 
 
@@ -248,6 +265,96 @@ def t2_ovvv_term(se, t2, ovvv_d, vm):
     T2 = SpinTensor.from_dense(t2, (o, o, v, v), sig=(-1, -1, 1, 1))
     Y = einsum('miaf,mbef->abei', T2, ovvv_d)
     return np.ascontiguousarray(pack_pairs(Y - Y.transpose(1, 0, 2, 3), 0, Qs).to_dense())
+
+
+def t2_ovvv_add(W, t2, ovvv_d, om, vm, alpha=-1.0):
+    '''W[(a<b), e, i] += alpha (Y[a,b,e,i] - Y[b,a,e,i]),
+    Y[a,b,e,i] = sum_{mf} t2[m,i,a,f] ovvv[m,b,e,f], without the dense Y:
+    spin conservation leaves the blocks with s_i - s_a = s_b - s_e = s_f - s_m,
+    computed as four GEMMs Y[(x,i), (y,e)] = A[(x,i), (m,f)] B[(m,f), (y,e)]
+    (rows (x,i) = alpha-alpha and beta-beta stacked where they share B).
+    W: dense (npair_v, nvir, nocc).'''
+    o = (0, int(np.sum(om.spins == 0)), om.n)
+    v = (0, int(np.sum(vm.spins == 0)), vm.n)
+    rng_o = ((o[0], o[1]), (o[1], o[2]))
+    rng_v = ((v[0], v[1]), (v[1], v[2]))
+    dt = W.dtype
+    nv, no = W.shape[1], W.shape[2]
+
+    def bop(sm, sy, se_, sf):
+        return ovvv_d.blocks.get((sm, sy, se_, sf))
+
+    def aop(sm, si, sx, sf):
+        (m0, m1), (i0, i1) = rng_o[sm], rng_o[si]
+        (x0, x1), (f0, f1) = rng_v[sx], rng_v[sf]
+        a = t2[m0:m1, i0:i1, x0:x1, f0:f1].transpose(2, 1, 0, 3)
+        return np.ascontiguousarray(a, dtype=dt).reshape((x1 - x0) * (i1 - i0), -1)
+
+    def ygemm(rows, sy, se_):
+        '''Y for the row spin pairs ``rows`` [(sx, si), ...] stacked, column
+        spins (sy, se_); returns {(sx, si): Y block (nx, ni, ny, ne)}.'''
+        d = sy - se_
+        terms = [(sm, sm + d) for sm in (0, 1) if 0 <= sm + d <= 1]
+        terms = [(sm, sf) for sm, sf in terms if bop(sm, sy, se_, sf) is not None]
+        rows = [(sx, si) for sx, si in rows if si - sx == d]
+        if not terms or not rows:
+            return {}
+        ny, ne = rng_v[sy][1] - rng_v[sy][0], rng_v[se_][1] - rng_v[se_][0]
+        # B[(m,f), (y,e)] = ovvv[m,y,e,f], the blocks of all terms stacked;
+        # copy loop order (m, y, f, e) keeps each [m, y] slab in cache
+        kdim = [bop(sm, sy, se_, sf).shape[0] * bop(sm, sy, se_, sf).shape[3]
+                for sm, sf in terms]
+        B = np.empty((sum(kdim), ny * ne), dtype=dt)
+        k0 = 0
+        for (sm, sf), k in zip(terms, kdim):
+            blk = np.asarray(bop(sm, sy, se_, sf), dtype=dt)
+            nm, nf = blk.shape[0], blk.shape[3]
+            t3pack.axpby(B[k0:k0 + k].reshape(nm, nf, ny, ne).transpose(0, 2, 1, 3),
+                         blk.transpose(0, 1, 3, 2), 1.0, 0.0)
+            k0 += k
+        A = np.block([[aop(sm, si, sx, sf) for sm, sf in terms] for sx, si in rows])
+        Y = gemm(np.ascontiguousarray(A), B)
+        out, r0 = {}, 0
+        for sx, si in rows:
+            nx, ni = rng_v[sx][1] - rng_v[sx][0], rng_o[si][1] - rng_o[si][0]
+            out[(sx, si)] = Y[r0:r0 + nx * ni].reshape(nx, ni, ny, ne)
+            r0 += nx * ni
+        return out
+
+    both = [(0, 0), (1, 1)]
+    Ya = ygemm(both, 0, 0)          # (y, e) alpha alpha: Y(0000), Y(1001)
+    Yb = ygemm(both, 1, 1)          # (y, e) beta beta:   Y(0110), Y(1111)
+    Yc = ygemm([(0, 1)], 1, 0)      # Y(0101): x a, i b, y b, e a
+    Yd = ygemm([(1, 0)], 0, 1)      # Y(1010): x b, i a, y a, e b
+    # same-spin pair blocks: e, i of the pair spin
+    for h, s, Yd_ in ((0, 0, Ya), (2, 1, Yb)):
+        lo, hi = vm.blocks[h]
+        Y = Yd_.get((s, s))
+        if hi == lo or Y is None:
+            continue
+        (x0, x1), (i0, i1) = rng_v[s], rng_o[s]
+        nx, ni = x1 - x0, i1 - i0
+        Y = np.ascontiguousarray(Y)                       # [x, i, y, e]
+        tmp = np.zeros((hi - lo, nx, ni), dtype=dt)       # [Q, e, i]
+        t3pack.pair_antisym_add(tmp, Y, vm, (ni * nx * nx, nx, 1, nx * nx), alpha,
+                                pairs=(vm.pa_c[lo:hi] - x0, vm.pb_c[lo:hi] - x0))
+        t3pack.axpby(W[lo:hi, x0:x1, i0:i1].transpose(0, 2, 1), tmp.transpose(0, 2, 1))
+    # alpha-beta pair block (a alpha, b beta), rows a-major
+    lo, hi = vm.blocks[1]
+    if hi > lo:
+        (a0, a1), (b0, b1) = rng_v
+        W1 = W[lo:hi].reshape(a1 - a0, b1 - b0, nv, no)
+        for (se_, si), Yab, Yba in (((1, 0), Yb.get((0, 0)), Yd.get((1, 0))),
+                                    ((0, 1), Yc.get((0, 1)), Ya.get((1, 1)))):
+            (e0, e1), (i0, i1) = rng_v[se_], rng_o[si]
+            if e1 == e0 or i1 == i0:
+                continue
+            Wv = W1[:, :, e0:e1, i0:i1].transpose(0, 1, 3, 2)      # (a, b, i, e)
+            if Yab is not None:      # Y[a, b, e, i] from [a, i, b, e]
+                t3pack.axpby(Wv, Yab.transpose(0, 2, 1, 3), alpha)
+            if Yba is not None:      # - Y[b, a, e, i] from [b, i, a, e]
+                t3pack.axpby(Wv, Yba.transpose(2, 0, 1, 3), -alpha)
+    return W
 
 
 def _vvvv_t1_c(lib, W, Vd, ta, tb, vm, nvs, nos):
