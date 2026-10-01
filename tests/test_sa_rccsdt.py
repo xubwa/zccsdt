@@ -140,3 +140,22 @@ def test_blocks_from_ao_integrals():
     for x, y in zip(a, b):
         assert abs(x - y).max() < 1e-11 * max(1.0, abs(x).max())
 
+
+
+def test_two_electrons_equal_fci():
+    '''One occupied orbital (no T3 blocks): CCSDT = FCI.'''
+    from pyscf import fci
+    mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='cc-pvdz', verbose=0)
+    mf = scf.RHF(mol).run(conv_tol=1e-12)
+    r = E.kernel(R.from_scf(mf, full=False), conv_tol=1e-11, conv_tol_normt=1e-8)
+    assert r.converged and abs(r.e_tot - fci.FCI(mf).kernel()[0]) < 1e-9
+
+
+def test_repeated_index_blocks_only():
+    '''Two occupied orbitals (only blocks i,i,k and i,k,k): block engine =
+    dense reference.'''
+    mol = gto.M(atom='Be 0 0 0', basis='cc-pvdz', verbose=0)
+    mf = scf.RHF(mol).run(conv_tol=1e-12)
+    r = E.kernel(R.from_scf(mf, full=False), conv_tol=1e-11, conv_tol_normt=1e-8)
+    ref = R.kernel(R.from_scf(mf), 'ccsdt', conv_tol=1e-11, conv_tol_normt=1e-8)
+    assert r.converged and abs(r.e_tot - ref.e_tot) < 1e-10
