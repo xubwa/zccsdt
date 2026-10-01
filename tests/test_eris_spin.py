@@ -93,3 +93,26 @@ def test_converged_energies_with_spin_eris(kind):
         assert b.converged and abs(a.e_corr - b.e_corr) < 1e-10, meth
         assert abs(a.e_tot - b.e_tot) < 1e-9
     ccsdt_opt._ENGINES.clear()
+
+
+@pytest.mark.parametrize('dtype', [np.float64, np.complex128])
+def test_vvvv_t1_blocks_c_equals_numpy(dtype, monkeypatch):
+    '''Spin-block vvvv x t1 C kernels against the numpy path (unequal numbers
+    of alpha and beta orbitals, as for an open-shell reference).'''
+    from zccsdt.cc import spin_imds, t3pack
+    rng = np.random.default_rng(3)
+    sv = np.array([0] * 7 + [1] * 5)
+    so = np.array([0] * 3 + [1] * 2)
+    vm, om = t3pack.triple_map(len(sv), sv), t3pack.triple_map(len(so), so)
+
+    def rand(*shape):
+        x = rng.standard_normal(shape)
+        return x + 1j * rng.standard_normal(shape) if dtype == np.complex128 else x
+
+    Vd = [rand(hi - lo, hi - lo) for lo, hi in vm.blocks]
+    t1 = rand(len(so), len(sv)) * (so[:, None] == sv[None, :])
+    W0 = rand(vm.npair, len(sv), len(so))
+    Wc = spin_imds.vvvv_t1_blocks(W0.copy(), Vd, t1, om, vm)
+    monkeypatch.setattr(t3pack, 'USE_C', False)
+    Wn = spin_imds.vvvv_t1_blocks(W0.copy(), Vd, t1, om, vm)
+    assert abs(Wc - Wn).max() < 1e-12

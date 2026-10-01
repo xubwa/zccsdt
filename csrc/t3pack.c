@@ -12,6 +12,7 @@
 
 #include <complex.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define DEFINE_KERNELS(T, SFX)                                                 \
@@ -230,6 +231,91 @@ void zc_pair_t1_contract_##SFX(T *out, const T *V, const T *t, int64_t nq,     \
 }
 DEFINE_PAIRHELP(double, d)
 DEFINE_PAIRHELP(double complex, z)
+
+/* ---- vvvv x t1 on spin-blocked packed pairs ----
+ * out[Q, e, i] += sum_f V[Q, (e,f)] t[i, f] for V antisymmetric in (e, f);
+ * t conserves spin, so each pair block couples one virtual and one occupied
+ * spin.  Output elements are out[Q * ldq + e * lde + i].
+ *
+ * Same-spin block: V (nq, n(n-1)/2), pairs e<f in triu order, t (no, n).
+ * The row segment V[Q, (e, e+1..n-1)] is contiguous: the e-term is a dot
+ * product, the f-term an axpy into a transposed scratch S (no, n). */
+#define DEFINE_VT1(T, SFX)                                                     \
+void zc_vt1_same_##SFX(T *out, const T *V, const T *t, int64_t nq, int64_t n,  \
+                       int64_t no, int64_t ldq, int64_t lde)                   \
+{                                                                              \
+    const int64_t np = n * (n - 1) / 2;                                        \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *S = malloc(sizeof(T) * (no * n + 1));                               \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t Q = 0; Q < nq; Q++) {                                     \
+            const T *v = V + Q * np;                                           \
+            T *o = out + Q * ldq;                                              \
+            memset(S, 0, sizeof(T) * no * n);                                  \
+            for (int64_t e = 0; e + 1 < n; e++) {                              \
+                const T *ve = v + e * n - e * (e + 1) / 2 - (e + 1);           \
+                for (int64_t i = 0; i < no; i++) {                             \
+                    const T *ti = t + i * n;                                   \
+                    const T te = ti[e];                                        \
+                    T *Si = S + i * n;                                         \
+                    T acc = 0;                                                 \
+                    _Pragma("omp simd reduction(+:acc)")                       \
+                    for (int64_t f = e + 1; f < n; f++) {                      \
+                        acc += ve[f] * ti[f];                                  \
+                        Si[f] -= te * ve[f];                                   \
+                    }                                                          \
+                    o[e * lde + i] += acc;                                     \
+                }                                                              \
+            }                                                                  \
+            for (int64_t f = 0; f < n; f++)                                    \
+                for (int64_t i = 0; i < no; i++) o[f * lde + i] += S[i * n + f]; \
+        }                                                                      \
+        free(S);                                                               \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* Alpha-beta block: V (nq, na, nb) = V[Q, (e alpha, f beta)], ta (noa, na),   \
+ * tb (nob, nb):                                                               \
+ *   oa[Q * ldq + e * lde + j] += sum_f V[Q, e, f] tb[j, f]  (e alpha, j beta) \
+ *   ob[Q * ldq + f * lde + i] -= sum_e V[Q, e, f] ta[i, e]  (f beta, i alpha) \
+ */                                                                            \
+void zc_vt1_ab_##SFX(T *oa, T *ob, const T *V, const T *ta, const T *tb,       \
+                     int64_t nq, int64_t na, int64_t nb, int64_t noa,          \
+                     int64_t nob, int64_t ldq, int64_t lde)                    \
+{                                                                              \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *S = malloc(sizeof(T) * (noa * nb + 1));                             \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t Q = 0; Q < nq; Q++) {                                     \
+            const T *v = V + Q * na * nb;                                      \
+            T *pa = oa + Q * ldq, *pb = ob + Q * ldq;                          \
+            memset(S, 0, sizeof(T) * noa * nb);                                \
+            for (int64_t e = 0; e < na; e++) {                                 \
+                const T *ve = v + e * nb;                                      \
+                for (int64_t j = 0; j < nob; j++) {                            \
+                    const T *tj = tb + j * nb;                                 \
+                    T acc = 0;                                                 \
+                    _Pragma("omp simd reduction(+:acc)")                       \
+                    for (int64_t f = 0; f < nb; f++) acc += ve[f] * tj[f];     \
+                    pa[e * lde + j] += acc;                                    \
+                }                                                              \
+                for (int64_t i = 0; i < noa; i++) {                            \
+                    const T x = ta[i * na + e];                                \
+                    T *Si = S + i * nb;                                        \
+                    _Pragma("omp simd")                                        \
+                    for (int64_t f = 0; f < nb; f++) Si[f] -= x * ve[f];       \
+                }                                                              \
+            }                                                                  \
+            for (int64_t f = 0; f < nb; f++)                                   \
+                for (int64_t i = 0; i < noa; i++) pb[f * lde + i] += S[i * nb + f]; \
+        }                                                                      \
+        free(S);                                                               \
+    }                                                                          \
+}
+DEFINE_VT1(double, d)
+DEFINE_VT1(double complex, z)
 
 /* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----
  * Element T3[I, A] = osig[I] vsig[A] T3b[obase[I] + vcol[A]] for occupied

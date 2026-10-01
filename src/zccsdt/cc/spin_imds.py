@@ -6,6 +6,8 @@ eris_spin.SpinERIs: tensors with v^3 or v^4 elements stay spin-blocked
 the rest of ccsdt_opt can use them unchanged.
 '''
 
+import ctypes
+
 import numpy as np
 
 from zccsdt.blas import gemm
@@ -248,6 +250,38 @@ def t2_ovvv_term(se, t2, ovvv_d, vm):
     return np.ascontiguousarray(pack_pairs(Y - Y.transpose(1, 0, 2, 3), 0, Qs).to_dense())
 
 
+def _vvvv_t1_c(lib, W, Vd, ta, tb, vm, nvs, nos):
+    '''C kernels of vvvv_t1_blocks: one pass over each pair block.'''
+    dt = W.dtype
+    sfx = t3pack._sfx(dt)
+    I64 = t3pack._I64
+    nv, nocc = W.shape[1], W.shape[2]
+    ldq, lde = nv * nocc, nocc
+    nva, nvb = nvs
+    noa, nob = nos
+    ta = np.ascontiguousarray(ta, dtype=dt)
+    tb = np.ascontiguousarray(tb, dtype=dt)
+
+    def ptr(q, e, i):
+        return ctypes.c_void_p(W.ctypes.data + dt.itemsize * (q * ldq + e * lde + i))
+
+    lo, hi = vm.blocks[1]
+    if hi > lo and noa + nob:
+        V = np.ascontiguousarray(Vd[1], dtype=dt)
+        getattr(lib, 'zc_vt1_ab_' + sfx)(
+            ptr(lo, 0, noa), ptr(lo, nva, 0), t3pack._p(V), t3pack._p(ta),
+            t3pack._p(tb), I64(hi - lo), I64(nva), I64(nvb), I64(noa), I64(nob),
+            I64(ldq), I64(lde))
+    for h, v0, n, o0, no, tt in ((0, 0, nva, 0, noa, ta), (2, nva, nvb, noa, nob, tb)):
+        lo, hi = vm.blocks[h]
+        if hi == lo or n < 2 or no == 0:
+            continue
+        V = np.ascontiguousarray(Vd[h], dtype=dt)
+        getattr(lib, 'zc_vt1_same_' + sfx)(
+            ptr(lo, v0, o0), t3pack._p(V), t3pack._p(tt), I64(hi - lo), I64(n),
+            I64(no), I64(ldq), I64(lde))
+
+
 def vvvv_t1_blocks(W, Vd, t1, om, vm, batch=512):
     '''W[Q, e, i] += sum_f ~<ab||ef> t1[i, f] for spin-grouped pairs, as GEMMs
     per spin block (t1 conserves spin; Vd are the aa / ab / bb pair blocks).
@@ -260,6 +294,11 @@ def vvvv_t1_blocks(W, Vd, t1, om, vm, batch=512):
     ta = np.ascontiguousarray(t1[oa[0]:oa[1], va[0]:va[1]])
     tb = np.ascontiguousarray(t1[ob[0]:ob[1], vb[0]:vb[1]])
     nvb = nv - nva
+    lib = t3pack._lib
+    if (t3pack.USE_C and hasattr(lib, 'zc_vt1_same_d') and W.flags.c_contiguous
+            and W.shape == (vm.npair, nv, nocc)):
+        _vvvv_t1_c(lib, W, Vd, ta, tb, vm, (nva, nvb), (noa, nocc - noa))
+        return W
     # alpha-beta pair block: columns (e alpha, f beta), e-major
     lo, hi = vm.blocks[1]
     if hi > lo and nva and nvb:
@@ -267,9 +306,9 @@ def vvvv_t1_blocks(W, Vd, t1, om, vm, batch=512):
         if tb.size:      # e alpha, i beta: sum_{f beta} V[Q, e, f] t[i, f]
             X = gemm(np.ascontiguousarray(V1).reshape(-1, nvb), np.asfortranarray(tb.T))
             W[lo:hi, va[0]:va[1], ob[0]:ob[1]] += X.reshape(hi - lo, nva, -1)
-        if ta.size:      # e beta, i alpha: -sum_{f alpha} V[Q, f, e] t[i, f]
-            X = np.matmul(V1.transpose(0, 2, 1), ta.T)
-            W[lo:hi, vb[0]:vb[1], oa[0]:oa[1]] -= X
+        if ta.size:      # e beta, i alpha: -sum_{f alpha} t[i, f] V[Q, f, e]
+            X = np.matmul(ta, V1)                       # (Q, i, e), V1 not copied
+            W[lo:hi, vb[0]:vb[1], oa[0]:oa[1]] -= X.transpose(0, 2, 1)
     # same-spin blocks: unpack V rows to antisymmetric (e, f), then GEMM
     for h, (v0, v1), (o0, o1), tt in ((0, va, oa, ta), (2, vb, ob, tb)):
         lo, hi = vm.blocks[h]
