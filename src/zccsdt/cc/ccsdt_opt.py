@@ -253,13 +253,22 @@ def dressed_vvvv_pp(eris, t1, vm):
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     nocc, nvir = t1.shape
     cache = vvvv_packed(eris, vm)
-    ovvv_Q = np.asarray(eris.ovvv)[:, :, md, ne]                   # (m, y, Q)
-    Y = gemm(np.ascontiguousarray(t1.T), ovvv_Q.reshape(nocc, -1))
-    # out[(a<b), Q] = cache - (Y[a,b,Q] - Y[b,a,Q]), one OpenMP pass
-    out = np.array(cache, dtype=np.result_type(cache, Y), copy=True)
-    t3pack.pair_antisym_add(out.reshape(vm.npair, vm.npair, 1), Y, nvir,
-                            (nvir * vm.npair, vm.npair, 1, 0), alpha=-1.0)
-    del Y
+    ovvv_Q = np.ascontiguousarray(np.asarray(eris.ovvv)[:, :, md, ne])  # (m, y, Q)
+    out = np.array(cache, dtype=np.result_type(cache, ovvv_Q, t1), copy=True)
+    # out[(x<y), Q] -= Y[x,y,Q];  out[(y<x), Q] += Y[x,y,Q], with
+    # Y[x,y,Q] = sum_m t1[m,x] <my||Q>, built in batches of x (Y is v^2 n_Q)
+    nb = max(1, int(2e9 // (nvir * vm.npair * out.itemsize)))
+    y = np.arange(nvir)
+    for x0 in range(0, nvir, nb):
+        x1 = min(x0 + nb, nvir)
+        Y = gemm(np.ascontiguousarray(t1[:, x0:x1].T), ovvv_Q.reshape(nocc, -1))
+        Y = Y.reshape(x1 - x0, nvir, vm.npair)
+        for x in range(x0, x1):
+            hi = y[x + 1:]
+            out[vm.pidx[x, hi]] -= Y[x - x0, hi]
+            lo = y[:x]
+            out[vm.pidx[lo, x]] += Y[x - x0, lo]
+        del Y
     # Z[(a<b), Q] = sum_{m<n} (t[m,a] t[n,b] - t[n,a] t[m,b]) <mn||Q>
     om = t3pack.triple_map(nocc)
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
@@ -432,8 +441,20 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         Feff_vv = fvv - einsum('Paf,Pdf->ad', t2mn, goovv_mn)
         Feff_oo = foo + einsum('mnP,inP->mi', goovv_P, t2P)
         t_.__exit__(None, None, None)
+        # CCSD residuals (T1-dressed) + T3 contributions, before the dressed
+        # packed vvvv is turned into the T3 ladder operator in place
+        t_ = timer('ccsd'); t_.__enter__()
+        vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)
+        R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
+                                      Feff_oo, Weff_ovvo, om, vm)
+        t1new = t1 + (R1 + r1) / eia
+        t2new = t2 + _unpack_pairs(R2 + r2_t3, om, vm) / eijab
+        del vvoo_pp, R1, R2
+        t_.__exit__(None, None, None)
         t_ = timer('imd.Wpp'); t_.__enter__()
-        Wpp = vvvv_pp + t2mn[:, md, ne].T @ goovv_pp
+        Wpp = vvvv_pp                     # in place: W(ab,de) = ~<ab||de> + ...
+        del vvvv_pp
+        gemm(np.asfortranarray(t2mn[:, md, ne].T), goovv_pp, Wpp, beta=1.0)
         # F_vv folded into the ladder: W(ab,de) += 1/2 A[F_ad delta_be]
         add_one_body_pairs(Wpp, Feff_vv, vm, 0.5)
         t_.__exit__(None, None, None)
@@ -441,14 +462,6 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         Weff_oooo = ge['oooo'] + einsum('mnP,ijP->mnij', goovv_P, t2P)
         O6 = t3pack.occ_operator(om, lambda t: _occ_apply(t, Weff_oooo, Feff_oo))
         t_.__exit__(None, None, None)
-
-    # ---- CCSD residuals (T1-dressed) + T3 contributions; Jacobi update
-    with timer('ccsd'):
-        vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)
-        R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
-                                      Feff_oo, Weff_ovvo, om, vm)
-        t1new = t1 + (R1 + r1) / eia
-        t2new = t2 + _unpack_pairs(R2 + r2_t3, om, vm) / eijab
 
     R = np.zeros((om.ntri, vm.ntri), dtype=dtype)
 
