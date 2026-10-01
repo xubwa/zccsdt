@@ -1007,6 +1007,149 @@ void zc_vzero_d(int64_t n, double *x)
     for (int64_t i = 0; i < n; i++) x[i] = 0;
 }
 
+/* ---- CCSDT(Q), closed shell (zccsdt/sa/rccsdt_q.py) ----
+ * Energy of one occupied quadruple from its accumulators:
+ *   out[0] = sum_x c[x] (M r)[x] / D[x],   out[1] = sum_x a[x] (M r)[x] / D[x],
+ *   (M r)[x] = sum_tau w(tau) r[tau(x)],  w = sgn 2^cycles,  r = a + b,
+ *   D[x] = eocc - ev[x0] - ev[x1] - ev[x2] - ev[x3],  x = (x0, x1, x2, x3).
+ * a and b are sums of three arrays in the cyclic layouts
+ *   a[x] = S[0][x0,x1,x2,x3] + S[1][x1,x2,x0,x3] + S[2][x2,x0,x1,x3]   (b: S[3..5]),
+ * and c[x] = sum_k tc[k][x_p,x_q] gc[k][x_r,x_s] over the six pair sets
+ * (p,q) = (0,1),(0,2),(0,3),(1,2),(1,3),(2,3), (r,s) the complement (v x v
+ * matrices).  The work unit is an orbit of QT^4 tiles (the distinct
+ * permutations of a sorted tile quadruple): a and r of the orbit are loaded
+ * into local buffers, where all permuted elements of M r are found. */
+#define QT 6
+static const int Q_PERM[24][4] = {{0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1}, {0, 3, 1, 2}, {0, 3, 2, 1}, {1, 0, 2, 3}, {1, 0, 3, 2}, {1, 2, 0, 3}, {1, 2, 3, 0}, {1, 3, 0, 2}, {1, 3, 2, 0}, {2, 0, 1, 3}, {2, 0, 3, 1}, {2, 1, 0, 3}, {2, 1, 3, 0}, {2, 3, 0, 1}, {2, 3, 1, 0}, {3, 0, 1, 2}, {3, 0, 2, 1}, {3, 1, 0, 2}, {3, 1, 2, 0}, {3, 2, 0, 1}, {3, 2, 1, 0}};
+static const double Q_W[24] = {16, -8, -8, 4, 4, -8, -8, 4, 4, -2, -2, 4, 4, -2, -8, 4, 4, -2, -2, 4, 4, -8, -2, 4};
+void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const double *gc,
+                      double eocc, const double *ev, double *out)
+{
+    const int64_t nt = (v + QT - 1) / QT, v2 = v * v, v3 = v2 * v;
+    const int64_t norb = nt * (nt + 1) * (nt + 2) * (nt + 3) / 24;
+    int64_t *orb = malloc(4 * norb * sizeof(int64_t));
+    int64_t n = 0;
+    for (int64_t a = 0; a < nt; a++)
+    for (int64_t b = a; b < nt; b++)
+    for (int64_t c = b; c < nt; c++)
+    for (int64_t d = c; d < nt; d++) {
+        orb[4 * n] = a; orb[4 * n + 1] = b; orb[4 * n + 2] = c; orb[4 * n + 3] = d; n++;
+    }
+    static const int PQ[6][4] = {{0, 1, 2, 3}, {0, 2, 1, 3}, {0, 3, 1, 2},
+                                 {1, 2, 0, 3}, {1, 3, 0, 2}, {2, 3, 0, 1}};
+    const int64_t Q4 = QT * QT * QT * QT;
+    double e5 = 0, e6 = 0;
+    #pragma omp parallel reduction(+:e5, e6)
+    {
+        double *al = malloc(2 * 24 * Q4 * sizeof(double));
+        double *rl = al + 24 * Q4;
+        #pragma omp for schedule(dynamic)
+        for (int64_t w = 0; w < norb; w++) {
+            /* distinct permuted tile positions of the orbit */
+            int64_t pos[24][4];
+            int np = 0, ppos[24][24];
+            for (int t = 0; t < 24; t++) {
+                int64_t q[4];
+                for (int k = 0; k < 4; k++) q[k] = orb[4 * w + Q_PERM[t][k]];
+                int found = -1;
+                for (int p = 0; p < np; p++)
+                    if (pos[p][0] == q[0] && pos[p][1] == q[1] && pos[p][2] == q[2] && pos[p][3] == q[3]) {
+                        found = p; break;
+                    }
+                if (found < 0) {
+                    for (int k = 0; k < 4; k++) pos[np][k] = q[k];
+                    np++;
+                }
+            }
+            /* partner position of each (position, permutation) */
+            for (int p = 0; p < np; p++)
+                for (int t = 0; t < 24; t++) {
+                    int64_t q[4];
+                    for (int k = 0; k < 4; k++) q[k] = pos[p][Q_PERM[t][k]];
+                    for (int p2 = 0; p2 < np; p2++)
+                        if (pos[p2][0] == q[0] && pos[p2][1] == q[1] && pos[p2][2] == q[2] && pos[p2][3] == q[3]) {
+                            ppos[p][t] = p2; break;
+                        }
+                }
+            /* load a and r = a + b of every position, local index
+             * ((u0 QT + u1) QT + u2) QT + u3 */
+            for (int p = 0; p < np; p++) {
+                const int64_t b0 = pos[p][0] * QT, b1 = pos[p][1] * QT, b2 = pos[p][2] * QT, b3 = pos[p][3] * QT;
+                const int64_t n0 = v - b0 < QT ? v - b0 : QT, n1 = v - b1 < QT ? v - b1 : QT;
+                const int64_t n2 = v - b2 < QT ? v - b2 : QT, n3 = v - b3 < QT ? v - b3 : QT;
+                double *ap = al + p * Q4, *rp = rl + p * Q4;
+                for (int64_t u0 = 0; u0 < n0; u0++)
+                for (int64_t u1 = 0; u1 < n1; u1++)
+                for (int64_t u2 = 0; u2 < n2; u2++) {
+                    const int64_t x0 = b0 + u0, x1 = b1 + u1, x2 = b2 + u2;
+                    const int64_t i0 = x0 * v3 + x1 * v2 + x2 * v + b3;
+                    const int64_t i1 = x1 * v3 + x2 * v2 + x0 * v + b3;
+                    const int64_t i2 = x2 * v3 + x0 * v2 + x1 * v + b3;
+                    double *ao = ap + ((u0 * QT + u1) * QT + u2) * QT;
+                    double *ro = rp + ((u0 * QT + u1) * QT + u2) * QT;
+                    for (int64_t u3 = 0; u3 < n3; u3++) {
+                        const double a = S[0][i0 + u3] + S[1][i1 + u3] + S[2][i2 + u3];
+                        ao[u3] = a;
+                        ro[u3] = a + S[3][i0 + u3] + S[4][i1 + u3] + S[5][i2 + u3];
+                    }
+                }
+            }
+            /* energy */
+            for (int p = 0; p < np; p++) {
+                const int64_t bb[4] = {pos[p][0] * QT, pos[p][1] * QT, pos[p][2] * QT, pos[p][3] * QT};
+                int64_t nn[4];
+                for (int k = 0; k < 4; k++) nn[k] = v - bb[k] < QT ? v - bb[k] : QT;
+                /* local strides of the canonical indices in partner t:
+                 * partner element (u_{t0}, u_{t1}, u_{t2}, u_{t3}) */
+                int64_t str[24][4];
+                for (int t = 0; t < 24; t++) {
+                    int64_t s = 1;
+                    for (int j = 3; j >= 0; j--) { str[t][Q_PERM[t][j]] = s; s *= QT; }
+                }
+                const double *ap = al + p * Q4;
+                for (int64_t u0 = 0; u0 < nn[0]; u0++)
+                for (int64_t u1 = 0; u1 < nn[1]; u1++)
+                for (int64_t u2 = 0; u2 < nn[2]; u2++) {
+                    const int64_t x[3] = {bb[0] + u0, bb[1] + u1, bb[2] + u2};
+                    double mr[QT] = {0}, cc[QT] = {0};
+                    for (int t = 0; t < 24; t++) {
+                        const double *rr = rl + ppos[p][t] * Q4 + u0 * str[t][0] + u1 * str[t][1] + u2 * str[t][2];
+                        const int64_t s3 = str[t][3];
+                        const double wt = Q_W[t];
+                        for (int64_t u3 = 0; u3 < nn[3]; u3++) mr[u3] += wt * rr[u3 * s3];
+                    }
+                    /* c: T2 on the pair set (p,q), <oo|vv> on the complement */
+                    for (int k = 0; k < 6; k++) {
+                        const double *tk = tc + k * v2, *gk = gc + k * v2;
+                        const int *pq = PQ[k];
+                        if (pq[1] != 3 && pq[3] != 3) continue;         /* always one of them */
+                        if (pq[3] == 3) {
+                            const double tv = tk[x[pq[0]] * v + x[pq[1]]];
+                            const double *g = gk + x[pq[2]] * v + bb[3];
+                            for (int64_t u3 = 0; u3 < nn[3]; u3++) cc[u3] += tv * g[u3];
+                        } else {
+                            const double gv = gk[x[pq[2]] * v + x[pq[3]]];
+                            const double *tt = tk + x[pq[0]] * v + bb[3];
+                            for (int64_t u3 = 0; u3 < nn[3]; u3++) cc[u3] += gv * tt[u3];
+                        }
+                    }
+                    const double d0 = eocc - ev[x[0]] - ev[x[1]] - ev[x[2]];
+                    const double *ar = ap + ((u0 * QT + u1) * QT + u2) * QT;
+                    for (int64_t u3 = 0; u3 < nn[3]; u3++) {
+                        const double q = mr[u3] / (d0 - ev[bb[3] + u3]);
+                        e5 += cc[u3] * q;
+                        e6 += ar[u3] * q;
+                    }
+                }
+            }
+        }
+        free(al);
+    }
+    free(orb);
+    out[0] = e5;
+    out[1] = e6;
+}
+
 /* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----
  * Element T3[I, A] = osig[I] vsig[A] T3b[obase[I] + vcol[A]] for occupied
  * triple I and virtual triple A of equal spin group. */

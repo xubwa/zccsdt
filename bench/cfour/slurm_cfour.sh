@@ -9,6 +9,7 @@
 #SBATCH --mem=30G
 # usage: sbatch bench/cfour/slurm_cfour.sh MOL BASIS CC_PROG REF MAXCYC
 # CFOUR_FC=ON: frozen core (default OFF);  CFOUR_MEM_GB: MEMORY_SIZE (default 24)
+# CFOUR_CALC='CCSDT(Q)': calculation level (default CCSDT);  CFOUR_CONV: CC_CONV (default 10)
 # The partition allows 4000 MB per core: --mem=30G keeps the allocation at the
 # 8 requested cores (a larger --mem silently adds cores).
 mol=$1; basis=$2; prog=$3; ref=$4; maxcyc=${5:-6}; mult=1
@@ -63,9 +64,9 @@ cat > ZMAT <<ZEOF
 $mol CCSDT $basis
 $geom
 
-*CFOUR(CALC=CCSDT,BASIS=$basis,REF=$ref,CC_PROG=$prog,MULT=$mult
+*CFOUR(CALC=${CFOUR_CALC:-CCSDT},BASIS=$basis,REF=$ref,CC_PROG=$prog,MULT=$mult
 COORDINATES=CARTESIAN,UNITS=ANGSTROM,SYMMETRY=OFF
-FROZEN_CORE=${CFOUR_FC:-OFF},SCF_CONV=10,CC_CONV=10,CC_MAXCYC=$maxcyc
+FROZEN_CORE=${CFOUR_FC:-OFF},SCF_CONV=10,CC_CONV=${CFOUR_CONV:-10},CC_MAXCYC=$maxcyc
 SCF_MAXCYC=200,MEMORY_SIZE=${CFOUR_MEM_GB:-24},MEM_UNIT=GB)
 
 ZEOF
@@ -73,6 +74,6 @@ echo "host $(hostname) $(date) run dir $run (kept: $keep)"
 /usr/bin/time -v xcfour > out 2> time.txt
 cp out time.txt ZMAT $keep/
 cd / && rm -rf $run
-grep -E "executable x(ncc|ecc|vcc|vtran|intprc) finished|Walltime|It\. " $keep/out | tail -40
+grep -E "executable x(ncc|ecc|vcc|vtran|intprc) finished|Walltime|It\. |\(Q\)" $keep/out | tail -40
 grep -E "Maximum resident" $keep/time.txt
 echo "done $(date)"

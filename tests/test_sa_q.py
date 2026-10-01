@@ -108,3 +108,35 @@ def test_quadruple_blocks_equal_dense(h2o):
     assert abs(got[0] - ref[0]) < 1e-13 and abs(got[1] - ref[1]) < 1e-13
     quads = rccsdt_q.unique_quadruples(ints.nocc)
     assert sum(m for _, m in quads) == 4 ** 4 - 4 * (1 + 4 * 3)   # no index three or four times
+
+
+def test_quad_energy_kernel(monkeypatch):
+    '''Tiled C kernel (cyclic accumulator layouts, partial and repeated
+    tiles) against the numpy evaluation.'''
+    from zccsdt.cc import t3pack
+    from zccsdt.sa import rccsdt_q
+    if not t3pack.USE_C:
+        pytest.skip('no C library')
+    v = 13
+    rng = np.random.default_rng(4)
+    S = [rng.standard_normal((v,) * 4) for _ in range(6)]
+    tc, gc = rng.standard_normal((6, v, v)), rng.standard_normal((6, v, v))
+    ev = 1 + rng.random(v)
+    got = rccsdt_q.quad_energy(S, tc, gc, -3.0, ev)
+    monkeypatch.setattr(t3pack, 'USE_C', False)
+    ref = rccsdt_q.quad_energy(S, tc, gc, -3.0, ev)
+    assert abs(got[0] - ref[0]) < 1e-10 * abs(ref[0])
+    assert abs(got[1] - ref[1]) < 1e-10 * abs(ref[1])
+
+
+def test_block_algorithm_equals_simple(h2o, monkeypatch):
+    '''Accumulator / stacked-GEMM algorithm against the plain per-quadruple
+    version, with the C kernels and with the numpy fallbacks.'''
+    from zccsdt.cc import t3pack
+    from zccsdt.sa import rccsdt_q
+    ints, B, t2, t3b, t3, val = h2o
+    ref = rccsdt_q.q_correction_simple(ints, B, t2, t3b)
+    for use_c in (True, False):
+        monkeypatch.setattr(t3pack, 'USE_C', use_c and t3pack._lib is not None)
+        got = rccsdt_q.q_correction(ints, B, t2, t3b)
+        assert abs(got[0] - ref[0]) < 1e-13 and abs(got[1] - ref[1]) < 1e-13

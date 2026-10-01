@@ -128,3 +128,156 @@ def q_correction_simple(ints, blocks, t2, t3b):
         e5 += mult / 24 * c
         e6 += mult / 24 * a
     return e5, e5 + e6
+
+
+# ------------------------------------------------------------ block algorithm
+
+# Accumulator layouts: three cyclic rotations (w, x, y) of the pairs 0, 1, 2
+# with pair 3 last; accumulator c holds its terms as [x_w, x_x, x_y, x_3].
+ROT = ((0, 1, 2), (1, 2, 0), (2, 0, 1))
+# pair sets of the T2 factor of C and their complements
+PAIRS = ((0, 1, 2, 3), (0, 2, 1, 3), (0, 3, 1, 2), (1, 2, 0, 3), (1, 3, 0, 2), (2, 3, 0, 1))
+
+
+def quad_energy(S, tc, gc, eocc, ev):
+    '''(sum c M r / D, sum a M r / D) of one quadruple from its accumulators
+    S = [A_0, A_1, A_2, B_0, B_1, B_2] (cyclic layouts ROT), with
+    a = sum_c A_c, r = a + sum_c B_c and c = sum_k tc[k] x gc[k] (PAIRS).'''
+    from zccsdt.cc import t3pack
+    lib = t3pack._lib
+    v = len(ev)
+    if t3pack.USE_C and hasattr(lib, 'zc_sa_q_energy_d'):
+        ptr = (t3pack.ctypes.c_void_p * 6)(*[x.ctypes.data for x in S])
+        out = np.zeros(2)
+        tcc, gcc, evc = (np.ascontiguousarray(x, dtype=np.float64) for x in (tc, gc, ev))
+        lib.zc_sa_q_energy_d(t3pack._I64(v), ptr, t3pack._p(tcc), t3pack._p(gcc),
+                             t3pack.ctypes.c_double(float(eocc)), t3pack._p(evc), t3pack._p(out))
+        return float(out[0]), float(out[1])
+    a, b = (sum(X[c].reshape((v,) * 4).transpose(np.argsort(ROT[c] + (3,))) for c in range(3))
+            for X in (S[:3], S[3:]))
+    cc = np.zeros((v,) * 4)
+    for k, (p, q, r, s) in enumerate(PAIRS):
+        _put(cc, tc[k][:, :, None, None] * gc[k][None, None], (p, q, r, s))
+    d = eocc - (ev[:, None, None, None] + ev[None, :, None, None]
+                + ev[None, None, :, None] + ev[None, None, None, :])
+    rt = sum(w * (a + b).transpose(tau) for tau, w in derive.q_metric()) / d
+    return float(np.vdot(cc, rt)), float(np.vdot(a, rt))
+
+
+def q_correction(ints, blocks, t2, t3b):
+    '''(E[Q], E(Q)) from converged spatial t2 and T3 blocks.
+
+    One sorted occupied quadruple (i <= j <= k <= l) at a time.  Its terms
+    are GEMMs whose outputs are stored in the cyclic layouts ROT directly, so
+    nothing is transposed: for rotation (w, x, y)
+
+      A_c: Xp as one [(x_w x_x), 4v] x [4v, (x_y x_3)] product (T3 cubes and
+           <vv|vo> stacked along the contraction index); Xh with special pair
+           w as [x_w, 3o] x [3o, (x_x x_y x_3)] and, for c = 0, with special
+           pair 3 as [(x_0 x_1 x_2), 3o] x [3o, x_3];
+      B_c: Ibar_c x T2 (pair 3 last) and T2 x Ibar_{c+1} (pair w first), with
+           Ibar_c[x_w, x_x, y; f] = I_{wx} + I_{xw} kept for the pairs (i,j),
+           (j,k), (k,i) while l runs; the T2 x G terms as one
+           [(x_w x_x), 4o] x [4o, (x_y x_3)] product.
+
+    The energy of the quadruple is one tiled pass over the six accumulators
+    (quad_energy).  Memory: 11 v^4.'''
+    from zccsdt.cc.t3pack import axpby
+    from zccsdt.sa.t3blocks import gather_boxes
+    from zccsdt.timing import timer
+    ctx = Context(ints, blocks, t2, t3b)
+    no, v = ctx.no, ctx.nv
+    vv, v3 = v * v, v ** 3
+    eo, ev = ctx.eo, ctx.ev
+    VO = np.ascontiguousarray(ctx.vvvo.transpose(3, 0, 1, 2))      # [o][c,d,e] = <cd|eo>
+    ovoo, oovv = ctx.ovoo, ctx.oovv
+    Gh = ctx.G + ctx.G.transpose(0, 2, 1, 3, 5, 4)      # G[q,r,s][m,xr,xs] + G[q,s,r][m,xs,xr]
+    Wc = ctx.Wc.reshape(v, v3)
+    S = [np.empty((v,) * 4) for _ in range(6)]
+    Ibar = [np.empty((v,) * 4) for _ in range(3)]
+    tmp = np.empty((v,) * 4)
+    As, Bs = np.empty((v, v, 4, v)), np.empty((4, v, v, v))
+    As2, Bs2 = np.empty((v, v, 4, no)), np.empty((4, no, v, v))
+    Tg = np.empty((3 * no, v, v, v))
+    occ = np.arange(no)
+
+    def cube(a, b, c):
+        return blocks.cube(t3b, a, b, c)
+
+    def build_I(dst, oa, ob):
+        # Ibar[x_a, x_b, y, f] = I_ba[x_a | x_b, y, f] + I_ab[x_b | x_a, y, f]
+        gemm(t2[ob, oa].T, Wc, dst.reshape(v, v3))
+        gemm(t2[oa, ob].T, Wc, tmp.reshape(v, v3))
+        axpby(dst, tmp.transpose(1, 0, 2, 3), 1.0, 1.0)
+
+    def gather(trips):
+        views = [blocks.view(a, b, c, v) for a, b, c in trips]
+        gather_boxes(t3b, [x[0] for x in views], [x[1] for x in views], Tg)
+
+    e5 = e6 = 0.0
+    for i in range(no):
+        for j in range(i, no):
+            with timer('q.I'):
+                build_I(Ibar[0], i, j)
+            for k in range(j, no):
+                if i == j == k:
+                    continue
+                with timer('q.I'):
+                    build_I(Ibar[1], j, k)
+                    build_I(Ibar[2], k, i)
+                for l in range(k, no):
+                    if j == k == l:
+                        continue
+                    o = (i, j, k, l)
+                    mult = 24 // 2 ** sum(o[n] == o[n + 1] for n in range(3))
+                    o3 = l
+                    for c, (w, x, y) in enumerate(ROT):
+                        ow, ox, oy = o[w], o[x], o[y]
+                        # ---- A_c: Xp
+                        with timer('q.stack'):
+                            axpby(As[:, :, 0], cube(ow, ox, oy), 1.0, 0.0)
+                            axpby(As[:, :, 1], cube(ow, ox, o3), 1.0, 0.0)
+                            axpby(As[:, :, 2], VO[ox], 1.0, 0.0)
+                            axpby(As[:, :, 3], VO[ow].transpose(1, 0, 2), 1.0, 0.0)
+                            axpby(Bs[0], VO[o3].transpose(2, 0, 1), 1.0, 0.0)
+                            axpby(Bs[1], VO[oy].transpose(2, 1, 0), 1.0, 0.0)
+                            axpby(Bs[2], cube(ow, oy, o3), 1.0, 0.0)
+                            axpby(Bs[3], cube(ox, oy, o3), 1.0, 0.0)
+                        with timer('q.Xp'):
+                            gemm(As.reshape(vv, 4 * v), Bs.reshape(4 * v, vv), S[c].reshape(vv, vv))
+                        # ---- A_c: Xh, special pair w, m in the slot of x, y or 3
+                        with timer('q.gather'):
+                            gather([(m, oy, o3) for m in occ] + [(ox, m, o3) for m in occ]
+                                   + [(ox, oy, m) for m in occ])
+                        with timer('q.Xh'):
+                            sm = np.hstack([-ovoo[:, :, r, ow].T for r in (ox, oy, o3)])
+                            gemm(sm, Tg.reshape(3 * no, v3), S[c].reshape(v, v3), beta=1.0)
+                        if c == 0:
+                            # special pair 3, m in the slot of 0, 1 or 2
+                            with timer('q.gather'):
+                                gather([(m, o[1], o[2]) for m in occ] + [(o[0], m, o[2]) for m in occ]
+                                       + [(o[0], o[1], m) for m in occ])
+                            with timer('q.Xh'):
+                                sm = np.vstack([-ovoo[:, :, r, o3] for r in o[:3]])
+                                gemm(Tg.reshape(3 * no, v3).T, sm, S[0].reshape(v3, v), beta=1.0)
+                        # ---- B_c: Yv and the T2 x G terms
+                        with timer('q.Yv'):
+                            gemm(Ibar[c].reshape(v3, v), t2[oy, o3], S[3 + c].reshape(v3, v))
+                            gemm(t2[o3, ow].T, Ibar[(c + 1) % 3].reshape(v3, v).T,
+                                 S[3 + c].reshape(v, v3), beta=1.0)
+                        with timer('q.G'):
+                            As2[:, :, 0] = t2[ow].transpose(1, 2, 0)
+                            As2[:, :, 1] = t2[ox].transpose(2, 1, 0)
+                            As2[:, :, 2] = Gh[o3, ow, ox].transpose(1, 2, 0)
+                            As2[:, :, 3] = Gh[oy, ow, ox].transpose(1, 2, 0)
+                            Bs2[0], Bs2[1] = Gh[ox, oy, o3], Gh[ow, oy, o3]
+                            Bs2[2], Bs2[3] = t2[oy], t2[o3].transpose(0, 2, 1)
+                            gemm(As2.reshape(vv, 4 * no), Bs2.reshape(4 * no, vv),
+                                 S[3 + c].reshape(vv, vv), beta=1.0)
+                    with timer('q.energy'):
+                        tc = np.array([t2[o[p], o[q]] for p, q, r, s in PAIRS])
+                        gc = np.array([oovv[o[r], o[s]] for p, q, r, s in PAIRS])
+                        c5, a6 = quad_energy(S, tc, gc, sum(eo[n] for n in o), ev)
+                    e5 += mult / 24 * c5
+                    e6 += mult / 24 * a6
+    return e5, e5 + e6
