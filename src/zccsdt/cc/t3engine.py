@@ -23,6 +23,9 @@ from zccsdt.cc import t3pack, t3kern
 from zccsdt.timing import timer
 
 
+_RED2 = True        # loop-inverted pass-2 reduction (zc_breduce2)
+
+
 def _batches(lo, hi, size):
     return [np.arange(i, min(i + size, hi)) for i in range(lo, hi, size)]
 
@@ -272,6 +275,45 @@ class SpinBlockT3:
         return T3[addr] * so[:, None, :, None] * sv[None, :, None, :]
 
     # ---- pass 1
+    def _workspace(self, n):
+        '''Reusable work array of at least n elements, kept across batches and
+        iterations (fresh large arrays pay page faults on every first touch).
+        One user at a time: callers take non-overlapping views.'''
+        w = getattr(self, '_work', None)
+        if w is None or w.size < n:
+            w = self._work = np.empty(n, dtype=self.dtype)
+        return w[:n]
+
+    def _red_targets(self, p0, p1):
+        '''Targets of the pass-2 reduction for the occupied pairs [p0, p1):
+        per virtual group g, (Rbase[it], free_r(it), pair_r(it) - p0, rs_r,
+        A0, A1) for the computed triples it with pair_r(it) in the batch.'''
+        cache = self.__dict__.setdefault('_redt', {})
+        if (p0, p1) not in cache:
+            om, vm = self.om, self.vm
+            out = []
+            for g in range(4):
+                A0, A1 = vm.tri_off[g], vm.tri_off[g + 1]
+                its = np.where((self.Rbase >= 0) & (om.tri_grp == g))[0]
+                if A1 == A0 or len(its) == 0:
+                    continue
+                tb, tx, tP, ts = [], [], [], []
+                for r, sg in ((0, 1.0), (1, -1.0), (2, 1.0)):
+                    P = om.pair_c[r, its]
+                    sel = (P >= p0) & (P < p1)
+                    tb.append(self.Rbase[its[sel]])
+                    tx.append(om.free_c[r, its[sel]])
+                    tP.append(P[sel] - p0)
+                    ts.append(np.full(int(sel.sum()), sg))
+                tb = np.concatenate(tb)
+                if len(tb) == 0:
+                    continue
+                c = lambda x, t=np.int64: np.ascontiguousarray(np.concatenate(x), dtype=t)  # noqa: E731
+                out.append((np.ascontiguousarray(tb, dtype=np.int64), c(tx), c(tP),
+                            c(ts, np.float64), A0, A1))
+            cache[(p0, p1)] = out
+        return cache[(p0, p1)]
+
     def pass1(self, T3, G_Pd, G_mQ, gpp, fov):
         if self.use_c:
             return self._pass1_c(T3, G_Pd, G_mQ, gpp, fov)
@@ -455,7 +497,32 @@ class _CArgs:
         return ctypes.c_void_p(int(a.ctypes.data) + int(off) * a.itemsize)
 
 
+def _vtables(eng):
+    '''Precombined virtual tables of the gathers, per (d, Q): the column of
+    the triple {d} + Q in its stored block (int32) and its sign vsgn * vsig
+    (int8, 0 if d is in Q).'''
+    t = getattr(eng, '_vtab', None)
+    if t is None:
+        vm, L = eng.vm, eng.L
+        sg = vm.sgn_c.astype(np.int64)
+        ci = np.where(sg != 0, L.vcol[vm.tri_c], 0)
+        assert ci.max(initial=0) < 2 ** 31
+        cs = (sg * L.vsig[vm.tri_c]).astype(np.int8)
+        t = eng._vtab = (np.ascontiguousarray(ci, dtype=np.int32), np.ascontiguousarray(cs))
+    return t
+
+
 def _cgather(eng, T3, Pidx, didx, midx, Qlo, Qhi, out, off, ldP):
+    om, vm, L = eng.om, eng.vm, eng.L
+    vci, vcs = _vtables(eng)
+    f = getattr(t3pack._lib, 'zc_bgather2_' + t3pack._sfx(T3.dtype))
+    I, p = _CArgs.I, _CArgs.p
+    f(p(T3), p(L.obase), p(L.osig), p(om.tri_c), p(om.sgn_c), I(om.npair), p(vci),
+      p(vcs), I(vm.npair), I(len(Pidx)), p(Pidx), I(len(didx)), p(didx), I(len(midx)),
+      p(midx), I(Qlo), I(Qhi - Qlo), I(ldP), p(out, off))
+
+
+def _cgather_old(eng, T3, Pidx, didx, midx, Qlo, Qhi, out, off, ldP):
     om, vm, L = eng.om, eng.vm, eng.L
     f = getattr(t3pack._lib, 'zc_bgather_' + t3pack._sfx(T3.dtype))
     I, p = _CArgs.I, _CArgs.p
@@ -509,7 +576,7 @@ def _spin_block_c_methods():
                         if nd == 0 or nm == 0 or nQ == 0:
                             continue
                         t_ = timer('pass1.gather'); t_.__enter__()
-                        T = np.empty((len(pb), nd, nm, nQ), dtype=dtype)
+                        T = self._workspace(len(pb) * nd * nm * nQ).reshape(len(pb), nd, nm, nQ)
                         _cgather(self, T3, pb, d, m, Qlo, Qhi, T, 0, nd * nm * nQ)
                         Tf = T.reshape(len(pb) * nd, nm * nQ)
                         t_.__exit__(None, None, None)
@@ -618,6 +685,7 @@ def _spin_block_c_methods():
         Qoff = np.ascontiguousarray(vm.pair_off[:3], dtype=np.int64)
         lib = t3pack._lib
         fred = getattr(lib, 'zc_breduce_pass2_' + t3pack._sfx(dtype))
+        fred2 = getattr(lib, 'zc_breduce2_' + t3pack._sfx(dtype))
         I_, p_ = _CArgs.I, _CArgs.p
         top = 1 if L.flip else 2
         for gP in range(top + 1):
@@ -630,12 +698,14 @@ def _spin_block_c_methods():
                     for gQ in gQs:
                         zoff[k, gQ] = off
                         off += nD[gP - gQ] * nQg[gQ]
-                Z = np.empty(off, dtype=dtype)
+                tmax = max(nD[gP - gQ] * nQg[gQ] for gQ in gQs) * nbp
+                ws = self._workspace(off + tmax)
+                Z = ws[:off]
                 for gQ in gQs:
                     delta = gP - gQ
                     Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
                     nQ, nr = Qhi - Qlo, nD[delta]
-                    T = np.empty(nbp * nr * nQ, dtype=dtype)
+                    T = ws[off:off + nbp * nr * nQ]
                     r0 = 0
                     t_ = timer('pass2.gather'); t_.__enter__()
                     for sd, sm in self.dsub[delta]:
@@ -680,10 +750,17 @@ def _spin_block_c_methods():
                         r0 += nc * ni
                     t_.__exit__(None, None, None)
                 t_ = timer('pass2.reduce'); t_.__enter__()
-                fred(p_(R), p_(self.Rbase), p_(self.Rcol), I_(om.ntri), p_(om.tri_grp),
-                     p_(om.free_c), p_(om.pair_c), I_(vm.ntri), p_(vm.tri_off),
-                     p_(vm.free_c), p_(vm.pair_c), p_(vm.pair_grp), I_(p0), I_(p1),
-                     p_(zoff), p_(nQg), p_(Qoff), p_(self.rowpos), I_(nocc), p_(Z))
+                if _RED2:
+                    for tb, tx, tP, tsg, A0, A1 in self._red_targets(p0, p1):
+                        fred2(p_(R), p_(self.Rcol), I_(len(tb)), p_(tb), p_(tx), p_(tP),
+                              p_(tsg), I_(A0), I_(A1), I_(vm.ntri), p_(vm.free_c),
+                              p_(vm.pair_c), p_(vm.pair_grp), p_(zoff), p_(nQg), p_(Qoff),
+                              p_(self.rowpos), I_(nocc), p_(Z))
+                else:
+                    fred(p_(R), p_(self.Rbase), p_(self.Rcol), I_(om.ntri), p_(om.tri_grp),
+                         p_(om.free_c), p_(om.pair_c), I_(vm.ntri), p_(vm.tri_off),
+                         p_(vm.free_c), p_(vm.pair_c), p_(vm.pair_grp), I_(p0), I_(p1),
+                         p_(zoff), p_(nQg), p_(Qoff), p_(self.rowpos), I_(nocc), p_(Z))
                 t_.__exit__(None, None, None)
 
     def _ppl_c(self, T3, Wpp, R):
@@ -711,18 +788,25 @@ def _spin_block_c_methods():
                 nb = len(rows)
                 X = [dummy, dummy]
                 hoff = np.zeros(2, dtype=np.int64)
+                # workspace [X_0 | X_1 | T]: both X stay alive for the reduction
+                size = {}
                 for sc in (0, 1):
                     h = g - sc
-                    if not 0 <= h <= 2 or ncs[sc] == 0:
-                        continue
+                    if 0 <= h <= 2 and ncs[sc] and vm.pair_off[h + 1] > vm.pair_off[h]:
+                        size[sc] = (vm.pair_off[h + 1] - vm.pair_off[h]) * nb * int(ncs[sc])
+                nx = sum(size.values())
+                ws = self._workspace(nx + max(size.values(), default=0))
+                xo = 0
+                for sc in sorted(size):
+                    h = g - sc
                     Qlo, Qhi = vm.pair_off[h], vm.pair_off[h + 1]
-                    if Qhi == Qlo:
-                        continue
-                    T = np.empty((Qhi - Qlo, nb, ncs[sc]), dtype=dtype)
+                    T = ws[nx:nx + size[sc]].reshape(Qhi - Qlo, nb, ncs[sc])
                     fg(p_(T3), p_(L.obase), p_(L.vcol), p_(L.osig), p_(L.vsig),
                        p_(vm.tri_c), p_(vm.sgn_c), I_(vm.npair), I_(nb), p_(rows),
                        I_(Qlo), I_(Qhi - Qlo), I_(coff[sc]), I_(ncs[sc]), p_(T))
-                    X[sc] = gemm(Wh[h], T.reshape(Qhi - Qlo, -1))
+                    X[sc] = ws[xo:xo + size[sc]].reshape(Qhi - Qlo, -1)
+                    gemm(Wh[h], T.reshape(Qhi - Qlo, -1), X[sc])
+                    xo += size[sc]
                     hoff[sc] = Qlo
                 fr(p_(R), p_(self.Rbase), p_(self.Rcol), I_(nb), p_(rows), I_(vm.ntri),
                    I_(A0), I_(A1), p_(vm.free_c), p_(vm.pair_c), p_(vspin), p_(hoff),

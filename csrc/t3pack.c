@@ -494,6 +494,92 @@ void zc_flip_sym3_##SFX(T *X, const int64_t *n, const int64_t *st,             \
 DEFINE_FLIPSYM(double, d)
 DEFINE_FLIPSYM(double complex, z)
 
+/* Gather of half-expanded spin-blocked T3 with precombined virtual tables:
+ *   out[p * ldP + (id * nm + im) * nQ + q] = t3[m, P_0, P_1, d, Q_0, Q_1]
+ *     = so * osig[I] * vcs[d, Q] * T3b[obase[I] + vci[d, Q]],
+ * I = otri[m, P], Q = Qlo + q; vci = vcol[vtri] (int32) and vcs = vsgn *
+ * vsig[vtri] (int8) are precombined per (d, Q) so the inner loop reads them
+ * sequentially.  Tasks are (p, im): one T3 row per task, streamed for all d. */
+#define DEFINE_BGATHER2(T, SFX)                                                \
+void zc_bgather2_##SFX(const T *T3b, const int64_t *obase, const double *osig, \
+                       const int64_t *otri, const int8_t *osgn, int64_t npo,   \
+                       const int32_t *vci, const int8_t *vcs, int64_t nvp,     \
+                       int64_t nP, const int64_t *Pidx, int64_t nd,            \
+                       const int64_t *didx, int64_t nm, const int64_t *midx,   \
+                       int64_t Qlo, int64_t nQ, int64_t ldP, T *out)           \
+{                                                                              \
+    _Pragma("omp parallel for collapse(2) schedule(dynamic, 1)")               \
+    for (int64_t p = 0; p < nP; p++)                                           \
+    for (int64_t im = 0; im < nm; im++) {                                      \
+        const int64_t P = Pidx[p], m = midx[im];                               \
+        const int8_t so = osgn[m * npo + P];                                   \
+        const int64_t ti = so ? otri[m * npo + P] : 0;                         \
+        const T *row = T3b + (so ? obase[ti] : 0);                             \
+        const double f = so ? so * osig[ti] : 0.0;                             \
+        for (int64_t id = 0; id < nd; id++) {                                  \
+            T *o = out + p * ldP + (id * nm + im) * nQ;                        \
+            if (so == 0) { memset(o, 0, sizeof(T) * nQ); continue; }           \
+            const int64_t d = didx[id];                                        \
+            const int32_t *ci = vci + d * nvp + Qlo;                           \
+            const int8_t *cs = vcs + d * nvp + Qlo;                            \
+            for (int64_t q = 0; q < nQ; q++) o[q] = (f * cs[q]) * row[ci[q]];  \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_BGATHER2(double, d)
+DEFINE_BGATHER2(double complex, z)
+
+/* Pass-2 reduction, loops inverted: the targets (it, r) of one pair batch
+ * whose pair P = pair_r(it) is in the batch and whose occupied triple it
+ * belongs to virtual group g are listed in (tbase = Rbase[it], tx = free_r(it),
+ * tP = P - p0, tsg = rs_r).  For every A in [A0, A1) (threads over chunks of
+ * A) the virtual decompositions are loaded once and applied to all targets:
+ *   R[tbase + Rcol[A]] += tsg sum_s rs_s Z[zoff[tP*3 + gQ] + rowpos[a, x] nQg[gQ]
+ *                                          + (Q - Qoff[gQ])],
+ * a = free_s(A), Q = pair_s(A), gQ = vpgrp[Q]. */
+#define RED_CH 128
+#define DEFINE_BREDUCE2(T, SFX)                                                \
+void zc_breduce2_##SFX(T *R, const int64_t *Rcol, int64_t ntg,                 \
+                       const int64_t *tbase, const int64_t *tx,                \
+                       const int64_t *tP, const double *tsg,                   \
+                       int64_t A0, int64_t A1, int64_t nvt,                    \
+                       const int64_t *vfree, const int64_t *vpair,             \
+                       const int64_t *vpgrp, const int64_t *zoff,              \
+                       const int64_t *nQg, const int64_t *Qoff,                \
+                       const int64_t *rowpos, int64_t no, const T *Z)          \
+{                                                                              \
+    const int64_t nch = (A1 - A0 + RED_CH - 1) / RED_CH;                       \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t ch = 0; ch < nch; ch++) {                                     \
+        const int64_t a_lo = A0 + ch * RED_CH;                                 \
+        const int64_t a_hi = a_lo + RED_CH < A1 ? a_lo + RED_CH : A1;          \
+        int64_t ra[3][RED_CH], zq[3][RED_CH], gg[3][RED_CH];                   \
+        for (int64_t A = a_lo; A < a_hi; A++) {                                \
+            for (int s = 0; s < 3; s++) {                                      \
+                const int64_t Q = vpair[s * nvt + A], g = vpgrp[Q];            \
+                ra[s][A - a_lo] = vfree[s * nvt + A] * no;                     \
+                gg[s][A - a_lo] = g;                                           \
+                zq[s][A - a_lo] = Q - Qoff[g];                                 \
+            }                                                                  \
+        }                                                                      \
+        for (int64_t t = 0; t < ntg; t++) {                                    \
+            const int64_t x = tx[t];                                           \
+            const int64_t *zo = zoff + tP[t] * 3;                              \
+            const double sg = tsg[t];                                          \
+            T *r = R + tbase[t];                                               \
+            for (int64_t k = 0; k < a_hi - a_lo; k++) {                        \
+                const int64_t g0 = gg[0][k], g1 = gg[1][k], g2 = gg[2][k];     \
+                const T v = Z[zo[g0] + rowpos[ra[0][k] + x] * nQg[g0] + zq[0][k]] \
+                          - Z[zo[g1] + rowpos[ra[1][k] + x] * nQg[g1] + zq[1][k]] \
+                          + Z[zo[g2] + rowpos[ra[2][k] + x] * nQg[g2] + zq[2][k]]; \
+                r[Rcol[a_lo + k]] += sg * v;                                   \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_BREDUCE2(double, d)
+DEFINE_BREDUCE2(double complex, z)
+
 /* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----
  * Element T3[I, A] = osig[I] vsig[A] T3b[obase[I] + vcol[A]] for occupied
  * triple I and virtual triple A of equal spin group. */
