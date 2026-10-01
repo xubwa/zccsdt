@@ -60,3 +60,46 @@ def test_spin_grouped_energy_equals_lexicographic(system, method):
     b = solver.kernel(spn, method, TIGHT)
     assert a.converged and b.converged
     assert abs(a.e_corr - b.e_corr) < 1e-10
+
+
+def _rand_amps(e, seed, eng):
+    rng = np.random.default_rng(seed)
+    nocc, nvir = e.nocc, e.nmo - e.nocc
+    so, sv = e.spin_occ, e.spin_vir
+    t1 = 0.05 * (rng.random((nocc, nvir)) - 0.5) * (so[:, None] == sv[None, :])
+    t2 = 0.05 * (rng.random((nocc, nocc, nvir, nvir)) - 0.5)
+    t2 = t2 - t2.transpose(1, 0, 2, 3)
+    t2 = t2 - t2.transpose(0, 1, 3, 2)
+    ms = (so[:, None, None, None] + so[None, :, None, None]
+          == sv[None, None, :, None] + sv[None, None, None, :])
+    t2 = t2 * ms
+    t3 = 0.05 * (rng.random(eng.size) - 0.5)
+    return t1, t2, t3
+
+
+@pytest.mark.parametrize('system', ['uhf', 'rhf'])
+def test_spin_block_step_equals_dense(system):
+    from zccsdt.cc import ccsdt_opt, t3engine
+    mf = nh2_uhf() if system == 'uhf' else h2o_rhf()
+    e = E.from_scf(mf, frozen=2, spin_order=True)
+    eng = ccsdt_opt.engine_for(e, np.float64)
+    assert isinstance(eng, t3engine.SpinBlockT3)
+    t1, t2, t3 = _rand_amps(e, 1, eng)
+    opts = solver.Options()
+    b1, b2, b3 = ccsdt_opt.update_amps(opts, t1, t2, t3, e)
+    # the same step with the dense engine on the same (spin-sorted) integrals
+    om, vm = t3pack.maps_for(e)
+    dense = t3engine.DenseT3(om, vm, np.float64, 2000)
+    key = (id(om), id(vm), np.dtype(np.float64).str, 2000.0, False)
+    saved = ccsdt_opt._ENGINES[key]
+    try:
+        ccsdt_opt._ENGINES[key] = dense
+        d1, d2, d3 = ccsdt_opt.update_amps(opts, t1, t2, eng.L.to_dense(t3).ravel(), e)
+    finally:
+        ccsdt_opt._ENGINES[key] = saved
+    assert abs(b1 - d1).max() < 1e-12
+    assert abs(b2 - d2).max() < 1e-12
+    D3 = d3.reshape(om.ntri, vm.ntri)
+    assert abs(eng.L.to_dense(b3) - D3).max() < 1e-12
+    # spin-forbidden blocks of the dense step stay zero
+    assert abs(D3[om.tri_grp[:, None] != vm.tri_grp[None, :]]).max() < 1e-14

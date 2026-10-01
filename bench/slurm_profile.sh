@@ -3,15 +3,15 @@
 #SBATCH --time=4:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48
-#SBATCH --exclusive
+#SBATCH --cpus-per-task=8
 #SBATCH -A lcheng24
 #SBATCH --partition=parallel
-#SBATCH --mem=180G
+#SBATCH --mem=60G
 # usage: sbatch -o bench/logs/%x-%j.out bench/slurm_profile.sh MOL BASIS KIND NITER [FROZEN]
-export OMP_NUM_THREADS=48
-export MKL_NUM_THREADS=48
-export OPENBLAS_NUM_THREADS=48
+# threads = cores of the allocation (default 8; override with sbatch -c N --mem=...)
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
+export MKL_NUM_THREADS=$OMP_NUM_THREADS
+export OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
 export OMP_WAIT_POLICY=${OMP_WAIT_POLICY:-PASSIVE}
 cd /home/xwang405/apps/zccsdt
 echo "host $(hostname)  $(date)"

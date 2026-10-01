@@ -22,6 +22,7 @@ class Options:
     max_cycle: int = 200
     diis_space: int = 8
     mem_mb: float = 2000.0      # batch buffer budget of the packed-T3 code
+    spin_flip: bool = False     # closed-shell alpha/beta symmetry (RCCSDT)
     verbose: bool = False
 
 
@@ -85,8 +86,8 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     t1 = t1.astype(dtype)
     t2 = t2.astype(dtype)
     if with_t3 and t3 is None:
-        t3 = np.zeros(t3pack.triple_map(nocc).ntri * t3pack.triple_map(nvir).ntri,
-                      dtype=dtype)
+        t3 = np.zeros(ccsdt_opt.engine_for(eris, dtype, opts.mem_mb,
+                                           opts.spin_flip).size, dtype=dtype)
 
     e_old = ccsd.energy(t1, t2, eris)
     adiis = DIIS(space=opts.diis_space)
