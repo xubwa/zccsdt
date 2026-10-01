@@ -7,7 +7,10 @@ from spatial chemist integrals (pr|qs) of the alpha and beta orbitals:
 The packed vvvv is stored as its three diagonal pair blocks (alpha-alpha,
 alpha-beta, beta-beta); the alpha-beta block is the plain spatial (ac|bd).
 For an RHF reference the alpha and beta orbitals coincide: the spatial
-integrals are computed once and spin-flipped blocks share their arrays.
+integrals are computed once and spin-flipped blocks share their arrays.  The
+CC code then also shares the beta-beta blocks of the dressed vvvv and of the
+ladder operator with the alpha-alpha ones, which assumes closed-shell
+(spin-flip symmetric) amplitudes, as produced by CC on an RHF reference.
 
 Orbital order: active occupied alpha, active occupied beta, virtual alpha,
 virtual beta, each in orbital-energy order (the order of from_scf(...,
@@ -44,6 +47,16 @@ class SpinERIs:
     @property
     def nmo(self):
         return self.fock.shape[0]
+
+    def __getattr__(self, name):
+        # dense views of the small blocks for code that expects ERIs-like
+        # attributes (ovvv and vvvv are intentionally not provided)
+        if name in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo'):
+            d = self.__dict__.setdefault('_dense', {})
+            if name not in d:
+                d[name] = self.g[name].to_dense()
+            return d[name]
+        raise AttributeError(name)
 
     @property
     def dtype(self):

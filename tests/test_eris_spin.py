@@ -41,3 +41,55 @@ def test_spin_eris_match_ghf_spin_order(kind, frozen):
     d = se.to_dense_eris()
     for a, b in zip(vvvv_packed(d, vm), vvvv_packed(ref, vm)):
         np.testing.assert_allclose(a, b, atol=1e-10)
+
+
+@pytest.mark.parametrize('kind', ['uhf', 'rhf'])
+def test_step_with_spin_eris_equals_ghf_spin_order(kind):
+    '''A CCSDT step with U/R-form integrals equals the step with the GHF
+    spin-ordered (dense spin-orbital) integrals.'''
+    from zccsdt.cc import ccsdt_opt, solver
+    mf = SYS[kind]
+    se = eris_spin.from_scf(mf, frozen=2, vir_batch=3)
+    ref = E.from_scf(scf.addons.convert_to_ghf(mf), frozen=2, spin_order=True)
+    eng = ccsdt_opt.engine_for(ref, np.float64)
+    rng = np.random.default_rng(7)
+    so, sv = ref.spin_occ, ref.spin_vir
+    no, nv = len(so), len(sv)
+    t1 = 0.05 * (rng.random((no, nv)) - 0.5) * (so[:, None] == sv[None, :])
+    t2 = 0.05 * (rng.random((no, no, nv, nv)) - 0.5)
+    t2 = t2 - t2.transpose(1, 0, 2, 3)
+    t2 = t2 - t2.transpose(0, 1, 3, 2)
+    t2 *= (so[:, None, None, None] + so[None, :, None, None]
+           == sv[None, None, :, None] + sv[None, None, None, :])
+    if kind == 'rhf':   # closed shell: alpha/beta (spin-flip) symmetric amplitudes
+        na, va = int(np.sum(so == 0)), int(np.sum(sv == 0))
+        fo = np.concatenate((np.arange(na, no), np.arange(na)))
+        fv = np.concatenate((np.arange(va, nv), np.arange(va)))
+        t1 = 0.5 * (t1 + t1[fo][:, fv])
+        t2 = 0.5 * (t2 + t2[fo][:, fo][:, :, fv][:, :, :, fv])
+    t3 = 0.05 * (rng.random(eng.size) - 0.5)
+    o = solver.Options()
+    a = ccsdt_opt.update_amps(o, t1, t2, t3, ref)
+    b = ccsdt_opt.update_amps(o, t1, t2, t3, se)
+    for x, y, name in zip(a, b, ('t1', 't2', 't3')):
+        assert abs(x - y).max() < 1e-11, name
+    a = ccsdt_opt.ccsd_update_amps(o, t1, t2, ref)
+    b = ccsdt_opt.ccsd_update_amps(o, t1, t2, se)
+    for x, y in zip(a, b):
+        assert abs(x - y).max() < 1e-11
+
+
+@pytest.mark.parametrize('kind', ['uhf', 'rhf'])
+def test_converged_energies_with_spin_eris(kind):
+    from zccsdt.cc import solver, ccsdt_opt
+    mf = SYS[kind]
+    se = eris_spin.from_scf(mf, frozen=2)
+    ref = E.from_scf(scf.addons.convert_to_ghf(mf), frozen=2)
+    tight = solver.Options(conv_tol=1e-11, conv_tol_normt=1e-8)
+    flip = solver.Options(conv_tol=1e-11, conv_tol_normt=1e-8, spin_flip=(kind == 'rhf'))
+    for meth, o in (('ccsd', tight), ('ccsdt', flip)):
+        a = solver.kernel(ref, meth, tight)
+        b = solver.kernel(se, meth, o)
+        assert b.converged and abs(a.e_corr - b.e_corr) < 1e-10, meth
+        assert abs(a.e_tot - b.e_tot) < 1e-9
+    ccsdt_opt._ENGINES.clear()

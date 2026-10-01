@@ -21,7 +21,8 @@ import numpy as np
 from pyscf import lib
 
 from zccsdt.blas import gemm
-from zccsdt.cc import ccsd, t3pack, t3kern, t3engine
+from zccsdt.cc import ccsd, t3pack, t3kern, t3engine, spin_imds
+from zccsdt.cc.spintensor import SpinTensor, einsum as s_einsum, pack_pairs, pair_space
 from zccsdt.timing import timer
 
 einsum = lib.einsum
@@ -105,6 +106,8 @@ def vvvv_packed(eris, vm):
     blocks vanish by spin conservation).  Cached on the integral object.  The
     stored packed form (generator / HDF5 attribute _vvvv_pp) is in triu
     (lexicographic) pair order.'''
+    if hasattr(type(eris), '__dataclass_fields__') and 'vvvv_blocks' in eris.__dataclass_fields__:
+        return eris.vvvv_blocks                       # U/R-form integrals
     cached = getattr(eris, '_vvvv_blocks', None)
     if cached is not None and cached[0] is vm:
         return cached[1]
@@ -166,7 +169,7 @@ def _tau1_pairs(t1, om, vm):
     return t1[mm][:, md] * t1[nn][:, ne] - t1[nn][:, md] * t1[mm][:, ne]
 
 
-def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm):
+def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None):
     '''W_vvvo[Q(a<b), e, i] of the T3 drive term (without the T3 dressing):
     the fully T1-dressed <ab||ei> = Bv + sum_f ~<ab||ef> t1[i,f] (Bv: bra-dressed
     vvvo, Vd: dressed packed vvvv), plus the T2 terms with the dressed oovo,
@@ -187,12 +190,17 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm):
         om.npair, -1), W.reshape(vm.npair, -1), beta=1.0)
     # - P(ab) sum_{mf} ~<mb||ef> t2[mi,af]: X[(a,i),(b,e)] = t2[a,i,m,f] ovvv[m,f,b,e]
     with timer('wv.t2ovvv'):
-        A = np.ascontiguousarray(t2.transpose(2, 1, 0, 3)).reshape(nvir * nocc, nocc * nvir)
-        B = np.ascontiguousarray(ge['ovvv'].transpose(0, 3, 1, 2)).reshape(nocc * nvir, -1)
-        X = gemm(A, B)                                                           # [a,i,b,e]
-        t3pack.pair_antisym_add(W, X, vm, (nocc * nvir * nvir, nvir, 1, nvir * nvir),
-                                alpha=-1.0)
-    del X, A, B
+        if xterm is not None:          # precomputed (spin-blocked) X[(a<b), e, i]
+            W -= xterm
+        else:
+            A = np.ascontiguousarray(t2.transpose(2, 1, 0, 3)).reshape(nvir * nocc,
+                                                                       nocc * nvir)
+            B = np.ascontiguousarray(ge['ovvv'].transpose(0, 3, 1, 2)).reshape(
+                nocc * nvir, -1)
+            X = gemm(A, B)                                                   # [a,i,b,e]
+            t3pack.pair_antisym_add(W, X, vm, (nocc * nvir * nvir, nvir, 1, nvir * nvir),
+                                    alpha=-1.0)
+            del X, A, B
     # - sum_m f[m,e] t2[m,i,a,b]
     W -= gemm(np.asfortranarray(fov.T), t2[:, :, md, ne].reshape(nocc, -1)).reshape(
         nvir, nocc, vm.npair).transpose(2, 0, 1)
@@ -224,7 +232,7 @@ def dressed_vvoo_pp(eris, t1, Bv, om, vm):
 
 
 def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
-                         Weff_ovvo, om, vm):
+                         Weff_ovvo, om, vm, r1_vovv=None):
     '''CCSD residuals in the T1-dressed formalism (CCSD with T1 = 0 and the
     dressed Hamiltonian; validated against the determinant-space oracle):
       R1 = f_ai + f_kc t_ikac + 1/2 g_akcd t_ikcd - 1/2 g_klic t_klac
@@ -241,7 +249,10 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
     goovv_pp = np.ascontiguousarray(ge['oovv'][mm, nn][:, md, ne])
     # R1
     R1 = fdr[v, o].T + einsum('kc,ikac->ia', fdr[o, v], t2)
-    R1 += einsum('akR,ikR->ia', ge['vovv'][:, :, md, ne], t2[:, :, md, ne])
+    if r1_vovv is None:
+        R1 += einsum('akR,ikR->ia', ge['vovv'][:, :, md, ne], t2[:, :, md, ne])
+    else:
+        R1 += r1_vovv
     R1 -= einsum('Pic,Pac->ia', ge['ooov'][mm, nn], t2[mm, nn])
     # R2: driving + ladder (with the t1 t1 part of the vvoo dressing) + hh
     R2 = np.array(vvoo_pp, order='C', copy=True)
@@ -344,6 +355,36 @@ def dress_fock(eris, t1):
 
 # ---------------------------------------------------------------- main step
 
+def _is_spin_eris(eris):
+    return type(eris).__name__ == 'SpinERIs'
+
+
+def _spin_dressing(eris, t1, om, vm):
+    '''T1 dressing for U/R-form integrals: small blocks dense, ovvv / vovv as
+    SpinTensors, packed vvvv as pair blocks.'''
+    fdr = spin_imds.dress_fock(eris, t1)
+    mats = spin_imds._t1_tensors(eris, t1)
+    ge, ges = {}, {}
+    for k in ('ovoo', 'oooo', 'ovvo', 'oovv', 'ooov', 'oovo'):
+        with timer('dress.' + k):
+            ge[k] = spin_imds.dress_block(eris, t1, k, mats).to_dense()
+    for k in ('ovvv', 'vovv'):
+        with timer('dress.' + k):
+            ges[k] = spin_imds.dress_block(eris, t1, k, mats)
+    with timer('dress.vvvv_pp'):
+        vvvv_pp = spin_imds.dressed_vvvv_blocks(eris, t1, om, vm)
+    return fdr, ge, ges, vvvv_pp
+
+
+def _spin_r1_vovv(eris, ges, t2, vm):
+    '''sum_{k, c<d} ~<ak||cd> t2[i,k,c,d] (the vovv term of R1), spin-blocked.'''
+    o_, v_ = eris.spaces['o'], eris.spaces['v']
+    Qs = pair_space('Q', vm)
+    T2s = SpinTensor.from_dense(t2, (o_, o_, v_, v_), sig=(-1, -1, 1, 1))
+    return s_einsum('akQ,ikQ->ia', pack_pairs(ges['vovv'], 2, Qs),
+                    pack_pairs(T2s, 2, Qs)).to_dense()
+
+
 _ENGINES = {}
 
 
@@ -375,14 +416,18 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
 
+    spin = _is_spin_eris(eris)
     with timer('t1_dress'):
-        fdr = dress_fock(eris, t1)
-        ge = {}
-        for k in ('ovoo', 'oooo', 'ovvo', 'oovv', 'ovvv', 'ooov', 'oovo', 'vovv'):
-            with timer('dress.' + k):
-                ge[k] = dress_block(eris, t1, k)
-        with timer('dress.vvvv_pp'):
-            vvvv_pp = dressed_vvvv_pp(eris, t1, om, vm)
+        if spin:
+            fdr, ge, ges, vvvv_pp = _spin_dressing(eris, t1, om, vm)
+        else:
+            fdr = dress_fock(eris, t1)
+            ge = {}
+            for k in ('ovoo', 'oooo', 'ovvo', 'oovv', 'ovvv', 'ooov', 'oovo', 'vovv'):
+                with timer('dress.' + k):
+                    ge[k] = dress_block(eris, t1, k)
+            with timer('dress.vvvv_pp'):
+                vvvv_pp = dressed_vvvv_pp(eris, t1, om, vm)
     foo, fov, fvv = fdr[:nocc, :nocc], fdr[:nocc, nocc:], fdr[nocc:, nocc:]
     goovv = ge['oovv']
 
@@ -392,7 +437,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     goovv_pp = goovv[mm, nn][:, md, ne]                 # (P, Q)
     goovv_P = goovv[:, :, md, ne]                       # (m, n, Q)
     goovv_mn = goovv[mm, nn]                            # (P, e, f)
-    gvovv_Q = ge['vovv'][:, :, md, ne]                  # (a, m, Q)
+    if spin:
+        gvovv_Q = pack_pairs(ges['vovv'], 2, pair_space('Q', vm)).to_dense()   # (a, m, Q)
+    else:
+        gvovv_Q = ge['vovv'][:, :, md, ne]                  # (a, m, Q)
     goovo_mn = ge['oovo'][mm, nn]                       # (P, e, j)
     # stacked integral operands so that pass 1 is two GEMMs per batch
     G_Pd = np.concatenate((goovv_mn.transpose(1, 0, 2),        # [e, P, f]
@@ -416,16 +464,27 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     # ---- effective intermediates for the T3 residual
     with timer('intermediates'):
         govoo = ge['ovoo']
-        ovvv, ooov = ge['ovvv'], ge['ooov']
+        ooov = ge['ooov']
         t_ = timer('imd.Wvvvo'); t_.__enter__()
-        Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
-        Wv = wvvvo_packed(Bv, vvvv_pp, t1, t2, fov, ge, om, vm) + dWv   # [Q(ab), e, i]
+        if spin:
+            Bv = spin_imds.bra_dressed_vvvo(eris, t1, om, vm)
+            xterm = spin_imds.t2_ovvv_term(eris, t2, ges['ovvv'], vm)
+        else:
+            Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
+            xterm = None
+        Wv = wvvvo_packed(Bv, vvvv_pp, t1, t2, fov, ge, om, vm, xterm) + dWv   # [Q(ab), e, i]
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wvooo'); t_.__enter__()
         Wvooo = govoo.copy()
         tmp2 = einsum('mnie,jnbe->mbij', ooov, t2)
         Wvooo -= (tmp2 - tmp2.transpose(0, 1, 3, 2)).transpose(0, 1, 3, 2)
-        Wvooo -= (0.5 * einsum('mbef,ijef->mbij', ovvv, t2)).transpose(0, 1, 3, 2)
+        if spin:
+            o_, v_ = eris.spaces['o'], eris.spaces['v']
+            T2s = SpinTensor.from_dense(t2, (o_, o_, v_, v_), sig=(-1, -1, 1, 1))
+            ovvv_t2 = s_einsum('mbef,ijef->mbij', ges['ovvv'], T2s).to_dense()
+        else:
+            ovvv_t2 = einsum('mbef,ijef->mbij', ge['ovvv'], t2)
+        Wvooo -= (0.5 * ovvv_t2).transpose(0, 1, 3, 2)
         Wo = Wvooo[:, :, nn, mm] + dWo                   # [m, a, P(ij)]
         t_.__exit__(None, None, None)
         t_ = timer('imd.ring_F'); t_.__enter__()
@@ -437,8 +496,9 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         # packed vvvv is turned into the T3 ladder operator in place
         t_ = timer('ccsd'); t_.__enter__()
         vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)
+        r1_vovv = _spin_r1_vovv(eris, ges, t2, vm) if spin else None
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
-                                      Feff_oo, Weff_ovvo, om, vm)
+                                      Feff_oo, Weff_ovvo, om, vm, r1_vovv)
         t1new = t1 + (R1 + r1) / eia
         t2new = t2 + _unpack_pairs(R2 + r2_t3, om, vm) / eijab
         del vvoo_pp, R1, R2
@@ -448,6 +508,8 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         del vvvv_pp
         t2pp_v = t2mn[:, md, ne]
         for h, (lo, hi) in enumerate(vm.blocks):
+            if any(Wpp[h] is Wpp[k] for k in range(h)):
+                continue                  # shared block (RHF beta-beta = alpha-alpha)
             if hi > lo:
                 gemm(np.asfortranarray(t2pp_v[:, lo:hi].T),
                      np.ascontiguousarray(goovv_pp[:, lo:hi]), Wpp[h], beta=1.0)
@@ -480,12 +542,17 @@ def ccsd_update_amps(opts, t1, t2, eris):
     mo_e = eris.mo_energy
     eia = mo_e[:nocc, None] - (mo_e[None, nocc:] + opts.level_shift)
     eijab = eia[:, None, :, None] + eia[None, :, None, :]
+    spin = _is_spin_eris(eris)
     with timer('t1_dress'):
-        fdr = dress_fock(eris, t1)
-        ge = {k: dress_block(eris, t1, k)
-              for k in ('oooo', 'ovvo', 'oovv', 'ooov', 'vovv')}
-        vvvv_pp = dressed_vvvv_pp(eris, t1, om, vm)
-        Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
+        if spin:
+            fdr, ge, ges, vvvv_pp = _spin_dressing(eris, t1, om, vm)
+            Bv = spin_imds.bra_dressed_vvvo(eris, t1, om, vm)
+        else:
+            fdr = dress_fock(eris, t1)
+            ge = {k: dress_block(eris, t1, k)
+                  for k in ('oooo', 'ovvo', 'oovv', 'ooov', 'vovv')}
+            vvvv_pp = dressed_vvvv_pp(eris, t1, om, vm)
+            Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
     with timer('ccsd'):
         goovv = ge['oovv']
         t2mn = t2[mm, nn]
@@ -494,8 +561,9 @@ def ccsd_update_amps(opts, t1, t2, eris):
                                               t2[:, :, md, ne])
         Weff_ovvo = ge['ovvo'] + einsum('mnde,inae->madi', goovv, t2)
         vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)
+        r1_vovv = _spin_r1_vovv(eris, ges, t2, vm) if spin else None
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
-                                      Feff_oo, Weff_ovvo, om, vm)
+                                      Feff_oo, Weff_ovvo, om, vm, r1_vovv)
     return t1 + R1 / eia, t2 + _unpack_pairs(R2, om, vm) / eijab
 
 

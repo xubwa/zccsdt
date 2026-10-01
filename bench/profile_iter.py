@@ -5,7 +5,9 @@ usage: python bench/profile_iter.py MOLECULE BASIS KIND [NITER] [FROZEN]
 environment: ZC_PACKED=1 builds the integrals block-wise with packed vvvv
              (needed for large bases); ZC_MEM_MB sets the batch buffer budget;
              ZC_SPIN=1 (ghf only) uses alpha-first orbitals and the spin-blocked
-             T3 engine (UCCSDT); ZC_FLIP=1 adds closed-shell spin flip (RCCSDT).
+             T3 engine (UCCSDT); ZC_FLIP=1 adds closed-shell spin flip (RCCSDT);
+             ZC_RU=1 (ghf only) builds R-form integrals straight from the RHF
+             (eris_spin, no GHF step).
 '''
 import os
 import sys
@@ -36,8 +38,14 @@ def main():
     t0 = time.perf_counter()
     packed = os.environ.get('ZC_PACKED', '0') == '1'
     spin = os.environ.get('ZC_SPIN', '0') == '1' and kind == 'ghf'
-    eris = E.from_scf(mf, frozen=frozen, packed_vvvv=packed,
-                      vir_batch=int(os.environ.get('ZC_VBATCH', 16)), spin_order=spin)
+    if os.environ.get('ZC_RU', '0') == '1' and kind == 'ghf':
+        from zccsdt import eris_spin
+        rhf = scf.RHF(mol).run(conv_tol=1e-10)
+        eris = eris_spin.from_scf(rhf, frozen=frozen,
+                                  vir_batch=int(os.environ.get('ZC_VBATCH', 16)))
+    else:
+        eris = E.from_scf(mf, frozen=frozen, packed_vvvv=packed,
+                          vir_batch=int(os.environ.get('ZC_VBATCH', 16)), spin_order=spin)
     t_ints = time.perf_counter() - t0
     nocc = eris.nocc
     nvir = eris.nmo - nocc
