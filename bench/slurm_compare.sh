@@ -15,6 +15,7 @@
 #   open shell (UCCSDT, U-form integrals):    ... nh2 cc-pvtz PVTZ uhf ECC UHF
 #   ZC_SA=1: closed-shell spin-adapted RCCSDT (bench/profile_sa.py) instead
 #   ZC_NCORE=n with CFOUR_FC=ON: n frozen core orbitals in both programs
+#   (Q): ZC_Q=1 CFOUR_CALC='CCSDT(Q)' CFOUR_CONV=7 CFOUR_MAXCYC=100 (ncc needs converged CCSDT)
 mol=$1; pbasis=$2; cbasis=$3; kind=$4; prog=$5; ref=$6; niter=${7:-3}
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export MKL_NUM_THREADS=$OMP_NUM_THREADS OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
@@ -34,7 +35,8 @@ else
         python bench/profile_iter.py $mol $pbasis $kind $niter
 fi
 echo "=== CFOUR $prog $ref $mol/$cbasis"
-bash bench/cfour/slurm_cfour.sh $mol $cbasis $prog $ref $((niter + 2))
+bash bench/cfour/slurm_cfour.sh $mol $cbasis $prog $ref ${CFOUR_MAXCYC:-$((niter + 2))}
 keep=/home/xwang405/.claude/jobs/7ba4fcf7/tmp/cfour_bench/${mol}_${cbasis}_${prog}_${ref}_${SLURM_JOB_ID}
 grep -E "^ +[0-9]+ +-?[0-9]+\.[0-9]{6}" $keep/out | tail -$((niter + 2))
+grep -E "\(Q\)" $keep/out | tail -3
 echo "done $(date)"

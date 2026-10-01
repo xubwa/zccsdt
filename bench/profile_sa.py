@@ -4,6 +4,8 @@ usage: python bench/profile_sa.py MOLECULE BASIS [NITER] [NCORE]
   MOLECULE: h2o | n2 | h2s | ch2o | c2h4 | c6h6     NCORE: frozen core (spatial orbitals)
   ZC_INCORE=1: all DIIS vectors in memory (default: T3 vectors in the scratch
   file, as in PySCF);  ZC_DIIS_SPACE: DIIS subspace size (default 8)
+  ZC_Q=1: also time the (Q) correction (with the amplitudes of the last
+  iteration; its cost does not depend on them)
 '''
 import os
 import sys
@@ -85,6 +87,21 @@ def main():
     print('peak RSS %.2f GB (anonymous %.2f GB, file-backed %.2f GB)'
           % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6, watch.anon / 1e6,
              watch.file / 1e6))
+    if os.environ.get('ZC_Q', '0') == '1':
+        from zccsdt.sa import rccsdt_q
+        from zccsdt.sa.t3blocks import Blocks
+        timing.reset()
+        watch = MemWatch()
+        watch.start()
+        t0 = time.perf_counter()
+        e5, e6 = rccsdt_q.kernel(ints, Blocks(ints.nocc), r.t2, r.t3)
+        dt = time.perf_counter() - t0
+        watch.stop()
+        print('(Q) %.2fs   E[Q] = %.12f  E(Q) = %.12f  (amplitudes after %d iterations)'
+              % (dt, e5, e6, len(r.timings)))
+        for k, sec, calls in timing.report(1):
+            print('  %-14s %9.3fs  %6.0f calls' % (k, sec, calls))
+        print('(Q) peak anonymous memory %.2f GB' % (watch.anon / 1e6))
 
 
 if __name__ == '__main__':

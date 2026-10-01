@@ -285,3 +285,20 @@ def q_correction(ints, blocks, t2, t3b):
                     e5 += mult / 24 * c5
                     e6 += mult / 24 * a6
     return e5, e5 + e6
+
+
+def memory_needed(nocc, nvir):
+    '''Bytes of the work arrays of q_correction (10 v^4 and smaller ones).'''
+    v = nvir
+    return 8 * (10 * v ** 4 + (2 * nocc + 8) * v ** 3 + 3 * nocc * v ** 3)
+
+
+def kernel(ints, blocks, t2, t3b):
+    '''(E[Q], E(Q)) for converged CCSDT amplitudes (q_correction, with
+    numpy's own BLAS kept single-threaded as in rccsdt.kernel).'''
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        return q_correction(ints, blocks, t2, t3b)
+    with threadpool_limits(limits={'openblas': 1}):
+        return q_correction(ints, blocks, t2, t3b)

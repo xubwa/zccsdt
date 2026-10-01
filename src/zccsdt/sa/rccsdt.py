@@ -239,12 +239,29 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
         return _kernel(*args)
 
 
-def run(mf, ncore=0, **kwargs):
+def run(mf, ncore=0, q=False, **kwargs):
     '''Closed-shell spin-adapted CCSDT for a PySCF RHF object, with ``ncore``
     frozen core orbitals: the integral blocks are transformed from the AO
-    integrals as needed (no n^4 array), then kernel(ints, **kwargs).'''
+    integrals as needed (no n^4 array), then kernel(ints, **kwargs).
+
+    ``q``: add the perturbative quadruples correction (zccsdt.sa.rccsdt_q):
+    the result then has e_q (the (Q) correction), e_q5 (its fifth-order part,
+    the [Q] correction) and e_tot_q = E(CCSDT(Q)).'''
     from zccsdt.sa import rccsdt_ref
-    return kernel(rccsdt_ref.from_scf(mf, ncore=ncore, full=False), **kwargs)
+    ints = rccsdt_ref.from_scf(mf, ncore=ncore, full=False)
+    res = kernel(ints, **kwargs)
+    if q:
+        add_q(ints, res)
+    return res
+
+
+def add_q(ints, res):
+    '''Attach the (Q) correction to a CCSDT result (see run).'''
+    from zccsdt.sa import rccsdt_q
+    from zccsdt.sa.t3blocks import Blocks
+    res.e_q5, res.e_q = rccsdt_q.kernel(ints, Blocks(ints.nocc), res.t2, res.t3)
+    res.e_tot_q = res.e_tot + res.e_q
+    return res
 
 
 def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,

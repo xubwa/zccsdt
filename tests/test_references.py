@@ -101,3 +101,19 @@ def test_spin_adapted_ccsdt_q_dense_vs_mrcc_cfour():
     assert r.converged
     assert abs(r.e_tot + e5 - ref['e_ccsdt[q]']) < 1e-9
     assert abs(r.e_tot + e6 - ref['e_ccsdt(q)']) < 1e-9
+
+
+@pytest.mark.parametrize('name', ['h2o_631g', 'n2_631g'])
+def test_spin_adapted_ccsdt_q_vs_mrcc_cfour(name):
+    '''CCSDT[Q] and CCSDT(Q) from the block algorithm (rccsdt.run with
+    q=True) against MRCC (CFOUR ncc agrees on (Q)).'''
+    from zccsdt.sa import rccsdt
+    molname, basis, frozen = SYSTEMS[name]
+    atoms = sorted({a.split()[0] for a in GEOM[molname].split(';')})
+    mol = gto.M(atom=GEOM[molname], basis=_basis(atoms, basis), verbose=0)
+    rhf = scf.RHF(mol).run(conv_tol=1e-12)
+    r = rccsdt.run(rhf, ncore=frozen // 2, q=True, conv_tol=1e-11, conv_tol_normt=1e-8)
+    ref = REFS[name]['recommended']
+    assert r.converged
+    assert abs(r.e_tot + r.e_q5 - ref['e_ccsdt[q]']) < 1e-9
+    assert abs(r.e_tot_q - ref['e_ccsdt(q)']) < 1e-9
