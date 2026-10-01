@@ -72,8 +72,8 @@ def test_vvvv_t1_packed_c_equals_numpy(monkeypatch):
 
 
 def test_pair_gather_c_equals_numpy(monkeypatch):
-    '''Tiled C gather against the numpy path, with partial and repeated tiles
-    (v not a multiple of the tile size) and a pair with a zero cube.'''
+    '''C pair gather against the numpy path (v not a multiple of the block
+    size) and a pair with a zero cube.'''
     from zccsdt.cc import t3pack
     if not t3pack.USE_C:
         pytest.skip('no C library')

@@ -763,7 +763,7 @@ DEFINE_SA_VT1(double, d)
 DEFINE_SA_VT1(double complex, z)
 
 
-/* Tiled gather of the cubes t_mpq (m < n) of one occupied pair with all the
+/* Gather of the cubes t_mpq (m < n) of one occupied pair with all the
  * layouts the ring and T3 -> T1/T2/W need:
  *   out0 (Y)  [x][m][y][z] = 2 s(x,y,z) - s(y,x,z) - s(z,y,x)
  *   out1 (T)              = s(x,y,z)
@@ -772,103 +772,51 @@ DEFINE_SA_VT1(double complex, z)
  *   out4 (Z)              = 2 s(x,z,y) - s(y,z,x) - s(z,x,y)
  * s(x,y,z) = t_mpq^{xyz} = src[off[m] + x st[3m] + y st[3m+1] + z st[3m+2]]
  * (off < 0: zero cube); output element [x][m][y][z] at x*ox + m*om + y*v + z.
- * Work unit: one cube and one orbit of GT^3 tiles {permutations of the tile
- * triple X <= Y <= Z}; its source tiles are read once into a local buffer
- * and every distinct output tile of the orbit is written from there. */
+ * Tasks are (cube, 8 x 8 block of (x, y)) and write whole z rows; the
+ * strided source reads of a block share cache lines along the unit-stride
+ * axis of the cube. */
 #define GT 16
-static const int G_PERM[6][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}, {0, 2, 1}, {1, 2, 0}, {2, 0, 1}};
-static const int G_PIDX[3][3] = {{-1, 0, 3}, {1, -1, 4}, {5, 2, -1}};
-#define DEFINE_SA_GATHER_T(T, SFX)                                             \
-void zc_sa_pair_gather_t_##SFX(const T *src, int64_t n, int64_t v,             \
+#define GS 8
+#define DEFINE_SA_GATHER_S(T, SFX)                                             \
+void zc_sa_pair_gather_s_##SFX(const T *src, int64_t n, int64_t v,             \
                                const int64_t *off, const int64_t *st,          \
                                T *o0, T *o1, T *o2, T *o3, T *o4,              \
                                int64_t ox, int64_t om)                         \
 {                                                                              \
-    const int64_t nt = (v + GT - 1) / GT;                                      \
-    const int64_t norb = nt * (nt + 1) * (nt + 2) / 6;                         \
-    int64_t *orb = malloc(3 * norb * sizeof(int64_t));                         \
-    int64_t q = 0;                                                             \
-    for (int64_t X = 0; X < nt; X++)                                           \
-    for (int64_t Y = X; Y < nt; Y++)                                           \
-    for (int64_t Z = Y; Z < nt; Z++) {                                         \
-        orb[3 * q] = X; orb[3 * q + 1] = Y; orb[3 * q + 2] = Z; q++;           \
-    }                                                                          \
-    _Pragma("omp parallel")                                                    \
-    {                                                                          \
-        T *L = malloc(6 * GT * GT * GT * sizeof(T));                           \
-        _Pragma("omp for collapse(2) schedule(dynamic)")                       \
-        for (int64_t m = 0; m < n; m++)                                        \
-        for (int64_t w = 0; w < norb; w++) {                                   \
-            const int64_t tl[3] = {orb[3 * w], orb[3 * w + 1], orb[3 * w + 2]}; \
-            const T *c = off[m] >= 0 ? src + off[m] : NULL;                    \
-            const int64_t s0 = st[3 * m], s1 = st[3 * m + 1], s2 = st[3 * m + 2]; \
-            int64_t pos[6][3];                                                 \
-            int lid[6];                                                        \
-            for (int k = 0; k < 6; k++) {                                      \
-                for (int a = 0; a < 3; a++) pos[k][a] = tl[G_PERM[k][a]];      \
-                lid[k] = k;                                                    \
-                for (int l = 0; l < k; l++)                                    \
-                    if (pos[l][0] == pos[k][0] && pos[l][1] == pos[k][1]       \
-                        && pos[l][2] == pos[k][2]) { lid[k] = l; break; }      \
-                if (lid[k] != k) continue;                                     \
-                /* load tile pos[k] as [u][w][t] */                            \
-                T *Lk = L + k * GT * GT * GT;                                  \
-                const int64_t U0 = pos[k][0] * GT, W0 = pos[k][1] * GT, V0 = pos[k][2] * GT; \
-                const int64_t nu = (v - U0 < GT ? v - U0 : GT);                \
-                const int64_t nw = (v - W0 < GT ? v - W0 : GT);                \
-                const int64_t nv = (v - V0 < GT ? v - V0 : GT);                \
-                for (int64_t u = 0; u < nu; u++)                               \
-                for (int64_t ww = 0; ww < nw; ww++) {                          \
-                    T *dst = Lk + (u * GT + ww) * GT;                          \
-                    if (c == NULL) {                                           \
-                        for (int64_t t = 0; t < nv; t++) dst[t] = 0;           \
-                    } else {                                                   \
-                        const T *sp = c + (U0 + u) * s0 + (W0 + ww) * s1 + V0 * s2; \
-                        for (int64_t t = 0; t < nv; t++) dst[t] = sp[t * s2];  \
-                    }                                                          \
-                }                                                              \
+    const int64_t nb = (v + GS - 1) / GS;                                      \
+    _Pragma("omp parallel for collapse(3) schedule(dynamic)")                  \
+    for (int64_t m = 0; m < n; m++)                                            \
+    for (int64_t X = 0; X < nb; X++)                                           \
+    for (int64_t Y = 0; Y < nb; Y++) {                                         \
+        const T *c = off[m] >= 0 ? src + off[m] : NULL;                        \
+        const int64_t s0 = st[3 * m], s1 = st[3 * m + 1], s2 = st[3 * m + 2];  \
+        const int64_t x1 = (X + 1) * GS < v ? (X + 1) * GS : v;                \
+        const int64_t y1 = (Y + 1) * GS < v ? (Y + 1) * GS : v;                \
+        for (int64_t x = X * GS; x < x1; x++)                                  \
+        for (int64_t y = Y * GS; y < y1; y++) {                                \
+            const int64_t o = x * ox + m * om + y * v;                         \
+            if (c == NULL) {                                                   \
+                for (int64_t z = 0; z < v; z++)                                \
+                    o0[o + z] = o1[o + z] = o2[o + z] = o3[o + z] = o4[o + z] = 0; \
+                continue;                                                      \
             }                                                                  \
-            for (int k = 0; k < 6; k++) {                                      \
-                if (lid[k] != k) continue;                                     \
-                const int *P = G_PERM[k];                                      \
-                /* buffers of s(y,x,z), s(z,y,x), s(x,z,y), s(y,z,x), s(z,x,y) */ \
-                const T *L0 = L + lid[k] * GT * GT * GT;                       \
-                const T *L1 = L + lid[G_PIDX[P[1]][P[0]]] * GT * GT * GT;      \
-                const T *L2 = L + lid[G_PIDX[P[2]][P[1]]] * GT * GT * GT;      \
-                const T *L3 = L + lid[G_PIDX[P[0]][P[2]]] * GT * GT * GT;      \
-                const T *L4 = L + lid[G_PIDX[P[1]][P[2]]] * GT * GT * GT;      \
-                const T *L5 = L + lid[G_PIDX[P[2]][P[0]]] * GT * GT * GT;      \
-                const int64_t A0 = pos[k][0] * GT, B0 = pos[k][1] * GT, C0 = pos[k][2] * GT; \
-                const int64_t na = (v - A0 < GT ? v - A0 : GT);                \
-                const int64_t nb = (v - B0 < GT ? v - B0 : GT);                \
-                const int64_t nc = (v - C0 < GT ? v - C0 : GT);                \
-                for (int64_t x = 0; x < na; x++)                               \
-                for (int64_t y = 0; y < nb; y++) {                             \
-                    const int64_t o = (A0 + x) * ox + m * om + (B0 + y) * v + C0; \
-                    const T *l0 = L0 + (x * GT + y) * GT;                      \
-                    const T *l1 = L1 + (y * GT + x) * GT;                      \
-                    const T *l2 = L2 + y * GT + x;                             \
-                    const T *l3 = L3 + x * GT * GT + y;                        \
-                    const T *l4 = L4 + y * GT * GT + x;                        \
-                    const T *l5 = L5 + x * GT + y;                             \
-                    for (int64_t z = 0; z < nc; z++) {                         \
-                        const T a0 = l0[z], a1 = l1[z], a2 = l2[z * GT * GT];   \
-                        const T a3 = l3[z * GT], a4 = l4[z * GT], a5 = l5[z * GT * GT]; \
-                        o0[o + z] = 2 * a0 - a1 - a2;                          \
-                        o1[o + z] = a0;                                        \
-                        o2[o + z] = a1;                                        \
-                        o3[o + z] = a4;                                        \
-                        o4[o + z] = 2 * a3 - a4 - a5;                          \
-                    }                                                          \
-                }                                                              \
+            const T *pxy = c + x * s0 + y * s1, *pyx = c + y * s0 + x * s1;    \
+            const T *pzyx = c + y * s1 + x * s2, *pyzx = c + y * s0 + x * s2;  \
+            const T *pxzy = c + x * s0 + y * s2, *pzxy = c + x * s1 + y * s2;  \
+            for (int64_t z = 0; z < v; z++) {                                  \
+                const T a0 = pxy[z * s2], a1 = pyx[z * s2], a2 = pzyx[z * s0]; \
+                const T a3 = pxzy[z * s1], a4 = pyzx[z * s1], a5 = pzxy[z * s0]; \
+                o0[o + z] = 2 * a0 - a1 - a2;                                  \
+                o1[o + z] = a0;                                                \
+                o2[o + z] = a1;                                                \
+                o3[o + z] = a4;                                                \
+                o4[o + z] = 2 * a3 - a4 - a5;                                  \
             }                                                                  \
         }                                                                      \
-        free(L);                                                               \
     }                                                                          \
-    free(orb);                                                                 \
 }
-DEFINE_SA_GATHER_T(double, d)
-DEFINE_SA_GATHER_T(double complex, z)
+DEFINE_SA_GATHER_S(double, d)
+DEFINE_SA_GATHER_S(double complex, z)
 
 /* dst[c] (contiguous n0 x n1 x n2) = box c of the source, element [x,y,z]
  * at src[off[c] + x st[3c] + y st[3c+1] + z st[3c+2]] (off < 0: zeros), for

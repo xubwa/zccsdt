@@ -479,14 +479,14 @@ def pair_gather(blocks, t3b, p, q, W):
     from zccsdt.cc.t3pack import axpby
     no, v = blocks.nocc, t3b.shape[1]
     lib = t3pack._lib
-    if t3pack.USE_C and hasattr(lib, 'zc_sa_pair_gather_t_d') and t3b.dtype in (np.float64, np.complex128):
+    if t3pack.USE_C and hasattr(lib, 'zc_sa_pair_gather_s_d') and t3b.dtype in (np.float64, np.complex128):
         bl = blocks.blk[:, p, q]
         off = np.where(bl >= 0, bl * v ** 3, -1).astype(np.int64)
         cst = np.array((v * v, v, 1), dtype=np.int64)
         st = np.ascontiguousarray(cst[blocks.axes[:, p, q]].ravel())
         P = t3pack._p
         ptr = [t3pack.ctypes.c_void_p(W[k].ctypes.data) for k in range(5)]
-        getattr(lib, 'zc_sa_pair_gather_t_' + t3pack._sfx(t3b.dtype))(
+        getattr(lib, 'zc_sa_pair_gather_s_' + t3pack._sfx(t3b.dtype))(
             P(t3b), t3pack._I64(no), t3pack._I64(v), P(off), P(st), *ptr,
             t3pack._I64(no * v * v), t3pack._I64(v * v))
         return W
