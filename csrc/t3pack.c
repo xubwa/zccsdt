@@ -1027,7 +1027,11 @@ void zc_vzero_d(int64_t n, double *x)
  *   M = 2 (2 - (01)) (2 - (02) - (12)) (2 - (03) - (13) - (23)),
  * Jucys-Murphy elements) and the energy are unit-stride operations on rows
  * of QT elements.  Where tiles coincide, only sorted base elements are
- * taken, with weight 1 / |stabilizer|. */
+ * taken, with weight 1 / |stabilizer|.
+ *
+ * mirror: a and b are the sums above plus their images under x0 <-> x1
+ * (quadruples whose first two occupied indices coincide: only one term of
+ * each mirror pair was accumulated). */
 #ifndef QT
 #define QT 6
 #endif
@@ -1038,7 +1042,7 @@ static const int Q_PERM[24][4] = {{0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 
 /* transpositions of the factors of M: (03), (13), (23); (02), (12); (01) */
 static const int Q_TR[6][2] = {{0, 3}, {1, 3}, {2, 3}, {0, 2}, {1, 2}, {0, 1}};
 void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const double *gc,
-                      double eocc, const double *ev, double *out)
+                      double eocc, const double *ev, int mirror, double *out)
 {
     const int64_t nt = (v + QT - 1) / QT, v2 = v * v, v3 = v2 * v;
     const int64_t norb = nt * (nt + 1) * (nt + 2) * (nt + 3) / 24;
@@ -1141,6 +1145,21 @@ void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const doubl
                 }
 #undef Q_LOAD_ROW
             }
+            /* a and r plus their images under x0 <-> x1: the image of the
+             * element of buffer pi is the same base element of the buffer
+             * of pi with its first two entries exchanged */
+            if (mirror)
+                for (int pi = 0; pi < 24; pi++) {
+                    const int pp = part[pi][5];
+                    if (pp < pi) continue;
+                    double *a0 = al + pi * Q4, *a1 = al + pp * Q4;
+                    double *r0 = rl + pi * Q4, *r1 = rl + pp * Q4;
+                    for (int64_t e = 0; e < Q4; e++) {
+                        const double sa = a0[e] + a1[e], sr = r0[e] + r1[e];
+                        a0[e] = a1[e] = sa;
+                        r0[e] = r1[e] = sr;
+                    }
+                }
             /* ---- M r and the energy, row by row of the base tile */
             const int rep = T[0] == T[1] || T[1] == T[2] || T[2] == T[3];
             const int64_t m3 = nn[3];

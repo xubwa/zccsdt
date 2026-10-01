@@ -160,10 +160,12 @@ ROT = ((0, 1, 2), (1, 2, 0), (2, 0, 1))
 PAIRS = ((0, 1, 2, 3), (0, 2, 1, 3), (0, 3, 1, 2), (1, 2, 0, 3), (1, 3, 0, 2), (2, 3, 0, 1))
 
 
-def quad_energy(S, tc, gc, eocc, ev):
+def quad_energy(S, tc, gc, eocc, ev, mirror=False):
     '''(sum c M r / D, sum a M r / D) of one quadruple from its accumulators
     S = [A_0, A_1, A_2, B_0, B_1, B_2] (cyclic layouts ROT), with
-    a = sum_c A_c, r = a + sum_c B_c and c = sum_k tc[k] x gc[k] (PAIRS).'''
+    a = sum_c A_c, r = a + sum_c B_c and c = sum_k tc[k] x gc[k] (PAIRS).
+    ``mirror``: a and r are the accumulated arrays plus their images under
+    the exchange of the pairs 0 and 1 (x_0 <-> x_1).'''
     from zccsdt.cc import t3pack
     lib = t3pack._lib
     v = len(ev)
@@ -172,10 +174,13 @@ def quad_energy(S, tc, gc, eocc, ev):
         out = np.zeros(2)
         tcc, gcc, evc = (np.ascontiguousarray(x, dtype=np.float64) for x in (tc, gc, ev))
         lib.zc_sa_q_energy_d(t3pack._I64(v), ptr, t3pack._p(tcc), t3pack._p(gcc),
-                             t3pack.ctypes.c_double(float(eocc)), t3pack._p(evc), t3pack._p(out))
+                             t3pack.ctypes.c_double(float(eocc)), t3pack._p(evc),
+                             t3pack.ctypes.c_int(int(mirror)), t3pack._p(out))
         return float(out[0]), float(out[1])
     a, b = (sum(X[c].reshape((v,) * 4).transpose(np.argsort(ROT[c] + (3,))) for c in range(3))
             for X in (S[:3], S[3:]))
+    if mirror:
+        a, b = a + a.transpose(1, 0, 2, 3), b + b.transpose(1, 0, 2, 3)
     cc = np.zeros((v,) * 4)
     for k, (p, q, r, s) in enumerate(PAIRS):
         _put(cc, tc[k][:, :, None, None] * gc[k][None, None], (p, q, r, s))
@@ -236,7 +241,107 @@ def q_correction(ints, blocks, t2, t3b):
 
     def gather(trips):
         views = [blocks.view(a, b, c, v) for a, b, c in trips]
-        gather_boxes(t3b, [x[0] for x in views], [x[1] for x in views], Tg)
+        gather_boxes(t3b, [x[0] for x in views], [x[1] for x in views], Tg[:len(trips)])
+        return Tg[:len(trips)].reshape(len(trips), v3)
+
+    def xp(dst, ow, ox, oy, o3, sym=False):
+        # T3 x <vv|vo> for the partition {w x | y 3}.  sym (o_w = o_x): the two
+        # terms with T3 on the rows at half weight, one of the two others
+        h, nb = (0.5, 3) if sym else (1.0, 4)
+        with timer('q.stack'):
+            axpby(As[:, :, 0], cube(ow, ox, oy), h, 0.0)
+            axpby(As[:, :, 1], cube(ow, ox, o3), h, 0.0)
+            axpby(As[:, :, 2], VO[ox], 1.0, 0.0)
+            axpby(Bs[0], VO[o3].transpose(2, 0, 1), 1.0, 0.0)
+            axpby(Bs[1], VO[oy].transpose(2, 1, 0), 1.0, 0.0)
+            axpby(Bs[2], cube(ow, oy, o3), 1.0, 0.0)
+            if not sym:
+                axpby(As[:, :, 3], VO[ow].transpose(1, 0, 2), 1.0, 0.0)
+                axpby(Bs[3], cube(ox, oy, o3), 1.0, 0.0)
+        with timer('q.Xp'):
+            gemm(As.reshape(vv, 4 * v)[:, :nb * v], Bs.reshape(4 * v, vv)[:nb * v],
+                 dst.reshape(vv, vv))
+
+    def gterms(dst, ow, ox, oy, o3, sym=False):
+        # T2 x G for the ordered pairs (w,x), (x,w), (y,3), (3,y) on T2.  sym:
+        # (w,x) once, the two others at half weight
+        with timer('q.G'):
+            As2[:, :, 0] = t2[ow].transpose(1, 2, 0)
+            Bs2[0] = ctx.Gh(ox, oy, o3)
+            if sym:
+                As2[:, :, 1] = 0.5 * ctx.Gh(o3, ow, ox).transpose(1, 2, 0)
+                As2[:, :, 2] = 0.5 * ctx.Gh(oy, ow, ox).transpose(1, 2, 0)
+                Bs2[1], Bs2[2] = t2[oy], t2[o3].transpose(0, 2, 1)
+            else:
+                As2[:, :, 1] = t2[ox].transpose(2, 1, 0)
+                As2[:, :, 2] = ctx.Gh(o3, ow, ox).transpose(1, 2, 0)
+                As2[:, :, 3] = ctx.Gh(oy, ow, ox).transpose(1, 2, 0)
+                Bs2[1] = ctx.Gh(ow, oy, o3)
+                Bs2[2], Bs2[3] = t2[oy], t2[o3].transpose(0, 2, 1)
+            nb = 3 if sym else 4
+            gemm(As2.reshape(vv, 4 * no)[:, :nb * no], Bs2.reshape(4 * no, vv)[:nb * no],
+                 dst.reshape(vv, vv), beta=1.0)
+
+    def xh_first(dst, ow, terms, beta):
+        # Xh with special pair w first: dst[x_w; (x_x x_y x_3)] = - sum over
+        # terms (weight, o_r, triples of the gathered cubes)
+        with timer('q.gather'):
+            Tm = gather([t for _, _, trips in terms for t in trips])
+        with timer('q.Xh'):
+            sm = np.hstack([-wgt * ovoo[:, :, r, ow].T for wgt, r, _ in terms])
+            gemm(sm, Tm, dst.reshape(v, v3), beta=beta)
+
+    def xh_last(dst, o3, terms):
+        # Xh with special pair 3 last: dst[(x_0 x_1 x_2); x_3] +=
+        with timer('q.gather'):
+            Tm = gather([t for _, _, trips in terms for t in trips])
+        with timer('q.Xh'):
+            sm = np.vstack([-wgt * ovoo[:, :, r, o3] for wgt, r, _ in terms])
+            gemm(Tm.T, sm, dst.reshape(v3, v), beta=1.0)
+
+    def fill_general(o):
+        o3 = o[3]
+        for c, (w, x, y) in enumerate(ROT):
+            ow, ox, oy = o[w], o[x], o[y]
+            xp(S[c], ow, ox, oy, o3)
+            # Xh, special pair w: m in the slot of x, y or 3
+            xh_first(S[c], ow, [(1.0, ox, [(m, oy, o3) for m in occ]),
+                                (1.0, oy, [(ox, m, o3) for m in occ]),
+                                (1.0, o3, [(ox, oy, m) for m in occ])], 1.0)
+            if c == 0:
+                xh_last(S[0], o3, [(1.0, o[0], [(m, o[1], o[2]) for m in occ]),
+                                   (1.0, o[1], [(o[0], m, o[2]) for m in occ]),
+                                   (1.0, o[2], [(o[0], o[1], m) for m in occ])])
+            with timer('q.Yv'):
+                gemm(Ibar[c].reshape(v3, v), t2[oy, o3], S[3 + c].reshape(v3, v))
+                gemm(t2[o3, ow].T, Ibar[(c + 1) % 3].reshape(v3, v).T,
+                     S[3 + c].reshape(v, v3), beta=1.0)
+            gterms(S[3 + c], ow, ox, oy, o3)
+
+    def fill_sym(o, Ia, Ib):
+        # o_0 = o_1: r and z are invariant under the exchange of the pairs 0
+        # and 1, which maps every term to a term.  Only one term of each
+        # mirror pair is computed (terms that are their own mirror image at
+        # half weight); the kernel adds the mirror image.  Ia = Ibar for the
+        # pairs (0,1), Ib for (1,2); rotation 2 is the mirror of rotation 1.
+        o0, o1, o2, o3 = o
+        xp(S[0], o0, o1, o2, o3, sym=True)
+        xh_first(S[0], o0, [(1.0, o1, [(m, o2, o3) for m in occ]),
+                            (1.0, o2, [(o1, m, o3) for m in occ]),
+                            (1.0, o3, [(o1, o2, m) for m in occ])], 1.0)
+        xh_last(S[0], o3, [(1.0, o0, [(m, o1, o2) for m in occ]),
+                           (0.5, o2, [(o0, o1, m) for m in occ])])
+        xp(S[1], o1, o2, o0, o3)
+        # special pair 2 (layout [x_2, x_0, x_1, x_3]): m in the slot of 0 or 3
+        xh_first(S[2], o2, [(1.0, o0, [(m, o1, o3) for m in occ]),
+                            (0.5, o3, [(o0, o1, m) for m in occ])], 0.0)
+        with timer('q.Yv'):
+            gemm(Ia.reshape(v3, v), t2[o2, o3], S[3].reshape(v3, v), alpha=0.5)
+            gemm(t2[o3, o0].T, Ib.reshape(v3, v).T, S[3].reshape(v, v3), beta=1.0)
+            gemm(Ib.reshape(v3, v), t2[o0, o3], S[4].reshape(v3, v))
+            gemm(t2[o3, o2].T, Ia.reshape(v3, v).T, S[5].reshape(v, v3), alpha=0.5)
+        gterms(S[3], o0, o1, o2, o3, sym=True)
+        gterms(S[4], o1, o2, o0, o3)
 
     e5 = e6 = 0.0
     for i in range(no):
@@ -254,54 +359,22 @@ def q_correction(ints, blocks, t2, t3b):
                         continue
                     o = (i, j, k, l)
                     mult = 24 // 2 ** sum(o[n] == o[n + 1] for n in range(3))
-                    o3 = l
-                    for c, (w, x, y) in enumerate(ROT):
-                        ow, ox, oy = o[w], o[x], o[y]
-                        # ---- A_c: Xp
-                        with timer('q.stack'):
-                            axpby(As[:, :, 0], cube(ow, ox, oy), 1.0, 0.0)
-                            axpby(As[:, :, 1], cube(ow, ox, o3), 1.0, 0.0)
-                            axpby(As[:, :, 2], VO[ox], 1.0, 0.0)
-                            axpby(As[:, :, 3], VO[ow].transpose(1, 0, 2), 1.0, 0.0)
-                            axpby(Bs[0], VO[o3].transpose(2, 0, 1), 1.0, 0.0)
-                            axpby(Bs[1], VO[oy].transpose(2, 1, 0), 1.0, 0.0)
-                            axpby(Bs[2], cube(ow, oy, o3), 1.0, 0.0)
-                            axpby(Bs[3], cube(ox, oy, o3), 1.0, 0.0)
-                        with timer('q.Xp'):
-                            gemm(As.reshape(vv, 4 * v), Bs.reshape(4 * v, vv), S[c].reshape(vv, vv))
-                        # ---- A_c: Xh, special pair w, m in the slot of x, y or 3
-                        with timer('q.gather'):
-                            gather([(m, oy, o3) for m in occ] + [(ox, m, o3) for m in occ]
-                                   + [(ox, oy, m) for m in occ])
-                        with timer('q.Xh'):
-                            sm = np.hstack([-ovoo[:, :, r, ow].T for r in (ox, oy, o3)])
-                            gemm(sm, Tg.reshape(3 * no, v3), S[c].reshape(v, v3), beta=1.0)
-                        if c == 0:
-                            # special pair 3, m in the slot of 0, 1 or 2
-                            with timer('q.gather'):
-                                gather([(m, o[1], o[2]) for m in occ] + [(o[0], m, o[2]) for m in occ]
-                                       + [(o[0], o[1], m) for m in occ])
-                            with timer('q.Xh'):
-                                sm = np.vstack([-ovoo[:, :, r, o3] for r in o[:3]])
-                                gemm(Tg.reshape(3 * no, v3).T, sm, S[0].reshape(v3, v), beta=1.0)
-                        # ---- B_c: Yv and the T2 x G terms
-                        with timer('q.Yv'):
-                            gemm(Ibar[c].reshape(v3, v), t2[oy, o3], S[3 + c].reshape(v3, v))
-                            gemm(t2[o3, ow].T, Ibar[(c + 1) % 3].reshape(v3, v).T,
-                                 S[3 + c].reshape(v, v3), beta=1.0)
-                        with timer('q.G'):
-                            As2[:, :, 0] = t2[ow].transpose(1, 2, 0)
-                            As2[:, :, 1] = t2[ox].transpose(2, 1, 0)
-                            As2[:, :, 2] = ctx.Gh(o3, ow, ox).transpose(1, 2, 0)
-                            As2[:, :, 3] = ctx.Gh(oy, ow, ox).transpose(1, 2, 0)
-                            Bs2[0], Bs2[1] = ctx.Gh(ox, oy, o3), ctx.Gh(ow, oy, o3)
-                            Bs2[2], Bs2[3] = t2[oy], t2[o3].transpose(0, 2, 1)
-                            gemm(As2.reshape(vv, 4 * no), Bs2.reshape(4 * no, vv),
-                                 S[3 + c].reshape(vv, vv), beta=1.0)
+                    # a repeated index among the first three pairs: relabel the
+                    # pairs so that it is on the pairs 0 and 1
+                    if i == j:
+                        mirror = True
+                        fill_sym(o, Ibar[0], Ibar[1])
+                    elif j == k:
+                        mirror = True
+                        o = (j, k, i, l)
+                        fill_sym(o, Ibar[1], Ibar[2])
+                    else:
+                        mirror = False
+                        fill_general(o)
                     with timer('q.energy'):
                         tc = np.array([t2[o[p], o[q]] for p, q, r, s in PAIRS])
                         gc = np.array([oovv[o[r], o[s]] for p, q, r, s in PAIRS])
-                        c5, a6 = quad_energy(S, tc, gc, sum(eo[n] for n in o), ev)
+                        c5, a6 = quad_energy(S, tc, gc, sum(eo[n] for n in o), ev, mirror)
                     e5 += mult / 24 * c5
                     e6 += mult / 24 * a6
     return e5, e5 + e6

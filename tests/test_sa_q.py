@@ -122,11 +122,13 @@ def test_quad_energy_kernel(monkeypatch):
     S = [rng.standard_normal((v,) * 4) for _ in range(6)]
     tc, gc = rng.standard_normal((6, v, v)), rng.standard_normal((6, v, v))
     ev = 1 + rng.random(v)
-    got = rccsdt_q.quad_energy(S, tc, gc, -3.0, ev)
-    monkeypatch.setattr(t3pack, 'USE_C', False)
-    ref = rccsdt_q.quad_energy(S, tc, gc, -3.0, ev)
-    assert abs(got[0] - ref[0]) < 1e-10 * abs(ref[0])
-    assert abs(got[1] - ref[1]) < 1e-10 * abs(ref[1])
+    for mirror in (False, True):
+        monkeypatch.setattr(t3pack, 'USE_C', True)
+        got = rccsdt_q.quad_energy(S, tc, gc, -3.0, ev, mirror)
+        monkeypatch.setattr(t3pack, 'USE_C', False)
+        ref = rccsdt_q.quad_energy(S, tc, gc, -3.0, ev, mirror)
+        assert abs(got[0] - ref[0]) < 1e-10 * abs(ref[0])
+        assert abs(got[1] - ref[1]) < 1e-10 * abs(ref[1])
 
 
 def test_block_algorithm_equals_simple(h2o, monkeypatch):
