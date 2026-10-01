@@ -52,3 +52,19 @@ def test_rotation_keeps_frozen_space():
     n = e.nocc
     assert abs(np.trace(e.fock[:n, :n]) - np.trace(ref.fock[:n, :n])) < 1e-10
     assert abs(np.trace(e.fock[n:, n:]) - np.trace(ref.fock[n:, n:])) < 1e-10
+
+
+@pytest.mark.parametrize('kind', ['ghf', 'x2c'])
+def test_ao2mo_blocks_match_full(kind):
+    from zccsdt.cc import t3pack
+    mf = water_ghf() if kind == 'ghf' else water_x2c()
+    ref = E.from_scf(mf, frozen=2)
+    new = E.from_scf(mf, frozen=2, packed_vvvv=True, vir_batch=3)
+    assert new.vvvv is None
+    for name in E.BLOCKS[:-1]:
+        np.testing.assert_allclose(getattr(new, name), getattr(ref, name), atol=1e-11,
+                                   err_msg=name)
+    vm = t3pack.triple_map(ref.nmo - ref.nocc)
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    np.testing.assert_allclose(new._vvvv_pp, ref.vvvv[md[:, None], ne[:, None], md, ne],
+                               atol=1e-11)

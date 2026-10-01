@@ -32,7 +32,7 @@ class ERIs:
     ovov: np.ndarray
     ovvo: np.ndarray
     ovvv: np.ndarray
-    vvvv: np.ndarray
+    vvvv: np.ndarray            # None if only the packed form _vvvv_pp is kept
     e_nuc: float = 0.0
     source: str = ''
 
@@ -64,6 +64,62 @@ def _mo_chemist(mol, C, kind):
     return out
 
 
+def _chem_block(mol, kind, C1, C2, C3, C4):
+    '''Chemist-notation MO block (12|34) via pyscf.ao2mo (no full n^4 tensor).'''
+    from pyscf import ao2mo
+    shape = (C1.shape[1], C2.shape[1], C3.shape[1], C4.shape[1])
+    if kind == 'spinor':
+        out = ao2mo.general(mol, (C1, C2, C3, C4), intor='int2e_spinor')
+        return np.asarray(out).reshape(shape)
+    nao = mol.nao_nr()
+    out = 0
+    for s1 in (slice(0, nao), slice(nao, None)):
+        for s2 in (slice(0, nao), slice(nao, None)):
+            out = out + ao2mo.general(mol, (C1[s1], C2[s1], C3[s2], C4[s2]),
+                                      compact=False).reshape(shape)
+    return out
+
+
+def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch):
+    '''Antisymmetrized blocks from chemist blocks; vvvv returned packed over
+    a<b, c<d, computed in batches of a.'''
+    ch = lambda a, b, c, d: _chem_block(mol, kind, a, b, c, d)
+    oooo = ch(Co, Co, Co, Co)                         # (ij|kl)
+    ooov = ch(Co, Co, Co, Cv)                         # (ij|ka)
+    ovov = ch(Co, Cv, Co, Cv)                         # (ia|jb)
+    oovv = ch(Co, Co, Cv, Cv)                         # (ij|ab)
+    ovvo = ch(Co, Cv, Cv, Co)                         # (ia|bj)
+    ovvv = ch(Co, Cv, Cv, Cv)                         # (ia|bc)
+    g = {}
+    g['oooo'] = oooo.transpose(0, 2, 1, 3) - oooo.transpose(0, 2, 3, 1)
+    # <ij||ka> = (ik|ja) - (ia|jk);  (ia|jk) = (jk|ia)
+    g['ooov'] = np.einsum('ikja->ijka', ooov) - np.einsum('jkia->ijka', ooov)
+    g['oovv'] = ovov.transpose(0, 2, 1, 3) - ovov.transpose(0, 2, 3, 1)
+    # <ia||jb> = (ij|ab) - (ib|aj)
+    g['ovov'] = oovv.transpose(0, 2, 1, 3) - ovvo.transpose(0, 2, 3, 1)
+    # <ia||bj> = (ib|aj) - (ij|ab)
+    g['ovvo'] = ovvo.transpose(0, 2, 1, 3) - oovv.transpose(0, 2, 3, 1)
+    # <ia||bc> = (ib|ac) - (ic|ab)
+    g['ovvv'] = ovvv.transpose(0, 2, 1, 3) - ovvv.transpose(0, 2, 3, 1)
+    g = {k: np.ascontiguousarray(0.5 * (b - b.transpose(1, 0, 2, 3)))
+         if k[0] == k[1] else np.ascontiguousarray(b) for k, b in g.items()}
+    nv = Cv.shape[1]
+    pa, pb = np.triu_indices(nv, 1)
+    vpp = np.zeros((len(pa), len(pa)), dtype=np.result_type(oooo, Cv))
+    row = 0
+    for a0 in range(0, nv, vir_batch):
+        a1 = min(a0 + vir_batch, nv)
+        X = ch(Cv[:, a0:a1], Cv, Cv, Cv)              # (ac|bd) as [a, c, b, d]
+        for a in range(a0, a1):
+            Y = X[a - a0]
+            G = Y.transpose(1, 0, 2) - Y.transpose(1, 2, 0)      # <ab||cd> as [b, c, d]
+            nb = nv - a - 1
+            vpp[row:row + nb] = G[a + 1:][:, pa, pb]
+            row += nb
+        del X
+    return g, vpp
+
+
 def _orbital_kind(mf):
     ''''ghf' for PySCF GHF objects (spin-orbital AO basis), 'spinor' otherwise
     (j-adapted spinor AO basis).  The mo_coeff shape cannot tell the two apart:
@@ -72,7 +128,8 @@ def _orbital_kind(mf):
     return 'ghf' if isinstance(mf, ghf.GHF) else 'spinor'
 
 
-def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None):
+def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=False,
+             vir_batch=16):
     '''Build spin-orbital ERIs from a converged SCF object.
 
     ``mo_coeff`` may be any orbitals spanning the same occupied space as the
@@ -95,6 +152,17 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None):
     C = np.hstack((mo_coeff[:, occ[frozen:]], mo_coeff[:, vir]))
     nocc = len(occ) - frozen
     fock = C.conj().T @ fock_ao @ C
+    if packed_vvvv and not (kind == 'ghf' and np.iscomplexobj(C)):
+        g, vpp = _blocks_by_ao2mo(mf.mol, kind, C[:, :nocc], C[:, nocc:], vir_batch)
+        if kind == 'ghf':
+            fock = fock.real
+            g = {k: b.real for k, b in g.items()}
+            vpp = vpp.real
+        out = ERIs(nocc=nocc, fock=fock, mo_energy=fock.diagonal().real.copy(),
+                   e_hf=e_hf, e_nuc=float(mf.energy_nuc()),
+                   source='%s:%s' % (type(mf).__name__, kind), vvvv=None, **g)
+        out._vvvv_pp = np.ascontiguousarray(vpp)
+        return out
     eri = _mo_chemist(mf.mol, C, kind)
     g = eri.transpose(0, 2, 1, 3)              # <pq|rs> = (pr|qs)
     g = g - g.transpose(0, 1, 3, 2)            # <pq||rs>

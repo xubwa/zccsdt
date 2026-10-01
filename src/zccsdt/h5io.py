@@ -66,10 +66,16 @@ def save(path, eris):
         f['fock'] = np.asarray(eris.fock)
         f['mo_energy'] = np.asarray(eris.mo_energy)
         for name in BLOCKS:
+            if name == 'vvvv' and eris.vvvv is None:
+                f['eri/vvvv'] = np.asarray(eris._vvvv_pp)   # already in file layout
+                continue
             f['eri/' + name] = _pack_block(name, np.asarray(getattr(eris, name)))
 
 
-def load(path):
+def load(path, full_vvvv=True):
+    '''Read an integral file.  full_vvvv=False keeps vvvv only in its packed
+    form (eris.vvvv is None, eris._vvvv_pp set), which is all the CCSDT code
+    needs and saves 3/4 of the largest block.'''
     with h5py.File(path, 'r') as f:
         version = int(f.attrs['format_version'])
         if version != FORMAT_VERSION:
@@ -77,8 +83,14 @@ def load(path):
         nocc = int(f.attrs['nocc'])
         fock = f['fock'][()]
         nvir = fock.shape[0] - nocc
+        names = BLOCKS if full_vvvv else BLOCKS[:-1]
         blocks = {name: _unpack_block(name, f['eri/' + name][()], nocc, nvir)
-                  for name in BLOCKS}
-        return ERIs(nocc=nocc, fock=fock, mo_energy=f['mo_energy'][()],
+                  for name in names}
+        if not full_vvvv:
+            blocks['vvvv'] = None
+        eris = ERIs(nocc=nocc, fock=fock, mo_energy=f['mo_energy'][()],
                     e_hf=float(f.attrs['e_hf']), e_nuc=float(f.attrs['e_nuc']),
                     source=str(f.attrs['source']), **blocks)
+        if not full_vvvv:
+            eris._vvvv_pp = np.ascontiguousarray(f['eri/vvvv'][()])
+        return eris

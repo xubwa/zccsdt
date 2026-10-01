@@ -2,7 +2,10 @@
 
 usage: python bench/profile_iter.py MOLECULE BASIS KIND [NITER] [FROZEN]
   MOLECULE: h2o | n2     KIND: ghf | x2c
+environment: ZC_PACKED=1 builds the integrals block-wise with packed vvvv
+             (needed for large bases); ZC_MEM_MB sets the batch buffer budget.
 '''
+import os
 import sys
 import time
 import resource
@@ -28,14 +31,16 @@ def main():
     else:
         mf = scf.addons.convert_to_ghf(scf.RHF(mol).run(conv_tol=1e-10))
     t0 = time.perf_counter()
-    eris = E.from_scf(mf, frozen=frozen)
+    packed = os.environ.get('ZC_PACKED', '0') == '1'
+    eris = E.from_scf(mf, frozen=frozen, packed_vvvv=packed)
     t_ints = time.perf_counter() - t0
     nocc = eris.nocc
     nvir = eris.nmo - nocc
     print('%s/%s %s  nocc=%d nvir=%d dtype=%s  integrals %.1fs'
           % (mol_name, basis, kind, nocc, nvir, eris.dtype, t_ints))
     timing.reset()
-    opts = solver.Options(max_cycle=niter, verbose=True)
+    opts = solver.Options(max_cycle=niter, verbose=True,
+                          mem_mb=float(os.environ.get('ZC_MEM_MB', 2000)))
     r = solver.kernel(eris, 'ccsdt', opts)
     per = len(r.timings)
     print('iterations: ' + ' '.join('%.2f' % t for t in r.timings))
