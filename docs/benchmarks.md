@@ -23,46 +23,75 @@ N2/cc-pVTZ has 120 (o = 14, v = 106).
 
 ## CCSDT iteration time
 
-| Program (representation) | H2O/cc-pVTZ | N2/cc-pVTZ |
-|---|---|---|
-| CFOUR `ncc`, REF=RHF (spin-adapted) | 0.60 s | 1.78 s |
-| CFOUR `ecc`, REF=RHF | 6.8 s | 19.8 s |
-| CFOUR `ecc`, REF=UHF (spin-integrated) | 18.7 s | 57 s |
-| CFOUR `vcc`, REF=UHF (spin-integrated) | 16 s | 56 s |
-| **zccsdt, real spin-orbital** | **3.2-3.6 s** | **6.7 s** |
-| **zccsdt, complex spinor (X2C)** | **6.6 s** | **16.9 s** |
+| Program (representation) | H2O/cc-pVTZ | N2/cc-pVTZ | H2O/cc-pVQZ |
+|---|---|---|---|
+| CFOUR `ncc`, REF=RHF (spin-adapted) | 0.60 s | 1.78 s | 11.7 s |
+| CFOUR `ecc`, REF=RHF | 6.8 s | 19.8 s | -- |
+| CFOUR `ecc`, REF=UHF (spin-integrated) | 18.7 s | 57 s | 173 s |
+| CFOUR `vcc`, REF=UHF (spin-integrated) | 16 s | 56 s | -- |
+| **zccsdt, real spin-orbital** | **3.2-3.6 s** | **6.7 s** | **34.6 s** |
+| **zccsdt, complex spinor (X2C)** | **6.6 s** | **13.7-16.9 s** | **100.9 s** |
+
+H2O/cc-pVQZ has 230 spin orbitals (o = 10, v = 220). It is run with
+block-wise integrals and packed-only vvvv (`ZC_PACKED=1`). Peak memory is
+36.5 GB (real) and 59.6 GB (complex); integral generation takes about
+3 minutes and is not included.
 
 Peak memory of zccsdt: H2O 6.2 GB (real) and 17.8 GB (complex); N2 8.3 GB
 (real) and 20.3 GB (complex).
 
-### Representation factor
+### Representation factor: theoretical vs measured
 
 zccsdt works with spin orbitals and uses no spin symmetry, because spinors
-have none. A nonrelativistic spin-integrated code needs only the
-Ms-conserving blocks.
+have none. `bench/flop_counts.py` counts the minimal FMA of the two
+dominant terms (pp ladder o^3 v^5, ring o^4 v^4) in three representations:
 
-The minimal FMA counts of the two dominant terms are computed by
-`bench/flop_counts.py`:
+- **spin-orbital:** what zccsdt does.
+- **Sz-blocked:** only Ms-conserving blocks, as in a spin-integrated UHF
+  code (`ecc`/`vcc` with REF=UHF).
+- **ncc model:** CFOUR `ncc` (RHF, spin-adapted), counted from its source
+  code:
+  - T3 is stored as i<=j<=k blocks (not all equal), each a full abc cube.
+  - The pp ladder is 3 GEMMs of v^2 x v^2 x v per block (the MAGIC_CYCLE
+    states with constraints 1, 4 and 7).
+  - The ring terms are 9 (wmaei) plus 13-26 (wmaie) contractions of o v^4
+    per block. Part of the wmaie work is skipped by an index-order test,
+    hence the range.
 
-| Term | H2O/cc-pVTZ: spin-orbital / Sz-blocked | N2/cc-pVTZ: spin-orbital / Sz-blocked |
+Here o and v are spatial orbitals. Cost ratios (zccsdt / other):
+
+| System | spin-orbital / Sz-blocked | spin-orbital / ncc (theory) | zccsdt / ncc (measured wall time) |
+|---|---|---|---|
+| H2O/cc-pVTZ | 7.5 | 8.5-10.6 | 5.3-6.0 |
+| N2/cc-pVTZ | 7.6 | 9.4-12.1 | 3.8 |
+| H2O/cc-pVQZ | 7.5 | 9.3-10.6 | 3.0 |
+
+Asymptotically (large o) the ladder ratio spin-orbital / ncc approaches
+256/12, about 21.
+
+Achieved rate on the dominant terms (FMA x 2 / iteration time):
+
+| System | ncc | zccsdt (real) |
 |---|---|---|
-| pp ladder (o^3 v^5) | 3.94e11 / 5.39e10 (7.3x) | 1.20e12 / 1.60e11 (7.5x) |
-| ring (o^4 v^4) | 2.81e11 / 3.63e10 (7.8x) | 1.12e12 / 1.43e11 (7.8x) |
+| H2O/cc-pVTZ | 0.21-0.26 TFLOPS | 0.38-0.42 TFLOPS |
+| N2/cc-pVTZ | 0.21-0.28 TFLOPS | 0.69 TFLOPS |
+| H2O/cc-pVQZ | 0.33-0.38 TFLOPS | 1.19 TFLOPS |
 
-An RHF spin-adapted code such as `ncc` saves several times more again.
+Conclusions:
 
-What this means for the comparison:
-
-- **Against CFOUR's spin-integrated codes** (`ecc`/`vcc`, REF=UHF; the
-  nonrelativistic analogue of a spinor calculation), zccsdt is **5-8 times
-  faster in wall time**, while doing about 7.5 times more arithmetic.
-- **Against `ncc`**, zccsdt is 4-6 times slower in wall time. The
-  representation factor is at least 7.5 (more, because of the RHF spin
-  adaptation), so per unit of work zccsdt is ahead.
-- **Spinor case.** CFOUR has no spinor CCSDT, so there is no same-condition
-  comparison. The complex zccsdt iteration costs about 2.5 times the real
-  one for 4 times the arithmetic. The N2 complex iteration (16.9 s) is 1.9
-  times the floor of dominant flops at 2.4 TFLOPS (about 9 s).
+- **The measured slowdown against ncc (3-6x) is 2-3.5 times smaller than
+  the arithmetic ratio (9-12x).** Per unit of work, zccsdt is 2-3.5 times
+  more efficient than ncc at these sizes, and the advantage grows with the
+  basis.
+- **Against the spin-integrated codes** (`ecc`/`vcc`, REF=UHF), zccsdt is
+  5-8 times faster in wall time, despite doing about 7.5 times more
+  arithmetic.
+- **The remaining gap to ncc is the price of the spin-orbital
+  representation.** For nonrelativistic closed shells an RHF spin-adapted
+  code will always win; for spinors (the target of zccsdt) there is no
+  such reduction, and CFOUR has no spinor CCSDT.
+- **Complex spinor iterations** cost about 2.5-3 times the real ones for 4
+  times the arithmetic.
 
 ## Where the time goes (N2/cc-pVTZ, complex)
 

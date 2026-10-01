@@ -5,7 +5,12 @@ representations (closed-shell molecule, o/v = spatial occupied/virtual).
                  (what zccsdt does; required for spinors)
   Sz-blocked   : spin-orbital terms restricted to Ms-conserving blocks
                  (what a spin-integrated UHF code such as CFOUR vcc/ecc can do)
-The RHF spin-adapted count (CFOUR ncc) is lower still and not modelled.
+  ncc model    : CFOUR ncc (RHF, spin-adapted), counted from its source:
+                 T3 blocks i<=j<=k (not all equal), each a full abc cube;
+                 pp ladder = 3 GEMMs of v^2 x v^2 x v per block (MAGIC_CYCLE
+                 states with constraint 1/4/7); rings = 9 (wmaei) plus 13-26
+                 (wmaie, 13 states x 2 types, some skipped by an index-order
+                 test) contractions of o v^4 per block.  o, v spatial.
 '''
 import sys
 from collections import Counter
@@ -66,9 +71,23 @@ def ring(o, v):
     return full, sz
 
 
+def ncc_model(o, v):
+    nblk = (o + 2) * (o + 1) * o // 6 - o
+    ladder = nblk * 3 * v**5
+    ring_lo = nblk * (9 + 13) * o * v**4
+    ring_hi = nblk * (9 + 26) * o * v**4
+    return ladder, ring_lo, ring_hi
+
+
 if __name__ == '__main__':
-    for name, o, v in [('H2O/cc-pVTZ', 5, 53), ('N2/cc-pVTZ', 7, 53)]:
+    for name, o, v in [('H2O/cc-pVTZ', 5, 53), ('N2/cc-pVTZ', 7, 53),
+                       ('H2O/cc-pVQZ', 5, 110)]:
         lf, ls = ladder(o, v)
         rf, rs = ring(o, v)
-        print('%-12s ladder %.3e / %.3e (x%.1f)   ring %.3e / %.3e (x%.1f)'
-              % (name, lf, ls, lf / ls, rf, rs, rf / rs))
+        nl, nrl, nrh = ncc_model(o, v)
+        print('%-12s spin-orbital: ladder %.3e ring %.3e | Sz-blocked: ladder %.3e '
+              'ring %.3e | ncc: ladder %.3e ring %.3e-%.3e'
+              % (name, lf, rf, ls, rs, nl, nrl, nrh))
+        tot, totsz = lf + rf, ls + rs
+        print('%-12s ratio spin-orbital/Sz-blocked %.1f   spin-orbital/ncc %.1f-%.1f'
+              % ('', tot / totsz, tot / (nl + nrh), tot / (nl + nrl)))
