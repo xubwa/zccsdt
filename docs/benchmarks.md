@@ -1,6 +1,104 @@
 # Benchmarks
 
-## Setup
+Wall time per CCSDT iteration of zccsdt and CFOUR, and where the time goes.
+
+## RCCSDT / UCCSDT on R/U-form integrals, 8 cores
+
+These runs use the nonrelativistic code path: integrals in R (RHF) or U
+(UHF) form, spin-blocked T3 (only Ms-conserving blocks) and, for closed
+shells, the alpha <-> beta spin flip (only T3 blocks with 0 or 1 beta
+indices are stored and computed; RCCSDT).
+
+**Setup.**
+
+- **Same allocation.** `bench/slurm_compare.sh` runs zccsdt and CFOUR back
+  to back on the same 8 cores of one job (`--cpus-per-task=8 --mem=30G`;
+  the partition allows 4000 MB per core, so a larger `--mem` silently adds
+  cores, which inflated earlier "8-core" numbers).
+- **Node load.** All six jobs ran at the same time on one node (c178, 2 x
+  Xeon Gold 6248R), so the node was fully loaded and memory bandwidth was
+  shared.
+- **What is timed.** zccsdt: mean of 3 iterations after one warm-up
+  iteration (version 2322512). CFOUR: the per-iteration wall times of
+  iterations 2-5.
+- **Calculations.** All-electron, C1 symmetry.
+
+| System | o, v (spatial) | zccsdt | CFOUR | zccsdt / CFOUR | arithmetic ratio (model) |
+|---|---|---|---|---|---|
+| H2O/cc-pVTZ, RHF | 5, 53 | RCCSDT 1.27 s | `ncc` 1.03 s | 1.24 | 0.57-0.71 |
+| N2/cc-pVTZ, RHF | 7, 53 | RCCSDT 2.80 s | `ncc` 3.97 s | 0.71 | 0.62-0.79 |
+| H2S/cc-pVTZ, RHF | 9, 53 | RCCSDT 5.51 s | `ncc` 7.02 s | 0.78 | 0.64-0.85 |
+| H2O/cc-pVQZ, RHF | 5, 110 | RCCSDT 10.9 s | `ncc` 16.1 s | 0.68 | 0.62-0.71 |
+| NH2/cc-pVTZ, UHF (doublet) | 5+4, 53+54 | UCCSDT 1.51 s | `ecc` 9.4 s | 0.16 | -- |
+| O2/cc-pVTZ, UHF (triplet) | 9+7, 51+53 | UCCSDT 5.70 s | `ecc` 56.1 s | 0.10 | -- |
+
+The arithmetic ratio is the FMA count of the dominant terms (pp ladder and
+ring), RCCSDT over the `ncc` model, from `bench/flop_counts.py`.
+
+Same node, pinned cores (c571, otherwise idle), H2O/cc-pVQZ:
+
+| Cores | zccsdt RCCSDT | `ncc` |
+|---|---|---|
+| 8 on one socket (`taskset -c 0-7`) | 11.1 s (b00ac29) | 17.0 s |
+| 4 + 4 on two sockets | 16.2 s (2322512) | 20.9 s |
+
+Peak memory for H2O/cc-pVQZ: zccsdt 9.7 GB, `ncc` 3.5 GB.
+
+**Reading the numbers.**
+
+- **zccsdt is 1.3-1.5 times faster than `ncc` from N2/cc-pVTZ upwards.**
+  The measured time ratio sits inside the arithmetic ratio, so per unit of
+  arithmetic the two codes are about equally efficient. At H2O/cc-pVTZ the
+  dominant terms are small (about 90 GFLOP), and the rest of the iteration
+  (intermediates, dressing, CCSD part, about 0.6 s, much of it Python-level
+  work on small tensors) is half of the time.
+- **RCCSDT does less arithmetic than the `ncc` model only for few occupied
+  orbitals.** `ncc` stores T3 as i<=j<=k blocks, each a full abc cube, and
+  the blocks with repeated indices are a large fraction when o is small.
+  The ladder ratio RCCSDT / `ncc` is 0.72 at o = 5, about 1 at o = 10-15,
+  and tends to 4/3 for large o (o^3 v^5 x 2/3 against o^3 v^5 / 2). The
+  ring ratio stays at or below 1.
+- **Against the spin-integrated UHF code** (`ecc`, REF=UHF), UCCSDT is 6-10
+  times faster. `ecc` uses about 1.5 of the 8 cores.
+
+### Where the time goes (H2O/cc-pVQZ RCCSDT, 8 cores, 11.1 s)
+
+Timers of `bench/profile_iter.py` (c571, cores 0-7, b00ac29):
+
+| Step | Time | Comment |
+|---|---|---|
+| pp ladder | 3.92 s | 2.08 TFLOP, 530 GFLOPS overall (the GEMM shape alone runs at about 575; 8-core AVX-512 peak about 650) |
+| pass 2: ring + drive | 2.91 s | ring GEMM 1.56 s (675 GFLOP), reduction 0.45 s, gather 0.41 s, drive 0.24 s |
+| pass 1: T3 -> T1/T2, W | 1.13 s | half of the spin combinations (flip); GEMM 0.49 s, gather 0.31 s |
+| W_vvvo, W_vooo, effective Fock | 1.06 s | |
+| CCSD part (T1-dressed) | 0.71 s | |
+| T1 dressing (incl. ladder operator) | 0.69 s | one pass over the bare vvvv blocks |
+| DIIS, T3 update, rest | 0.6 s | |
+
+### Optimization history (H2O/cc-pVQZ RCCSDT, s/iteration)
+
+Each step was measured on c571 with cores 0-7 pinned, unless marked
+(slurm).
+
+| Version | Time | Change |
+|---|---|---|
+| UCCSDT blocks on GHF-ordered integrals | 33.4 (slurm, 16 cores available) | |
+| R-form integrals, RCCSDT | 19.9 | |
+| W_vvvo pieces as spin-block GEMMs, Fock term folded into a GEMM, transpose-add kernel | 17.6 | c9c7a6a |
+| one-pass T1/T2-dressed ladder operator, F_vv folding kernel, dressed vovv dropped | 15.5 | |
+| pass 1 on half of the spin combinations (flip) | 13.8 | 2476c2b |
+| pass-1 batches sized for spin blocks | 13.3 | 0d94abf |
+| dressed ovvv by GEMMs, cached bare vvvo | 12.5 | a93a678 |
+| engine workspace (no page faults), precombined gather tables | 11.7 | |
+| loop-inverted pass-2 reduction | 11.4 | 2322512 |
+| CCSD residual on packed pairs | 11.1 | b00ac29 |
+
+## Spin-orbital (spinor-capable) code, 48 cores
+
+The general spin-orbital path (no spin symmetry, as needed for spinors),
+on GHF / X2C integrals.
+
+### Setup
 
 - **Hardware.** One exclusive node: 2 x Intel Xeon Gold 6248R, 48 cores,
   192 GB RAM, from the `parallel` partition.
@@ -21,7 +119,7 @@
 Orbital counts: H2O/cc-pVTZ has 116 spin orbitals (o = 10, v = 106);
 N2/cc-pVTZ has 120 (o = 14, v = 106).
 
-## CCSDT iteration time
+### CCSDT iteration time
 
 | Program (representation) | H2O/cc-pVTZ | N2/cc-pVTZ | H2O/cc-pVQZ |
 |---|---|---|---|
@@ -93,7 +191,7 @@ Conclusions:
 - **Complex spinor iterations** cost about 2.5-3 times the real ones for 4
   times the arithmetic.
 
-## Where the time goes (N2/cc-pVTZ, complex)
+### Where the time goes (N2/cc-pVTZ, complex)
 
 Per-iteration breakdown from the timers in `ccsdt_opt` and the C kernels
 (node c054, 16.9 s per iteration in total):
@@ -111,7 +209,7 @@ Per-iteration breakdown from the timers in `ccsdt_opt` and the C kernels
 The T3 kernels (12.5 s) run their GEMMs at 2-2.8 TFLOPS. The Python-side
 remainder is about 3.7 s.
 
-## Optimization history (H2O/cc-pVTZ, real, s/iteration)
+### Optimization history (H2O/cc-pVTZ, real, s/iteration)
 
 | Version | Time | Change |
 |---|---|---|

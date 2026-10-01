@@ -4,7 +4,10 @@ representations (closed-shell molecule, o/v = spatial occupied/virtual).
   spin-orbital : all 2o x 2v spin orbitals, antisymmetry exploited, no Sz
                  (what zccsdt does; required for spinors)
   Sz-blocked   : spin-orbital terms restricted to Ms-conserving blocks
-                 (what a spin-integrated UHF code such as CFOUR vcc/ecc can do)
+                 (what a spin-integrated UHF code such as CFOUR vcc/ecc can do;
+                 zccsdt UCCSDT)
+  RCCSDT       : Sz-blocked with alpha <-> beta spin flip, only the target
+                 blocks with 0 or 1 beta indices (zccsdt RCCSDT)
   ncc model    : CFOUR ncc (RHF, spin-adapted), counted from its source:
                  T3 blocks i<=j<=k (not all equal), each a full abc cube;
                  pp ladder = 3 GEMMs of v^2 x v^2 x v per block (MAGIC_CYCLE
@@ -40,13 +43,15 @@ def ladder(o, v):
     O, V = 2 * o, 2 * v
     full = (O * (O - 1) * (O - 2) // 6) * (V * (V - 1) // 2) ** 2 * V
     tO, pV, sV = triple_ms(o), pair_ms(v), Counter({0: v, 1: v})
-    sz = 0
+    sz = rf = 0
     for mI, nI in tO.items():
         for mc, nc in sV.items():
             for mab, nab in pV.items():      # W conserves Ms: Ms(de) = Ms(ab)
                 if mab + mc == mI:
                     sz += nI * nc * nab * pV[mab]
-    return full, sz
+                    if mI <= 1:
+                        rf += nI * nc * nab * pV[mab]
+    return full, sz, rf
 
 
 def ring(o, v):
@@ -55,7 +60,7 @@ def ring(o, v):
     full = (O * (O - 1) // 2) * (V * (V - 1) // 2) * (O * V) ** 2
     pO, pV, s = pair_ms(o), pair_ms(v), Counter({0: o, 1: o})
     sv = Counter({0: v, 1: v})
-    sz = 0
+    sz = rf = 0
     for mjk, njk in pO.items():
         for mbc, nbc in pV.items():
             for mi, ni in s.items():
@@ -68,7 +73,9 @@ def ring(o, v):
                             # W(ma,di) needs Ms(m)+Ms(a) = Ms(d)+Ms(i)
                             if mm + mjk == md + mbc and mm + ma == md + mi:
                                 sz += njk * nbc * ni * na * nm * nd
-    return full, sz
+                                if mi + mjk <= 1:           # target block stored
+                                    rf += njk * nbc * ni * na * nm * nd
+    return full, sz, rf
 
 
 def ncc_model(o, v):
@@ -81,13 +88,15 @@ def ncc_model(o, v):
 
 if __name__ == '__main__':
     for name, o, v in [('H2O/cc-pVTZ', 5, 53), ('N2/cc-pVTZ', 7, 53),
-                       ('H2O/cc-pVQZ', 5, 110)]:
-        lf, ls = ladder(o, v)
-        rf, rs = ring(o, v)
+                       ('H2S/cc-pVTZ', 9, 53), ('H2O/cc-pVQZ', 5, 110)]:
+        lf, ls, lr = ladder(o, v)
+        rf, rs, rr = ring(o, v)
         nl, nrl, nrh = ncc_model(o, v)
         print('%-12s spin-orbital: ladder %.3e ring %.3e | Sz-blocked: ladder %.3e '
-              'ring %.3e | ncc: ladder %.3e ring %.3e-%.3e'
-              % (name, lf, rf, ls, rs, nl, nrl, nrh))
-        tot, totsz = lf + rf, ls + rs
-        print('%-12s ratio spin-orbital/Sz-blocked %.1f   spin-orbital/ncc %.1f-%.1f'
-              % ('', tot / totsz, tot / (nl + nrh), tot / (nl + nrl)))
+              'ring %.3e | RCCSDT: ladder %.3e ring %.3e | ncc: ladder %.3e ring %.3e-%.3e'
+              % (name, lf, rf, ls, rs, lr, rr, nl, nrl, nrh))
+        tot, totsz, totr = lf + rf, ls + rs, lr + rr
+        print('%-12s ratio spin-orbital/Sz-blocked %.1f   spin-orbital/ncc %.1f-%.1f   '
+              'RCCSDT/ncc %.2f-%.2f'
+              % ('', tot / totsz, tot / (nl + nrh), tot / (nl + nrl),
+                 totr / (nl + nrh), totr / (nl + nrl)))
