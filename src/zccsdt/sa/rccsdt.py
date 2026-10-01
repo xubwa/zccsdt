@@ -204,7 +204,18 @@ def residuals_terms(ints, blocks, t1, t2, t3b):
 
 def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=8,
            verbose=False):
-    '''Closed-shell spin-adapted CCSDT (Jacobi steps with DIIS).'''
+    '''Closed-shell spin-adapted CCSDT (Jacobi steps with DIIS).  numpy's own
+    BLAS (OpenBLAS) is kept single-threaded while it runs: its spinning
+    threads would otherwise compete with the MKL threads of zccsdt.blas.'''
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        return _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose)
+    with threadpool_limits(limits={'openblas': 1}):
+        return _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose)
+
+
+def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose):
     from zccsdt.cc.diis import DIIS
     from zccsdt.sa import rccsdt_ref
     from zccsdt.sa.t3blocks import Blocks, denominators
