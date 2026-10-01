@@ -24,11 +24,20 @@ def _clib():
 
 
 def _ld(a):
-    '''(transposed flag, leading dimension) for a 2-D C- or F-contiguous view.'''
+    '''(transposed flag, leading dimension) for a 2-D view that BLAS can read
+    in place: C- or F-contiguous, or a row- / column-major submatrix (unit
+    stride along one axis, leading stride >= that axis' length).'''
     if a.flags.c_contiguous:
         return 0, a.shape[1]
     if a.flags.f_contiguous:
         return 1, a.shape[0]
+    isz = a.itemsize
+    s0, s1 = a.strides
+    m, n = a.shape
+    if s1 == isz and s0 > 0 and s0 % isz == 0 and s0 // isz >= n:
+        return 0, s0 // isz
+    if s0 == isz and s1 > 0 and s1 % isz == 0 and s1 // isz >= m:
+        return 1, s1 // isz
     return None
 
 

@@ -242,7 +242,8 @@ def dressed_vvoo_pp(eris, t1, Bv, om, vm):
 
 
 def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
-                         Weff_ovvo, om, vm, r1_vovv=None, ladder_t2=None):
+                         Weff_ovvo, om, vm, r1_vovv=None, ladder_t2=None, t2pp=None,
+                         goovv_pp=None, tau=None):
     '''CCSD residuals in the T1-dressed formalism (CCSD with T1 = 0 and the
     dressed Hamiltonian; validated against the determinant-space oracle):
       R1 = f_ai + f_kc t_ikac + 1/2 g_akcd t_ikcd - 1/2 g_klic t_klac
@@ -252,46 +253,68 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
     F = Feff (the same effective Fock blocks as in the T3 equation).
     R2 is returned packed as [(i<j), (a<b)].  ladder_t2 = (H, t2pp): the blocks
     Vd[h] include + t2pp[P_h, Q_h]^T H[h] (the T3 ladder operator), whose
-    contribution to the ladder is subtracted.'''
+    contribution to the ladder is subtracted.  t2pp, goovv_pp (packed (P, Q))
+    and tau (tau1 packed) may be passed in when already formed.'''
     nocc, nvir = t1.shape
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     o, v = slice(0, nocc), slice(nocc, None)
-    t2pp = np.ascontiguousarray(t2[mm, nn][:, md, ne])                  # (P, Q)
-    goovv_pp = np.ascontiguousarray(ge['oovv'][mm, nn][:, md, ne])
+    if t2pp is None:
+        t2pp = np.ascontiguousarray(t2[mm, nn][:, md, ne])              # (P, Q)
+    if goovv_pp is None:
+        goovv_pp = np.ascontiguousarray(ge['oovv'][mm, nn][:, md, ne])
+    if tau is None:
+        tau = _tau1_pairs(t1, om, vm)
+    t2mn = t2[mm, nn]                                                    # (P, a, b)
     # R1
     R1 = fdr[v, o].T + einsum('kc,ikac->ia', fdr[o, v], t2)
     if r1_vovv is None:
         R1 += einsum('akR,ikR->ia', ge['vovv'][:, :, md, ne], t2[:, :, md, ne])
     else:
         R1 += r1_vovv
-    R1 -= einsum('Pic,Pac->ia', ge['ooov'][mm, nn], t2[mm, nn])
-    # R2: driving + ladder (with the t1 t1 part of the vvoo dressing) + hh
+    R1 -= einsum('Pic,Pac->ia', ge['ooov'][mm, nn], t2mn)
+    # R2: driving + ladder (with the t1 t1 part of the vvoo dressing) + hh;
+    # ladder as Vd[h] tt^T, one pass over each distinct (possibly shared) block
     R2 = np.array(vvoo_pp, order='C', copy=True)
-    tt = t2pp + _tau1_pairs(t1, om, vm)
+    npo = R2.shape[0]
+    tt = t2pp + tau
+    done = set()
     for h, (lo, hi) in enumerate(vm.blocks):
-        if hi > lo:
-            ttb = np.ascontiguousarray(tt[:, lo:hi])
-            R2[:, lo:hi] += gemm(ttb, Vd[h].T)
-            if ladder_t2 is not None and ladder_t2[0][h] is not None:
-                plo, phi = om.blocks[h]
-                C1 = ttb @ ladder_t2[0][h].T                              # (P, P_h)
-                R2[:, lo:hi] -= C1 @ ladder_t2[1][plo:phi, lo:hi]
+        if hi == lo or h in done:
+            continue
+        hs = [k for k in range(h, len(vm.blocks))
+              if Vd[k] is Vd[h] and vm.blocks[k][1] > vm.blocks[k][0]]
+        done.update(hs)
+        B = np.ascontiguousarray(np.concatenate([tt[:, slice(*vm.blocks[k])] for k in hs],
+                                                axis=0), dtype=R2.dtype)  # (k P, nQ)
+        X = gemm(Vd[h], B.T)                                             # (nQ, k P)
+        for j, k in enumerate(hs):
+            klo, khi = vm.blocks[k]
+            t3pack.axpby(R2[:, klo:khi], X[:, j * npo:(j + 1) * npo].T)
+            if ladder_t2 is not None and ladder_t2[0][k] is not None:
+                plo, phi = om.blocks[k]
+                C1 = tt[:, klo:khi] @ ladder_t2[0][k].T                   # (P, P_k)
+                R2[:, klo:khi] -= C1 @ ladder_t2[1][plo:phi, klo:khi]
     Wkl = np.ascontiguousarray(ge['oooo'][mm, nn][:, mm, nn])           # (kl, ij)
     gemm(goovv_pp, t2pp.T, Wkl, beta=1.0)
     gemm(np.asfortranarray(Wkl.T), t2pp, R2, beta=1.0)
-    # F terms and ring term in full (o,o,v,v) form, then packed
-    X = einsum('bc,ijac->ijab', Feff_vv, t2)
-    full = X - X.transpose(0, 1, 3, 2)
-    X = einsum('kj,ikab->ijab', Feff_oo, t2)
-    full -= X - X.transpose(1, 0, 2, 3)
+    # P(ab) F_bc t_ijac on the packed occupied pairs: Y[P, a, b] = t[P, a, c] F[b, c]
+    Y = gemm(np.ascontiguousarray(t2mn).reshape(-1, nvir), np.asarray(Feff_vv).T)
+    Y = Y.reshape(len(mm), nvir, nvir)
+    R2 += Y[:, md, ne] - Y[:, ne, md]
+    # - P(ij) F_kj t_ikab on the packed virtual pairs: Z[i, j, Q] = t[i, k, Q] F[k, j]
+    Z = np.einsum('ikQ,kj->ijQ', t2[:, :, md, ne], Feff_oo, optimize=True)
+    R2 -= Z[mm, nn] - Z[nn, mm]
+    # P(ij) P(ab) W_kbcj t_ikac: X[(i,a), (j,b)] = t[i,k,a,c] W2[k,b,c,j]
     W2 = 0.5 * (ge['ovvo'] + Weff_ovvo)                                  # [k,b,c,j]
     A = np.ascontiguousarray(t2.transpose(0, 2, 1, 3)).reshape(nocc * nvir, -1)  # (ia,kc)
     B = np.ascontiguousarray(W2.transpose(0, 2, 3, 1)).reshape(nocc * nvir, -1)  # (kc,jb)
-    X = gemm(A, B).reshape(nocc, nvir, nocc, nvir).transpose(0, 2, 1, 3)        # [i,j,a,b]
-    X = X - X.transpose(1, 0, 2, 3)
-    full += X - X.transpose(0, 1, 3, 2)
-    R2 += full[mm, nn][:, md, ne]
+    X = gemm(A, B)
+    ia = mm[:, None] * nvir + md[None, :]
+    ib = mm[:, None] * nvir + ne[None, :]
+    ja = nn[:, None] * nvir + md[None, :]
+    jb = nn[:, None] * nvir + ne[None, :]
+    R2 += X[ia, jb] - X[ja, ib] - X[ib, ja] + X[jb, ia]
     return R1, R2
 
 
@@ -558,13 +581,15 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         # CCSD residuals (T1-dressed) + T3 contributions, before the dressed
         # packed vvvv is turned into the T3 ladder operator in place
         t_ = timer('ccsd'); t_.__enter__()
-        r1_vovv = _spin_r1_vovv(eris, ges, t2, vm) if spin else None
-        ladder_t2 = None
+        ladder_t2 = r1_vovv = None
         if spin:
+            # sum ~<ak||Q> t2[i,k,Q] with the pass-1 operand G_mQ[(k,Q), no + a] = ~<ak||Q>
+            r1_vovv = gemm(t2P.reshape(nocc, -1), G_mQ[:, nocc:])
             Hb = spin_imds.bare_packed(eris)['oovv_PQ']
             ladder_t2 = ([Hb.blocks.get((h, h)) for h in range(3)], t2pp_v)
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
-                                      Feff_oo, Weff_ovvo, om, vm, r1_vovv, ladder_t2)
+                                      Feff_oo, Weff_ovvo, om, vm, r1_vovv, ladder_t2,
+                                      t2pp=t2pp_v, goovv_pp=goovv_pp)
         t1new = t1 + (R1 + r1) / eia
         t2new = t2 + _unpack_pairs(R2 + r2_t3, om, vm) / eijab
         del vvoo_pp, R1, R2
