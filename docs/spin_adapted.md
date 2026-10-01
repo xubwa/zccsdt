@@ -233,10 +233,26 @@ about as much as its GEMM, so nothing is transposed:
   local buffer indexed by the base element, so the 24 permutations of an
   element sit at one offset of 24 buffers and M and the energy are
   unit-stride row operations.  C is formed on the fly from v x v matrices.
+  The rows of a tile are scattered over the accumulators, so they are
+  prefetched before use; coinciding tiles are copied in cache.
+- **Repeated occupied index.**  If two of the first three pairs have the same
+  occupied index (i = j or j = k; the pairs are relabeled so that these are
+  pairs 0 and 1), r and z are invariant under the exchange of the two pairs,
+  and the exchange maps every term to a term.  One term of each mirror pair
+  is accumulated (terms that are their own image at half weight), rotation 2
+  is not computed at all (it is the image of rotation 1), and the kernel adds
+  the image of its tile buffers in cache: 7 + 4 instead of 12 + 6 products
+  of v^5.  Quadruples with k = l only are computed in full (the exchange
+  would move the contiguous index of the accumulators).
+- **BLAS.**  All products, including the small ones for G, go through MKL
+  (`zccsdt.blas.gemm`): calls into numpy's own BLAS between the threaded
+  GEMMs made those twice as slow.
 
-Leading cost per quadruple: 12 + 6 products of v^5 FMA, or 0.75 o^4 v^5 in
-total, against o^3 v^5 / 4 + 2 o^4 v^4 for a CCSDT iteration.  Memory: 10 v^4
-(6 accumulators, 3 intermediates, the `<vv|vv>` integrals) besides T3.
+Leading cost per quadruple: 12 + 6 products of v^5 FMA (7 + 4 with a
+repeated index among the first three), at most 0.75 o^4 v^5 in total, against
+o^3 v^5 / 4 + 2 o^4 v^4 for a CCSDT iteration.  Memory: 10 v^4 (6
+accumulators, 3 intermediates, the `<vv|vv>` integrals) besides T3;
+`rccsdt_q.kernel` checks it against the available memory first.
 
 ## Validation
 
