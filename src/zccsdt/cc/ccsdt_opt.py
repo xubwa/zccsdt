@@ -325,6 +325,10 @@ def engine_for(eris, dtype, mem_mb=2000, flip=False):
     '''T3 engine for these integrals: spin-blocked if the orbitals carry spin
     labels, dense otherwise (cached per maps / dtype / memory budget).'''
     om, vm = t3pack.maps_for(eris)
+    if flip and (om.spins is None or 2 * int(np.sum(om.spins == 0)) != om.n
+                 or 2 * int(np.sum(vm.spins == 0)) != vm.n):
+        raise ValueError('spin_flip (RCCSDT) needs alpha-first orbitals of a closed-shell '
+                         'RHF reference (from_scf(..., spin_order=True))')
     key = (id(om), id(vm), np.dtype(dtype).str, float(mem_mb), bool(flip))
     if key not in _ENGINES:
         _ENGINES[key] = t3engine.make_engine(om, vm, dtype, mem_mb, flip=flip)

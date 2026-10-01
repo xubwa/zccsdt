@@ -580,16 +580,27 @@ def _spin_block_c_methods():
                             _cgather(self, T3, pb, d, m, Qlo, Qhi, T, r0 * nQ, nr * nQ)
                         r0 += len(d) * len(m)
                     T = T.reshape(nbp, nr, nQ)
+                    # rows (a, i) only for target groups that are computed:
+                    # g = gP + s(i) must be stored (all for UCCSDT; with spin
+                    # flip the pairs gP = 1 only need i alpha)
+                    r0, sub = 0, []
+                    for sa, si in self.dsub[delta]:
+                        n = (vr[sa][1] - vr[sa][0]) * (orr[si][1] - orr[si][0])
+                        if gP + si in L.stored and n:
+                            sub.append((r0, n))
+                        r0 += n
                     for k in range(nbp):
-                        Zk = Z[zoff[k, gQ]:zoff[k, gQ] + nr * nQ].reshape(nr, nQ)
-                        gemm(Wd[delta], T[k], Zk)
+                        for r0, n in sub:
+                            zo = zoff[k, gQ] + r0 * nQ
+                            gemm(Wd[delta][r0:r0 + n], T[k], Z[zo:zo + n * nQ].reshape(n, nQ))
                     # drive terms on the (s_c, s_i) sub-blocks of D_delta
                     r0 = 0
                     for sc, si in self.dsub[delta]:
                         (c0, c1), (i0, i1) = vr[sc], orr[si]
                         nc, ni = c1 - c0, i1 - i0
                         se = gP - sc
-                        if nc and ni and 0 <= se <= 1 and (gQ, si) in Bd:
+                        if nc and ni and 0 <= se <= 1 and (gQ, si) in Bd \
+                                and gP + si in L.stored:
                             (e0, e1), (m0, m1) = vr[se], orr[se]
                             for k, P in enumerate(pb):
                                 A = np.concatenate((t2mn[P, e0:e1, c0:c1].T,

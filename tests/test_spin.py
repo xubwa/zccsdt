@@ -145,3 +145,30 @@ def test_spin_block_c_equals_numpy(system, cplx):
     O6 = rnd(om.ntri, om.ntri) * (om.tri_grp[:, None] == om.tri_grp[None, :])
     rargs = (T3, Wr.reshape(nv * no, -1), t2mn, Wv, Wo, t2P, Wpp, O6)
     np.testing.assert_allclose(eng._residual_c(*rargs), eng._residual_np(*rargs), atol=1e-11)
+
+
+@pytest.mark.parametrize('use_c', [True, False])
+def test_rccsdt_spin_flip(use_c, monkeypatch):
+    '''Closed shell: storing only the T3 blocks with 0 or 1 beta indices and
+    obtaining the others by spin flip gives the same CCSDT energy.'''
+    if use_c and not t3pack.USE_C:
+        pytest.skip('C kernels not built')
+    monkeypatch.setattr(t3pack, 'USE_C', use_c)
+    from zccsdt.cc import ccsdt_opt
+    ccsdt_opt._ENGINES.clear()
+    e = E.from_scf(h2o_rhf(), frozen=2, spin_order=True)
+    full = solver.kernel(e, 'ccsdt', TIGHT)
+    o = solver.Options(conv_tol=1e-11, conv_tol_normt=1e-8, spin_flip=True)
+    r = solver.kernel(e, 'ccsdt', o)
+    eng_u = ccsdt_opt.engine_for(e, np.float64, o.mem_mb, False)
+    eng_r = ccsdt_opt.engine_for(e, np.float64, o.mem_mb, True)
+    assert eng_r.size < 0.6 * eng_u.size
+    assert r.converged and abs(r.e_corr - full.e_corr) < 1e-10
+    ccsdt_opt._ENGINES.clear()
+
+
+def test_spin_flip_rejects_open_shell():
+    from zccsdt.cc import ccsdt_opt
+    e = E.from_scf(nh2_uhf(), frozen=2, spin_order=True)
+    with pytest.raises(ValueError):
+        ccsdt_opt.engine_for(e, np.float64, 2000, True)
