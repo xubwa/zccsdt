@@ -5,7 +5,9 @@ from pyscf import gto, scf
 
 from zccsdt import eris as E
 from zccsdt.cc import ccsdt, ccsdt_opt, solver
-from zccsdt.cc.ccsdt_opt import get_block, dress_block, dress_fock
+from zccsdt.cc import t3pack
+from zccsdt.cc.ccsdt_opt import (get_block, dress_block, dress_fock,
+                                 dressed_vvvv_pp, add_one_body_pairs)
 
 
 @pytest.fixture(scope='module', params=['real', 'complex'])
@@ -61,6 +63,24 @@ def test_dressing_matches_reference(fh):
         np.testing.assert_allclose(dress_block(fh, t1, key), ref, atol=1e-12,
                                    err_msg=key)
     np.testing.assert_allclose(dress_fock(fh, t1), fdr, atol=1e-12)
+    vm = t3pack.triple_map(fh.nmo - fh.nocc)
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    ref = ge[v, v, v, v][md[:, None], ne[:, None], md, ne]
+    np.testing.assert_allclose(dressed_vvvv_pp(fh, t1, vm), ref, atol=1e-12)
+
+
+def test_add_one_body_pairs():
+    rng = np.random.default_rng(0)
+    n = 6
+    vm = t3pack.triple_map(n)
+    F = rng.standard_normal((n, n))
+    I = np.eye(n)
+    full = (np.einsum('ad,be->abde', F, I) - np.einsum('bd,ae->abde', F, I)
+            - np.einsum('ae,bd->abde', F, I) + np.einsum('be,ad->abde', F, I))
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    W = np.zeros((vm.npair, vm.npair))
+    add_one_body_pairs(W, F, vm, 0.5)
+    np.testing.assert_allclose(W, 0.5 * full[md[:, None], ne[:, None], md, ne], atol=1e-14)
 
 
 @pytest.mark.parametrize('seed', [1, 2])

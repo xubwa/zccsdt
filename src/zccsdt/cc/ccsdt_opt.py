@@ -20,6 +20,7 @@ See docs/factorization.md for the derivation of each step.
 import numpy as np
 from pyscf import lib
 
+from zccsdt.blas import gemm
 from zccsdt.cc import ccsd, t3pack
 from zccsdt.timing import timer
 
@@ -54,28 +55,94 @@ def get_block(eris, key):
     raise KeyError(key)
 
 
+def _contract_slot(b, M, p):
+    '''b with its slot p contracted against M[source, target], using
+    contiguous GEMMs (no moveaxis copies).'''
+    sh = b.shape
+    if p == 3:
+        return (b.reshape(-1, sh[3]) @ M).reshape(sh[:3] + (M.shape[1],))
+    if p == 0:
+        return (M.T @ b.reshape(sh[0], -1)).reshape((M.shape[1],) + sh[1:])
+    lead = int(np.prod(sh[:p]))
+    out = np.matmul(M.T, b.reshape(lead, sh[p], -1))
+    return out.reshape(sh[:p] + (M.shape[1],) + sh[p + 1:])
+
+
 def dress_block(eris, t1, key):
     '''T1-dressed block of <pq||rs>: a virtual bra index a picks up
     -sum_m t1[m,a] <m..||..>, an occupied ket index i picks up
-    +sum_e t1[i,e] <..||..e>.  Other indices are unchanged.'''
-    opts = []
-    for pos, sp in enumerate(key):
-        if pos < 2 and sp == 'v':
-            opts.append((('v', None), ('o', -t1)))           # M[m, a]
-        elif pos >= 2 and sp == 'o':
-            opts.append((('o', None), ('v', t1.T)))          # M[e, i]
-        else:
-            opts.append(((sp, None),))
-    out = None
-    for combo in np.ndindex(*[len(x) for x in opts]):
-        src = ''.join(opts[p][c][0] for p, c in enumerate(combo))
-        b = get_block(eris, src)
-        for p, c in enumerate(combo):
-            M = opts[p][c][1]
-            if M is not None:
-                b = np.moveaxis(np.tensordot(b, M, axes=([p], [0])), -1, p)
-        out = b if out is None else out + b
+    +sum_e t1[i,e] <..||..e>.  Other indices are unchanged.
+
+    The dressing is a product of one-index transformations, so it is applied
+    slot by slot (ket slots first): each step combines the blocks that differ
+    only in the source space of that slot.'''
+    alt = {}
+    for p, sp in enumerate(key):
+        if p < 2 and sp == 'v':
+            alt[p] = ('o', -t1)                      # M[m, a]
+        elif p >= 2 and sp == 'o':
+            alt[p] = ('v', t1.T)                     # M[e, i]
+    choices = [(key[p], alt[p][0]) if p in alt else (key[p],) for p in range(4)]
+    state = {''.join(c): get_block(eris, ''.join(c))
+             for c in np.ndindex(*[len(x) for x in choices])
+             for c in [tuple(choices[p][i] for p, i in enumerate(c))]}
+    for p in sorted(alt, reverse=True):
+        src, M = alt[p]
+        new = {}
+        for k, blk in state.items():
+            if k[p] != key[p]:
+                continue
+            k_alt = k[:p] + src + k[p + 1:]
+            new[k] = blk + _contract_slot(state[k_alt], M, p)
+        state = new
+    return state[key]
+
+
+def dressed_vvvv_pp(eris, t1, vm):
+    '''Packed T1-dressed <ab||de> over a<b, d<e without the full v^4 array:
+    ~<ab||de> = <ab||de> - Y[a,b,de] + Y[b,a,de] + Z[a,b,de],
+    Y[x,y,Q] = sum_m t1[m,x] <my||Q>,  Z[a,b,Q] = sum_mn t1[m,a] t1[n,b] <mn||Q>.'''
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    nocc, nvir = t1.shape
+    cache = getattr(eris, '_vvvv_pp', None)
+    if cache is None:
+        cache = np.asarray(eris.vvvv)[md[:, None], ne[:, None], md, ne]
+        try:
+            eris._vvvv_pp = cache
+        except AttributeError:
+            pass
+    ovvv_Q = np.asarray(eris.ovvv)[:, :, md, ne]                   # (m, y, Q)
+    Y = gemm(np.ascontiguousarray(t1.T), ovvv_Q.reshape(nocc, -1))
+    Y = Y.reshape(nvir * nvir, -1)                                 # [(x,y), Q]
+    out = cache - np.take(Y, md * nvir + ne, axis=0)
+    out += np.take(Y, ne * nvir + md, axis=0)
+    del Y
+    # Z[(a<b), Q] = sum_{m<n} (t[m,a] t[n,b] - t[n,a] t[m,b]) <mn||Q>
+    om = t3pack.triple_map(nocc)
+    mm, nn = om.pairs[:, 0], om.pairs[:, 1]
+    tau = (t1[mm][:, md] * t1[nn][:, ne] - t1[nn][:, md] * t1[mm][:, ne])   # (mn, ab)
+    oovv_pp = np.asarray(eris.oovv)[mm, nn][:, md, ne]
+    gemm(np.ascontiguousarray(tau.T), oovv_pp, out, beta=1.0)
     return out
+
+
+def add_one_body_pairs(W, F, vm, scale):
+    '''W[(a<b),(d<e)] += scale * (F_ad d_be - F_bd d_ae - F_ae d_bd + F_be d_ad),
+    the antisymmetrized one-body operator F acting on either pair index.
+
+    Grouped by the index F acts on: acting on a, the column pair is {y, b}
+    with value +F[a,y] if y < b else -F[a,y]; acting on b, the column pair
+    is {y, a} with value -F[b,y] if y < a else +F[b,y].'''
+    a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+    y = np.arange(vm.n)[None, :]
+    rows = np.broadcast_to(np.arange(vm.npair)[:, None], (vm.npair, vm.n))
+    for keep, act, s_lt, s_gt in ((b, a, 1, -1), (a, b, -1, 1)):
+        k = keep[:, None]
+        valid = y != k
+        col = vm.pidx[np.minimum(y, k), np.maximum(y, k)]
+        val = scale * np.where(y < k, s_lt, s_gt) * F[act[:, None], y]
+        W[rows[valid], col[valid]] += val[valid]
+    return W
 
 
 def dress_fock(eris, t1):
@@ -128,8 +195,9 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     with timer('t1_dress'):
         fdr = dress_fock(eris, t1)
         ge = {k: dress_block(eris, t1, k) for k in
-              ('vvvo', 'ovoo', 'vvvv', 'oooo', 'ovvo', 'oovv', 'ovvv',
+              ('vvvo', 'ovoo', 'oooo', 'ovvo', 'oovv', 'ovvv',
                'ooov', 'oovo', 'vovv')}
+        vvvv_pp = dressed_vvvv_pp(eris, t1, vm)
     foo, fov, fvv = fdr[:nocc, :nocc], fdr[:nocc, nocc:], fdr[nocc:, nocc:]
     goovv = ge['oovv']
 
@@ -144,29 +212,47 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
     goovv_mn = goovv[mm, nn]                            # (P, e, f)
     gvovv_Q = ge['vovv'][:, :, md, ne]                  # (a, m, Q)
     goovo_mn = ge['oovo'][mm, nn]                       # (P, e, j)
-    dWv = np.zeros((vm.npair, nvir, nocc), dtype=dtype)  # [Q(ab), e, i]
-    dWo = np.zeros((nocc, nvir, om.npair), dtype=dtype)  # [m, a, P(ij)]
-    r1 = np.zeros((nocc, nvir), dtype=dtype)
+    dWvT = np.zeros((nocc, nvir, vm.npair), dtype=dtype)  # [i, e, Q(ab)]
+    dWo = np.zeros((nocc, nvir, om.npair), dtype=dtype)   # [m, a, P(ij)]
+    r1 = np.zeros(nvir * nocc, dtype=dtype)
     rA = np.zeros((om.npair, vm.npair), dtype=dtype)
     B0 = np.zeros((om.npair, nvir, nvir), dtype=dtype)
     C0 = np.zeros((nocc, nocc, vm.npair), dtype=dtype)
     nb = _pair_batch_size(nocc, nvir, np.dtype(dtype).itemsize, mem_mb)
     batches = _batches(om.npair, nb)
+    # stacked integral operands so that pass 1 is two GEMMs per batch
+    G_Pd = np.concatenate((goovv_mn.transpose(1, 0, 2),        # [e, P, f]
+                           goovo_mn.transpose(2, 0, 1)), axis=0)   # [j, P, e]
+    G_mQ = np.concatenate((goovv_P.transpose(1, 2, 0),        # [n, R, m']
+                           gvovv_Q.transpose(1, 2, 0)), axis=2)    # [m, R, a]
+    G_mQ = G_mQ.reshape(nocc * vm.npair, nocc + nvir)
+    fovT = np.ascontiguousarray(fov.T).ravel()                 # [(e, m)]
     with timer('pass1'):
         for pb in batches:
+            nbp = len(pb)
             with timer('gather_half'):
-                T = t3pack.gather_half(T3p, om, vm, pb)     # (m, Pb, d, Q)
-            # dW_vvvo[Q, e, i] += sum_{P,f} g[P,e,f] T[i,P,f,Q]
-            dWv += einsum('Pef,iPfQ->Qei', goovv_mn[pb], T)
-            # dW_vooo[m, a, P] = sum_{n,R} g[m,n,R] T[n,P,a,R]
-            dWo[:, :, pb] = einsum('mnR,nPaR->maP', goovv_P, T)
-            # T3 -> T1: r1[i,a] += sum_{P,Q} g[P,Q] T[i,P,a,Q]
-            r1 += einsum('PQ,iPaQ->ia', goovv_pp[pb], T)
-            # T3 -> T2
-            rA[pb] = einsum('me,mPeQ->PQ', fov, T)
-            B0[pb] = -2 * einsum('amR,mPbR->Pab', gvovv_Q, T)
-            C0 -= 2 * einsum('Pej,iPeQ->ijQ', goovo_mn[pb], T)
-            del T
+                T = t3pack.gather_half(T3p, om, vm, pb)     # (Pb, d, m, Q)
+            with timer('pass1_gemm'):
+                # sum over (P, d): dW_vvvo[i,e,Q] and C0[i,j,Q]
+                X = G_Pd[:, pb].reshape(nvir + nocc, nbp * nvir) @ \
+                    T.reshape(nbp * nvir, nocc * vm.npair)
+                X = X.reshape(nvir + nocc, nocc, vm.npair)
+                dWvT += X[:nvir].transpose(1, 0, 2)
+                C0 -= 2 * X[nvir:].transpose(1, 0, 2)
+                # sum over (m, Q): dW_vooo[m',a,P] and B0[P,a,b]
+                Y = T.reshape(nbp * nvir, nocc * vm.npair) @ G_mQ
+                Y = Y.reshape(nbp, nvir, nocc + nvir)
+                dWo[:, :, pb] = Y[:, :, :nocc].transpose(2, 1, 0)
+                B0[pb] = -2 * Y[:, :, nocc:].transpose(0, 2, 1)
+                # T3 -> T1: r1[a,i] += sum_{P,Q} g[P,Q] T[P,a,i,Q]
+                Tm = T.reshape(nbp, nvir * nocc, vm.npair)
+                for k, P in enumerate(pb):
+                    r1 += Tm[k] @ goovv_pp[P]
+                # T3 -> T2: rA[P,Q] = sum_{m,e} f[m,e] T[P,e,m,Q]
+                rA[pb] = np.matmul(fovT, Tm)
+            del T, Tm, X, Y
+    r1 = r1.reshape(nvir, nocc).T
+    dWv = dWvT.transpose(2, 1, 0)                       # [Q, e, i]
     t1new = t1new + r1 / eia
     rB = 0.5 * (B0[:, md, ne] - B0[:, ne, md])
     rC = -0.5 * (C0[mm, nn] - C0[nn, mm])
@@ -189,49 +275,51 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000):
         Wvooo -= (0.5 * einsum('mbef,ijef->mbij', ovvv, t2)).transpose(0, 1, 3, 2)
         Wo = Wvooo[:, :, nn, mm] + dWo                   # [m, a, P(ij)]
         Weff_ovvo = ge['ovvo'] + einsum('mnde,inae->madi', goovv, t2)
-        Wring = Weff_ovvo.transpose(3, 1, 0, 2).reshape(nocc * nvir, nocc * nvir)
         Feff_vv = fvv - einsum('Paf,Pdf->ad', t2mn, goovv_mn)
         Feff_oo = foo + einsum('mnP,inP->mi', goovv_P, t2P)
-        Wpp = ge['vvvv'][md[:, None], ne[:, None], md, ne] + t2mn[:, md, ne].T @ goovv_pp
+        Wpp = vvvv_pp + t2mn[:, md, ne].T @ goovv_pp
         # F_vv folded into the ladder: W(ab,de) += 1/2 A[F_ad delta_be]
-        I = np.eye(nvir)
-        FI = (einsum('ad,be->abde', Feff_vv, I) - einsum('bd,ae->abde', Feff_vv, I)
-              - einsum('ae,bd->abde', Feff_vv, I) + einsum('be,ad->abde', Feff_vv, I))
-        Wpp += 0.5 * FI[md[:, None], ne[:, None], md, ne]
-        del FI
+        add_one_body_pairs(Wpp, Feff_vv, vm, 0.5)
         Weff_oooo = ge['oooo'] + einsum('mnP,ijP->mnij', goovv_P, t2P)
         O6 = t3pack.occ_operator(om, lambda t: _occ_apply(t, Weff_oooo, Feff_oo))
 
     R = np.zeros((om.ntri, vm.ntri), dtype=dtype)
 
-    # ---- pass 2: ring + drive, one antisymmetrizing reduction per batch
+    # ---- pass 2: ring + drive in one buffer Z[P, a, i, Q], reduced once
+    # ring operator rows (a, i), columns (d, m) to match T[P, d, m, Q]
+    WringT = Weff_ovvo.transpose(1, 3, 2, 0).reshape(nvir * nocc, nvir * nocc)
+    WvT2 = np.ascontiguousarray(Wv.transpose(1, 2, 0)).reshape(nvir, -1)   # [e, (i,Q)]
+    t2P_flat = t2P.reshape(nocc, -1)                                     # [m, (k,Q)]
     with timer('pass2'):
         for pb in batches:
+            nbp = len(pb)
             with timer('gather_half'):
-                T = t3pack.gather_half(T3p, om, vm, pb)     # (m, Pb, d, Q)
+                T = t3pack.gather_half(T3p, om, vm, pb)     # (Pb, d, m, Q)
             with timer('ring_gemm'):
-                Tm = T.transpose(0, 2, 1, 3).reshape(nocc * nvir, -1)
-                Z = (Wring @ Tm).reshape(nocc, nvir, len(pb), vm.npair)  # [i,a,P,Q]
+                Z = np.empty((nbp, nvir * nocc, vm.npair), dtype=dtype)
+                Tm = T.reshape(nbp, nvir * nocc, vm.npair)
+                for k in range(nbp):
+                    gemm(WringT, Tm[k], Z[k])               # Z[P, a, i, Q]
             del T, Tm
             with timer('drive'):
-                # Xr1[i,P,Q,c] = sum_e Wv[Q,e,i] t2mn[P,e,c]
-                Z -= einsum('Qei,Pec->icPQ', Wv, t2mn[pb])
-                # Xr2[k,P,Q,a] = sum_m Wo[m,a,P] t2P[m,k,Q]
-                Z -= einsum('maP,mkQ->kaPQ', Wo[:, :, pb], t2P)
+                Zf = Z.reshape(nbp * nvir, nocc * vm.npair)
+                # Xr1: Z[P,c,i,Q] -= sum_e t2mn[P,e,c] Wv[Q,e,i]
+                gemm(t2mn[pb].transpose(0, 2, 1).reshape(nbp * nvir, nvir), WvT2,
+                     Zf, alpha=-1.0, beta=1.0)
+                # Xr2: Z[P,a,k,Q] -= sum_m Wo[m,a,P] t2P[m,k,Q]
+                gemm(Wo[:, :, pb].transpose(2, 1, 0).reshape(nbp * nvir, nocc),
+                     t2P_flat, Zf, alpha=-1.0, beta=1.0)
             with timer('reduce'):
-                Xv = t3pack.reduce_vir(Z.transpose(0, 2, 1, 3), vm)   # (i, P, A)
+                t3pack.add_reduce_split(R, Z, om, vm, pb)
                 del Z
-                t3pack.scatter_occ(R, Xv, om, pb)
-                del Xv
 
     # ---- pp ladder (+F_vv) over batches of occupied triples
     with timer('pp_ladder'):
         nbt = max(1, int(mem_mb * 1e6 // (3 * vm.npair * nvir * np.dtype(dtype).itemsize)))
         for rows in _batches(om.ntri, nbt):
-            T = t3pack.gather_vir_half(T3p, vm, rows)            # (nb, Q, c)
-            X = (Wpp @ T.transpose(1, 0, 2).reshape(vm.npair, -1))
-            X = X.reshape(vm.npair, len(rows), nvir).transpose(1, 0, 2)
-            R[rows] += t3pack.reduce_vir_pair_first(X, vm)
+            T = t3pack.gather_vir_half(T3p, vm, rows)            # (Q, nb, c)
+            X = gemm(Wpp, T.reshape(vm.npair, -1))                # (Q', nb*c)
+            t3pack.add_reduce_pair_first(R, X, vm, rows)
             del T, X
 
     # ---- hh ladder (+F_oo): occupied-space operator on packed T3

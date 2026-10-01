@@ -6,6 +6,14 @@ from zccsdt.cc import t3pack, ccsdt
 NO, NV = 5, 7
 
 
+@pytest.fixture(params=['c', 'numpy'])
+def impl(request, monkeypatch):
+    if request.param == 'c' and not t3pack.USE_C:
+        pytest.skip('C kernels not built')
+    monkeypatch.setattr(t3pack, 'USE_C', request.param == 'c')
+    return request.param
+
+
 def _rand(shape, rng, cplx):
     x = rng.standard_normal(shape)
     return x + 1j * rng.standard_normal(shape) if cplx else x
@@ -27,7 +35,7 @@ def _pack(t3):
 
 
 @pytest.mark.parametrize('cplx', [False, True])
-def test_gathers(cplx):
+def test_gathers(cplx, impl):
     rng = np.random.default_rng(1)
     t3 = _full_t3(rng, cplx)
     T3p = _pack(t3)
@@ -36,16 +44,16 @@ def test_gathers(cplx):
     T = t3pack.gather_half(T3p, om, vm, pairs)
     P, Q = om.pairs[pairs], vm.pairs
     ref = t3[:, P[:, 0], P[:, 1]][:, :, :, Q[:, 0], Q[:, 1]]   # (m, P, d, Q)
-    np.testing.assert_allclose(T, ref, atol=1e-13)
+    np.testing.assert_allclose(T, ref.transpose(1, 2, 0, 3), atol=1e-13)
     rows = np.array([0, 4, 5])
     Tv = t3pack.gather_vir_half(T3p, vm, rows)
     tri = om.triples[rows]
     ref = t3[tri[:, 0], tri[:, 1], tri[:, 2]][:, Q[:, 0], Q[:, 1], :]
-    np.testing.assert_allclose(Tv, ref, atol=1e-13)
+    np.testing.assert_allclose(Tv, ref.transpose(1, 0, 2), atol=1e-13)
 
 
 @pytest.mark.parametrize('cplx', [False, True])
-def test_reductions(cplx):
+def test_reductions(cplx, impl):
     '''P(i/jk)P(a/bc) of X[i, a, jk, bc] (antisymmetric within the pairs).'''
     rng = np.random.default_rng(2)
     X = _asym_pair(_asym_pair(_rand((NO, NV, NO, NO, NV, NV), rng, cplx), 2), 4)
@@ -56,18 +64,34 @@ def test_reductions(cplx):
     Xh = X[:, :, om.pairs[:, 0], om.pairs[:, 1]][..., vm.pairs[:, 0], vm.pairs[:, 1]]
     R = np.zeros((om.ntri, vm.ntri), dtype=Xh.dtype)
     for batch in (np.arange(0, 4), np.arange(4, om.npair)):
-        Xv = t3pack.reduce_vir(Xh[:, :, batch].transpose(0, 2, 1, 3), vm)
+        Xv = t3pack.reduce_vir(Xh[:, :, batch].transpose(2, 0, 1, 3), vm)
         t3pack.scatter_occ(R, Xv, om, batch)
     np.testing.assert_allclose(R, _pack(full), atol=1e-12)
+    # split layout Z[P, a, i, Q]
+    R2 = np.zeros_like(R)
+    for batch in (np.arange(0, 3), np.arange(3, om.npair)):
+        Z = np.ascontiguousarray(Xh[:, :, batch].transpose(2, 1, 0, 3))
+        t3pack.scatter_occ(R2, t3pack.reduce_vir_split(Z, vm, NO), om, batch)
+    np.testing.assert_allclose(R2, _pack(full), atol=1e-12)
+    # fused reduce + scatter
+    R3 = np.zeros_like(R)
+    for batch in (np.arange(0, 3), np.arange(3, om.npair)):
+        Z = np.ascontiguousarray(Xh[:, :, batch].transpose(2, 1, 0, 3))
+        t3pack.add_reduce_split(R3, Z, om, vm, batch)
+    np.testing.assert_allclose(R3, _pack(full), atol=1e-12)
     # pair-first variant: Y[I, Q, c] with P(c/ab)
     Y = _asym_pair(_rand((3, NV, NV, NV), rng, cplx), 1)[:, vm.pairs[:, 0], vm.pairs[:, 1]]
     Yf = np.zeros((3, NV, NV, NV), dtype=Y.dtype)
     Yf[:, vm.pairs[:, 0], vm.pairs[:, 1]] = Y
     Yf[:, vm.pairs[:, 1], vm.pairs[:, 0]] = -Y
     ref = Yf - Yf.transpose(0, 3, 2, 1) - Yf.transpose(0, 1, 3, 2)
-    got = t3pack.reduce_vir_pair_first(Y, vm)
-    np.testing.assert_allclose(got, ref[:, vm.triples[:, 0], vm.triples[:, 1],
-                                        vm.triples[:, 2]], atol=1e-12)
+    want = ref[:, vm.triples[:, 0], vm.triples[:, 1], vm.triples[:, 2]]
+    np.testing.assert_allclose(t3pack.reduce_vir_pair_first(Y, vm), want, atol=1e-12)
+    Racc = np.zeros((5, vm.ntri), dtype=Y.dtype)
+    t3pack.add_reduce_pair_first(Racc, np.ascontiguousarray(Y.transpose(1, 0, 2)), vm,
+                                 np.array([4, 0, 2]))
+    np.testing.assert_allclose(Racc[[4, 0, 2]], want, atol=1e-12)
+    assert not Racc[[1, 3]].any()
 
 
 def test_occ_operator():

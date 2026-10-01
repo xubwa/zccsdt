@@ -12,3 +12,10 @@ target_compile_options(ccsdt_clib PRIVATE -O3 -march=native)
 target_link_libraries(ccsdt_clib PUBLIC OpenMP::OpenMP_C m)
 set_target_properties(ccsdt_clib PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
+
+# packed-T3 gather / antisymmetrizing-reduction kernels (double and complex)
+add_library(zc_t3pack SHARED t3pack.c)
+target_compile_options(zc_t3pack PRIVATE -O3 -march=native)
+target_link_libraries(zc_t3pack PUBLIC OpenMP::OpenMP_C m)
+set_target_properties(zc_t3pack PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
