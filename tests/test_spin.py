@@ -103,3 +103,45 @@ def test_spin_block_step_equals_dense(system):
     assert abs(eng.L.to_dense(b3) - D3).max() < 1e-12
     # spin-forbidden blocks of the dense step stay zero
     assert abs(D3[om.tri_grp[:, None] != vm.tri_grp[None, :]]).max() < 1e-14
+
+
+@pytest.mark.parametrize('system', ['uhf', 'rhf'])
+@pytest.mark.parametrize('cplx', [False, True])
+def test_spin_block_c_equals_numpy(system, cplx):
+    from zccsdt.cc import t3engine
+    mf = nh2_uhf() if system == 'uhf' else h2o_rhf()
+    e = E.from_scf(mf, frozen=2, spin_order=True)
+    om, vm = t3pack.maps_for(e)
+    dt = np.complex128 if cplx else np.float64
+    eng = t3engine.SpinBlockT3(om, vm, dt, 0.05)       # tiny budget: many batches
+    if not eng.use_c:
+        pytest.skip('C kernels not built')
+    rng = np.random.default_rng(3)
+    no, nv, npo, npv = om.n, vm.n, om.npair, vm.npair
+    so, sv, gP, gQ = om.spins, vm.spins, om.pair_grp, vm.pair_grp
+
+    def rnd(*s):
+        x = rng.random(s) - 0.5
+        return x + 1j * (rng.random(s) - 0.5) if cplx else x
+    T3 = rnd(eng.size)
+    G_Pd = rnd(nv + no, npo, nv)
+    G_Pd[:nv] *= gP[None, :, None] == sv[:, None, None] + sv[None, None, :]
+    G_Pd[nv:] *= gP[None, :, None] == so[:, None, None] + sv[None, None, :]
+    G3 = rnd(no, npv, no + nv)
+    G3[:, :, :no] *= so[:, None, None] + so[None, None, :] == gQ[None, :, None]
+    G3[:, :, no:] *= so[:, None, None] + sv[None, None, :] == gQ[None, :, None]
+    gpp = rnd(npo, npv) * (gP[:, None] == gQ[None, :])
+    fov = rnd(no, nv) * (so[:, None] == sv[None, :])
+    args = (T3, G_Pd, G3.reshape(no * npv, -1), gpp, fov)
+    for x, y in zip(eng._pass1_c(*args), eng._pass1_np(*args)):
+        np.testing.assert_allclose(x, y, atol=1e-12)
+    Wr = rnd(nv, no, nv, no) * ((sv[:, None, None, None] - so[None, :, None, None])
+                                == (sv[None, None, :, None] - so[None, None, None, :]))
+    t2mn = rnd(npo, nv, nv) * (gP[:, None, None] == sv[None, :, None] + sv[None, None, :])
+    Wv = rnd(npv, nv, no) * (gQ[:, None, None] == sv[None, :, None] + so[None, None, :])
+    Wo = rnd(no, nv, npo) * (so[:, None, None] + sv[None, :, None] == gP[None, None, :])
+    t2P = rnd(no, no, npv) * (so[:, None, None] + so[None, :, None] == gQ[None, None, :])
+    Wpp = rnd(npv, npv) * (gQ[:, None] == gQ[None, :])
+    O6 = rnd(om.ntri, om.ntri) * (om.tri_grp[:, None] == om.tri_grp[None, :])
+    rargs = (T3, Wr.reshape(nv * no, -1), t2mn, Wv, Wo, t2P, Wpp, O6)
+    np.testing.assert_allclose(eng._residual_c(*rargs), eng._residual_np(*rargs), atol=1e-11)

@@ -3,7 +3,9 @@
 usage: python bench/profile_iter.py MOLECULE BASIS KIND [NITER] [FROZEN]
   MOLECULE: h2o | n2 | h2s     KIND: ghf | x2c
 environment: ZC_PACKED=1 builds the integrals block-wise with packed vvvv
-             (needed for large bases); ZC_MEM_MB sets the batch buffer budget.
+             (needed for large bases); ZC_MEM_MB sets the batch buffer budget;
+             ZC_SPIN=1 (ghf only) uses alpha-first orbitals and the spin-blocked
+             T3 engine (UCCSDT); ZC_FLIP=1 adds closed-shell spin flip (RCCSDT).
 '''
 import os
 import sys
@@ -33,8 +35,9 @@ def main():
         mf = scf.addons.convert_to_ghf(scf.RHF(mol).run(conv_tol=1e-10))
     t0 = time.perf_counter()
     packed = os.environ.get('ZC_PACKED', '0') == '1'
+    spin = os.environ.get('ZC_SPIN', '0') == '1' and kind == 'ghf'
     eris = E.from_scf(mf, frozen=frozen, packed_vvvv=packed,
-                      vir_batch=int(os.environ.get('ZC_VBATCH', 16)))
+                      vir_batch=int(os.environ.get('ZC_VBATCH', 16)), spin_order=spin)
     t_ints = time.perf_counter() - t0
     nocc = eris.nocc
     nvir = eris.nmo - nocc
@@ -42,7 +45,8 @@ def main():
           % (mol_name, basis, kind, nocc, nvir, eris.dtype, t_ints))
     timing.reset()
     opts = solver.Options(max_cycle=niter, verbose=True,
-                          mem_mb=float(os.environ.get('ZC_MEM_MB', 2000)))
+                          mem_mb=float(os.environ.get('ZC_MEM_MB', 2000)),
+                          spin_flip=os.environ.get('ZC_FLIP', '0') == '1')
     r = solver.kernel(eris, 'ccsdt', opts)
     per = len(r.timings)
     print('iterations: ' + ' '.join('%.2f' % t for t in r.timings))

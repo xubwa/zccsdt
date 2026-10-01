@@ -228,3 +228,135 @@ void zc_pair_t1_contract_##SFX(T *out, const T *V, const T *t, int64_t nq,     \
 }
 DEFINE_PAIRHELP(double, d)
 DEFINE_PAIRHELP(double complex, z)
+
+/* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----
+ * Element T3[I, A] = osig[I] vsig[A] T3b[obase[I] + vcol[A]] for occupied
+ * triple I and virtual triple A of equal spin group. */
+
+#define DEFINE_BLOCKED(T, SFX)                                                 \
+/* out[p * ldP + (id * nm + im) * nQ + q] =                                    \
+ *     t3[m, P_0, P_1, d, Q_0, Q_1],  P = Pidx[p], d = didx[id], m = midx[im], \
+ *     Q = Qlo + q.  otri/osgn: (no, npo); vtri/vsgn: (nv, nvp). */            \
+void zc_bgather_##SFX(const T *T3b, const int64_t *obase, const int64_t *vcol, \
+                      const double *osig, const double *vsig,                  \
+                      const int64_t *otri, const int8_t *osgn, int64_t npo,    \
+                      const int64_t *vtri, const int8_t *vsgn, int64_t nvp,    \
+                      int64_t nP, const int64_t *Pidx, int64_t nd,             \
+                      const int64_t *didx, int64_t nm, const int64_t *midx,    \
+                      int64_t Qlo, int64_t nQ, int64_t ldP, T *out)            \
+{                                                                              \
+    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
+    for (int64_t p = 0; p < nP; p++)                                           \
+    for (int64_t id = 0; id < nd; id++) {                                      \
+        const int64_t P = Pidx[p], d = didx[id];                               \
+        const int64_t *vt = vtri + d * nvp + Qlo;                              \
+        const int8_t *vs = vsgn + d * nvp + Qlo;                               \
+        for (int64_t im = 0; im < nm; im++) {                                  \
+            const int64_t m = midx[im];                                        \
+            T *o = out + p * ldP + (id * nm + im) * nQ;                        \
+            const int8_t so = osgn[m * npo + P];                               \
+            if (so == 0) { memset(o, 0, sizeof(T) * nQ); continue; }           \
+            const int64_t ti = otri[m * npo + P];                               \
+            const T *row = T3b + obase[ti];                                     \
+            const double f = so * osig[ti];                                     \
+            for (int64_t q = 0; q < nQ; q++) {                                 \
+                const int64_t A = vt[q];                                       \
+                o[q] = (f * vs[q] * vsig[A]) * row[vcol[A]];                   \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* Pass-2 reduction into blocked R: for every computed target I (Rbase >= 0)  \
+ * and r with P = pair_r(I) in [p0, p1), x = free_r(I):                        \
+ *   R[I, A] += rs_r sum_s rs_s Z[zoff[(P-p0)*3 + gQ] + rowpos[a, x] nQg[gQ]    \
+ *                                + (Q - Qoff[gQ])],                           \
+ * a = free_s(A), Q = pair_s(A), gQ = vpgrp[Q], for A in the vir group of I. */ \
+void zc_breduce_pass2_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol,   \
+                            int64_t nto, const int64_t *ogrp,                  \
+                            const int64_t *ofree, const int64_t *opair,        \
+                            int64_t nvt, const int64_t *voff,                  \
+                            const int64_t *vfree, const int64_t *vpair,        \
+                            const int64_t *vpgrp, int64_t p0, int64_t p1,      \
+                            const int64_t *zoff, const int64_t *nQg,           \
+                            const int64_t *Qoff, const int64_t *rowpos,        \
+                            int64_t no, const T *Z)                            \
+{                                                                              \
+    _Pragma("omp parallel for schedule(dynamic, 2)")                           \
+    for (int64_t it = 0; it < nto; it++) {                                     \
+        if (Rbase[it] < 0) continue;                                           \
+        const int64_t g = ogrp[it];                                            \
+        T *r = R + Rbase[it];                                                  \
+        for (int rr = 0; rr < 3; rr++) {                                       \
+            const int64_t P = opair[rr * nto + it];                            \
+            if (P < p0 || P >= p1) continue;                                   \
+            const int64_t x = ofree[rr * nto + it];                            \
+            const int64_t *zo = zoff + (P - p0) * 3;                           \
+            const double sg = (rr == 1) ? -1.0 : 1.0;                          \
+            for (int64_t A = voff[g]; A < voff[g + 1]; A++) {                  \
+                T acc = 0;                                                     \
+                for (int s = 0; s < 3; s++) {                                  \
+                    const int64_t a = vfree[s * nvt + A], Q = vpair[s * nvt + A]; \
+                    const int64_t gq = vpgrp[Q];                               \
+                    const T v = Z[zo[gq] + rowpos[a * no + x] * nQg[gq] + (Q - Qoff[gq])]; \
+                    acc += (s == 1) ? -v : v;                                  \
+                }                                                              \
+                r[Rcol[A]] += sg * acc;                                        \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* out[(q * nrows + ib) * nc + cl] = t3[rows[ib], Q_0, Q_1, c],                \
+ * Q = Qlo + q, c = c0 + cl. */                                                \
+void zc_bgather_vir_##SFX(const T *T3b, const int64_t *obase,                  \
+                          const int64_t *vcol, const double *osig,             \
+                          const double *vsig, const int64_t *vtri,             \
+                          const int8_t *vsgn, int64_t nvp, int64_t nrows,      \
+                          const int64_t *rows, int64_t Qlo, int64_t nQ,        \
+                          int64_t c0, int64_t nc, T *out)                      \
+{                                                                              \
+    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
+    for (int64_t q = 0; q < nQ; q++)                                           \
+    for (int64_t ib = 0; ib < nrows; ib++) {                                   \
+        const int64_t ti = rows[ib], Q = Qlo + q;                               \
+        const T *row = T3b + obase[ti];                                         \
+        const double f = osig[ti];                                              \
+        T *o = out + (q * nrows + ib) * nc;                                    \
+        for (int64_t cl = 0; cl < nc; cl++) {                                  \
+            const int64_t c = c0 + cl;                                         \
+            const int64_t A = vtri[c * nvp + Q];                               \
+            o[cl] = (f * vsgn[c * nvp + Q] * vsig[A]) * row[vcol[A]];          \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* pp-ladder reduction into blocked R for the triples rows[] of group g:      \
+ * R[I, A] += sum_s rs_s X_sc[(Q - hoff[sc]) nrows nc[sc] + ib nc[sc]          \
+ *                            + (c - coff[sc])],  c = free_s(A), Q = pair_s(A), \
+ * sc = vspin[c];  X0 / X1 are the GEMM outputs for c alpha / beta. */         \
+void zc_breduce_ppl_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol,     \
+                          int64_t nrows, const int64_t *rows, int64_t nvt,     \
+                          int64_t A0, int64_t A1, const int64_t *vfree,        \
+                          const int64_t *vpair, const int64_t *vspin,          \
+                          const int64_t *hoff, const int64_t *ncs,             \
+                          const int64_t *coff, const T *X0, const T *X1)       \
+{                                                                              \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t ib = 0; ib < nrows; ib++) {                                   \
+        T *r = R + Rbase[rows[ib]];                                            \
+        for (int64_t A = A0; A < A1; A++) {                                    \
+            T acc = 0;                                                         \
+            for (int s = 0; s < 3; s++) {                                      \
+                const int64_t c = vfree[s * nvt + A], Q = vpair[s * nvt + A];  \
+                const int64_t sc = vspin[c];                                   \
+                const T *X = sc ? X1 : X0;                                     \
+                const T v = X[((Q - hoff[sc]) * nrows + ib) * ncs[sc] + (c - coff[sc])]; \
+                acc += (s == 1) ? -v : v;                                      \
+            }                                                                  \
+            r[Rcol[A]] += acc;                                                 \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_BLOCKED(double, d)
+DEFINE_BLOCKED(double complex, z)

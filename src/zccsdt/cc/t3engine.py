@@ -14,6 +14,8 @@ Both engines take the same dense intermediates and return the same dense
 pass-1 quantities, so ccsdt_opt.update_amps does not depend on the engine.
 '''
 
+import ctypes
+
 import numpy as np
 
 from zccsdt.blas import gemm
@@ -230,6 +232,16 @@ class SpinBlockT3:
         # composite (d, m) / (a, i) index sets D_delta, delta = s(vir) - s(occ),
         # as lists of (s_vir, s_occ) sub-blocks, each vir-major
         self.dsub = {-1: [(0, 1)], 0: [(0, 0), (1, 1)], 1: [(1, 0)]}
+        self.use_c = t3pack.USE_C and hasattr(t3pack._lib, 'zc_bgather_d')
+        L = self.L
+        # targets of the residual: stored groups only (R in the stored layout)
+        self.Rbase = np.where(np.isin(om.tri_grp, L.stored), L.obase, -1).astype(np.int64)
+        self.Rcol = np.ascontiguousarray(L.vcol)
+        # position of (a, x) inside its D_delta (delta = s(a) - s(x))
+        self.rowpos = -np.ones((vm.n, om.n), dtype=np.int64)
+        for delta in (-1, 0, 1):
+            a, i = self._rows(delta)
+            self.rowpos[a, i] = np.arange(len(a))
 
     # ---- gathers (numpy reference)
     def gather(self, T3, P, d, m, Qlo, Qhi):
@@ -247,6 +259,11 @@ class SpinBlockT3:
 
     # ---- pass 1
     def pass1(self, T3, G_Pd, G_mQ, gpp, fov):
+        if self.use_c:
+            return self._pass1_c(T3, G_Pd, G_mQ, gpp, fov)
+        return self._pass1_np(T3, G_Pd, G_mQ, gpp, fov)
+
+    def _pass1_np(self, T3, G_Pd, G_mQ, gpp, fov):
         om, vm, dtype = self.om, self.vm, self.dtype
         nocc, nvir = om.n, vm.n
         npv = vm.npair
@@ -290,9 +307,14 @@ class SpinBlockT3:
 
     # ---- residual
     def residual(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6):
-        '''T3 residual on the stored blocks (flat, layout of T3).  Numpy
-        reference: blocked GEMMs, scattered into dense buffers and reduced with
-        the dense kernels.'''
+        '''T3 residual on the stored blocks (flat, layout of T3).'''
+        if self.use_c:
+            return self._residual_c(T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6)
+        return self._residual_np(T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6)
+
+    def _residual_np(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6):
+        '''Numpy reference: blocked GEMMs, scattered into dense buffers and
+        reduced with the dense kernels.'''
         om, vm, dtype, L = self.om, self.vm, self.dtype, self.L
         nocc, nvir = om.n, vm.n
         Rd = np.zeros((om.ntri, vm.ntri), dtype=dtype)
@@ -391,6 +413,14 @@ class SpinBlockT3:
 
     def update(self, T3, R, eo, ev):
         L, om, vm = self.L, self.om, self.vm
+        if self.use_c and t3kern.USE_C:
+            for g in L.stored:
+                if L.nI[g] == 0 or L.nA[g] == 0:
+                    continue
+                I = slice(om.tri_off[g], om.tri_off[g + 1])
+                A = slice(vm.tri_off[g], vm.tri_off[g + 1])
+                t3kern.update_into_r(L.block(T3, g), L.block(R, g), eo[I], ev[A])
+            return R
         out = np.empty_like(R)
         for g in L.stored:
             I = slice(om.tri_off[g], om.tri_off[g + 1])
@@ -398,6 +428,229 @@ class SpinBlockT3:
             L.block(out, g)[:] = L.block(T3, g) + L.block(R, g) / (
                 eo[I][:, None] - ev[A][None, :])
         return out
+
+
+class _CArgs:
+    '''ctypes helpers for the blocked kernels.'''
+    @staticmethod
+    def I(x):
+        return ctypes.c_int64(int(x))
+
+    @staticmethod
+    def p(a, off=0):
+        return ctypes.c_void_p(int(a.ctypes.data) + int(off) * a.itemsize)
+
+
+def _cgather(eng, T3, Pidx, didx, midx, Qlo, Qhi, out, off, ldP):
+    om, vm, L = eng.om, eng.vm, eng.L
+    f = getattr(t3pack._lib, 'zc_bgather_' + t3pack._sfx(T3.dtype))
+    I, p = _CArgs.I, _CArgs.p
+    f(p(T3), p(L.obase), p(L.vcol), p(L.osig), p(L.vsig), p(om.tri_c), p(om.sgn_c),
+      I(om.npair), p(vm.tri_c), p(vm.sgn_c), I(vm.npair), I(len(Pidx)), p(Pidx),
+      I(len(didx)), p(didx), I(len(midx)), p(midx), I(Qlo), I(Qhi - Qlo), I(ldP),
+      p(out, off))
+
+
+def _spin_block_c_methods():
+    def _pass1_c(self, T3, G_Pd, G_mQ, gpp, fov):
+        om, vm, dtype = self.om, self.vm, self.dtype
+        nocc, nvir = om.n, vm.n
+        npv = vm.npair
+        Xacc = np.zeros((nvir + nocc, nocc, npv), dtype=dtype)
+        Yall = np.zeros((om.npair, nvir, nocc + nvir), dtype=dtype)
+        r1 = np.zeros((nvir, nocc), dtype=dtype)
+        rA = np.zeros((om.npair, npv), dtype=dtype)
+        G3 = G_mQ.reshape(nocc, npv, nocc + nvir)
+        vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
+        orr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.orng]
+        for gP in range(3):
+            for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
+                p0, p1 = pb[0], pb[-1] + 1
+                for sd in (0, 1):
+                    for sm in (0, 1):
+                        gQ = gP + sm - sd
+                        if not 0 <= gQ <= 2:
+                            continue
+                        d, m = self.vrng[sd], self.orng[sm]
+                        Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
+                        nd, nm, nQ = len(d), len(m), Qhi - Qlo
+                        if nd == 0 or nm == 0 or nQ == 0:
+                            continue
+                        T = np.empty((len(pb), nd, nm, nQ), dtype=dtype)
+                        _cgather(self, T3, pb, d, m, Qlo, Qhi, T, 0, nd * nm * nQ)
+                        Tf = T.reshape(len(pb) * nd, nm * nQ)
+                        sy = gP - sd
+                        if 0 <= sy <= 1:
+                            e0, e1 = vr[sy]
+                            j0, j1 = orr[sy]
+                            G = np.concatenate((G_Pd[e0:e1, p0:p1, vr[sd][0]:vr[sd][1]],
+                                                G_Pd[nvir + j0:nvir + j1, p0:p1,
+                                                     vr[sd][0]:vr[sd][1]]), axis=0)
+                            X = gemm(np.ascontiguousarray(G).reshape(G.shape[0], -1), Tf)
+                            X = X.reshape(-1, nm, nQ)
+                            m0, m1 = orr[sm]
+                            Xacc[e0:e1, m0:m1, Qlo:Qhi] += X[:e1 - e0]
+                            Xacc[nvir + j0:nvir + j1, m0:m1, Qlo:Qhi] += X[e1 - e0:]
+                            Gy = np.concatenate((G3[m0:m1, Qlo:Qhi, j0:j1],
+                                                 G3[m0:m1, Qlo:Qhi, nocc + e0:nocc + e1]),
+                                                axis=2).reshape(nm * nQ, -1)
+                            Y = gemm(Tf, np.ascontiguousarray(Gy)).reshape(len(pb), nd, -1)
+                            d0, d1 = vr[sd]
+                            Yall[p0:p1, d0:d1, j0:j1] += Y[:, :, :j1 - j0]
+                            Yall[p0:p1, d0:d1, nocc + e0:nocc + e1] += Y[:, :, j1 - j0:]
+                        if sd == sm:
+                            d0, d1 = vr[sd]
+                            m0, m1 = orr[sm]
+                            Tm = T.reshape(len(pb), nd * nm, nQ)
+                            acc = np.zeros(nd * nm, dtype=dtype)
+                            for k, P in enumerate(pb):
+                                acc += Tm[k] @ gpp[P, Qlo:Qhi]
+                            r1[d0:d1, m0:m1] += acc.reshape(nd, nm)
+                            fdm = np.ascontiguousarray(fov[m0:m1, d0:d1].T).ravel()
+                            rA[p0:p1, Qlo:Qhi] += np.matmul(fdm, Tm)
+        return Xacc, Yall, r1, rA
+
+    def _residual_c(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6):
+        om, vm, dtype, L = self.om, self.vm, self.dtype, self.L
+        R = np.zeros(L.size, dtype=dtype)
+        with timer('pass2'):
+            self._pass2_c(T3, WringT, t2mn, Wv, Wo, t2P, R)
+        with timer('pp_ladder'):
+            self._ppl_c(T3, Wpp, R)
+        with timer('hh_ladder'):
+            for g in L.stored:
+                if L.nI[g] == 0 or L.nA[g] == 0:
+                    continue
+                I = slice(om.tri_off[g], om.tri_off[g + 1])
+                gemm(np.ascontiguousarray(O6[I, I], dtype=dtype), L.block(T3, g),
+                     L.block(R, g), beta=1.0)
+        return R
+
+    def _pass2_c(self, T3, WringT, t2mn, Wv, Wo, t2P, R):
+        om, vm, dtype, L = self.om, self.vm, self.dtype, self.L
+        nocc, nvir = om.n, vm.n
+        vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
+        orr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.orng]
+        Wd, nD = {}, {}
+        for delta in (-1, 0, 1):
+            a, i = self._rows(delta)
+            flat = a * nocc + i
+            Wd[delta] = np.ascontiguousarray(WringT[flat[:, None], flat], dtype=dtype)
+            nD[delta] = len(a)
+        # drive right-hand sides B[(e|m), (i, Q)] per (gQ, s_i), e and m of spin gQ - s_i
+        Bd = {}
+        for gQ in range(3):
+            Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
+            for si in (0, 1):
+                se = gQ - si
+                if not 0 <= se <= 1 or Qhi == Qlo:
+                    continue
+                (e0, e1), (i0, i1), (m0, m1) = vr[se], orr[si], orr[se]
+                B1 = Wv[Qlo:Qhi, e0:e1, i0:i1].transpose(1, 2, 0)          # [e, i, Q]
+                B2 = t2P[m0:m1, i0:i1, Qlo:Qhi]                            # [m, i, Q]
+                Bd[gQ, si] = np.ascontiguousarray(np.concatenate((B1, B2), axis=0),
+                                                  dtype=dtype).reshape(
+                    (e1 - e0) + (m1 - m0), -1)
+        nQg = np.array([vm.pair_off[g + 1] - vm.pair_off[g] for g in range(3)], dtype=np.int64)
+        Qoff = np.ascontiguousarray(vm.pair_off[:3], dtype=np.int64)
+        lib = t3pack._lib
+        fred = getattr(lib, 'zc_breduce_pass2_' + t3pack._sfx(dtype))
+        I_, p_ = _CArgs.I, _CArgs.p
+        top = 1 if L.flip else 2
+        for gP in range(top + 1):
+            for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
+                p0, p1, nbp = pb[0], pb[-1] + 1, len(pb)
+                gQs = [gQ for gQ in range(3) if abs(gP - gQ) <= 1 and nQg[gQ] > 0]
+                zoff = -np.ones((nbp, 3), dtype=np.int64)
+                off = 0
+                for k in range(nbp):
+                    for gQ in gQs:
+                        zoff[k, gQ] = off
+                        off += nD[gP - gQ] * nQg[gQ]
+                Z = np.empty(off, dtype=dtype)
+                for gQ in gQs:
+                    delta = gP - gQ
+                    Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
+                    nQ, nr = Qhi - Qlo, nD[delta]
+                    T = np.empty(nbp * nr * nQ, dtype=dtype)
+                    r0 = 0
+                    for sd, sm in self.dsub[delta]:
+                        d, m = self.vrng[sd], self.orng[sm]
+                        if len(d) and len(m):
+                            _cgather(self, T3, pb, d, m, Qlo, Qhi, T, r0 * nQ, nr * nQ)
+                        r0 += len(d) * len(m)
+                    T = T.reshape(nbp, nr, nQ)
+                    for k in range(nbp):
+                        Zk = Z[zoff[k, gQ]:zoff[k, gQ] + nr * nQ].reshape(nr, nQ)
+                        gemm(Wd[delta], T[k], Zk)
+                    # drive terms on the (s_c, s_i) sub-blocks of D_delta
+                    r0 = 0
+                    for sc, si in self.dsub[delta]:
+                        (c0, c1), (i0, i1) = vr[sc], orr[si]
+                        nc, ni = c1 - c0, i1 - i0
+                        se = gP - sc
+                        if nc and ni and 0 <= se <= 1 and (gQ, si) in Bd:
+                            (e0, e1), (m0, m1) = vr[se], orr[se]
+                            for k, P in enumerate(pb):
+                                A = np.concatenate((t2mn[P, e0:e1, c0:c1].T,
+                                                    Wo[m0:m1, c0:c1, P].T), axis=1)
+                                zo = zoff[k, gQ] + r0 * nQ
+                                Zs = Z[zo:zo + nc * ni * nQ].reshape(nc, ni * nQ)
+                                gemm(np.ascontiguousarray(A, dtype=dtype), Bd[gQ, si], Zs,
+                                     alpha=-1.0, beta=1.0)
+                        r0 += nc * ni
+                fred(p_(R), p_(self.Rbase), p_(self.Rcol), I_(om.ntri), p_(om.tri_grp),
+                     p_(om.free_c), p_(om.pair_c), I_(vm.ntri), p_(vm.tri_off),
+                     p_(vm.free_c), p_(vm.pair_c), p_(vm.pair_grp), I_(p0), I_(p1),
+                     p_(zoff), p_(nQg), p_(Qoff), p_(self.rowpos), I_(nocc), p_(Z))
+
+    def _ppl_c(self, T3, Wpp, R):
+        om, vm, dtype, L = self.om, self.vm, self.dtype, self.L
+        nvir = vm.n
+        vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
+        lib = t3pack._lib
+        fg = getattr(lib, 'zc_bgather_vir_' + t3pack._sfx(dtype))
+        fr = getattr(lib, 'zc_breduce_ppl_' + t3pack._sfx(dtype))
+        I_, p_ = _CArgs.I, _CArgs.p
+        Wh = {}
+        for h in range(3):
+            Qlo, Qhi = vm.pair_off[h], vm.pair_off[h + 1]
+            Wh[h] = np.ascontiguousarray(Wpp[Qlo:Qhi, Qlo:Qhi], dtype=dtype)
+        vspin = np.ascontiguousarray(vm.spins, dtype=np.int64)
+        coff = np.array([vr[0][0], vr[1][0]], dtype=np.int64)
+        ncs = np.array([vr[0][1] - vr[0][0], vr[1][1] - vr[1][0]], dtype=np.int64)
+        dummy = np.zeros(1, dtype=dtype)
+        nbt = max(1, int(self.mem_mb * 1e6 // (3 * vm.npair * nvir * np.dtype(dtype).itemsize)))
+        for g in L.stored:
+            A0, A1 = vm.tri_off[g], vm.tri_off[g + 1]
+            if A1 == A0:
+                continue
+            for rows in _batches(om.tri_off[g], om.tri_off[g + 1], nbt):
+                nb = len(rows)
+                X = [dummy, dummy]
+                hoff = np.zeros(2, dtype=np.int64)
+                for sc in (0, 1):
+                    h = g - sc
+                    if not 0 <= h <= 2 or ncs[sc] == 0:
+                        continue
+                    Qlo, Qhi = vm.pair_off[h], vm.pair_off[h + 1]
+                    if Qhi == Qlo:
+                        continue
+                    T = np.empty((Qhi - Qlo, nb, ncs[sc]), dtype=dtype)
+                    fg(p_(T3), p_(L.obase), p_(L.vcol), p_(L.osig), p_(L.vsig),
+                       p_(vm.tri_c), p_(vm.sgn_c), I_(vm.npair), I_(nb), p_(rows),
+                       I_(Qlo), I_(Qhi - Qlo), I_(coff[sc]), I_(ncs[sc]), p_(T))
+                    X[sc] = gemm(Wh[h], T.reshape(Qhi - Qlo, -1))
+                    hoff[sc] = Qlo
+                fr(p_(R), p_(self.Rbase), p_(self.Rcol), I_(nb), p_(rows), I_(vm.ntri),
+                   I_(A0), I_(A1), p_(vm.free_c), p_(vm.pair_c), p_(vspin), p_(hoff),
+                   p_(ncs), p_(coff), p_(X[0]), p_(X[1]))
+
+    return _pass1_c, _residual_c, _pass2_c, _ppl_c
+
+
+(SpinBlockT3._pass1_c, SpinBlockT3._residual_c, SpinBlockT3._pass2_c,
+ SpinBlockT3._ppl_c) = _spin_block_c_methods()
 
 
 def make_engine(om, vm, dtype, mem_mb, flip=False):
