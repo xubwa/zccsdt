@@ -181,7 +181,7 @@ def q_correction(ints, blocks, t2, t3b):
            [(x_w x_x), 4o] x [4o, (x_y x_3)] product.
 
     The energy of the quadruple is one tiled pass over the six accumulators
-    (quad_energy).  Memory: 11 v^4.'''
+    (quad_energy).  Memory: 10 v^4.'''
     from zccsdt.cc.t3pack import axpby
     from zccsdt.sa.t3blocks import gather_boxes
     from zccsdt.timing import timer
@@ -195,7 +195,6 @@ def q_correction(ints, blocks, t2, t3b):
     Wc = ctx.Wc.reshape(v, v3)
     S = [np.empty((v,) * 4) for _ in range(6)]
     Ibar = [np.empty((v,) * 4) for _ in range(3)]
-    tmp = np.empty((v,) * 4)
     As, Bs = np.empty((v, v, 4, v)), np.empty((4, v, v, v))
     As2, Bs2 = np.empty((v, v, 4, no)), np.empty((4, no, v, v))
     Tg = np.empty((3 * no, v, v, v))
@@ -205,10 +204,15 @@ def q_correction(ints, blocks, t2, t3b):
         return blocks.cube(t3b, a, b, c)
 
     def build_I(dst, oa, ob):
-        # Ibar[x_a, x_b, y, f] = I_ba[x_a | x_b, y, f] + I_ab[x_b | x_a, y, f]
-        gemm(t2[ob, oa].T, Wc, dst.reshape(v, v3))
-        gemm(t2[oa, ob].T, Wc, tmp.reshape(v, v3))
-        axpby(dst, tmp.transpose(1, 0, 2, 3), 1.0, 1.0)
+        # Ibar[x_a, x_b, y, f] = sum_e t_ab^{x_a e} (e x_b|y f) + t_ab^{e x_b} (x_a e|y f):
+        # one product over all x_a, and one per x_a into its slice (no
+        # transposed copy; (e x|y f) = (x e|y f))
+        tab = np.ascontiguousarray(t2[oa, ob])
+        gemm(tab, Wc, dst.reshape(v, v3))
+        tT = np.ascontiguousarray(tab.T)
+        d3, w3 = dst.reshape(v, v, vv), ctx.Wc.reshape(v, v, vv)
+        for a in range(v):
+            gemm(tT, w3[a], d3[a], beta=1.0)
 
     def gather(trips):
         views = [blocks.view(a, b, c, v) for a, b, c in trips]
