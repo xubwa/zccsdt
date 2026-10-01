@@ -471,6 +471,18 @@ def _spin_block_c_methods():
         G3 = G_mQ.reshape(nocc, npv, nocc + nvir)
         vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
         orr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.orng]
+        gy_cache = {}           # Y-GEMM operands depend on (sm, gQ, sy) only
+
+        def gy(sm, gQ, sy):
+            key = (sm, gQ, sy)
+            if key not in gy_cache:
+                (m0, m1), (j0, j1), (e0, e1) = orr[sm], orr[sy], vr[sy]
+                Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
+                G = np.concatenate((G3[m0:m1, Qlo:Qhi, j0:j1],
+                                    G3[m0:m1, Qlo:Qhi, nocc + e0:nocc + e1]), axis=2)
+                gy_cache[key] = np.ascontiguousarray(G).reshape((m1 - m0) * (Qhi - Qlo), -1)
+            return gy_cache[key]
+
         for gP in range(3):
             for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
                 p0, p1 = pb[0], pb[-1] + 1
@@ -499,10 +511,7 @@ def _spin_block_c_methods():
                             m0, m1 = orr[sm]
                             Xacc[e0:e1, m0:m1, Qlo:Qhi] += X[:e1 - e0]
                             Xacc[nvir + j0:nvir + j1, m0:m1, Qlo:Qhi] += X[e1 - e0:]
-                            Gy = np.concatenate((G3[m0:m1, Qlo:Qhi, j0:j1],
-                                                 G3[m0:m1, Qlo:Qhi, nocc + e0:nocc + e1]),
-                                                axis=2).reshape(nm * nQ, -1)
-                            Y = gemm(Tf, np.ascontiguousarray(Gy)).reshape(len(pb), nd, -1)
+                            Y = gemm(Tf, gy(sm, gQ, sy)).reshape(len(pb), nd, -1)
                             d0, d1 = vr[sd]
                             Yall[p0:p1, d0:d1, j0:j1] += Y[:, :, :j1 - j0]
                             Yall[p0:p1, d0:d1, nocc + e0:nocc + e1] += Y[:, :, j1 - j0:]
@@ -582,11 +591,13 @@ def _spin_block_c_methods():
                     nQ, nr = Qhi - Qlo, nD[delta]
                     T = np.empty(nbp * nr * nQ, dtype=dtype)
                     r0 = 0
+                    t_ = timer('pass2.gather'); t_.__enter__()
                     for sd, sm in self.dsub[delta]:
                         d, m = self.vrng[sd], self.orng[sm]
                         if len(d) and len(m):
                             _cgather(self, T3, pb, d, m, Qlo, Qhi, T, r0 * nQ, nr * nQ)
                         r0 += len(d) * len(m)
+                    t_.__exit__(None, None, None)
                     T = T.reshape(nbp, nr, nQ)
                     # rows (a, i) only for target groups that are computed:
                     # g = gP + s(i) must be stored (all for UCCSDT; with spin
@@ -597,10 +608,13 @@ def _spin_block_c_methods():
                         if gP + si in L.stored and n:
                             sub.append((r0, n))
                         r0 += n
+                    t_ = timer('pass2.ring'); t_.__enter__()
                     for k in range(nbp):
                         for r0, n in sub:
                             zo = zoff[k, gQ] + r0 * nQ
                             gemm(Wd[delta][r0:r0 + n], T[k], Z[zo:zo + n * nQ].reshape(n, nQ))
+                    t_.__exit__(None, None, None)
+                    t_ = timer('pass2.drive'); t_.__enter__()
                     # drive terms on the (s_c, s_i) sub-blocks of D_delta
                     r0 = 0
                     for sc, si in self.dsub[delta]:
@@ -618,10 +632,13 @@ def _spin_block_c_methods():
                                 gemm(np.ascontiguousarray(A, dtype=dtype), Bd[gQ, si], Zs,
                                      alpha=-1.0, beta=1.0)
                         r0 += nc * ni
+                    t_.__exit__(None, None, None)
+                t_ = timer('pass2.reduce'); t_.__enter__()
                 fred(p_(R), p_(self.Rbase), p_(self.Rcol), I_(om.ntri), p_(om.tri_grp),
                      p_(om.free_c), p_(om.pair_c), I_(vm.ntri), p_(vm.tri_off),
                      p_(vm.free_c), p_(vm.pair_c), p_(vm.pair_grp), I_(p0), I_(p1),
                      p_(zoff), p_(nQg), p_(Qoff), p_(self.rowpos), I_(nocc), p_(Z))
+                t_.__exit__(None, None, None)
 
     def _ppl_c(self, T3, Wpp, R):
         om, vm, dtype, L = self.om, self.vm, self.dtype, self.L

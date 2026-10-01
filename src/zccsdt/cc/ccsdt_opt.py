@@ -144,11 +144,13 @@ def bra_dressed_vvvo_pp(eris, t1, om, vm):
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     dtype = np.result_type(t1, eris.oovv)
     # explicit copies: get_block may return the stored array itself
-    B = np.array(get_block(eris, 'vvvo')[md, ne], dtype=dtype, order='C', copy=True)
-    ovvo = np.ascontiguousarray(get_block(eris, 'ovvo'), dtype=dtype)
-    L = gemm(np.asfortranarray(t1.T), ovvo.reshape(nocc, -1))      # [a, (b, e, i)]
-    t3pack.pair_antisym_add(B, L, vm, (nvir * nvir * nocc, nvir * nocc, nocc, 1),
-                            alpha=-1.0)
+    with timer('bv.gather'):
+        B = np.array(get_block(eris, 'vvvo')[md, ne], dtype=dtype, order='C', copy=True)
+        ovvo = np.ascontiguousarray(get_block(eris, 'ovvo'), dtype=dtype)
+    with timer('bv.L'):
+        L = gemm(np.asfortranarray(t1.T), ovvo.reshape(nocc, -1))      # [a, (b, e, i)]
+        t3pack.pair_antisym_add(B, L, vm, (nvir * nvir * nocc, nvir * nocc, nocc, 1),
+                                alpha=-1.0)
     del L
     tau = _tau1_pairs(t1, om, vm)                                    # (mn, ab)
     oovo = np.ascontiguousarray(get_block(eris, 'oovo')[mm, nn], dtype=dtype)
@@ -175,19 +177,21 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm):
     W = np.array(Bv, order='C', copy=True)
     # sum_f ~<ab||ef> t1[i,f]: sparse in the packed (e<f) index, done directly,
     # one diagonal pair block of the dressed vvvv at a time
-    for h, (lo, hi) in enumerate(vm.blocks):
-        if hi > lo:
-            t3pack.pair_t1_contract(W[lo:hi], Vd[h], t1, vm, block=h)
+    with timer('wv.vvvv_t1'):
+        for h, (lo, hi) in enumerate(vm.blocks):
+            if hi > lo:
+                t3pack.pair_t1_contract(W[lo:hi], Vd[h], t1, vm, block=h)
     # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] = sum_{m<n} t2[mn,ab] ~oovo[mn,e,i]
     t2mn_pp = t2[mm, nn][:, md, ne]
     gemm(np.asfortranarray(t2mn_pp.T), np.ascontiguousarray(ge['oovo'][mm, nn]).reshape(
         om.npair, -1), W.reshape(vm.npair, -1), beta=1.0)
     # - P(ab) sum_{mf} ~<mb||ef> t2[mi,af]: X[(a,i),(b,e)] = t2[a,i,m,f] ovvv[m,f,b,e]
-    A = np.ascontiguousarray(t2.transpose(2, 1, 0, 3)).reshape(nvir * nocc, nocc * nvir)
-    B = np.ascontiguousarray(ge['ovvv'].transpose(0, 3, 1, 2)).reshape(nocc * nvir, -1)
-    X = gemm(A, B)                                                           # [a,i,b,e]
-    t3pack.pair_antisym_add(W, X, vm, (nocc * nvir * nvir, nvir, 1, nvir * nvir),
-                            alpha=-1.0)
+    with timer('wv.t2ovvv'):
+        A = np.ascontiguousarray(t2.transpose(2, 1, 0, 3)).reshape(nvir * nocc, nocc * nvir)
+        B = np.ascontiguousarray(ge['ovvv'].transpose(0, 3, 1, 2)).reshape(nocc * nvir, -1)
+        X = gemm(A, B)                                                           # [a,i,b,e]
+        t3pack.pair_antisym_add(W, X, vm, (nocc * nvir * nvir, nvir, 1, nvir * nvir),
+                                alpha=-1.0)
     del X, A, B
     # - sum_m f[m,e] t2[m,i,a,b]
     W -= gemm(np.asfortranarray(fov.T), t2[:, :, md, ne].reshape(nocc, -1)).reshape(
