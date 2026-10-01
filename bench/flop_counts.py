@@ -8,6 +8,12 @@ representations (closed-shell molecule, o/v = spatial occupied/virtual).
                  zccsdt UCCSDT)
   RCCSDT       : Sz-blocked with alpha <-> beta spin flip, only the target
                  blocks with 0 or 1 beta indices (zccsdt RCCSDT)
+  spin-adapted : zccsdt.sa.rccsdt (RHF, NOSA): T3 blocks i<=j<=k (not all
+                 equal); pp ladder as (d,e)-symmetric and antisymmetric
+                 packed GEMMs, 3 pair views of a block with distinct indices
+                 (v^5/2 FMA each) and 1.5 views' worth for a repeated index;
+                 ring 4 o^2 v^4 FMA per occupied pair p <= q (o v^2 rows of
+                 X, contractions over (m, d) with t~ / t, t2-, t3-ordered t)
   ncc model    : CFOUR ncc (RHF, spin-adapted), counted from its source:
                  T3 blocks i<=j<=k (not all equal), each a full abc cube;
                  pp ladder = 3 GEMMs of v^2 x v^2 x v per block (MAGIC_CYCLE
@@ -78,6 +84,15 @@ def ring(o, v):
     return full, sz, rf
 
 
+def sa_model(o, v):
+    '''(ladder, ring) FMA of the spin-adapted engine (zccsdt.sa.rccsdt).'''
+    ndist = o * (o - 1) * (o - 2) // 6
+    nrep = o * (o - 1)
+    ladder = (ndist * 3 + nrep * 1.5) * v**5 / 2
+    ring = o * (o + 1) // 2 * 4 * o**2 * v**4
+    return ladder, ring
+
+
 def ncc_model(o, v):
     nblk = (o + 2) * (o + 1) * o // 6 - o
     ladder = nblk * 3 * v**5
@@ -92,11 +107,13 @@ if __name__ == '__main__':
         lf, ls, lr = ladder(o, v)
         rf, rs, rr = ring(o, v)
         nl, nrl, nrh = ncc_model(o, v)
+        sl, sr = sa_model(o, v)
         print('%-12s spin-orbital: ladder %.3e ring %.3e | Sz-blocked: ladder %.3e '
-              'ring %.3e | RCCSDT: ladder %.3e ring %.3e | ncc: ladder %.3e ring %.3e-%.3e'
-              % (name, lf, rf, ls, rs, lr, rr, nl, nrl, nrh))
-        tot, totsz, totr = lf + rf, ls + rs, lr + rr
+              'ring %.3e | RCCSDT: ladder %.3e ring %.3e | spin-adapted: ladder %.3e '
+              'ring %.3e | ncc: ladder %.3e ring %.3e-%.3e'
+              % (name, lf, rf, ls, rs, lr, rr, sl, sr, nl, nrl, nrh))
+        tot, totsz, totr, tots = lf + rf, ls + rs, lr + rr, sl + sr
         print('%-12s ratio spin-orbital/Sz-blocked %.1f   spin-orbital/ncc %.1f-%.1f   '
-              'RCCSDT/ncc %.2f-%.2f'
+              'RCCSDT/ncc %.2f-%.2f   spin-adapted/ncc %.2f-%.2f'
               % ('', tot / totsz, tot / (nl + nrh), tot / (nl + nrl),
-                 totr / (nl + nrh), totr / (nl + nrl)))
+                 totr / (nl + nrh), totr / (nl + nrl), tots / (nl + nrh), tots / (nl + nrl)))

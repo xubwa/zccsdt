@@ -12,9 +12,11 @@ cube per sorted occupied triple (zccsdt.sa.t3blocks).  The T3 residual is
   t~_mjk^dbc = 2 t_mjk^dbc - t_mjk^bdc - t_mjk^cbd,
   pp ladder (pair 12) sum_de W_ab^de t_ijk^dec,  hh ladder sum_mn W_mn^ij t_mnk^abc,
 
-with P the six-term pair symmetrizer; F_vv and F_oo are folded into the
-ladder operators.  Wv, Wo, J, K are the J (resp. K) spatial components of
-the intermediates of zccsdt.sa.derive.
+with P the six-term pair symmetrizer.  Wv, Wo, J, K are the J (resp. K)
+spatial components of the intermediates of zccsdt.sa.derive.  In the block
+engine (residuals) F_vv rides in the attached ring term and F_oo in the hh
+operator; the first version (residuals_terms) folds both into the ladder
+operators.  Design notes: docs/spin_adapted.md.
 '''
 
 import numpy as np
