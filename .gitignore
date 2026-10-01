@@ -4,3 +4,4 @@ build/
 *.so
 *.egg-info/
 .pytest_cache/
+bench/logs/

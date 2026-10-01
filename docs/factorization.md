@@ -1,0 +1,160 @@
+# CCSDT factorization and contraction schemes
+
+This document records how each part of the CCSDT iteration is evaluated in
+`src/zccsdt/cc/ccsdt_opt.py`, the alternatives considered and why the chosen
+scheme was picked.
+
+- The equations are those of the ported reference implementation
+  (`src/zccsdt/cc/ccsdt.py`, T1-dressed formalism), which is validated
+  element-wise against a determinant-space brute-force oracle.
+- Every optimized step is tested against the reference step to 1e-12
+  (`tests/test_ccsdt_opt.py`).
+
+Notation:
+- `o`, `v`: numbers of occupied and virtual spin orbitals.
+- `P`, `Q`: occupied pairs i<j and virtual pairs a<b, with
+  `n_P = o(o-1)/2` and `n_Q = v(v-1)/2`.
+- `I`, `A`: occupied triples and virtual triples, with `C(o,3)` and `C(v,3)`
+  of them.
+
+Flop counts are fused multiply-adds (FMA).
+
+## 1. T3 storage and access (see also `src/zccsdt/cc/t3pack.py`)
+
+T3 is stored only as its unique block `T3p[I, A]` (i<j<k, a<b<c). This is
+the minimum: 1/36 of the full array. Nothing in the iteration ever forms
+the full o^3 v^3 array.
+
+A triple is a free index plus a pair in three ways, with signs +, -, +:
+(p<q<s) = (p; qs) = -(q; ps) = (s; pq). Every T3 contraction uses one of
+two *views*:
+
+| View | Shape | Built by | Used for |
+|---|---|---|---|
+| half-expanded | `T[P, d, m, Q]` (batch of occupied pairs) | `gather_half` (C, OpenMP) | ring, drive, T3 -> T1/T2, T3 -> W |
+| vir-half-expanded | `T[Q, I, c]` (batch of occupied triples) | `gather_vir_half` (C) | pp ladder |
+
+Results come back through fused "antisymmetrize + pack" reductions:
+- `add_reduce_split`: computes `P(i/jk) P(a/bc)` of `Z[P, a, i, Q]`. It is
+  parallel over target triples, so threads never write the same element.
+- `add_reduce_pair_first`: computes `P(c/ab)` of `X[Q, I, c]`.
+
+No 6-index transpose exists anywhere. The gather *is* the transpose, and it
+writes exactly the layout the following GEMM needs. Gather and reduction
+traffic is O(o^3 v^3) per pass, against O(o^4 v^4) or O(o^3 v^5) flops.
+
+Alternatives considered:
+
+| Storage | Memory | Comment |
+|---|---|---|
+| full o^3 v^3 | 36x | ported starting point; 52 GB per copy for N2/cc-pVTZ complex |
+| i<j<k with full abc cubes (CFOUR `ncc`) | 6x | each triple's abc cube is a natural GEMM operand, but the ladder costs 2x flops unless pairs are packed |
+| i<j<k with (a<b, c) (CFOUR `vcc`) | 3x | ladder-friendly, but needs re-packing after every term |
+| **fully packed (chosen)** | **1x** | minimal memory and flops; the views are built on the fly by cheap gathers |
+
+## 2. Per-iteration work
+
+| Step | Scheme | FMA executed | Minimum (antisymmetry exploited) |
+|---|---|---|---|
+| pp ladder + F_vv | per batch of triples I: `X[Q',(I,c)] = W(Q',Q) T[Q,(I,c)]`, then P(c/ab) reduction | C(o,3) n_Q^2 v ~ o^3 v^5/24 | o^3 v^5/24 |
+| ring | per occupied pair P: `Z[P] = W[(a,i),(d,m)] T[P](d m, Q)` | n_P (ov)^2 n_Q ~ o^4 v^4/4 | o^4 v^4/4 |
+| drive (T2 x W_vvvo, T2 x W_vooo) | GEMMs accumulated into the ring buffer Z (BLAS beta=1) | o^3 v^4/4 + o^4 v^3/4 | same |
+| hh ladder + F_oo | one operator O6[I,J] on packed T3: `R += O6 @ T3p` | C(o,3)^2 C(v,3) ~ o^6 v^3/216 | o^5 v^3/24 (ratio o/9) |
+| pass 1: T3 -> W_vvvo, W_vooo, T1, T2 | two stacked GEMMs per batch of pairs, plus two matrix-vector passes | about o^3 v^4 | same order |
+| T1 dressing | slot by slot; packed vvvv dressed directly | o v^4/2 (vvvv) | -- |
+| CCSD part (T1/T2 residual) | reference code (Gauss-Stanton intermediates) | o^2 v^4 (ladder) | o^2 v^4/4 with packed pairs (not yet done) |
+
+### 2.1 pp ladder (o^3 v^5), F_vv folded
+
+The term is `R += P(c/ab) sum_{d<e} W(ab,de) t(ijk,dec)`. Its operator is
+`W = ~<ab||de> + sum_{m<n} t2(mn,ab) <mn||de>`, kept packed over both pairs
+(`n_Q x n_Q`, v^4/4).
+
+The F_vv term `P(a/bc) F_ad t(ijk,dbc)` has the same structure. Adding
+`1/2 (F_ad d_be - F_bd d_ae - F_ae d_bd + F_be d_ad)` to W reproduces it
+exactly (see `add_one_body_pairs`). The term therefore costs no extra GEMM
+and no extra pass over T3.
+
+T3 is gathered pair-major as `T[Q, I, c]`. The GEMM output `X[Q', I, c]` is
+reduced directly by the C kernel, so the batch involves no transpose at all.
+
+Packed vvvv dressing (`dressed_vvvv_pp`) uses
+`~<ab||de> = <ab||de> - Y[a,b] + Y[b,a] + Z[ab]`, where
+`Y = t1^T <ov||vv>` and Z is a pair-space GEMM with
+`tau(mn,ab) = t(m,a) t(n,b) - t(n,a) t(m,b)`. No full v^4 temporary is
+needed. The undressed packed vvvv is cached on the integral object.
+
+### 2.2 Ring + drive (o^4 v^4)
+
+Both terms carry the antisymmetrizer `P(i/jk) P(a/bc)` (the drive terms
+after renaming indices). They are accumulated into one half-expanded buffer
+`Z[P, a, i, Q]` per batch of occupied pairs and reduced once.
+
+- **Ring.** `W[(a,i),(d,m)] = ~<ma||di> + sum_{ne} <mn||de> t2(in,ae)`. The
+  half-expanded `T[P]` is exactly the `(d m) x Q` matrix this GEMM needs:
+  M = K = ov, N = n_Q, one GEMM per pair.
+- **Drive 1.** `Z[P,c,i,Q] -= sum_e t2(P,e,c) W_vvvo(Q,e,i)` is a single
+  GEMM, (n_b v) x v x (o n_Q).
+- **Drive 2.** `Z[P,a,k,Q] -= sum_m W_vooo(m,a,P) t2(m,k,Q)` is a single
+  GEMM, (n_b v) x o x (o n_Q).
+
+The drive GEMMs accumulate directly into Z through SciPy BLAS with beta = 1
+(`zccsdt.blas.gemm`). The numpy form `Z -= A @ B` was 18x slower because of
+the output-sized temporary and its page faults.
+
+### 2.3 hh ladder and F_oo (o^5 v^3)
+
+Both act only on the occupied indices of T3. Together they form a linear
+operator on antisymmetric 3-index tensors. Its matrix
+`O6[I, J]` (C(o,3) x C(o,3)) is built by applying the operator to the packed
+basis (`occ_operator`). The terms then reduce to one GEMM on the packed
+T3, `R += O6 @ T3p`, with N = C(v,3).
+
+This does o/9 times the minimal flops (1.1x for o = 10, 1.6x for o = 14),
+but needs no gather, no reduction and no transpose. CFOUR evaluates this
+term with level-1 DAXPY loops. For o larger than about 25, a pair-driven
+GEMM would be cheaper.
+
+### 2.4 Pass 1: T3 -> T1, T2 and the T3 dressing of W_vvvo, W_vooo
+
+All six contractions read the same half-expanded batch `T[P, d, m, Q]`:
+
+| Quantity | Contraction | Summed over |
+|---|---|---|
+| dW_vvvo[i,e,Q] | `sum g(P,e,f) T[P,f,i,Q]` | (P, d) |
+| C0[i,j,Q] (T3 -> T2) | `sum g(P,e,j) T[P,e,i,Q]` | (P, d) |
+| dW_vooo[m,a,P] | `sum g(m,n,R) T[P,a,n,R]` | (m, Q) |
+| B0[P,a,b] (T3 -> T2) | `sum g(a,m,R) T[P,b,m,R]` | (m, Q) |
+| r1[a,i] (T3 -> T1) | `sum g(P,Q) T[P,a,i,Q]` | (P, Q) |
+| rA[P,Q] (T3 -> T2) | `sum f(m,e) T[P,e,m,Q]` | (d, m) |
+
+- The two (P, d) contractions share the matrix view `(P d) x (m Q)` of T.
+  With their integral operands stacked, they are **one GEMM**.
+- The two (m, Q) contractions likewise form **one GEMM**.
+- The last two are matrix-vector passes.
+
+In an earlier version, the layout `T[P, m, d, Q]` forced a loop of many
+medium GEMMs. That was 25x slower because of BLAS threading overhead.
+
+### 2.5 T1 dressing
+
+The dressing is a product of one-index transformations:
+- a bra virtual index picks up `-t1(m,a)` from occupied;
+- a ket occupied index picks up `+t1(i,e)` from virtual.
+
+It is applied slot by slot, ket slots first (`dress_block`). Each step is a
+contiguous GEMM on blocks that differ only in that slot's source space.
+The full n^4 tensor and the n^5 transformation of the starting point are
+gone.
+
+## 3. Open items
+
+- **CCSD part.** The T2 ladder could reuse the packed W(ab,de)
+  (o^2 v^4/4 instead of o^2 v^4). Some intermediates are still built with
+  generic einsum.
+- **Pass 1 matrix-vector passes.** r1 and rA could be fused into the C
+  gather.
+- **Memory.** The integral container still holds full vvvv (v^4). Only the
+  packed form is needed after the first iteration.
+- **Real/complex.** Both are covered by the same code. Complex runs about
+  4x the real flops, as expected.
