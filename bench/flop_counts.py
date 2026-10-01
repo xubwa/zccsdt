@@ -103,7 +103,8 @@ def ncc_model(o, v):
 
 if __name__ == '__main__':
     for name, o, v in [('H2O/cc-pVTZ', 5, 53), ('N2/cc-pVTZ', 7, 53),
-                       ('H2S/cc-pVTZ', 9, 53), ('H2O/cc-pVQZ', 5, 110)]:
+                       ('H2S/cc-pVTZ', 9, 53), ('CH2O/cc-pVTZ', 8, 80),
+                       ('H2O/cc-pVQZ', 5, 110)]:
         lf, ls, lr = ladder(o, v)
         rf, rs, rr = ring(o, v)
         nl, nrl, nrh = ncc_model(o, v)

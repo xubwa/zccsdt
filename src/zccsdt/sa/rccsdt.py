@@ -354,28 +354,6 @@ def contract(spec, A, B, out=None, alpha=1.0, beta=0.0):
     return out
 
 
-_einsum = contract
-
-
-def dress(V, F, t1, nocc):
-    '''T1-dressed <pq|rs> and Fock (see rccsdt_ref.dress), index by index
-    with MKL GEMMs.'''
-    n = F.shape[0]
-    X = np.eye(n)
-    X[nocc:, :nocc] -= t1.T
-    Y = np.eye(n)
-    Y[:nocc, nocc:] += t1
-    # slot 0 (bra): Vd[p,...] = sum_P X[p,P] V[P,...]; then rotate the slots
-    Vd = V
-    for M in (X, X, Y, Y):
-        Vd = gemm(M, np.ascontiguousarray(Vd).reshape(n, -1)).reshape(n, n, n, n)
-        Vd = Vd.transpose(1, 2, 3, 0)
-    Vd = np.ascontiguousarray(Vd)
-    o, v = slice(0, nocc), slice(nocc, n)
-    Fd = F + np.einsum('risa,ia->rs', 2 * V[:, o, :, v] - V[:, o, v, :].transpose(0, 1, 3, 2), t1)
-    return Vd, X @ Fd @ Y.T
-
-
 def intermediates(D, Fd, t2, nocc, P=None, t1=None):
     '''T2 parts of the intermediates (spatial J / K components of
     zccsdt.sa.derive) from the T1-dressed blocks D (see DRESSED, plus the
