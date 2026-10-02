@@ -103,6 +103,35 @@ void zc_reduce_pair_first_##SFX(T *R, int64_t nvtri, const T *X,               \
                   - x[vpair[nvtri + A] * sQ + vfree[nvtri + A]]                \
                   + x[vpair[2 * nvtri + A] * sQ + vfree[2 * nvtri + A]];       \
     }                                                                          \
+}                                                                              \
+                                                                               \
+/* The same for the rows [q0, q1) of the pair index only (a slab of the        \
+ * sliced pp ladder):                                                          \
+ *   R[rows[I], A] += sum_{s: q0 <= Q_s(A) < q1} rs_s X[Q_s(A) - q0, I, c_s(A)], \
+ * X: (q1 - q0, nb, nvir). */                                                  \
+void zc_reduce_pair_first_rows_##SFX(T *R, int64_t nvtri, const T *X,          \
+                                     const int64_t *rows, int64_t nb,          \
+                                     int64_t nvir, int64_t q0, int64_t q1,     \
+                                     const int64_t *vfree, const int64_t *vpair) \
+{                                                                              \
+    const int64_t sQ = nb * nvir, nq = q1 - q0;                                \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t ib = 0; ib < nb; ib++) {                                      \
+        const T *x = X + ib * nvir;                                            \
+        T *r = R + rows[ib] * nvtri;                                           \
+        for (int64_t A = 0; A < nvtri; A++) {                                  \
+            const uint64_t Q0 = (uint64_t)(vpair[A] - q0);                     \
+            const uint64_t Q1 = (uint64_t)(vpair[nvtri + A] - q0);             \
+            const uint64_t Q2 = (uint64_t)(vpair[2 * nvtri + A] - q0);         \
+            if (Q0 >= (uint64_t)nq && Q1 >= (uint64_t)nq && Q2 >= (uint64_t)nq) \
+                continue;                                                      \
+            T acc = 0;                                                         \
+            if (Q0 < (uint64_t)nq) acc += x[Q0 * sQ + vfree[A]];               \
+            if (Q1 < (uint64_t)nq) acc -= x[Q1 * sQ + vfree[nvtri + A]];       \
+            if (Q2 < (uint64_t)nq) acc += x[Q2 * sQ + vfree[2 * nvtri + A]];   \
+            r[A] += acc;                                                       \
+        }                                                                      \
+    }                                                                          \
 }
 
 DEFINE_KERNELS(double, d)

@@ -12,12 +12,19 @@ SpinBlockT3   orbitals carry alpha/beta labels (spin-grouped enumerations,
 
 Both engines take the same dense intermediates and return the same dense
 pass-1 quantities, so ccsdt_opt.update_amps does not depend on the engine.
+
+T3 and its residual may be views of a mapped scratch file (``io``, set by
+update_amps when memory is short, see scratch.io_desc): the kernels then
+announce the rows they are about to read and unmap the rows of T3 they have
+read, and the new T3 is sent to the file when the update has written it;
+nothing below makes a copy of either array.
 '''
 
 import ctypes
 
 import numpy as np
 
+from zccsdt import scratch
 from zccsdt.blas import gemm
 from zccsdt.cc import t3pack, t3kern
 from zccsdt.timing import timer
@@ -37,6 +44,24 @@ def pair_batch_size(nocc, nvir, itemsize, mem_mb):
     return max(1, int(mem_mb * 1e6 // max(per_pair, 1)))
 
 
+def occ_cols(nrow, itemsize, mem_mb):
+    '''Columns per GEMM of the occupied operator: blocks of T3 and of the
+    residual of mem_mb / 8 each.'''
+    return max(64, int(mem_mb * 1e6 / 8 // max(nrow * itemsize, 1)))
+
+
+def _target(out, shape, dtype, clear):
+    '''The residual array: ``out`` viewed in ``shape`` (zeroed if ``clear``),
+    or new zeros.'''
+    if out is None:
+        return np.zeros(shape, dtype=dtype)
+    R = out.reshape(shape)
+    assert R.dtype == dtype and R.flags.c_contiguous and np.shares_memory(R, out)
+    if clear:
+        t3kern.zero(R)
+    return R
+
+
 # --------------------------------------------------------------------- dense
 
 class DenseT3:
@@ -45,6 +70,7 @@ class DenseT3:
         self.size = om.ntri * vm.ntri
         nocc, nvir = om.n, vm.n
         self.nb = pair_batch_size(nocc, nvir, np.dtype(dtype).itemsize, mem_mb)
+        self.io = None
 
     def view(self, T3):
         return np.ascontiguousarray(np.asarray(T3, dtype=self.dtype).reshape(
@@ -58,7 +84,8 @@ class DenseT3:
         T3p = self.view(T3)
         fovT = np.ascontiguousarray(fov.T).ravel()                 # [(e, m)]
         if t3kern.USE_C:
-            Xacc, Yall, r1, rA = t3kern.pass1(T3p, om, vm, self.nb, G_Pd, G_mQ, gpp, fovT)
+            Xacc, Yall, r1, rA = t3kern.pass1(T3p, om, vm, self.nb, G_Pd, G_mQ, gpp, fovT,
+                                              self.io)
             return Xacc.reshape(nvir + nocc, nocc, vm.npair), Yall, r1.reshape(nvir, nocc), rA
         Xacc = np.zeros((nvir + nocc, nocc * vm.npair), dtype=dtype)
         Yall = np.zeros((om.npair, nvir, nocc + nvir), dtype=dtype)
@@ -76,9 +103,11 @@ class DenseT3:
             rA[pb] = np.matmul(fovT, Tm)
         return Xacc.reshape(nvir + nocc, nocc, vm.npair), Yall, r1.reshape(nvir, nocc), rA
 
-    def residual(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6):
+    def residual(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6, out=None, clear=True):
         '''T3 residual (ring + drive, pp ladder, hh ladder) as a dense
-        (ntri_o, ntri_v) array.'''
+        (ntri_o, ntri_v) array: new, or accumulated in ``out`` (zeroed first
+        unless ``clear`` is False).  Wpp = None leaves the pp ladder out (it
+        is then in ``out`` already, see pp_ladder_rows).'''
         om, vm, dtype = self.om, self.vm, self.dtype
         nocc, nvir = om.n, vm.n
         T3p = self.view(T3)
@@ -90,16 +119,21 @@ class DenseT3:
                 for (lo, hi), blk in zip(vm.blocks, Wpp):
                     full[lo:hi, lo:hi] = blk
                 Wpp = full
-        R = np.zeros((om.ntri, vm.ntri), dtype=dtype)
-        WvT2 = np.ascontiguousarray(Wv.transpose(1, 2, 0)).reshape(nvir, -1)   # [e,(i,Q)]
+        R = _target(out, (om.ntri, vm.ntri), dtype, clear)
         t2P_flat = t2P.reshape(nocc, -1)                                     # [m,(k,Q)]
         with timer('pass2'):
             if t3kern.USE_C:
                 Adrv = np.concatenate((t2mn.transpose(0, 2, 1), Wo.transpose(2, 1, 0)),
                                       axis=2)                 # (P, c, e | m)
-                Bdrv = np.concatenate((WvT2, t2P_flat), axis=0)  # (e | m, (i, Q))
-                t3kern.pass2(T3p, om, vm, self.nb, WringT, Adrv, Bdrv, R)
+                # (e | m, (i, Q)): Wv[Q, e, i] transposed, then t2P, in one array
+                Bdrv = np.empty((nvir + nocc, nocc * vm.npair), dtype=dtype)
+                t3pack.axpby(Bdrv[:nvir].reshape(nvir, nocc, vm.npair),
+                             np.asarray(Wv, dtype=dtype).transpose(1, 2, 0), 1.0, 0.0)
+                Bdrv[nvir:] = t2P_flat
+                t3kern.pass2(T3p, om, vm, self.nb, WringT, Adrv, Bdrv, R, self.io)
+                del Bdrv
             else:
+                WvT2 = np.ascontiguousarray(Wv.transpose(1, 2, 0)).reshape(nvir, -1)  # [e,(i,Q)]
                 for pb in _batches(0, om.npair, self.nb):
                     nbp = len(pb)
                     T = t3pack.gather_half(T3p, om, vm, pb)
@@ -116,8 +150,10 @@ class DenseT3:
         with timer('pp_ladder'):
             nbt = max(1, int(self.mem_mb * 1e6 //
                              (3 * vm.npair * nvir * np.dtype(dtype).itemsize)))
-            if t3kern.USE_C:
-                t3kern.pp_ladder(T3p, om, vm, nbt, Wpp, R)
+            if Wpp is None:
+                pass
+            elif t3kern.USE_C:
+                t3kern.pp_ladder(T3p, om, vm, nbt, Wpp, R, self.io)
             else:
                 for rows in _batches(0, om.ntri, nbt):
                     T = t3pack.gather_vir_half(T3p, vm, rows)
@@ -125,17 +161,75 @@ class DenseT3:
                     t3pack.add_reduce_pair_first(R, X, vm, rows)
         with timer('hh_ladder'):
             if t3kern.USE_C:
-                t3kern.occ_operator(O6, T3p, R)
+                t3kern.occ_operator(O6, T3p, R,
+                                    occ_cols(om.ntri, np.dtype(dtype).itemsize, self.mem_mb),
+                                    self.io)
             else:
                 R += O6.astype(dtype) @ T3p
         return R
 
+    def target(self, out=None, clear=True):
+        '''The array the residual is accumulated in (see residual).'''
+        return _target(out, (self.om.ntri, self.vm.ntri), self.dtype, clear)
+
+    def pp_ladder_rows(self, T3, slabs, R, order='slab', max_rows=None):
+        '''pp ladder with the operator given in slabs of rows: ``slabs()``
+        returns an iterator of (q0, q1, W[q0:q1]) over all rows of W(ab,de).
+        order 'slab': for each slab all occupied triples (T3 is gathered again
+        for every slab, slabs() is called once); 'batch': for each batch of
+        triples all slabs (T3 is read once, slabs() is called once per batch).
+        ``max_rows``: the largest q1 - q0.  R as returned by target().'''
+        om, vm, dtype = self.om, self.vm, self.dtype
+        nvir, nvp, isz = vm.n, vm.npair, np.dtype(dtype).itemsize
+        T3p = self.view(T3)
+        max_rows = nvp if max_rows is None else max_rows
+        # the gathered T3 and its product: two thirds of the buffer budget, as
+        # the buffers of the other passes
+        nbt = max(1, int(self.mem_mb * 1e6 * 2 / 3 // max((nvp + max_rows) * nvir * isz, 1)))
+        nbt = min(nbt, max(om.ntri, 1))
+        ws = np.empty((nvp + max_rows) * nbt * nvir, dtype=dtype)
+
+        def gather(rows):
+            r0, r1 = rows[0] * vm.ntri, (rows[-1] + 1) * vm.ntri
+            scratch.need(T3p, r0, r1)
+            scratch.need(R, r0, r1)
+            with timer('ppl.gather'):
+                Tv = t3pack.gather_vir_half(
+                    T3p, vm, rows, out=ws[:nvp * len(rows) * nvir].reshape(nvp, len(rows), nvir))
+            scratch.unmap(T3p, r0, r1)
+            return Tv
+
+        def apply(Tv, rows, q0, q1, W):
+            nq = q1 - q0
+            X = ws[nvp * nbt * nvir:nvp * nbt * nvir + nq * len(rows) * nvir]
+            X = X.reshape(nq, len(rows) * nvir)
+            with timer('ppl.gemm'):
+                gemm(W, Tv.reshape(nvp, -1), X)
+            with timer('ppl.reduce'):
+                t3pack.add_reduce_pair_first(R, X.reshape(nq, len(rows), nvir), vm, rows,
+                                             pairs=(q0, q1))
+
+        batches = _batches(0, om.ntri, nbt)
+        if order == 'slab':
+            for q0, q1, W in slabs():
+                for rows in batches:
+                    apply(gather(rows), rows, q0, q1, W)
+        else:
+            for rows in batches:
+                Tv = gather(rows)
+                for q0, q1, W in slabs():
+                    apply(Tv, rows, q0, q1, W)
+
     def update(self, T3, R, eo, ev):
+        '''T3 + R / D, written over R.'''
         T3p = self.view(T3)
         if t3kern.USE_C:
-            t3kern.update_into_r(T3p, R, eo, ev)                 # R <- T3p + R / D
+            t3kern.update_into_r(T3p, R, eo, ev, self.io)        # R <- T3p + R / D
             return R.ravel()
-        return (T3p + R / (eo[:, None] - ev[None, :])).ravel()
+        R /= eo[:, None] - ev[None, :]
+        R += T3p
+        scratch.written(R)
+        return R.ravel()
 
 
 # ---------------------------------------------------------------- spin-block
@@ -250,6 +344,7 @@ class SpinBlockT3:
         # as lists of (s_vir, s_occ) sub-blocks, each vir-major
         self.dsub = {-1: [(0, 1)], 0: [(0, 0), (1, 1)], 1: [(1, 0)]}
         self.use_c = t3pack.USE_C and hasattr(t3pack._lib, 'zc_bgather_d')
+        self.io = None
         L = self.L
         # targets of the residual: stored groups only (R in the stored layout)
         self.Rbase = np.where(np.isin(om.tri_grp, L.stored), L.obase, -1).astype(np.int64)
@@ -362,11 +457,21 @@ class SpinBlockT3:
         return Xacc, Yall, r1, rA
 
     # ---- residual
-    def residual(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6):
-        '''T3 residual on the stored blocks (flat, layout of T3).'''
+    def residual(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6, out=None, clear=True):
+        '''T3 residual on the stored blocks (flat, layout of T3): new, or
+        accumulated in ``out`` (zeroed first unless ``clear`` is False).'''
         if self.use_c:
-            return self._residual_c(T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6)
-        return self._residual_np(T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6)
+            return self._residual_c(T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6, out, clear)
+        R = self._residual_np(T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6)
+        if out is None:
+            return R
+        out = _target(out, (self.L.size,), self.dtype, clear)
+        out += R
+        return out
+
+    def target(self, out=None, clear=True):
+        '''The array the residual is accumulated in (see residual).'''
+        return _target(out, (self.L.size,), self.dtype, clear)
 
     def _residual_np(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6):
         '''Numpy reference: blocked GEMMs, scattered into dense buffers and
@@ -475,15 +580,17 @@ class SpinBlockT3:
                     continue
                 I = slice(om.tri_off[g], om.tri_off[g + 1])
                 A = slice(vm.tri_off[g], vm.tri_off[g + 1])
-                t3kern.update_into_r(L.block(T3, g), L.block(R, g), eo[I], ev[A])
+                Tg, Rg = L.block(T3, g), L.block(R, g)
+                t3kern.update_into_r(Tg, Rg, eo[I], ev[A],
+                                     None if self.io is None else scratch.io_desc(Tg, Rg))
             return R
-        out = np.empty_like(R)
         for g in L.stored:
             I = slice(om.tri_off[g], om.tri_off[g + 1])
             A = slice(vm.tri_off[g], vm.tri_off[g + 1])
-            L.block(out, g)[:] = L.block(T3, g) + L.block(R, g) / (
+            L.block(R, g)[:] = L.block(T3, g) + L.block(R, g) / (
                 eo[I][:, None] - ev[A][None, :])
-        return out
+        scratch.written(R)
+        return R
 
 
 class _CArgs:
@@ -640,20 +747,27 @@ def _spin_block_c_methods():
         r1 += r1[np.ix_(vf, of)]
         rA += sP[:, None] * sQ[None, :] * rA[np.ix_(Pf, Qf)]
 
-    def _residual_c(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6):
+    def _residual_c(self, T3, WringT, t2mn, Wv, Wo, t2P, Wpp, O6, out=None, clear=True):
         om, vm, dtype, L = self.om, self.vm, self.dtype, self.L
-        R = np.zeros(L.size, dtype=dtype)
+        R = _target(out, (L.size,), dtype, clear)
         with timer('pass2'):
             self._pass2_c(T3, WringT, t2mn, Wv, Wo, t2P, R)
         with timer('pp_ladder'):
             self._ppl_c(T3, Wpp, R)
+        scratch.unmap(T3)               # (the blocked gathers leave the unmapping to here)
         with timer('hh_ladder'):
             for g in L.stored:
                 if L.nI[g] == 0 or L.nA[g] == 0:
                     continue
                 I = slice(om.tri_off[g], om.tri_off[g + 1])
-                gemm(np.ascontiguousarray(O6[I, I], dtype=dtype), L.block(T3, g),
-                     L.block(R, g), beta=1.0)
+                Og = np.ascontiguousarray(O6[I, I], dtype=dtype)
+                if t3kern.USE_C:
+                    Tg, Rg = L.block(T3, g), L.block(R, g)
+                    t3kern.occ_operator(Og, Tg, Rg,
+                                        occ_cols(L.nI[g], np.dtype(dtype).itemsize, self.mem_mb),
+                                        None if self.io is None else scratch.io_desc(Tg, Rg))
+                else:
+                    gemm(Og, L.block(T3, g), L.block(R, g), beta=1.0)
         return R
 
     def _pass2_c(self, T3, WringT, t2mn, Wv, Wo, t2P, R):

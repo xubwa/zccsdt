@@ -21,7 +21,9 @@
  * Every function exists for double (_d) and double complex (_z).
  */
 
+#define _GNU_SOURCE
 #include <complex.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +33,55 @@
 #include <cblas.h>
 #endif
 #include <omp.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+/* T3 and its residual R may be views of a mapped scratch file (not enough
+ * memory).  ``io`` then describes them (NULL: both in ordinary memory):
+ *   io[0]  T3 is mapped
+ *   io[1]  file descriptor of R (-1: not mapped), io[2] file offset of R[0]
+ * and the kernels tell the operating system what they do (zccsdt/scratch.py):
+ * the rows of a batch are announced (large sequential reads instead of page
+ * faults scattered over the threads), rows of T3 a batch has read leave the
+ * page tables (clean pages that are not mapped are cheap to take back under
+ * a memory limit), and R is sent to the file as soon as it holds the new T3.
+ * While the passes add to R it is left alone: writing it out after each
+ * pass writes it several times, and unmapping pages that are still dirty
+ * only costs a fault per page at the next pass (both were measured). */
+static uintptr_t page_size(void)
+{
+    static uintptr_t page = 0;
+    if (!page) page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    return page;
+}
+
+static void will_need(const void *p, size_t nbytes)
+{
+    const uintptr_t page = page_size();
+    const uintptr_t lo = (uintptr_t)p & ~(page - 1);
+    const uintptr_t hi = (uintptr_t)p + nbytes;
+    if (hi > lo) madvise((void *)lo, hi - lo, MADV_WILLNEED);
+}
+
+/* whole pages inside [p, p + nbytes) leave the page tables (the data stays
+ * in the page cache or goes to the file) */
+static void unmap(const void *p, size_t nbytes)
+{
+    const uintptr_t page = page_size();
+    const uintptr_t lo = ((uintptr_t)p + page - 1) & ~(page - 1);
+    const uintptr_t hi = ((uintptr_t)p + nbytes) & ~(page - 1);
+    if (hi > lo) madvise((void *)lo, hi - lo, MADV_DONTNEED);
+}
+
+/* [p, p + nbytes) of R (first element at base) was written: start writing
+ * it to the file, and drop it from the page tables */
+static void written(const int64_t *io, const void *base, const void *p, size_t nbytes)
+{
+    if (!io || io[1] < 0) return;
+    sync_file_range((int)io[1], io[2] + ((const char *)p - (const char *)base),
+                    (off64_t)nbytes, SYNC_FILE_RANGE_WRITE);
+    unmap(p, nbytes);
+}
 
 /* stats[]: accumulated wall seconds: 0 gather, 1 gemm, 2 reduce/other,
  * 3 drive GEMM (pass 2) */
@@ -110,8 +161,15 @@ void zc_gemm_slices_d(int ta, int64_t nb, int64_t m, int64_t n, int64_t k,
 static void gather_half_##SFX(const T *T3p, int64_t nvt, int64_t p0, int64_t nbp, \
                               int64_t no, int64_t nv, int64_t npo, int64_t nvp, \
                               const int64_t *otri, const int8_t *osgn,         \
-                              const int64_t *vtri, const int8_t *vsgn, T *out) \
+                              const int64_t *vtri, const int8_t *vsgn, T *out, \
+                              const int64_t *io)                               \
 {                                                                              \
+    const int mapped = io && io[0];                                            \
+    if (mapped)                                                                \
+        for (int64_t P = 0; P < nbp; P++)                                      \
+        for (int64_t m = 0; m < no; m++)                                       \
+            if (osgn[m * npo + p0 + P])                                        \
+                will_need(T3p + otri[m * npo + p0 + P] * nvt, sizeof(T) * nvt); \
     _Pragma("omp parallel for collapse(2) schedule(static)")                   \
     for (int64_t P = 0; P < nbp; P++)                                          \
     for (int64_t d = 0; d < nv; d++) {                                         \
@@ -126,6 +184,11 @@ static void gather_half_##SFX(const T *T3p, int64_t nvt, int64_t p0, int64_t nbp
             else       for (int64_t Q = 0; Q < nvp; Q++) o[Q] = -vs[Q] * row[vt[Q]]; \
         }                                                                      \
     }                                                                          \
+    if (mapped)                                                                \
+        for (int64_t P = 0; P < nbp; P++)                                      \
+        for (int64_t m = 0; m < no; m++)                                       \
+            if (osgn[m * npo + p0 + P])                                        \
+                unmap(T3p + otri[m * npo + p0 + P] * nvt, sizeof(T) * nvt);    \
 }                                                                              \
                                                                                \
 /* Pass 1.  For every batch of pairs, with T = T[P, d, m, Q]:                  \
@@ -142,7 +205,8 @@ void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                        int64_t batch,                                          \
                        const T *GPd, const T *GmQ, int64_t ny,                 \
                        const T *gpp, const T *fT,                              \
-                       T *Xacc, T *Yall, T *r1, T *rA, double *stats)                         \
+                       T *Xacc, T *Yall, T *r1, T *rA, const int64_t *io,      \
+                       double *stats)                                          \
 {                                                                              \
     (void)nto;                                                                 \
     const int64_t dm = nv * no;                                                \
@@ -151,7 +215,7 @@ void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
         int64_t nbp = (p0 + batch <= npo) ? batch : npo - p0;                  \
         TIC(0);                                                                \
         gather_half_##SFX(T3p, nvt, p0, nbp, no, nv, npo, nvp, otri, osgn,     \
-                          vtri, vsgn, buf);                                    \
+                          vtri, vsgn, buf, io);                                \
         TOC(0);                                                                \
         TIC(1);                                                                \
         gemm_##SFX(0, 0, nv + no, no * nvp, nbp * nv, 1.0, GPd + p0 * nv,      \
@@ -188,7 +252,7 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                        const int64_t *vfree, const int64_t *vpair,             \
                        int64_t batch,                                          \
                        const T *Wring, const T *Adrv, const T *Bdrv,           \
-                       T *R, double *stats)                       \
+                       T *R, const int64_t *io, double *stats)                 \
 {                                                                              \
     const int64_t dm = nv * no;                                                \
     T *Tb = malloc(sizeof(T) * batch * dm * nvp);                              \
@@ -198,7 +262,7 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
         int64_t nbp = (p0 + batch <= npo) ? batch : npo - p0;                  \
         TIC(0);                                                                \
         gather_half_##SFX(T3p, nvt, p0, nbp, no, nv, npo, nvp, otri, osgn,     \
-                          vtri, vsgn, Tb);                                     \
+                          vtri, vsgn, Tb, io);                                 \
         TOC(0);                                                                \
         TIC(1);                                                                \
         for (int64_t P = 0; P < nbp; P++)                                      \
@@ -212,6 +276,16 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                    Z, no * nvp);                                               \
         TOC(3);                                                                \
         TIC(2);                                                                \
+        const int rmap = io && io[1] >= 0;                                     \
+        if (rmap)                         /* the rows of R this batch adds to */ \
+            for (int64_t it = 0; it < nto; it++)                               \
+                for (int rr = 0; rr < 3; rr++) {                               \
+                    int64_t P = opair[rr * nto + it] - p0;                     \
+                    if (P >= 0 && P < nbp) {                                   \
+                        will_need(R + it * nvt, sizeof(T) * nvt);              \
+                        break;                                                 \
+                    }                                                          \
+                }                                                              \
         _Pragma("omp parallel for schedule(dynamic, 4)")                       \
         for (int64_t it = 0; it < nto; it++) {                                    \
             T *r = R + it * nvt;                                                \
@@ -240,12 +314,15 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
 void zc_t3_ppl_##SFX(const T *T3p, int64_t nto, int64_t nvt, int64_t nv,       \
                      int64_t nvp, const int64_t *vtri, const int8_t *vsgn,     \
                      const int64_t *vfree, const int64_t *vpair,               \
-                     int64_t batch, const T *Wpp, T *R, double *stats)                        \
+                     int64_t batch, const T *Wpp, T *R, const int64_t *io,     \
+                     double *stats)                                            \
 {                                                                              \
     T *Tv = malloc(sizeof(T) * batch * nvp * nv);                              \
     T *X = malloc(sizeof(T) * batch * nvp * nv);                               \
     for (int64_t i0 = 0; i0 < nto; i0 += batch) {                              \
         int64_t nb = (i0 + batch <= nto) ? batch : nto - i0;                   \
+        if (io && io[0]) will_need(T3p + i0 * nvt, sizeof(T) * nb * nvt);      \
+        if (io && io[1] >= 0) will_need(R + i0 * nvt, sizeof(T) * nb * nvt);   \
         TIC(0);                                                                \
         _Pragma("omp parallel for collapse(2) schedule(static)")               \
         for (int64_t Q = 0; Q < nvp; Q++)                                      \
@@ -255,6 +332,7 @@ void zc_t3_ppl_##SFX(const T *T3p, int64_t nto, int64_t nvt, int64_t nv,       \
             for (int64_t c = 0; c < nv; c++)                                   \
                 o[c] = vsgn[c * nvp + Q] * row[vtri[c * nvp + Q]];             \
         }                                                                      \
+        if (io && io[0]) unmap(T3p + i0 * nvt, sizeof(T) * nb * nvt);          \
         TOC(0);                                                                \
         TIC(1);                                                                \
         gemm_##SFX(0, 0, nvp, nb * nv, nvp, 1.0, Wpp, nvp, Tv, nb * nv, 0.0,   \
@@ -276,16 +354,31 @@ void zc_t3_ppl_##SFX(const T *T3p, int64_t nto, int64_t nvt, int64_t nv,       \
     free(Tv); free(X);                                                         \
 }                                                                              \
                                                                                \
-/* R[I, A] += sum_J O6[I, J] T3p[J, A]  (hh ladder + F_oo operator) */       \
+/* R[I, A] += sum_J O6[I, J] T3p[J, A]  (hh ladder + F_oo operator), in      \
+ * blocks of ncb columns (ncb <= 0: all at once): a GEMM then touches one      \
+ * column block of T3p and of R, which is what must be in memory when the two  \
+ * are mapped files. */                                                        \
 void zc_t3_occop_##SFX(const T *O6, const T *T3p, int64_t nto, int64_t nvt,    \
-                       T *R)                                                   \
+                       int64_t ncb, const int64_t *io, T *R)                   \
 {                                                                              \
-    gemm_##SFX(0, 0, nto, nvt, nto, 1.0, O6, nto, T3p, nvt, 1.0, R, nvt);      \
+    const int tmap = io && io[0], rmap = io && io[1] >= 0;                     \
+    if (ncb <= 0 || ncb > nvt) ncb = nvt;                                      \
+    for (int64_t c0 = 0; c0 < nvt; c0 += ncb) {                                \
+        const int64_t nc = (c0 + ncb <= nvt) ? ncb : nvt - c0;                 \
+        for (int64_t it = 0; it < nto && (tmap || rmap); it++) {               \
+            if (tmap) will_need(T3p + it * nvt + c0, sizeof(T) * nc);          \
+            if (rmap) will_need(R + it * nvt + c0, sizeof(T) * nc);            \
+        }                                                                      \
+        gemm_##SFX(0, 0, nto, nc, nto, 1.0, O6, nto, T3p + c0, nvt, 1.0,       \
+                   R + c0, nvt);                                               \
+        for (int64_t it = 0; it < nto && tmap; it++)                           \
+            unmap(T3p + it * nvt + c0, sizeof(T) * nc);                        \
+    }                                                                          \
 }                                                                              \
                                                                                \
 /* R[I, A] = T3p[I, A] + R[I, A] / (eo[I] - ev[A])  (new T3 written over R) */ \
 void zc_t3_update_##SFX(const T *T3p, T *R, int64_t nto, int64_t nvt,          \
-                        const double *eo, const double *ev)                    \
+                        const double *eo, const double *ev, const int64_t *io) \
 {                                                                              \
     _Pragma("omp parallel for schedule(static)")                               \
     for (int64_t it = 0; it < nto; it++) {                                     \
@@ -294,6 +387,8 @@ void zc_t3_update_##SFX(const T *T3p, T *R, int64_t nto, int64_t nvt,          \
         const double e = eo[it];                                               \
         for (int64_t A = 0; A < nvt; A++)                                      \
             r[A] = t[A] + r[A] * (1.0 / (e - ev[A]));                          \
+        if (io && io[0]) unmap(t, sizeof(T) * nvt);                            \
+        written(io, R, r, sizeof(T) * nvt);                                    \
     }                                                                          \
 }
 

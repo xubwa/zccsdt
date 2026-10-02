@@ -181,20 +181,28 @@ def gather_half(T3p, om, vm, pairs):
     return out
 
 
-def gather_vir_half(T3p, vm, rows):
+def gather_vir_half(T3p, vm, rows, out=None):
     '''T[Q, I, c] = t3[rows[I], Q_0, Q_1, c] for occupied triples ``rows``.
-    Shape (nvpair, len(rows), nvir), pair-major for the ladder GEMM.'''
+    Shape (nvpair, len(rows), nvir), pair-major for the ladder GEMM (written
+    into ``out`` if given).'''
     if USE_C:
         T3p = np.ascontiguousarray(T3p)
         rows = np.ascontiguousarray(rows, dtype=np.int64)
-        out = np.empty((vm.npair, len(rows), vm.n), dtype=T3p.dtype)
+        if out is None:
+            out = np.empty((vm.npair, len(rows), vm.n), dtype=T3p.dtype)
+        assert out.shape == (vm.npair, len(rows), vm.n) and out.flags.c_contiguous \
+            and out.dtype == T3p.dtype
         getattr(_lib, 'zc_gather_vir_half_' + _sfx(T3p.dtype))(
             _p(T3p), _I64(T3p.shape[1]), _p(rows), _I64(len(rows)),
             _p(vm.tri_c), _p(vm.sgn_c), _I64(vm.n), _I64(vm.npair), _p(out))
         return out
     X = np.take(T3p[rows], vm.tri.T, axis=1)     # (nb, nvpair, v)
     X *= vm.sgn.T
-    return np.ascontiguousarray(X.transpose(1, 0, 2))
+    X = np.ascontiguousarray(X.transpose(1, 0, 2))
+    if out is None:
+        return X
+    out[...] = X
+    return out
 
 
 def reduce_vir(X, vm):
@@ -282,16 +290,27 @@ def occ_operator(om, apply):
     return LB[:, p, q, s].T                       # O[I, J]
 
 
-def add_reduce_pair_first(R, X, vm, rows):
+def add_reduce_pair_first(R, X, vm, rows, pairs=None):
     '''R[rows] += P(c/ab) X, with X[Q, I, c] (pair-major, as produced by the
-    ladder GEMM on gather_vir_half).'''
+    ladder GEMM on gather_vir_half).  ``pairs`` = (q0, q1): X holds the pair
+    rows q0 <= Q < q1 only (a slab of the operator) and the terms of the
+    other pairs are left out.'''
     if USE_C and R.flags.c_contiguous:
         X = np.ascontiguousarray(X, dtype=R.dtype)
         rows = np.ascontiguousarray(rows, dtype=np.int64)
-        getattr(_lib, 'zc_reduce_pair_first_' + _sfx(R.dtype))(
-            _p(R), _I64(R.shape[1]), _p(X), _p(rows), _I64(len(rows)),
-            _I64(vm.n), _I64(vm.npair), _p(vm.free_c), _p(vm.pair_c))
+        if pairs is None:
+            getattr(_lib, 'zc_reduce_pair_first_' + _sfx(R.dtype))(
+                _p(R), _I64(R.shape[1]), _p(X), _p(rows), _I64(len(rows)),
+                _I64(vm.n), _I64(vm.npair), _p(vm.free_c), _p(vm.pair_c))
+        else:
+            getattr(_lib, 'zc_reduce_pair_first_rows_' + _sfx(R.dtype))(
+                _p(R), _I64(R.shape[1]), _p(X), _p(rows), _I64(len(rows)),
+                _I64(vm.n), _I64(pairs[0]), _I64(pairs[1]), _p(vm.free_c), _p(vm.pair_c))
         return
+    if pairs is not None:
+        full = np.zeros((vm.npair,) + X.shape[1:], dtype=X.dtype)
+        full[pairs[0]:pairs[1]] = X
+        X = full
     R[rows] += reduce_vir_pair_first(X.transpose(1, 0, 2), vm)
 
 

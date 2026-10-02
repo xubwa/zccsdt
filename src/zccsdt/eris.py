@@ -66,26 +66,37 @@ def _mo_chemist(mol, C, kind):
     return out
 
 
-def _chem_block(mol, kind, C1, C2, C3, C4):
-    '''Chemist-notation MO block (12|34) via pyscf.ao2mo (no full n^4 tensor).'''
+def _chem_block(mol, kind, C1, C2, C3, C4, max_memory=None):
+    '''Chemist-notation MO block (12|34) via pyscf.ao2mo (no full n^4 tensor).
+    ``max_memory`` (MB): work memory of the transformation.'''
     from pyscf import ao2mo
+    from zccsdt import memory
     shape = (C1.shape[1], C2.shape[1], C3.shape[1], C4.shape[1])
+    kw = {'max_memory': memory.ao2mo_memory() if max_memory is None else max_memory}
     if kind == 'spinor':
-        out = ao2mo.general(mol, (C1, C2, C3, C4), intor='int2e_spinor')
+        out = ao2mo.general(mol, (C1, C2, C3, C4), intor='int2e_spinor', **kw)
         return np.asarray(out).reshape(shape)
     nao = mol.nao_nr()
     out = 0
     for s1 in (slice(0, nao), slice(nao, None)):
         for s2 in (slice(0, nao), slice(nao, None)):
             out = out + ao2mo.general(mol, (C1[s1], C2[s1], C3[s2], C4[s2]),
-                                      compact=False).reshape(shape)
+                                      compact=False, **kw).reshape(shape)
     return out
 
 
-def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch):
+def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
     '''Antisymmetrized blocks from chemist blocks; vvvv returned packed over
-    a<b, c<d, computed in batches of a.'''
-    ch = lambda a, b, c, d: _chem_block(mol, kind, a, b, c, d)
+    a<b, c<d, computed in batches of a.  With a memory budget (``max_memory``
+    in MB for the whole process; default: 80% of what is available) the
+    batches shrink to fit, and the packed vvvv is a mapped array of a scratch
+    file when it does not fit twice (bare and dressed); the scratch object is
+    returned as well (None if in memory).'''
+    from zccsdt import memory
+    from zccsdt.scratch import Scratch
+    # (PySCF takes up to its max_memory for buffers: bound every transformation)
+    ch = lambda a, b, c, d: _chem_block(mol, kind, a, b, c, d,       # noqa: E731
+                                        memory.ao2mo_memory(max_memory))
     oooo = ch(Co, Co, Co, Co)                         # (ij|kl)
     ooov = ch(Co, Co, Co, Cv)                         # (ij|ka)
     ovov = ch(Co, Cv, Co, Cv)                         # (ia|jb)
@@ -105,21 +116,46 @@ def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch):
     g['ovvv'] = ovvv.transpose(0, 2, 1, 3) - ovvv.transpose(0, 2, 3, 1)
     g = {k: np.ascontiguousarray(0.5 * (b - b.transpose(1, 0, 2, 3)))
          if k[0] == k[1] else np.ascontiguousarray(b) for k, b in g.items()}
+    del oooo, ooov, ovov, oovv, ovvo, ovvv
     nv = Cv.shape[1]
     pa, pb = np.triu_indices(nv, 1)
-    vpp = np.zeros((len(pa), len(pa)), dtype=np.result_type(oooo, Cv))
-    row = 0
-    for a0 in range(0, nv, vir_batch):
-        a1 = min(a0 + vir_batch, nv)
-        X = ch(Cv[:, a0:a1], Cv, Cv, Cv)              # (ac|bd) as [a, c, b, d]
-        for a in range(a0, a1):
-            Y = X[a - a0]
-            G = Y.transpose(1, 0, 2) - Y.transpose(1, 2, 0)      # <ab||cd> as [b, c, d]
-            nb = nv - a - 1
-            vpp[row:row + nb] = G[a + 1:][:, pa, pb]
-            row += nb
-        del X
-    return g, vpp
+    dtype = np.result_type(g['oooo'], Cv)
+    isz = np.dtype(dtype).itemsize
+    pp = len(pa) * len(pa) * isz
+    # one a of (ac|bd): the chemist block, its antisymmetrized form and the
+    # buffers of the transformation
+    per_a = 4 * nv ** 3 * isz
+    budget = memory.budget(max_memory)
+    scr = None
+    if budget is not None:
+        if 2 * pp + min(vir_batch, nv) * per_a > budget:
+            scr = Scratch(prefix='zccsdt_vvvv_', what='the packed <ab||cd> integrals',
+                          hint=' or give the calculation more memory (max_memory)')
+        else:
+            budget -= pp
+        vir_batch = int(max(1, min(vir_batch, budget // 2 // max(per_a, 1))))
+    vpp = np.zeros((len(pa), len(pa)), dtype=dtype) if scr is None else \
+        scr.create('vvvv', (len(pa), len(pa)), dtype)
+    from zccsdt import scratch
+    hints = scratch.hints(scr is not None)          # memory is short: say what is done
+    try:
+        row = 0
+        for a0 in range(0, nv, vir_batch):
+            a1 = min(a0 + vir_batch, nv)
+            row0 = row
+            X = ch(Cv[:, a0:a1], Cv, Cv, Cv)                      # (ac|bd) as [a, c, b, d]
+            for a in range(a0, a1):
+                Y = X[a - a0]
+                G = Y.transpose(1, 0, 2) - Y.transpose(1, 2, 0)      # <ab||cd> as [b, c, d]
+                nb = nv - a - 1
+                vpp[row:row + nb] = G[a + 1:][:, pa, pb]
+                row += nb
+            del X
+            scratch.written(vpp, row0 * len(pa), row * len(pa))     # to the file now
+            scratch.unmap(vpp, row0 * len(pa), row * len(pa))
+    finally:
+        scratch.hints(hints)
+    return g, vpp, scr
 
 
 def _orbital_kind(mf):
@@ -131,13 +167,20 @@ def _orbital_kind(mf):
 
 
 def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=False,
-             vir_batch=16, spin_order=False):
+             vir_batch=16, spin_order=False, max_memory=None):
     '''Build spin-orbital ERIs from a converged SCF object.
 
     ``mo_coeff`` may be any orbitals spanning the same occupied space as the
     SCF (e.g. after an occ-occ / vir-vir rotation); the Fock matrix is then
     non-diagonal and is used as such.  Occupied orbitals are the columns with
     mo_occ > 0; the first ``frozen`` occupied orbitals are dropped.
+
+    ``packed_vvvv``: transform block by block and keep <ab||cd> only packed
+    over a<b, c<d (needed beyond small bases), ``vir_batch`` values of a at a
+    time.  ``max_memory`` (MB for the whole process, as in PySCF; default: 80%
+    of what the node and the memory limit of the job leave) then bounds the
+    transformation, and the packed vvvv becomes a mapped array of a scratch
+    file if it does not fit in memory twice.
     '''
     if mo_coeff is None:
         mo_coeff = mf.mo_coeff
@@ -168,7 +211,8 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=Fa
         C, spins = C[:, perm], spins[perm]
     fock = C.conj().T @ fock_ao @ C
     if packed_vvvv and not (kind == 'ghf' and np.iscomplexobj(C)):
-        g, vpp = _blocks_by_ao2mo(mf.mol, kind, C[:, :nocc], C[:, nocc:], vir_batch)
+        g, vpp, scr = _blocks_by_ao2mo(mf.mol, kind, C[:, :nocc], C[:, nocc:], vir_batch,
+                                       max_memory)
         if kind == 'ghf':
             fock = fock.real
             g = {k: b.real for k, b in g.items()}
@@ -176,7 +220,9 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=Fa
         out = ERIs(nocc=nocc, fock=fock, mo_energy=fock.diagonal().real.copy(),
                    e_hf=e_hf, e_nuc=float(mf.energy_nuc()),
                    source='%s:%s' % (type(mf).__name__, kind), vvvv=None, **g)
-        out._vvvv_pp = np.ascontiguousarray(vpp)
+        # (a mapped array stays a mapped array: no ascontiguousarray)
+        out._vvvv_pp = vpp if scr is not None else np.ascontiguousarray(vpp)
+        out._scratch = scr                      # keeps the scratch file open
         if spins is not None:
             out.spin_occ, out.spin_vir = spins[:nocc], spins[nocc:]
         return out

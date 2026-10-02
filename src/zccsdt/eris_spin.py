@@ -85,9 +85,13 @@ class SpinERIs:
         return out
 
 
-def from_scf(mf, frozen=0, vir_batch=16):
+def from_scf(mf, frozen=0, vir_batch=16, max_memory=None):
     '''U/R-form integrals from a PySCF RHF, ROHF or UHF object.  ``frozen`` is
-    the number of frozen spin orbitals (frozen // 2 alpha and beta each).'''
+    the number of frozen spin orbitals (frozen // 2 alpha and beta each).
+    ``max_memory`` (MB for the whole process; default: 80% of what is
+    available) bounds the buffers of the integral transformations.'''
+    from zccsdt import memory
+    ao_mem = memory.ao2mo_memory(max_memory)
     mol = mf.mol
     restricted = getattr(mf, 'mo_coeff', None) is not None and np.asarray(mf.mo_coeff).ndim == 2
     if restricted:
@@ -158,7 +162,8 @@ def from_scf(mf, frozen=0, vir_batch=16):
             if min(a.shape[1], b.shape[1], c.shape[1], d.shape[1]) == 0:
                 cache[key] = np.zeros((a.shape[1], b.shape[1], c.shape[1], d.shape[1]))
             else:
-                cache[key] = ao2mo.general(mol, (a, b, c, d), compact=False).reshape(
+                cache[key] = ao2mo.general(mol, (a, b, c, d), compact=False,
+                                           max_memory=ao_mem).reshape(
                     a.shape[1], b.shape[1], c.shape[1], d.shape[1])
         return cache[key]
 
@@ -196,8 +201,8 @@ def from_scf(mf, frozen=0, vir_batch=16):
         row = 0
         for a0 in range(0, nv_s, vir_batch):
             a1 = min(a0 + vir_batch, nv_s)
-            X = ao2mo.general(mol, (Cv[s][:, a0:a1], Cv[s], Cv[s], Cv[s]),
-                              compact=False).reshape(a1 - a0, nv_s, nv_s, nv_s)
+            X = ao2mo.general(mol, (Cv[s][:, a0:a1], Cv[s], Cv[s], Cv[s]), compact=False,
+                              max_memory=ao_mem).reshape(a1 - a0, nv_s, nv_s, nv_s)
             for a in range(a0, a1):
                 Y = X[a - a0]                                 # (ac|bd) as [c, b, d]
                 G = Y.transpose(1, 0, 2) - Y.transpose(1, 2, 0)   # [b, c, d]
@@ -209,8 +214,8 @@ def from_scf(mf, frozen=0, vir_batch=16):
     vaa = vv_same(0) if nva else np.zeros((0, 0))
     vbb = vaa if rhf else (vv_same(1) if nvb else np.zeros((0, 0)))
     if nva and nvb:
-        X = ao2mo.general(mol, (Cv[0], Cv[0], Cv[1], Cv[1]), compact=False).reshape(
-            nva, nva, nvb, nvb)                               # (ac|bd) as [a, c, b, d]
+        X = ao2mo.general(mol, (Cv[0], Cv[0], Cv[1], Cv[1]), compact=False,
+                          max_memory=ao_mem).reshape(nva, nva, nvb, nvb)   # (ac|bd): [a, c, b, d]
         vab = np.ascontiguousarray(X.transpose(0, 2, 1, 3)).reshape(nva * nvb, nva * nvb)
     else:
         vab = np.zeros((nva * nvb, nva * nvb))
