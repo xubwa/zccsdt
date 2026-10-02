@@ -11,12 +11,13 @@
 # CFOUR_FC=ON: frozen core (default OFF);  CFOUR_MEM_GB: MEMORY_SIZE (default 24)
 # CFOUR_CALC='CCSDT(Q)': calculation level (default CCSDT);  CFOUR_CONV: CC_CONV (default 10)
 # CFOUR_SYM=ON: point-group symmetry (default OFF, as zccsdt has none)
+# CFOUR_BIN: directory of the CFOUR executables (default: the cfour-x2cso build)
 # The partition allows 4000 MB per core: --mem=30G keeps the allocation at the
 # 8 requested cores (a larger --mem silently adds cores).
 mol=$1; basis=$2; prog=$3; ref=$4; maxcyc=${5:-6}; mult=1
 # threads = cores of the allocation (default 8; override with sbatch -c N --mem=...)
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8} MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
-export PATH=/home/xwang405/apps/cfour-x2cso/bin:$PATH
+export PATH=${CFOUR_BIN:-/home/xwang405/apps/cfour-x2cso/bin}:$PATH
 tag=${mol}_${basis}_${prog}_${ref}_${SLURM_JOB_ID:-local$$}
 # CFOUR work files go to node-local disk (they reach tens of GB; the home
 # quota is small); only out / time.txt / ZMAT are kept

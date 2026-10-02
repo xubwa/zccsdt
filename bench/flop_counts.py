@@ -20,6 +20,9 @@ representations (closed-shell molecule, o/v = spatial occupied/virtual).
                  states with constraint 1/4/7); rings = 9 (wmaei) plus 13-26
                  (wmaie, 13 states x 2 types, some skipped by an index-order
                  test) contractions of o v^4 per block.  o, v spatial.
+                 This model overstates ncc about twofold: ncc's own flop
+                 counter gives 3.95e10 FMA per iteration for H2O/cc-pVTZ
+                 where the model gives 6.4-7.9e10 (docs/benchmarks.md).
 '''
 import sys
 from collections import Counter
