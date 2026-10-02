@@ -21,7 +21,7 @@ import numpy as np
 import scipy.linalg
 
 from zccsdt.cc import t3pack
-from zccsdt.scratch import Scratch, scratch_dir          # noqa: F401
+from zccsdt.scratch import Scratch, scratch_dir, written, unmap          # noqa: F401
 from zccsdt.timing import timer
 
 INCORE_SIZE = 10_000_000        # elements; smaller parts always stay in memory
@@ -89,6 +89,14 @@ def _copy(dst, src):
         return _lincomb([src], [1.0], dst)
     dst[...] = src
     return dst
+
+
+def _stored(a):
+    '''A part was written into a mapped array: send it to the file now and
+    drop it from the page tables (see zccsdt.scratch).'''
+    written(a)
+    unmap(a)
+    return a
 
 
 def _same(a, b):
@@ -176,7 +184,7 @@ class DIIS:
         if s is None or _same(a, s):
             return a if s is None else s
         if isinstance(s, np.memmap):
-            return _copy(s, a)
+            return _stored(_copy(s, a))
         return a
 
     def close(self):
@@ -209,7 +217,7 @@ class DIIS:
             for j, xi in enumerate(x):
                 o = None if out is None else out[j]
                 if o is not None:
-                    res.append(_copy(o.ravel(), xi))
+                    res.append(_stored(_copy(o.ravel(), xi)))
                 elif any(_same(xi, s) for s in own):
                     res.append(np.array(xi))        # never hand out a storage array
                 else:
@@ -224,7 +232,9 @@ class DIIS:
             if self.xprev is True:
                 raise ValueError('update() without errors after a call with errors')
             with timer('diis.sub'):
-                e = [_sub(a, b, r) for a, b, r in zip(x, self.xprev, se)]
+                e = [_stored(_sub(a, b, r)) for a, b, r in zip(x, self.xprev, se)]
+        for part in x + e:              # written by the caller or just above
+            _stored(part)
         self.xs.append(x)
         self.es.append(e)
         n = len(self.es)
@@ -235,6 +245,9 @@ class DIIS:
         with timer('diis.dot'):
             # all overlaps of the new error vector in one pass per part
             d = [_mdot(ej, [ek[j] for ek in self.es]) for j, ej in enumerate(e)]
+        for ek in self.es:
+            for part in ek:
+                unmap(part)
         self.err_norms = [np.sqrt(abs(dj[n - 1])) for dj in d]
         H[n - 1, :] = sum(d)
         H[:, n - 1] = np.conj(H[n - 1, :])
@@ -252,7 +265,11 @@ class DIIS:
             c = np.linalg.solve(B, g)
         outs = [None] * len(x) if out is None else [None if o is None else o.ravel() for o in out]
         with timer('diis.lincomb'):
-            res = [_lincomb([xk[j] for xk in self.xs], c[1:], outs[j]) for j in range(len(x))]
+            res = [_stored(_lincomb([xk[j] for xk in self.xs], c[1:], outs[j]))
+                   for j in range(len(x))]
+        for xk in self.xs:
+            for part in xk:
+                unmap(part)
         # with caller-supplied errors the previous extrapolation is not kept
         self.xprev = res if errors is None else True
         return res

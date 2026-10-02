@@ -81,3 +81,17 @@ def test_scratch_arrays(monkeypatch, tmp_path):
     import h5py
     with h5py.File(name, 'r') as f:
         assert f['x'].shape == (2, 3) and (f['x'][...] == 1.5).all()
+
+
+def test_ao2mo_memory(monkeypatch):
+    '''PySCF's transformation buffers get a quarter of the budget, between
+    200 MB and PySCF's own default.'''
+    from zccsdt import memory
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    assert memory.ao2mo_memory(100000.0) == 4000.0
+    assert memory.ao2mo_memory(2000.0) == 500.0
+    assert memory.ao2mo_memory(300.0) == 200.0
+    monkeypatch.setattr(memory, 'available', lambda: None)
+    assert memory.ao2mo_memory() == 4000.0
+    monkeypatch.setattr(memory, 'available', lambda: 2 * 10 ** 9)
+    assert memory.ao2mo_memory() == 400.0

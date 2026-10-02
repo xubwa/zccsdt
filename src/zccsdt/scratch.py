@@ -8,14 +8,50 @@ they do not.
 
 The directory is ZCCSDT_TMPDIR, else PySCF's lib.param.TMPDIR (which follows
 PYSCF_TMPDIR / TMPDIR).
+
+Under a memory limit (a Slurm job: a memory cgroup) the page cache of these
+files competes with the arrays of the program.  A run that had to put large
+arrays into scratch files for lack of memory (hints(True), set by the
+kernels from their memory plan) therefore tells the operating system what it
+does with a region; with enough memory nothing is said, and the files simply
+stay in the page cache.  The environment variable ZCCSDT_IO=0 (IO_MODE)
+turns the hints off altogether.
+
+  written(a, ...)   the region was written and is final for now (a DIIS
+                    vector, the new T3): start writing it to the file
+  unmap(a, ...)     the region is not needed for a while: drop it from the
+                    page tables (it stays in the page cache while there is
+                    room, and is cheap to take back when there is not)
+  advise(a, 'willneed', ...)   the region is needed next: read ahead
 '''
 
 import ctypes
 import mmap
 import os
 import tempfile
+import weakref
 
 import numpy as np
+
+
+IO_MODE = int(os.environ.get('ZCCSDT_IO', '1'))
+_HINTS = [False]    # is memory short in the run that is under way?
+
+
+def hints(on=None):
+    '''Are the I/O hints active?  With an argument: switch them on or off
+    (memory is short / is not) and return the previous setting; they stay off
+    whatever is asked while IO_MODE is 0.'''
+    prev = _HINTS[0]
+    if on is not None:
+        _HINTS[0] = bool(on)
+    return bool(IO_MODE) and prev if on is None else prev
+
+# (first address, end address, file descriptor, file offset, weak reference to
+# the mmap object) of the mapped arrays of the open Scratch objects.  An entry
+# goes when its file is closed or its mapping is released: the address range
+# may then belong to something else.
+_MAPS = []
 
 
 def scratch_dir():
@@ -76,45 +112,139 @@ class Scratch:
                           'scratch directory (ZCCSDT_TMPDIR / PYSCF_TMPDIR)%s'
                           % (n * dtype.itemsize / 1e9, self.what, self.filename, err.strerror,
                              self.hint)) from err
-        return np.memmap(self.raw, dtype=dtype, mode='r+', offset=offset, shape=shape)
+        a = np.memmap(self.raw, dtype=dtype, mode='r+', offset=offset, shape=shape)
+        if a.nbytes:
+            lo = a.ctypes.data
+
+            def gone(ref, lo=lo):
+                _MAPS[:] = [m for m in _MAPS if m[0] != lo or m[4] is not ref]
+
+            _MAPS.append((lo, lo + a.nbytes, self.raw.fileno(), offset,
+                          weakref.ref(a._mmap, gone)))
+        return a
 
     def close(self):
         if self.h5 is not None:
+            fd = self.raw.fileno()
+            _MAPS[:] = [m for m in _MAPS if m[2] != fd]
             try:
                 self.h5.close()
                 self.raw.close()
             finally:
                 self.h5 = self.raw = None
 
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 _libc = None
 _PAGE = mmap.PAGESIZE
 
 
-def advise(a, advice='willneed', start=0, stop=None):
-    '''madvise() on the elements start:stop (flat C order) of a file-backed
-    array; nothing happens for an array in ordinary memory or if the call is
-    not available.  ``advice``: 'willneed' (read ahead now), 'sequential',
-    'random', 'dontneed' (drop the pages; they are written out first if
-    dirty).'''
+def _c():
     global _libc
-    # only arrays that really are views of a mapped file (numpy keeps _mmap
-    # for those; zeros_like(memmap) is a memmap instance in ordinary memory,
-    # where 'dontneed' would discard the data)
-    if getattr(a, '_mmap', None) is None:
-        return
-    code = {'willneed': mmap.MADV_WILLNEED, 'sequential': mmap.MADV_SEQUENTIAL,
-            'random': mmap.MADV_RANDOM, 'dontneed': mmap.MADV_DONTNEED}[advice]
     if _libc is None:
         try:
             _libc = ctypes.CDLL(None, use_errno=True)
             _libc.madvise.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+            _libc.sync_file_range.argtypes = (ctypes.c_int, ctypes.c_int64, ctypes.c_int64,
+                                              ctypes.c_uint)
         except (OSError, AttributeError):
             _libc = False
-    if not _libc:
+    return _libc
+
+
+def file_range(a):
+    '''(file descriptor, file offset of the first element) of an array that
+    is a view of a mapped array of an open Scratch, else None.'''
+    p = a.ctypes.data
+    for lo, hi, fd, off, _ in _MAPS:
+        if lo <= p < hi:
+            return fd, off + (p - lo)
+    return None
+
+
+def io_desc(t3, r):
+    '''What the C kernels need to know about T3 and its residual as mapped
+    arrays (int64: T3 is mapped, file descriptor of the residual or -1, file
+    offset of its first element), or None if neither is mapped or IO_MODE is 0.'''
+    if not hints():
+        return None
+    fr = file_range(r) if r is not None else None
+    ft = file_range(t3) if t3 is not None else None
+    if fr is None and ft is None:
+        return None
+    return np.array([ft is not None, fr[0] if fr else -1, fr[1] if fr else 0], dtype=np.int64)
+
+
+def written(a, start=0, stop=None):
+    '''The elements start:stop (flat C order) of a mapped array were written:
+    start writing them to the file (returns at once).  Nothing happens for
+    other arrays.'''
+    if not hints() or not _MAPS:
         return
-    n = a.size if stop is None else stop
-    lo = a.ctypes.data + start * a.itemsize
+    fr = file_range(a)
+    lib = _c()
+    if fr is None or not lib:
+        return
+    n = a.size if stop is None else int(stop)
+    lib.sync_file_range(fr[0], fr[1] + int(start) * a.itemsize, (n - int(start)) * a.itemsize,
+                        2)                           # SYNC_FILE_RANGE_WRITE
+
+
+def unmap(a, start=0, stop=None):
+    '''The elements start:stop of a mapped array are not needed for a while:
+    drop their pages from the page tables (whole pages inside the range; the
+    data stays in the page cache or goes to the file).  Nothing happens for
+    other arrays.'''
+    if not hints() or not _MAPS or file_range(a) is None:
+        return
+    lib = _c()
+    if not lib:
+        return
+    n = a.size if stop is None else int(stop)
+    lo = a.ctypes.data + int(start) * a.itemsize
+    hi = a.ctypes.data + n * a.itemsize
+    lo += -lo % _PAGE
+    hi -= hi % _PAGE
+    if hi > lo:
+        lib.madvise(lo, hi - lo, mmap.MADV_DONTNEED)
+
+
+def is_mapped(a):
+    '''Is the array a view of a mapped file?  (numpy keeps _mmap for those;
+    zeros_like(memmap) is a memmap instance in ordinary memory.)'''
+    return getattr(a, '_mmap', None) is not None
+
+
+def need(a, start=0, stop=None):
+    '''The elements start:stop of a mapped array are read next: read ahead
+    (if the hints are active; nothing happens for other arrays).'''
+    if hints() and _MAPS and file_range(a) is not None:
+        advise(a, 'willneed', start, stop, force=True)
+
+
+def advise(a, advice='willneed', start=0, stop=None, force=False):
+    '''madvise() on the elements start:stop (flat C order) of a file-backed
+    array; nothing happens for an array in ordinary memory or if the call is
+    not available.  ``advice``: 'willneed' (read ahead now), 'sequential',
+    'random', 'dontneed' (drop the pages; they are written out first if
+    dirty).  ``force``: the caller knows that the array is a view of a mapped
+    file although numpy has lost track of it (a plain ndarray view).'''
+    global _libc
+    # only arrays that really are views of a mapped file: in ordinary memory
+    # 'dontneed' would discard the data
+    if not force and not is_mapped(a):
+        return
+    code = {'willneed': mmap.MADV_WILLNEED, 'sequential': mmap.MADV_SEQUENTIAL,
+            'random': mmap.MADV_RANDOM, 'dontneed': mmap.MADV_DONTNEED}[advice]
+    if not _c():
+        return
+    n = a.size if stop is None else int(stop)
+    lo = a.ctypes.data + int(start) * a.itemsize
     hi = a.ctypes.data + n * a.itemsize
     lo_al = lo - lo % _PAGE
     if hi > lo_al:

@@ -106,6 +106,15 @@ def resident():
     return 0
 
 
+def ao2mo_memory(max_memory=None):
+    '''MB for the buffers of a PySCF AO-to-MO transformation (its
+    ``max_memory``): a quarter of budget(max_memory), at most PySCF's default
+    of 4000 MB and at least 200 MB.  PySCF sizes its buffers by this number
+    whatever the memory limit of the job, so every transformation is given it.'''
+    b = budget(max_memory)
+    return 4000.0 if b is None else float(min(4000.0, max(200.0, b / 4e6)))
+
+
 def budget(max_memory=None):
     '''Bytes the arrays of a calculation may take from now on: ``max_memory``
     (MB, for the whole process) minus what is resident, else FRACTION of
