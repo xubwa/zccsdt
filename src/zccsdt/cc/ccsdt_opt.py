@@ -70,11 +70,14 @@ def cached_bytes(eris):
     bare blocks, work buffers) and the buffers of the BLAS threads.'''
     from zccsdt.scratch import is_mapped
     d = eris.__dict__
-    arrs = list(d.get('_bare_Q', ())[1:])
+    arrs = list(d.get('_bare_Q', ())[1:]) + [d.get('_bare_vvvo')]
     for bufs in d.get('_buffers', {}).values():
-        arrs += [x for x in bufs if x is not None]
-    n = sum(x.nbytes for x in arrs if isinstance(x, np.ndarray) and not is_mapped(x))
-    return n + (overhead() if _STEPS[0] else 0)
+        arrs += list(bufs)
+    for x in d.get('_bare_packed', {}).values():        # U/R form: SpinTensors
+        arrs += list(getattr(x, 'blocks', {}).values())
+    seen = {id(x): x for x in arrs                      # (blocks shared between spins once)
+            if isinstance(x, np.ndarray) and not is_mapped(x)}
+    return sum(x.nbytes for x in seen.values()) + (overhead() if _STEPS[0] else 0)
 
 
 def sliceable(eris, eng):
