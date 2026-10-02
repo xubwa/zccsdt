@@ -549,6 +549,58 @@ passes over v^4 arrays.  For 15 occupied orbitals the o-contracted terms take
 | 2c26c97 | 5.4 | | exchange symmetry of quadruples with a repeated index |
 | e2314da | 5.2 | 103 | coinciding tiles copied in cache |
 
+## Not enough memory: T3, `<vv|vv>` and the (Q) arrays out of core
+
+What happens when the arrays do not fit is described in
+`docs/spin_adapted.md` ("Memory, and when it is short"; "When 10 v^4 does not
+fit"); here is what it costs.  Each run is a Slurm job step of 8 cores with a
+memory limit (`srun --mem`), which zccsdt sees through its memory cgroup; the
+plan is the automatic one (budget: 80% of what the limit leaves).  c233, the
+node of the other measurements, scratch on its local NVMe (2.4 GB/s
+sequential read), zccsdt ec877db - 75cc5c4.  "In memory" is the same
+calculation without a limit; under every limit of the table it needs more
+than the limit and is killed (the (Q) step refuses to start).
+
+| System | In memory: needs, time | Limit | Goes to the scratch file | Time | Anonymous memory |
+|---|---|---|---|---|---|
+| H2O/cc-pVQZ, iteration | 4.5 GB, 5.15 s | 3 GB | T3, residual; pp operator in 6 slabs | 9.5-9.9 s | 2.4 GB |
+| C2H4/cc-pVTZ, iteration | 7.6 GB, 19.4-20.1 s | 6 GB | T3, residual | 28.1 s | 4.3 GB |
+| C2H4/cc-pVTZ, iteration | | 4 GB | T3, residual; pp operator in 6 slabs | 42.7 s | 3.3 GB |
+| C6H6/cc-pVDZ, frozen core, iteration | 13.7 GB, 85.7 s | 8 GB | T3, residual | 155 s | 4.5 GB |
+| H2O/cc-pVQZ, (Q) | 14 GB, 102 s | 6 GB | (v^4 arrays in slabs) | 194-225 s | 5.2 GB |
+
+The DIIS vectors (2 x 8 T3-sized vectors) are in the scratch file in all
+runs, also "in memory".  The node was shared with other jobs during these
+runs (the benzene run at a 1-minute load of 15); the same set is queued as
+separate Slurm jobs (`bench/slurm_memory.sh`).
+
+- **The runs complete, with the energies of the runs in memory** (the (Q)
+  correction to all printed digits), where the version without these
+  changes was killed by the memory limit.
+- **Cost: 1.4-2.2 times the time in memory** when a third to a half of the
+  memory is missing; the sliced (Q) algorithm takes about twice the block
+  algorithm.
+- **Where the time goes: reading and writing T3.**  With T3 in the file an
+  iteration reads it about 8 times and reads and writes the residual about
+  8 times (three touches in the pair pass, three in the k pass, the ladder,
+  the null projection, the Jacobi step), and DIIS reads its 16 vectors and
+  writes 3: about 40 T3 volumes per iteration, 180 GB for benzene, at
+  2 GB/s unless the page cache holds them.  The time above the run in memory
+  is this.  A smaller `diis_space` reduces it (and the scratch space, 18 T3
+  volumes by default); `diis_t3=False` (DIIS on T1 and T2 only) removes the
+  DIIS part at the price of about a quarter more iterations.
+- **The pp operator costs little to slice**: it is passed over once per
+  iteration.  H2O/cc-pVQZ without a limit, but with an extreme plan (T3
+  mapped, the operator in 10 slabs of 64 MB, one block per product): 7.9 s
+  instead of 5.2 s per iteration, the difference being thin GEMMs and
+  repeated packing.
+- **What must still fit**: the ovvv-sized arrays, about 23 o v^3 elements
+  (1.5 GB for H2O/cc-pVQZ, 2.7 GB for benzene/cc-pVDZ, 25 GB for
+  H2O/cc-pV5Z, 46 GB for benzene/cc-pVTZ with frozen core); below that
+  `MemoryError` is raised at the start.  For (Q) in slabs: 6 (26 + o^2) v^3
+  elements (3.6 GB for H2O/cc-pVQZ, 60 GB for v = 282 and o = 5, where the
+  block algorithm needs 506 GB).
+
 ## Spinor against spin-adapted CCSDT: time ratios and their theory, 8 cores
 
 How much more does the relativistic (complex spinor, no spin symmetry)
