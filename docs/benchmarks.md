@@ -310,6 +310,56 @@ passes over v^4 arrays.  For 15 occupied orbitals the o-contracted terms take
 | 2c26c97 | 5.4 | | exchange symmetry of quadruples with a repeated index |
 | e2314da | 5.2 | 103 | coinciding tiles copied in cache |
 
+## Spinor against spin-adapted CCSDT: time ratios and their theory, 8 cores
+
+How much more does the relativistic (complex spinor, no spin symmetry)
+iteration cost than the nonrelativistic closed-shell one, and is that the
+ratio the operation counts predict?
+
+c233, 8 threads on 8 pinned cores, wall time per CCSDT iteration (mean of 3,
+or of 2 for the complex cc-pVQZ run), zccsdt 0212757.  Spin-orbital code:
+`bench/profile_iter.py` with `ghf` (real, RHF orbitals as spin orbitals) and
+`x2c` (complex two-component spinors); cc-pVQZ with `ZC_PACKED=1`.
+
+| System | spin-adapted (real) | spin-orbital, real | spinor, complex |
+|---|---|---|---|
+| H2O/cc-pVTZ | 0.46 s | 5.28 s | 16.1 s |
+| N2/cc-pVTZ | 1.05 s | 14.6 s | 47.6 s |
+| H2O/cc-pVQZ | 5.1 s | 109 s | 367 s |
+
+Theory: FMA of the pp ladder and ring terms from `bench/flop_counts.py`
+(spin-orbital against spin-adapted), and a factor 4 for complex arithmetic
+(one complex multiplication is four real ones).
+
+| Ratio | Theory | H2O/cc-pVTZ | N2/cc-pVTZ | H2O/cc-pVQZ |
+|---|---|---|---|---|
+| spin-orbital real / spin-adapted | 28-30 | 11.5 | 13.9 | 21.4 |
+| complex / real (spin-orbital code) | 4 | 3.05 | 3.25 | 3.36 |
+| complex spinor / spin-adapted | 111-118 | 35 | 45 | 72 |
+
+Rate on the dominant terms (flops of the ladder and ring terms over the
+iteration time, GFLOP/s; the DGEMM rate of these 8 cores is 540-580):
+
+| System | spin-adapted | spin-orbital, real | spinor, complex |
+|---|---|---|---|
+| H2O/cc-pVTZ | 106 | 256 | 336 |
+| N2/cc-pVTZ | 149 | 316 | 388 |
+| H2O/cc-pVQZ | 276 | 377 | 449 |
+
+- **The measured ratios are below the theoretical ones and approach them as
+  the calculation grows** (spinor / spin-adapted: 35 -> 72 from cc-pVTZ to
+  cc-pVQZ, theory 117).  The operation counts only describe the GEMM work.
+  The cheaper a method is, the larger the share of everything else (gathers,
+  scatters, passes over T3, DIIS, small intermediates), so the spin-adapted
+  code runs at 20-50% of the DGEMM rate and the spinor code at 60-80%.
+- **Complex against real is 3.0-3.4, not 4**, for the same reason: the GEMMs
+  cost four times more, the memory traffic only twice.
+- The relativistic code is therefore not slower than it should be relative
+  to the nonrelativistic one; the deviation from theory is overhead on the
+  nonrelativistic side that matters less for larger basis sets.
+- Peak memory, H2O/cc-pVQZ: 27 GB (real spin-orbital) and 42 GB (complex),
+  against 5 GB for the spin-adapted iterations.
+
 ## RCCSDT / UCCSDT on R/U-form integrals, 8 cores
 
 These runs use the nonrelativistic code path: integrals in R (RHF) or U
