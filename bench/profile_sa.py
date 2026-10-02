@@ -74,10 +74,15 @@ def main():
     del r                       # its T3 must not count in the memory of the timed run
     timing.reset()
     # time a further run of niter iterations without the warm-up costs
+    c0 = time.process_time()
     r = rccsdt.kernel(ints, max_cycle=niter, **opts)
+    cpu = time.process_time() - c0
     watch.stop()
     print('iterations: ' + ' '.join('%.2f' % t for t in r.timings))
     print('mean iteration %.3fs' % np.mean(r.timings[1:] or r.timings))
+    # CPU time of all threads (idle OpenMP threads sleep with OMP_WAIT_POLICY=PASSIVE)
+    print('CPU time per iteration %.3fs (%.2f cores busy)'
+          % (cpu / len(r.timings), cpu / sum(r.timings)))
     if len(r.timings) > opts['diis_space'] + 2:
         print('mean iteration with a full DIIS subspace %.3fs'
               % np.mean(r.timings[opts['diis_space'] + 1:]))
@@ -93,12 +98,13 @@ def main():
         timing.reset()
         watch = MemWatch()
         watch.start()
-        t0 = time.perf_counter()
+        t0, c0 = time.perf_counter(), time.process_time()
         e5, e6 = rccsdt_q.kernel(ints, Blocks(ints.nocc), r.t2, r.t3)
-        dt = time.perf_counter() - t0
+        dt, cpu = time.perf_counter() - t0, time.process_time() - c0
         watch.stop()
         print('(Q) %.2fs   E[Q] = %.12f  E(Q) = %.12f  (amplitudes after %d iterations)'
               % (dt, e5, e6, len(r.timings)))
+        print('(Q) CPU time %.2fs (%.2f cores busy)' % (cpu, cpu / dt))
         for k, sec, calls in timing.report(1):
             print('  %-14s %9.3fs  %6.0f calls' % (k, sec, calls))
         print('(Q) peak anonymous memory %.2f GB' % (watch.anon / 1e6))

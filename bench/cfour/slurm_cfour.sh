@@ -10,6 +10,7 @@
 # usage: sbatch bench/cfour/slurm_cfour.sh MOL BASIS CC_PROG REF MAXCYC
 # CFOUR_FC=ON: frozen core (default OFF);  CFOUR_MEM_GB: MEMORY_SIZE (default 24)
 # CFOUR_CALC='CCSDT(Q)': calculation level (default CCSDT);  CFOUR_CONV: CC_CONV (default 10)
+# CFOUR_SYM=ON: point-group symmetry (default OFF, as zccsdt has none)
 # The partition allows 4000 MB per core: --mem=30G keeps the allocation at the
 # 8 requested cores (a larger --mem silently adds cores).
 mol=$1; basis=$2; prog=$3; ref=$4; maxcyc=${5:-6}; mult=1
@@ -65,7 +66,7 @@ $mol CCSDT $basis
 $geom
 
 *CFOUR(CALC=${CFOUR_CALC:-CCSDT},BASIS=$basis,REF=$ref,CC_PROG=$prog,MULT=$mult
-COORDINATES=CARTESIAN,UNITS=ANGSTROM,SYMMETRY=OFF
+COORDINATES=CARTESIAN,UNITS=ANGSTROM,SYMMETRY=${CFOUR_SYM:-OFF}
 FROZEN_CORE=${CFOUR_FC:-OFF},SCF_CONV=10,CC_CONV=${CFOUR_CONV:-10},CC_MAXCYC=$maxcyc
 SCF_MAXCYC=200,MEMORY_SIZE=${CFOUR_MEM_GB:-24},MEM_UNIT=GB)
 

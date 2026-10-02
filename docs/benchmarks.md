@@ -2,6 +2,66 @@
 
 Wall time per CCSDT iteration of zccsdt and CFOUR, and where the time goes.
 
+## What is compared
+
+Unless a table says otherwise, the numbers of this document are
+
+- **wall time**, not CPU time: of one CCSDT iteration (residuals, update and
+  DIIS) or of the (Q) step, excluding SCF, integral transformation and setup;
+- for the **same calculation** in both programs: same geometry and basis,
+  RHF reference, all electrons correlated unless frozen core is stated;
+- with the **same threads on the same cores**: `OMP_NUM_THREADS` =
+  `MKL_NUM_THREADS` = 8 and both programs pinned to the same 8 cores (checked
+  per thread, see the (Q) section);
+- **without point-group symmetry**: CFOUR is run with `SYMMETRY=OFF`.  zccsdt
+  has no point-group symmetry, so this is the like-for-like comparison of
+  the two implementations, and it is the relevant one for molecules without
+  symmetry.  It is *not* what CFOUR does best for the small symmetric
+  molecules used here: with symmetry `ncc` is several times faster (below).
+
+CPU time is not a clean measure for either program on several threads
+(idle OpenMP threads of `ncc` spin: its CCSDT(Q) step for H2O/cc-pVTZ takes
+405 CPU seconds on 8 threads and 300 on one).  The single-thread runs are.
+
+### One core, and `ncc` with point-group symmetry
+
+cc-pVTZ, c233, one thread pinned to one core per job (all single-core jobs
+ran at the same time on separate cores of one socket).  zccsdt 0212757;
+times in seconds.
+
+| | zccsdt | `ncc`, no symmetry | `ncc` / zccsdt | `ncc`, with symmetry |
+|---|---|---|---|---|
+| H2O, CCSDT iteration | 2.34 | 6.98 | 3.0 | 0.97 (C2v) |
+| H2O, (Q) | 36.4 | 301 | 8.3 | 29.3 |
+| N2, CCSDT iteration | 6.27 | 21.7 | 3.5 | 1.59 (D2h) |
+| N2, (Q) | 128 | 1064 | 8.3 | 53.8 |
+| H2S, CCSDT iteration | 13.6 | 55.4 | 4.1 | 6.07 (C2v) |
+| H2S, (Q) | 334 | not run | | 287 |
+
+The same on 8 cores (wall time; CPU time of all threads in parentheses):
+
+| | zccsdt | `ncc`, no symmetry | `ncc` / zccsdt | `ncc`, with symmetry |
+|---|---|---|---|---|
+| H2O, CCSDT iteration | 0.46 (2.9) | 0.97 (6.3-7.8) | 2.1 | 0.30 (2.4) |
+| H2O, (Q) | 5.2 (36) | 57.4 (405) | 11 | 7.4 (59) |
+| N2, CCSDT iteration | 1.05 (7.2) | 3.81 (20-30) | 3.6 | 0.64 (5.1) |
+| N2, (Q) | 18.5 (128) | 283 (1364-1522) | 15 | 13.5 (107) |
+| H2S, CCSDT iteration | 2.17 (15.5) | 7.14 (51.5) | 3.3 | 1.23 (9.8) |
+| H2S, (Q) | 48.7 (337) | 613 (4269) | 13 | 48.1 (381) |
+
+- **Like for like (no symmetry), on one core** zccsdt is 3.0-4.1 times
+  faster per CCSDT iteration and 8.3 times faster in the (Q) step.  The
+  8-core wall-time ratios of (Q) (11-15) are larger because the (Q) step of
+  `ncc` gains only 3.8-5.2 from 8 threads, that of zccsdt 6.9-7.0.  For the
+  CCSDT iteration zccsdt gains 5.1-6.3 and `ncc` 5.7-7.8.
+- **With point-group symmetry `ncc` wins on these molecules.**  Its
+  iteration becomes 7-14 times cheaper (C2v, D2h) and is then 2.2-3.9 times
+  faster than zccsdt on one core and 1.5-1.8 times on 8 cores; its (Q) step
+  is 1.2-2.4 times faster on one core and between 1.4 times slower and 1.4
+  times faster on 8 cores.  zccsdt would need Abelian point-group symmetry
+  to compete for symmetric molecules.
+- The (Q) corrections of `ncc` with and without symmetry agree to 1e-13 Eh.
+
 ## Closed-shell spin-adapted RCCSDT, 8 cores
 
 Fully spin-adapted closed-shell CCSDT on spatial orbitals (`zccsdt.sa.rccsdt`,
