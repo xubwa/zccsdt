@@ -48,6 +48,11 @@ class Blocks:
         self.kind = np.where(t[:, 0] == t[:, 1], 1, np.where(t[:, 1] == t[:, 2], 2, 0))
         self._att, self._ord = {}, {}
 
+    @staticmethod
+    def count(nocc):
+        '''Number of blocks (sorted triples, not all equal).'''
+        return nocc * (nocc + 1) * (nocc + 2) // 6 - nocc
+
     def cube(self, t3b, p, q, r):
         '''t_pqr^{xyz} as a (v, v, v) view (zeros for p = q = r).'''
         b = self.blk[p, q, r]

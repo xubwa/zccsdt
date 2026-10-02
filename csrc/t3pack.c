@@ -684,20 +684,26 @@ void zc_sa_pair_pack_##SFX(const T *src, int64_t nview, const int64_t *off,    \
                                                                                \
 /* Inverse of zc_sa_pair_pack for the results: Y_w[a,b,x] += S + A (a<b),     \
  * S - A at (b,a), S at (a,a); Y_w addressed like X_w in zc_sa_pair_pack.     \
- * Views must not overlap each other (each element written by one view). */  \
-void zc_sa_pair_unpack_add_##SFX(T *dst, int64_t nview, const int64_t *off,    \
+ * Views must not overlap each other (each element written by one view).     \
+ * _rows: S and A hold only the rows of the pairs (a, b) with a0 <= a < a1    \
+ * (first row: the pair (a0, a0), resp. (a0, a0 + 1)). */                    \
+void zc_sa_pair_unpack_add_rows_##SFX(T *dst, int64_t nview,                   \
+                                 const int64_t *off,                           \
                                  const int64_t *sd, const int64_t *se,         \
                                  const int64_t *sx, int64_t v, int64_t nx,     \
                                  const T *S, int64_t ld, const T *A,           \
-                                 int64_t lda, const int64_t *cols)             \
+                                 int64_t lda, const int64_t *cols,             \
+                                 int64_t a0, int64_t a1)                       \
 {                                                                              \
+    const int64_t ps0 = a0 * v - a0 * (a0 - 1) / 2;                            \
+    const int64_t pa0 = a0 * v - a0 * (a0 + 1) / 2;                            \
     for (int64_t w = 0; w < nview; w++) {                                      \
         T *Y = dst + off[w];                                                   \
         const int64_t col0 = cols ? cols[w] * nx : w * nx;                     \
         _Pragma("omp parallel for schedule(static)")                           \
-        for (int64_t a = 0; a < v; a++) {                                      \
-            const int64_t ps = a * v - a * (a - 1) / 2;                        \
-            const int64_t pa = a * v - a * (a + 1) / 2;                        \
+        for (int64_t a = a0; a < a1; a++) {                                    \
+            const int64_t ps = a * v - a * (a - 1) / 2 - ps0;                  \
+            const int64_t pa = a * v - a * (a + 1) / 2 - pa0;                  \
             for (int64_t b = a; b < v; b++) {                                  \
                 const T *srow = S + (ps + b - a) * ld + col0;                  \
                 T *yab = Y + a * sd[w] + b * se[w];                            \
@@ -721,6 +727,16 @@ void zc_sa_pair_unpack_add_##SFX(T *dst, int64_t nview, const int64_t *off,    \
             }                                                                  \
         }                                                                      \
     }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_sa_pair_unpack_add_##SFX(T *dst, int64_t nview, const int64_t *off,    \
+                                 const int64_t *sd, const int64_t *se,         \
+                                 const int64_t *sx, int64_t v, int64_t nx,     \
+                                 const T *S, int64_t ld, const T *A,           \
+                                 int64_t lda, const int64_t *cols)             \
+{                                                                              \
+    zc_sa_pair_unpack_add_rows_##SFX(dst, nview, off, sd, se, sx, v, nx, S, ld, \
+                                     A, lda, cols, 0, v);                      \
 }
 DEFINE_SA_NULL(double, d)
 DEFINE_SA_NULL(double complex, z)
@@ -729,12 +745,16 @@ DEFINE_SA_NULL(double complex, z)
  * symmetric part Ws[(a<=b), (e<=f)] and antisymmetric part Wa[(a<b), (e<f)]
  * (pairs in numpy.triu_indices order): W_ab^ef = S_(ab)(ef) + A_(ab)(ef) and
  * W_ba^ef = S - A, S symmetric and A antisymmetric in (e,f).  out (v,v,v,no)
- * contiguous, t (no, v).  One pass over the rows of Ws / Wa. */
+ * contiguous, t (no, v).  One pass over the rows of Ws / Wa.
+ * _rows: Ws and Wa hold only the rows of the pairs (a, b) with a0 <= a < a1. */
 #define DEFINE_SA_VT1(T, SFX)                                                  \
-void zc_sa_vvvv_t1_##SFX(T *out, const T *Ws, const T *Wa, const T *t,         \
-                         int64_t v, int64_t no)                                \
+void zc_sa_vvvv_t1_rows_##SFX(T *out, const T *Ws, const T *Wa, const T *t,    \
+                              int64_t v, int64_t no, int64_t a0, int64_t a1)   \
 {                                                                              \
     const int64_t ps = v * (v + 1) / 2, pa = v * (v - 1) / 2;                  \
+    const int64_t rs0 = a0 * v - a0 * (a0 - 1) / 2;                            \
+    const int64_t rs1 = a1 * v - a1 * (a1 - 1) / 2;                            \
+    const int64_t ra0 = a0 * v - a0 * (a0 + 1) / 2;                            \
     _Pragma("omp parallel")                                                    \
     {                                                                          \
         T *Ys = malloc(sizeof(T) * (2 * v * no + 1));                          \
@@ -742,13 +762,13 @@ void zc_sa_vvvv_t1_##SFX(T *out, const T *Ws, const T *Wa, const T *t,         \
         T *St = malloc(sizeof(T) * (2 * no * v + 1));    /* transposed [i,f] */\
         T *At = St + no * v;                                                   \
         _Pragma("omp for schedule(dynamic, 16)")                               \
-        for (int64_t r = 0; r < ps; r++) {                                     \
+        for (int64_t r = rs0; r < rs1; r++) {                                  \
             /* row pair (a, b), a <= b, of the symmetric part */               \
-            int64_t a = 0;                                                     \
+            int64_t a = a0;                                                    \
             while ((a + 1) * v - (a + 1) * a / 2 <= r) a++;                    \
             const int64_t b = a + r - (a * v - a * (a - 1) / 2);               \
-            const T *ws = Ws + r * ps;                                         \
-            const T *wa = (a < b) ? Wa + (a * v - a * (a + 1) / 2 + b - a - 1) * pa : NULL; \
+            const T *ws = Ws + (r - rs0) * ps;                                 \
+            const T *wa = (a < b) ? Wa + (a * v - a * (a + 1) / 2 + b - a - 1 - ra0) * pa : NULL; \
             memset(Ys, 0, sizeof(T) * 2 * v * no);                             \
             memset(St, 0, sizeof(T) * 2 * no * v);                             \
             for (int64_t e = 0; e < v; e++) {                                  \
@@ -792,6 +812,12 @@ void zc_sa_vvvv_t1_##SFX(T *out, const T *Ws, const T *Wa, const T *t,         \
         free(Ys);                                                              \
         free(St);                                                              \
     }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_sa_vvvv_t1_##SFX(T *out, const T *Ws, const T *Wa, const T *t,         \
+                         int64_t v, int64_t no)                                \
+{                                                                              \
+    zc_sa_vvvv_t1_rows_##SFX(out, Ws, Wa, t, v, no, 0, v);                     \
 }
 DEFINE_SA_VT1(double, d)
 DEFINE_SA_VT1(double complex, z)
@@ -967,6 +993,29 @@ void zc_sa_vvvv_pack_d(const double *E, int64_t v, double *Vs, double *Va)
                 const double y = E[tri_idx(a, e) * np_ + pbd];
                 vs[cs++] = 0.5 * (x + y);
                 if (va != NULL && e > d) va[ca++] = 0.5 * (x - y);
+            }
+        }
+    }
+}
+
+/* The same for the rows (a, b >= a) of one a, from R[d][tri(b,e)] = (ad|be)
+ * (v rows of v(v+1)/2): vs (v - a rows), va (v - a - 1 rows). */
+void zc_sa_vvvv_pack_a_d(const double *R, int64_t v, int64_t a, double *vs, double *va)
+{
+    const int64_t np_ = v * (v + 1) / 2, pa = v * (v - 1) / 2;
+    #pragma omp parallel for schedule(dynamic, 4)
+    for (int64_t b = a; b < v; b++) {
+        double *s = vs + (b - a) * np_;
+        double *t = b > a ? va + (b - a - 1) * pa : NULL;
+        int64_t cs = 0, ca = 0;
+        for (int64_t d = 0; d < v; d++) {
+            const double *Rd = R + d * np_;
+            const int64_t pbd = tri_idx(b, d);
+            for (int64_t e = d; e < v; e++) {
+                const double x = Rd[tri_idx(b, e)];
+                const double y = R[e * np_ + pbd];
+                s[cs++] = 0.5 * (x + y);
+                if (t != NULL && e > d) t[ca++] = 0.5 * (x - y);
             }
         }
     }

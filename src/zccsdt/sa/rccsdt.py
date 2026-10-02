@@ -19,9 +19,56 @@ operator; the first version (residuals_terms) folds both into the ladder
 operators.  Design notes: docs/spin_adapted.md.
 '''
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from zccsdt.blas import gemm
+
+
+@dataclass
+class MemoryPlan:
+    '''Where the large arrays live and how the passes are sliced
+    (plan_memory).  The default is everything in memory.'''
+    t3_file: bool = False          # T3 and its residual in the scratch file
+    pp_file: bool = False          # bare packed <vv|vv> in the scratch file
+    pp_bytes: int = None           # rows of the dressed pp operator held at a time
+                                   # (None: all of them)
+    pp_order: str = 'slab'         # sliced pp ladder: for each slab of rows all T3
+                                   # blocks ('slab'), or for each batch of blocks
+                                   # all slabs ('batch': T3 is read once)
+    build_bytes: int = 1 << 30     # memory for building the packed <vv|vv>
+    slab_bytes: int = 1 << 29      # per buffer of the k pass (drive_hh)
+    batch: int = 8                 # T3 blocks per GEMM of the pp ladder
+    need: int = 0                  # bytes of ordinary memory the plan takes
+
+
+def pair_rows(v, a0, a1):
+    '''(rs0, rs1, ra0, ra1): the rows of the pairs (a, b) with a0 <= a < a1 in
+    the packed symmetric (a <= b) and antisymmetric (a < b) pair lists
+    (numpy.triu_indices order).'''
+    return (a0 * v - a0 * (a0 - 1) // 2, a1 * v - a1 * (a1 - 1) // 2,
+            a0 * v - a0 * (a0 + 1) // 2, a1 * v - a1 * (a1 + 1) // 2)
+
+
+def pp_slabs(v, max_bytes=None):
+    '''[(a0, a1)]: ranges of the first virtual index whose rows of the packed
+    pp operator take at most ``max_bytes`` (at least one a per range; None:
+    one range with everything).'''
+    if max_bytes is None:
+        return [(0, v)]
+    ps, pa = v * (v + 1) // 2, v * (v - 1) // 2
+    out, a0 = [], 0
+    while a0 < v:
+        a1 = a0 + 1
+        while a1 < v:
+            rs0, rs1, ra0, ra1 = pair_rows(v, a0, a1 + 1)
+            if 8 * ((rs1 - rs0) * ps + (ra1 - ra0) * pa) > max_bytes:
+                break
+            a1 += 1
+        out.append((a0, a1))
+        a0 = a1
+    return out
 
 
 def pp_operator(Wj, Fv):
@@ -51,11 +98,17 @@ _PP_PLAN = {0: (('01', True, ('01',)), ('02', True, ('02',)), ('12', True, ('12'
             2: (('12', False, ('12',)), ('01', True, ('01', '02')))}
 
 
-def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
+def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8, rows=None, slabs=None):
     '''r3b += sum over the three pair positions of every block of
     sum_de W_xy^de t^{..de..} (block-local): the (d,e) symmetric and
     antisymmetric parts as half-size GEMMs, using the extra symmetry of the
-    blocks with a repeated occupied index.'''
+    blocks with a repeated occupied index.
+
+    ``rows`` = (a0, a1): Ws and Wa hold only the rows of the pairs (x, y)
+    with a0 <= x < a1, and only those elements of the result are added
+    (pair_rows).  ``slabs``: instead of Ws and Wa, a function returning an
+    iterable of (rows, Ws, Wa) that covers all rows; it is called once per
+    batch of blocks, so T3 and the residual are passed over once.'''
     from zccsdt.cc import t3pack
     from zccsdt.timing import timer
     lib = t3pack._lib
@@ -69,8 +122,12 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
     mcol = 3 * min(batch, nb) * v
     buf = (lambda name, n: blocks.buffer(name, (n,))) if hasattr(blocks, 'buffer') \
         else (lambda name, n: np.empty(n))
+    a0, a1 = (0, v) if rows is None or slabs is not None else rows
+    rs0, rs1, ra0, ra1 = pair_rows(v, a0, a1)
+    ms, ma = rs1 - rs0, ra1 - ra0
+    assert slabs is not None or (Ws.shape == (ms, ps) and Wa.shape == (ma, pa))
     Tsb, Tab = buf('pp.Ts', ps * mcol), buf('pp.Ta', pa * mcol)
-    Sb, Ab = buf('pp.S', ps * mcol), buf('pp.A', pa * mcol)
+    Sb, Ab = buf('pp.S', ms * mcol), buf('pp.A', ma * mcol)
     for b0 in range(0, nb, batch):
         full, sym, fplace, splace = [], [], [], []
         for b in range(b0, min(b0 + batch, nb)):
@@ -98,20 +155,26 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8):
                                   t3pack.ctypes.c_void_p(Ts.ctypes.data + 8 * nf * v), I64(ncol),
                                   None, I64(0))
         _t.__exit__(None, None, None)
-        with timer('pp.gemm'):
-            S = gemm(Ws, Ts, Sb[:ps * ncol].reshape(ps, ncol))
-            A = gemm(Wa, Ta, Ab[:pa * nf * v].reshape(pa, nf * v)) if nf else None
+        S = Sb[:ms * ncol].reshape(ms, ncol)
+        A = Ab[:ma * nf * v].reshape(ma, nf * v) if nf else None
+        for (q0, q1), Wsq, Waq in (((a0, a1), Ws, Wa),) if slabs is None else slabs():
+            p0, p1, r0, r1 = (x - y for x, y in zip(pair_rows(v, q0, q1), (rs0, rs0, ra0, ra0)))
+            with timer('pp.gemm'):
+                gemm(Wsq, Ts, S[p0:p1])
+                if nf:
+                    gemm(Waq, Ta, A[r0:r1])
         _t = timer('pp.unpack'); _t.__enter__()
         for plc, Sp, Ap, lda, coff in ((fplace, S, A, nf * v, 0), (splace, S, None, 0, nf)):
             if not plc:
                 continue
             Q = np.array(plc, dtype=np.int64)
             cols = np.ascontiguousarray(Q[:, 4] + coff)
-            lib.zc_sa_pair_unpack_add_d(P(r3b), I64(len(Q)), P(np.ascontiguousarray(Q[:, 0])),
-                                        P(np.ascontiguousarray(Q[:, 1])), P(np.ascontiguousarray(Q[:, 2])),
-                                        P(np.ascontiguousarray(Q[:, 3])), I64(v), I64(v),
-                                        P(Sp), I64(ncol), None if Ap is None else P(Ap), I64(lda),
-                                        P(cols))
+            lib.zc_sa_pair_unpack_add_rows_d(
+                P(r3b), I64(len(Q)), P(np.ascontiguousarray(Q[:, 0])),
+                P(np.ascontiguousarray(Q[:, 1])), P(np.ascontiguousarray(Q[:, 2])),
+                P(np.ascontiguousarray(Q[:, 3])), I64(v), I64(v),
+                P(Sp), I64(ncol), None if Ap is None else P(Ap), I64(lda),
+                P(cols), I64(a0), I64(a1))
         _t.__exit__(None, None, None)
 
 
@@ -217,7 +280,7 @@ def residuals_terms(ints, blocks, t1, t2, t3b):
 
 
 def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=8,
-           verbose=False, diis_file=None, incore_complete=False):
+           verbose=False, diis_file=None, incore_complete=False, max_memory=None, plan=None):
     '''Closed-shell spin-adapted CCSDT (Jacobi steps with DIIS).
 
     DIIS storage follows the PySCF settings (zccsdt.cc.diis): unless
@@ -226,11 +289,33 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
     temporary file in the scratch directory.  T1, T2 and T3 vectors below
     diis.INCORE_SIZE elements stay in memory.
 
+    ``max_memory`` (MB, as in PySCF; default: 80% of what the node and the
+    memory cgroups of the process leave) decides where the other large
+    arrays live (plan_memory): what does not fit goes to the scratch
+    directory and the passes are sliced.  ``incore_complete`` keeps
+    everything in memory whatever the budget; ``plan`` gives a MemoryPlan
+    explicitly.
+
     numpy's own BLAS (OpenBLAS) is kept single-threaded while it runs: its
     spinning threads would otherwise compete with the MKL threads of
     zccsdt.blas.'''
+    if plan is None and incore_complete:
+        plan = plan_memory(ints.nocc, ints.nvir)
+    elif plan is None:
+        from zccsdt import memory
+        # arrays cached on the integral object by an earlier run are part of
+        # what the plan accounts for: they do not reduce the budget
+        cached = cached_bytes(ints)
+        budget = memory.budget(max_memory)
+        limit = budget if max_memory is not None else memory.available()
+        packed = getattr(ints, '_sa_packed', None)
+        plan = plan_memory(ints.nocc, ints.nvir,
+                           None if budget is None else budget + cached,
+                           None if limit is None else limit + cached,
+                           None if packed is None else
+                           ('memory' if packed['scratch'] is None else 'file'))
     args = (ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
-            incore_complete)
+            incore_complete, plan)
     try:
         from threadpoolctl import threadpool_limits
     except ImportError:
@@ -265,11 +350,12 @@ def add_q(ints, res):
 
 
 def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
-            incore_complete):
+            incore_complete, plan):
     import time
     from zccsdt.cc.diis import DIIS
     from zccsdt.sa import rccsdt_ref
     from zccsdt.sa.t3blocks import Blocks, jacobi
+    from zccsdt.scratch import Scratch
     from zccsdt.timing import timer
     no, nv = ints.nocc, ints.nvir
     blocks = Blocks(no)
@@ -280,8 +366,17 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
     eo3 = eo[blocks.tri].sum(axis=1)
     t1 = np.zeros((no, nv))
     t2 = ints.block('oovv') / d2
-    t3b = np.zeros((blocks.nblk, nv, nv, nv))
-    r3b = np.empty_like(t3b)
+    scr = None
+    if plan.t3_file and blocks.nblk:
+        # T3 and its residual as mapped arrays of a scratch file (new file
+        # space reads as zeros)
+        scr = Scratch(prefix='zccsdt_t3_', what='T3',
+                      hint=' or give the calculation more memory (max_memory)')
+        t3b = scr.create('t3', (blocks.nblk, nv, nv, nv))
+        r3b = scr.create('r3', (blocks.nblk, nv, nv, nv))
+    else:
+        t3b = np.zeros((blocks.nblk, nv, nv, nv))
+        r3b = np.empty_like(t3b)
     adiis = DIIS(space=diis_space, filename=diis_file, incore=incore_complete)
     # DIIS metric of the full t_ijk^abc: a block stands for 6 (distinct
     # occupied indices) or 3 (one repeated index) ordered triples; the T3
@@ -293,7 +388,7 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
     try:
         for cycle in range(max_cycle):
             t0 = time.perf_counter()
-            r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b, r3b)
+            r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b, r3b, plan)
             with timer('sa.diis'):
                 # the new vector and its error are built in the DIIS storage
                 xs, es = adiis.buffers((t1, t2, t3b))
@@ -321,11 +416,114 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
         diis_on_disk = adiis.on_disk()
     finally:
         adiis.close()
+        if scr is not None:
+            scr.close()             # the mapped t3b stays valid (the file is unlinked)
     res = rccsdt_ref.Result(e_corr=e_old, e_tot=ints.e_hf + e_old, converged=conv,
                             ncycle=cycle + 1, t1=t1, t2=t2, t3=t3b)
     res.timings = timings
     res.diis_on_disk = diis_on_disk
+    res.plan = plan
     return res
+
+
+def cached_bytes(ints):
+    '''Bytes of ordinary memory held by the arrays that the engine caches on
+    an integral object (integral blocks, packed parts, work buffers).'''
+    n = 0
+    bare = getattr(ints, '_sa_bare', None)
+    for d in (getattr(ints, '_blocks', None), getattr(ints, '_sa_packed', None),
+              getattr(ints, '_sa_wpp', None), None if bare is None else bare._c):
+        for x in (d or {}).values():
+            if isinstance(x, np.ndarray) and getattr(x, '_mmap', None) is None:
+                n += x.nbytes
+    return n
+
+
+def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
+    '''MemoryPlan for ``budget`` bytes of ordinary memory (None: no limit,
+    everything in memory).
+
+    The memory of an iteration (8-byte elements; o, v spatial; n = o + v):
+
+      fixed    about 23 o v^3 (ovvv-sized blocks, their dressed forms, the
+               intermediates and the buffers of the pair pass), plus
+               2 (o + v) o v^2 and n^2 o v
+      k pass   2.6 slab_bytes
+      ladder   6 batch v^3 (packed T3 views and their products)
+      pp       v^4: the bare packed <vv|vv> and its dressed form, v^4 / 2 each
+      T3       2 o^3 v^3 / 6: amplitudes and residual
+
+    (the DIIS vectors are in the scratch file already).  If that exceeds the
+    budget, the work buffers shrink.  T3 and its residual stay in memory if
+    they fit next to a few rows of the pp operator (they are passed over many
+    times per iteration, the operator once), else they go to the scratch
+    file.  The bare pp operator goes there when both forms do not fit, and
+    its dressed rows are held ``pp_bytes`` at a time if they do not fit
+    either.  ``pp_cached``: the bare operator exists
+    already, in 'memory' or in a 'file'.  Raises MemoryError if the fixed
+    part does not fit in ``limit`` (default: the budget).'''
+    from zccsdt.sa.t3blocks import Blocks
+    o, v = nocc, nvir
+    n = o + v
+    ps, pa = v * (v + 1) // 2, v * (v - 1) // 2
+    plan = MemoryPlan(build_bytes=1 << 62, pp_file=pp_cached == 'file')
+    t3 = 8 * Blocks.count(o) * v ** 3
+    pp = 8 * (ps * ps + pa * pa)
+    bare = 0 if plan.pp_file else pp
+    fixed = 8 * (23 * o * v ** 3 + 2 * n * o * v * v + n * n * o * v) + 100_000_000
+
+    nblk = Blocks.count(o)
+
+    def ladder(batch):
+        return 16 * 3 * min(batch, nblk) * v * (ps + pa)
+
+    def kpass(slab):                                # the buffers hold at most all of x
+        return int(2.6 * min(slab, 8 * o * o * v ** 3))
+
+    plan.need = fixed + kpass(plan.slab_bytes) + ladder(plan.batch) + bare + pp + 2 * t3
+    if budget is None or plan.need <= budget:
+        return plan
+    slab_min = 8 * o * o * v * v                    # one virtual index per slab
+    row_min = min(8 * (v * ps + (v - 1) * pa), pp)  # the rows of one a
+    sunk = pp if pp_cached == 'memory' else 0
+    hard = budget if limit is None else limit
+
+    def base(batch, slab):
+        return fixed + kpass(slab) + ladder(batch) + sunk
+
+    if base(1, slab_min) + row_min > hard:
+        raise MemoryError('spin-adapted CCSDT with %d occupied and %d virtual orbitals needs '
+                          'about %.1f GB of memory for its o v^3 arrays and work buffers; '
+                          '%.1f GB are available (max_memory, or what the node and the memory '
+                          'limit of the job leave)'
+                          % (o, v, (base(1, slab_min) + row_min) / 1e9, hard / 1e9))
+    # work buffers: moderate ones, then the smallest that still work well;
+    # T3 stays in memory with the first choice that leaves room for it
+    choices = [(8 if ladder(8) <= budget // 8 else int(max(1, (budget // 8) // max(ladder(1), 1))),
+                int(min(max(budget // 32, slab_min), 1 << 29))),
+               (1, int(min(max(budget // 128, slab_min), 1 << 29))),
+               (1, slab_min)]
+    room = 2 * t3 + min(4 * row_min, pp)
+    fits = [c for c in choices if base(*c) + room <= budget]
+    plan.t3_file = not fits
+    plan.batch, plan.slab_bytes = fits[0] if fits else \
+        ([c for c in choices if base(*c) + row_min <= budget] + choices[-1:])[0]
+    plan.need = base(plan.batch, plan.slab_bytes) + (0 if plan.t3_file else 2 * t3)
+    rest = max(budget - plan.need, 0)
+    if pp_cached is None and 2 * pp <= rest:
+        plan.need += 2 * pp                         # bare and dressed in memory
+    elif pp <= rest:
+        plan.pp_file = pp_cached != 'memory'        # all dressed rows at once
+        plan.need += pp
+    else:
+        plan.pp_file = pp_cached != 'memory'
+        plan.pp_bytes = int(max(rest // 2, row_min))
+        plan.need += plan.pp_bytes
+        # with T3 in the file each slab-wise sweep would read it again
+        plan.pp_order = 'batch' if plan.t3_file else 'slab'
+    if plan.pp_file:
+        plan.build_bytes = int(min(max((budget - plan.need) // 2, 1 << 28), 1 << 30))
+    return plan
 
 
 # ------------------------------------------------------- explicit (v2) pieces
@@ -453,29 +651,49 @@ def intermediates(D, Fd, t2, nocc, P=None, t1=None):
     return out
 
 
-def ladder_pairs(Ws, Wa, x):
+class PairLadder:
     '''sum_cd W_ab^cd x[cd, n] for x[c, d, n] with the packed (c,d)
-    symmetric / antisymmetric parts of W; returns [a, b, n].'''
-    v = x.shape[0]
-    s0, s1 = np.triu_indices(v)
-    a0, a1 = np.triu_indices(v, 1)
-    xs = x[s0, s1] + x[s1, s0]
-    xs[s0 == s1] *= 0.5
-    S = gemm(Ws, np.ascontiguousarray(xs))
-    A = gemm(Wa, np.ascontiguousarray(x[a0, a1] - x[a1, a0]))
-    out = np.empty((v, v, x.shape[2]), dtype=S.dtype)
-    out[s0, s1] = S
-    out[s1, s0] = S
-    out[a0, a1] += A
-    out[a1, a0] -= A
-    return out
+    symmetric / antisymmetric parts of W, whose rows may come in slabs
+    (add); result() is [a, b, n].'''
+
+    def __init__(self, x):
+        self.v = v = x.shape[0]
+        self.s = s0, s1 = np.triu_indices(v)
+        self.a = a0, a1 = np.triu_indices(v, 1)
+        xs = x[s0, s1] + x[s1, s0]
+        xs[s0 == s1] *= 0.5
+        self.xs = np.ascontiguousarray(xs)
+        self.xa = np.ascontiguousarray(x[a0, a1] - x[a1, a0])
+        self.S = np.empty((len(s0), x.shape[2]), dtype=x.dtype)
+        self.A = np.empty((len(a0), x.shape[2]), dtype=x.dtype)
+
+    def add(self, Ws, Wa, rows=None):
+        rs0, rs1, ra0, ra1 = pair_rows(self.v, *((0, self.v) if rows is None else rows))
+        gemm(Ws, self.xs, self.S[rs0:rs1])
+        gemm(Wa, self.xa, self.A[ra0:ra1])
+        return self
+
+    def result(self):
+        (s0, s1), (a0, a1) = self.s, self.a
+        out = np.empty((self.v, self.v, self.S.shape[1]), dtype=self.S.dtype)
+        out[s0, s1] = self.S
+        out[s1, s0] = self.S
+        out[a0, a1] += self.A
+        out[a1, a0] -= self.A
+        return out
 
 
-def ccsd_residual(D, Fd, t2, imds, nocc, Ws, Wa, t1=None):
-    '''T1-dressed closed-shell CCSD residuals (no T3); the ladder through the
-    packed pp operator W (which includes the T2 term, removed here).  With
-    ``t1``, D['vvoo'] lacks the sum_fg t_i^f t_j^g <ab|fg> term, which is
-    added here through the ladder with tau = t2 + t1 t1.'''
+def ladder_pairs(Ws, Wa, x):
+    '''sum_cd W_ab^cd x[cd, n] for x[c, d, n]; returns [a, b, n].'''
+    return PairLadder(x).add(Ws, Wa).result()
+
+
+def ccsd_residual(D, Fd, t2, imds, nocc, lad, t1=None):
+    '''T1-dressed closed-shell CCSD residuals (no T3).  ``lad``[a, b, (ij)]:
+    the ladder sum_cd W_ab^cd tau_ij^cd through the packed pp operator W
+    (which includes the T2 term, removed here), tau = t2 + t1 t1: with ``t1``,
+    D['vvoo'] lacks the sum_fg t_i^f t_j^g <ab|fg> term, which the ladder
+    with tau adds.'''
     o, v = slice(0, nocc), slice(nocc, None)
     Fv, Fo, Whh, G = imds['Fv'], imds['Fo'], imds['Whh'], imds['G']
     t2b = 2 * t2 - t2.transpose(0, 1, 3, 2)
@@ -486,7 +704,6 @@ def ccsd_residual(D, Fd, t2, imds, nocc, Ws, Wa, t1=None):
     W2K = 0.5 * (D['ovov'].transpose(0, 1, 3, 2) + imds['WrK'])
     no, nv = t2.shape[0], t2.shape[2]
     tau = t2 if t1 is None else t2 + t1[:, None, :, None] * t1[None, :, None, :]
-    lad = ladder_pairs(Ws, Wa, np.ascontiguousarray(tau.transpose(2, 3, 0, 1)).reshape(nv, nv, -1))
     lad = lad.reshape(nv, nv, no, no).transpose(2, 3, 0, 1)
     lad = lad - contract('mnab,mnij->ijab', t2, contract('mncd,ijcd->mnij', G, tau))
     q = 0.5 * D['vvoo'].transpose(2, 3, 0, 1) + 0.5 * lad \
@@ -700,32 +917,65 @@ def dressed_blocks(ints, t1):
     return D, dress_fock(bb, ints.fock, t1)
 
 
-def residuals(ints, blocks, t1, t2, t3b, r3b=None):
+def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
     '''(R1, R2, R3 blocks): dressed small blocks, the packed pp operator in
     one pass, explicit intermediates and CCSD part, one loop over occupied
     pairs for the ring (with F_vv) and T3 -> T1/T2/W, then drive and the
-    ladders (F_oo in the hh operator).  ``r3b``: optional output array.'''
+    ladders (F_oo in the hh operator).  ``r3b``: optional output array;
+    ``plan``: MemoryPlan (default: everything in memory).'''
     from zccsdt.sa.t3blocks import project_null, zero
     from zccsdt.timing import timer
     no = ints.nocc
+    plan = plan or MemoryPlan()
     bb = BareBlocks.of(ints)
+    nv = ints.nvir
     with timer('sa.dress'):
         D, Fd = dressed_blocks(ints, t1)
         G = D['oovv']
-    with timer('sa.Wpp'):
-        Ws, Wa = pp_operator_packed(ints, t1, t2)
+    r3b = np.zeros_like(t3b) if r3b is None else zero(r3b)
     with timer('sa.imds'):
         # vvvo: bra-dressed part + sum_f t1[i,f] (bra-dressed vvvv = W - t2.G)
         B = dress_block(bb, t1, 'vvvo', ket=False)
-        P = vvvv_t1_packed(Ws, Wa, t1, out=permute(B, (0, 1, 2, 3), out=np.empty(B.shape)))
+        P = permute(B, (0, 1, 2, 3), out=np.empty(B.shape))
+    tau = t2 + t1[:, None, :, None] * t1[None, :, None, :]
+    lad = PairLadder(np.ascontiguousarray(tau.transpose(2, 3, 0, 1)).reshape(nv, nv, -1))
+    # the pp operator, all rows at once or in slabs of its first virtual
+    # index: dressed, then used for the vvvo intermediate, the CCSD ladder
+    # and the T3 ladder of all blocks
+    slabs = pp_slabs(nv, plan.pp_bytes)
+    cap = [max(q[n + 1] - q[n] for q in (pair_rows(nv, *r) for r in slabs)) for n in (0, 2)]
+    sweeps = []
+
+    def dressed():
+        # the dressed rows slab by slab; the first sweep also feeds the vvvo
+        # intermediate and the CCSD ladder
+        for rows in slabs:
+            with timer('sa.Wpp'):
+                Ws, Wa = pp_operator_packed(ints, t1, t2, rows, plan, cap)
+            if not sweeps:
+                with timer('sa.imds'):
+                    vvvv_t1_packed(Ws, Wa, t1, out=P, rows=rows)
+                with timer('sa.ccsd'):
+                    lad.add(Ws, Wa, rows)
+            yield rows, Ws, Wa
+        sweeps.append(1)
+
+    if plan.pp_order == 'batch' and len(slabs) > 1 and blocks.nblk:
+        with timer('sa.pp_ladder'):
+            ladder_pp(blocks, t3b, None, None, r3b, batch=plan.batch, slabs=dressed)
+    else:
+        for rows, Ws, Wa in dressed():
+            with timer('sa.pp_ladder'):
+                ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=plan.batch, rows=rows)
+    with timer('sa.imds'):
         im = intermediates(D, Fd, t2, no, P=P, t1=t1)
     with timer('sa.ccsd'):
         # vvoo: bra-dressed part and the single-t1 ket terms; the t1 t1 vvvv
         # term rides with the CCSD ladder (tau = t2 + t1 t1)
         Bvo = dress_block(bb, t1, 'vvoo', ket=False)
         D['vvoo'] = Bvo + contract('if,abfj->abij', t1, B) + contract('jf,bafi->abij', t1, B)
-        r1, r2 = ccsd_residual(D, Fd, t2, im, no, Ws, Wa, t1=t1)
-    r3b = np.zeros_like(t3b) if r3b is None else zero(r3b)
+        r1, r2 = ccsd_residual(D, Fd, t2, im, no, lad.result(), t1=t1)
+    del lad, P, B
     with timer('sa.t3_pass'):
         r1t, r2t, Eab, Eba, dWo = t3_pass(blocks, t3b, im, D, no, r3b)
     with timer('sa.drive_hh'):
@@ -736,9 +986,8 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None):
             axpby(out, WvT[k], 1.0, 0.0)
             axpby(out, Eab[:, k].transpose(0, 2, 1), 1.0, 1.0)
             axpby(out, Eba[:, k], 1.0, 1.0)
-        drive_hh(blocks, t3b, t2, Wv, im['WoJ'] + dWo, hh_operator(im['Whh'], im['Fo']), r3b)
-    with timer('sa.pp_ladder'):
-        ladder_pp(blocks, t3b, Ws, Wa, r3b)
+        drive_hh(blocks, t3b, t2, Wv, im['WoJ'] + dWo, hh_operator(im['Whh'], im['Fo']), r3b,
+                 max_bytes=plan.slab_bytes)
     with timer('sa.project'):
         r3b = project_null(r3b)
     return r1 + r1t, r2 + r2t, r3b
@@ -834,27 +1083,32 @@ def dress_fock(bb, F, t1):
 DRESSED = ('oooo', 'ooov', 'oovo', 'ovov', 'ovvo', 'ovvv')
 
 
-def vvvv_t1_packed(Ws, Wa, t1, out=None):
+def vvvv_t1_packed(Ws, Wa, t1, out=None, rows=None):
     '''X[a,b,e,i] = sum_f W_ab^ef t1[i,f] from the packed parts of W (added
-    to ``out`` if given).'''
+    to ``out`` if given).  ``rows`` = (a0, a1): Ws and Wa hold the rows of
+    the pairs (a, b) with a0 <= a < a1 only (pair_rows), and the elements
+    [a,b] and [b,a] of those pairs are added.'''
     from zccsdt.cc import t3pack
     no, v = t1.shape
     if out is None:
         out = np.zeros((v, v, v, no))
+    r0, r1 = (0, v) if rows is None else rows
     lib = t3pack._lib
-    if t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_t1_d'):
-        lib.zc_sa_vvvv_t1_d(t3pack._p(out), t3pack._p(Ws), t3pack._p(Wa),
-                            t3pack._p(np.ascontiguousarray(t1)), t3pack._I64(v), t3pack._I64(no))
+    if t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_t1_rows_d'):
+        lib.zc_sa_vvvv_t1_rows_d(t3pack._p(out), t3pack._p(Ws), t3pack._p(Wa),
+                                 t3pack._p(np.ascontiguousarray(t1)), t3pack._I64(v),
+                                 t3pack._I64(no), t3pack._I64(r0), t3pack._I64(r1))
         return out
     s0, s1 = np.triu_indices(v)
     a0, a1 = np.triu_indices(v, 1)
+    rs0, rs1, ra0, ra1 = pair_rows(v, r0, r1)
     W = np.zeros((v, v, v, v))
     S = np.zeros((len(s0), v, v))
-    S[:, s0, s1] = Ws
-    S[:, s1, s0] = Ws
+    S[rs0:rs1, s0, s1] = Ws
+    S[rs0:rs1, s1, s0] = Ws
     A = np.zeros((len(a0), v, v))
-    A[:, a0, a1] = Wa
-    A[:, a1, a0] = -Wa
+    A[ra0:ra1, a0, a1] = Wa
+    A[ra0:ra1, a1, a0] = -Wa
     W[s0, s1] += S
     W[s1, s0] += S
     W[s0[s0 == s1], s1[s0 == s1]] -= S[s0 == s1]
@@ -864,55 +1118,95 @@ def vvvv_t1_packed(Ws, Wa, t1, out=None):
     return out
 
 
-def vvvv_packed(ints, max_bytes=1 << 30):
+def vvvv_packed(ints, max_bytes=1 << 30, out=None):
     '''Bare <ab|de> symmetric / antisymmetric in (d,e), packed over rows
-    a<=b (a<b) and columns d<=e (d<e) in numpy.triu_indices order.  Without
-    the full V: from the 4-fold packed (ad|be) when it fits in ``max_bytes``,
-    else row batches of a from the AO integrals (<ab|de> = (ad|be)).'''
+    a<=b (a<b) and columns d<=e (d<e) in numpy.triu_indices order: (Vs, Va),
+    written into ``out`` if given (e.g. mapped arrays of a scratch file).
+
+    Without the full V: from the 4-fold packed (ad|be) in memory when that
+    fits in ``max_bytes``.  Else PySCF's out-of-core transformation writes
+    (ad|be) with rows (a, d) and packed columns (b >= e) to a scratch file,
+    for one half of the a at a time (so that the first two orbital sets
+    differ and (a, d) is not packed), and the rows of each a are repacked
+    from it: two passes over the AO integrals, 4 v^3 bytes in memory.'''
     no, v = ints.nocc, ints.nvir
     s0, s1 = np.triu_indices(v)
     a0, a1 = np.triu_indices(v, 1)
+    ps, pa = len(s0), len(a0)
+    Vs, Va = out if out is not None else (np.empty((ps, ps)), np.empty((pa, pa)))
     if ints.V is not None:
         Vv = ints.V[no:, no:, no:, no:]
-        Vs = 0.5 * (Vv[s0, s1][:, s0, s1] + Vv[s0, s1][:, s1, s0])
-        Va = 0.5 * (Vv[a0, a1][:, a0, a1] - Vv[a0, a1][:, a1, a0])
+        Vs[...] = 0.5 * (Vv[s0, s1][:, s0, s1] + Vv[s0, s1][:, s1, s0])
+        Va[...] = 0.5 * (Vv[a0, a1][:, a0, a1] - Vv[a0, a1][:, a1, a0])
         return Vs, Va
+    import os
+    import tempfile
+    import h5py
+    from pyscf import ao2mo, lib as pyscf_lib
     from zccsdt.cc import t3pack
-    from zccsdt.sa.rccsdt_ref import ao_block
+    from zccsdt.scratch import scratch_dir
     Cv = np.ascontiguousarray(ints.mo_coeff[:, no:])
-    Vs = np.empty((len(s0), len(s0)))
-    Va = np.empty((len(a0), len(a0)))
     lib = t3pack._lib
-    if (8 * len(s0) ** 2 <= max_bytes and t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_pack_d')):
+    have_c = t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_pack_a_d')
+    if 8 * ps ** 2 <= max_bytes and have_c:
         # (ad|be) with 4-fold symmetry in one transformation, then repacked
-        from pyscf import ao2mo
         E4 = np.ascontiguousarray(ao2mo.kernel(ints.mol, Cv, compact=True))
         lib.zc_sa_vvvv_pack_d(t3pack._p(E4), t3pack._I64(v), t3pack._p(Vs), t3pack._p(Va))
         return Vs, Va
-    nb = int(max(1, min(v, max_bytes // (8 * v ** 3))))
-    rs = ra = 0
-    for b0 in range(0, v, nb):
-        b1 = min(v, b0 + nb)
-        X = ao_block(ints.mol, (Cv[:, b0:b1], Cv, Cv, Cv))          # [a, b, d, e]
-        for a in range(b0, b1):
-            Y = X[a - b0, a:]                                       # rows (a, b >= a)
-            Vs[rs:rs + v - a] = 0.5 * (Y[:, s0, s1] + Y[:, s1, s0])
-            Va[ra:ra + v - a - 1] = 0.5 * (Y[1:, a0, a1] - Y[1:, a1, a0])
-            rs += v - a
-            ra += v - a - 1
+    R = np.empty((v, ps))
+    h = v // 2
+    for h0, h1 in ((0, h), (h, v)) if h else ((0, v),):
+        fd, name = tempfile.mkstemp(prefix='zccsdt_ao2mo_', suffix='.h5', dir=scratch_dir())
+        os.close(fd)
+        try:
+            ao2mo.outcore.general(ints.mol, (Cv[:, h0:h1], Cv, Cv, Cv), name, dataname='eri',
+                                  compact=True, max_memory=max(500.0, max_bytes / 1e6),
+                                  verbose=0)
+            with h5py.File(name, 'r') as f:
+                ds = f['eri']
+                for a in range(h0, h1):
+                    ds.read_direct(R, np.s_[(a - h0) * v:(a - h0 + 1) * v])
+                    rs0, rs1, ra0, ra1 = pair_rows(v, a, a + 1)
+                    if have_c:
+                        # the row buffers: views of the output or copies
+                        vs, va = np.ascontiguousarray(Vs[rs0:rs1]), np.ascontiguousarray(Va[ra0:ra1])
+                        lib.zc_sa_vvvv_pack_a_d(t3pack._p(R), t3pack._I64(v), t3pack._I64(a),
+                                                t3pack._p(vs), t3pack._p(va))
+                        if not np.shares_memory(vs, Vs):
+                            Vs[rs0:rs1], Va[ra0:ra1] = vs, va
+                        continue
+                    Y = pyscf_lib.unpack_tril(R)                  # [d, b, e] = (ad|be)
+                    for b in range(a, v):
+                        Yb = Y[:, b]
+                        Vs[rs0 + b - a] = 0.5 * (Yb + Yb.T)[s0, s1]
+                        if b > a:
+                            Va[ra0 + b - a - 1] = 0.5 * (Yb - Yb.T)[a0, a1]
+        finally:
+            os.remove(name)
     return Vs, Va
 
 
-def bare_packed(ints):
+def bare_packed(ints, plan=None):
     '''Bare <ab|de> symmetric / antisymmetric in (d,e), packed (a<=b, d<=e) /
     (a<b, d<e), with the matching packed ovvv (U) and oovv (G) parts; cached
-    on the integral object.'''
+    on the integral object.  With ``plan.pp_file`` the two vvvv parts are
+    mapped arrays of a scratch file.'''
     c = getattr(ints, '_sa_packed', None)
     if c is None:
         no, v = ints.nocc, ints.nvir
         s0, s1 = np.triu_indices(v)
         a0, a1 = np.triu_indices(v, 1)
-        Vs, Va = vvvv_packed(ints)
+        plan = plan or MemoryPlan()
+        scr = None
+        if plan.pp_file and ints.V is None and len(a0):
+            from zccsdt.scratch import Scratch
+            scr = Scratch(prefix='zccsdt_vvvv_', what='the packed <vv|vv> integrals',
+                          hint=' or give the calculation more memory (max_memory)')
+            Vs, Va = vvvv_packed(ints, max_bytes=plan.build_bytes,
+                                 out=(scr.create('Vs', (len(s0), len(s0))),
+                                      scr.create('Va', (len(a0), len(a0)))))
+        else:
+            Vs, Va = vvvv_packed(ints, max_bytes=plan.build_bytes)
         U = ints.block('ovvv')                                  # <mb|de>
         Us = 0.5 * (U[:, :, s0, s1] + U[:, :, s1, s0])
         Ua = 0.5 * (U[:, :, a0, a1] - U[:, :, a1, a0])
@@ -920,36 +1214,46 @@ def bare_packed(ints):
         Gs = 0.5 * (Gf[:, s0, s1] + Gf[:, s1, s0])
         Ga = 0.5 * (Gf[:, a0, a1] - Gf[:, a1, a0])
         c = {k: np.ascontiguousarray(x) for k, x in
-             (('Vs', Vs), ('Va', Va), ('Us', Us), ('Ua', Ua), ('Gs', Gs), ('Ga', Ga))}
+             (('Us', Us), ('Ua', Ua), ('Gs', Gs), ('Ga', Ga))}
+        c['Vs'], c['Va'] = Vs, Va           # C-contiguous; mapped arrays stay mapped
+        c['scratch'] = scr                  # keeps the file of mapped Vs / Va open
         ints._sa_packed = c
     return c
 
 
-def pp_operator_packed(ints, t1, t2):
+def pp_operator_packed(ints, t1, t2, rows=None, plan=None, cap=None):
     '''W_ab^de = ~<ab|de> + sum_mn t_mn^ab <mn|de> (no F_vv), as its (d,e)
     symmetric / antisymmetric packed parts, in one pass over the bare
-    packed blocks (zc_vvvv_dress).'''
+    packed blocks (zc_vvvv_dress).  ``rows`` = (a0, a1): only the rows of the
+    pairs (a, b) with a0 <= a < a1 (pair_rows).  The arrays returned are work
+    buffers that the next call overwrites; ``cap``: their numbers of rows
+    (symmetric, antisymmetric; default: those of this call).'''
     from zccsdt.cc import t3pack
     lib = t3pack._lib
-    c = bare_packed(ints)
+    c = bare_packed(ints, plan)
     no, v = t1.shape
     s0, s1 = np.triu_indices(v)
     a0, a1 = np.triu_indices(v, 1)
+    rs0, rs1, ra0, ra1 = pair_rows(v, *((0, v) if rows is None else rows))
     tau = (t2 + t1[:, None, :, None] * t1[None, :, None, :]).reshape(no * no, v, v)
     out = []
     I64, P = t3pack._I64, t3pack._p
     mt = np.ascontiguousarray(-t1)
-    for (r0, r1), bare, U, G, sgnB in (((s0, s1), c['Vs'], c['Us'], c['Gs'], -1.0),
-                                        ((a0, a1), c['Va'], c['Ua'], c['Ga'], 1.0)):
+    ws = ints.__dict__.setdefault('_sa_wpp', {})
+    for n, ((r0, r1), bare, U, G, sgnB, (q0, q1)) in enumerate(
+            (((s0, s1), c['Vs'], c['Us'], c['Gs'], -1.0, (rs0, rs1)),
+             ((a0, a1), c['Va'], c['Ua'], c['Ga'], 1.0, (ra0, ra1)))):
+        m, ncol = q1 - q0, bare.shape[1]
+        r0, r1 = (np.ascontiguousarray(x[q0:q1], dtype=np.int64) for x in (r0, r1))
         CT = np.ascontiguousarray(tau[:, r0, r1].T)              # [(ab), (mn)]
-        ws = ints.__dict__.setdefault('_sa_wpp', {})
-        W = ws.get(len(r0))
-        if W is None or W.shape != bare.shape:
-            W = ws[len(r0)] = np.empty_like(bare)
+        W = ws.get(n)
+        if W is None or W.shape != (max(m, cap[n] if cap else m), ncol):
+            ws.pop(n, None)
+            W = None                            # freed before the new one is made
+            W = ws[n] = np.empty((max(m, cap[n] if cap else m), ncol))
+        W = W[:m]
         tB = np.ascontiguousarray(sgnB * t1)
-        lib.zc_vvvv_dress_d(P(W), P(bare), I64(len(r0)), I64(bare.shape[1]),
-                            P(np.ascontiguousarray(r0, dtype=np.int64)),
-                            P(np.ascontiguousarray(r1, dtype=np.int64)),
+        lib.zc_vvvv_dress_d(P(W), P(bare[q0:q1]), I64(m), I64(ncol), P(r0), P(r1),
                             P(mt), I64(v), P(U), I64(no), I64(v),
                             P(tB), I64(v), P(U), I64(no), I64(v),
                             P(CT), P(G), I64(no * no))

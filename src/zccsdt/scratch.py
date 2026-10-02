@@ -98,7 +98,10 @@ def advise(a, advice='willneed', start=0, stop=None):
     'random', 'dontneed' (drop the pages; they are written out first if
     dirty).'''
     global _libc
-    if not isinstance(a, np.memmap) and not isinstance(getattr(a, 'base', None), np.memmap):
+    # only arrays that really are views of a mapped file (numpy keeps _mmap
+    # for those; zeros_like(memmap) is a memmap instance in ordinary memory,
+    # where 'dontneed' would discard the data)
+    if getattr(a, '_mmap', None) is None:
         return
     code = {'willneed': mmap.MADV_WILLNEED, 'sequential': mmap.MADV_SEQUENTIAL,
             'random': mmap.MADV_RANDOM, 'dontneed': mmap.MADV_DONTNEED}[advice]

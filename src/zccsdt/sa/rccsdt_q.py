@@ -394,15 +394,10 @@ def memory_needed(nocc, nvir):
 
 
 def _available_memory():
-    '''MemAvailable of /proc/meminfo in bytes, or None.'''
-    try:
-        with open('/proc/meminfo') as f:
-            for line in f:
-                if line.startswith('MemAvailable'):
-                    return 1024 * int(line.split()[1])
-    except OSError:
-        pass
-    return None
+    '''Bytes the process can still allocate (node and memory cgroups), or
+    None.'''
+    from zccsdt import memory
+    return memory.available()
 
 
 def kernel(ints, blocks, t2, t3b):

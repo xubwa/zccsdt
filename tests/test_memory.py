@@ -66,6 +66,10 @@ def test_scratch_arrays(monkeypatch, tmp_path):
         scratch.advise(a[1], adv, 2, 9)
         scratch.advise(np.zeros(10), adv)
     assert a[2, 3, 4] == 59.0 and a.sum() == 59 * 60 / 2
+    # a memmap instance in ordinary memory keeps its data
+    z = np.ones_like(a)
+    scratch.advise(z, 'dontneed')
+    assert z.sum() == 60
     assert list(tmp_path.iterdir()) == []            # the temporary file is unlinked
     s.close()
     name = str(tmp_path / 'keep.h5')

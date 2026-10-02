@@ -6,6 +6,8 @@ usage: python bench/profile_sa.py MOLECULE BASIS [NITER] [NCORE]
   file, as in PySCF);  ZC_DIIS_SPACE: DIIS subspace size (default 8)
   ZC_Q=1: also time the (Q) correction (with the amplitudes of the last
   iteration; its cost does not depend on them)
+  ZC_MAXMEM: max_memory in MB (default: 80% of the available memory)
+  ZC_PLAN: fields of an explicit rccsdt.MemoryPlan, e.g. 't3_file=True, batch=1'
 '''
 import os
 import sys
@@ -67,6 +69,11 @@ def main():
           % (name, basis, ints.nocc, ints.nvir, time.perf_counter() - t0))
     opts = dict(incore_complete=os.environ.get('ZC_INCORE', '0') == '1',
                 diis_space=int(os.environ.get('ZC_DIIS_SPACE', '8')), verbose=True)
+    if os.environ.get('ZC_MAXMEM'):
+        opts['max_memory'] = float(os.environ['ZC_MAXMEM'])
+    if os.environ.get('ZC_PLAN'):
+        # e.g. ZC_PLAN='t3_file=True, pp_file=True, pp_bytes=1 << 28, batch=1'
+        opts['plan'] = eval('rccsdt.MemoryPlan(%s)' % os.environ['ZC_PLAN'])
     watch = MemWatch()
     watch.start()
     timing.reset()
@@ -89,6 +96,7 @@ def main():
     for k, sec, calls in timing.report(len(r.timings)):
         print('  %-14s %9.3fs  %5.1f calls' % (k, sec, calls))
     print('DIIS vectors: %s' % ('T3 part in the scratch file' if r.diis_on_disk else 'in memory'))
+    print('plan: %s' % r.plan)
     print('peak RSS %.2f GB (anonymous %.2f GB, file-backed %.2f GB)'
           % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6, watch.anon / 1e6,
              watch.file / 1e6))
