@@ -8,6 +8,7 @@ usage: python bench/profile_sa.py MOLECULE BASIS [NITER] [NCORE]
   iteration; its cost does not depend on them)
   ZC_MAXMEM: max_memory in MB (default: 80% of the available memory)
   ZC_PLAN: fields of an explicit rccsdt.MemoryPlan, e.g. 't3_file=True, batch=1'
+  ZC_DIIS_T3=0: DIIS on T1 and T2 only (T3 by its Jacobi step)
 '''
 import os
 import sys
@@ -71,6 +72,8 @@ def main():
                 diis_space=int(os.environ.get('ZC_DIIS_SPACE', '8')), verbose=True)
     if os.environ.get('ZC_MAXMEM'):
         opts['max_memory'] = float(os.environ['ZC_MAXMEM'])
+    if os.environ.get('ZC_DIIS_T3', '1') == '0':
+        opts['diis_t3'] = False
     if os.environ.get('ZC_PLAN'):
         # e.g. ZC_PLAN='t3_file=True, pp_file=True, pp_bytes=1 << 28, batch=1'
         opts['plan'] = eval('rccsdt.MemoryPlan(%s)' % os.environ['ZC_PLAN'])

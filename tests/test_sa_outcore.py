@@ -180,6 +180,36 @@ def test_plan_memory():
 
 
 @needs_c
+def test_diis_on_t1_t2_only_is_an_option(mf, monkeypatch):
+    '''diis_t3=False (DIIS on T1 and T2, T3 by its Jacobi step): the same
+    energy in a few more iterations, and no T3 vector is stored by DIIS.  It
+    is never chosen by the program: the default keeps T3 in the DIIS vectors
+    whatever the memory plan.'''
+    from zccsdt import memory
+    from zccsdt.cc import diis
+    monkeypatch.setattr(diis, 'INCORE_SIZE', 5000)        # between the sizes of T2 and T3
+    ref = E.kernel(R.from_scf(mf, ncore=1, full=False), conv_tol=1e-10, conv_tol_normt=1e-7)
+    assert ref.diis_t3 and ref.diis_on_disk
+    r = E.kernel(R.from_scf(mf, ncore=1, full=False), conv_tol=1e-10, conv_tol_normt=1e-7,
+                 diis_t3=False)
+    assert r.converged and abs(r.e_tot - ref.e_tot) < 1e-9
+    assert ref.ncycle <= r.ncycle <= ref.ncycle + 12
+    assert not r.diis_t3 and not r.diis_on_disk and abs(r.t3 - ref.t3).max() < 1e-6
+    # a tight budget changes where the arrays live, not the DIIS
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    ints = R.from_scf(mf, ncore=1, full=False)
+    low = E.plan_memory(ints.nocc, ints.nvir).need
+    while True:
+        try:
+            E.plan_memory(ints.nocc, ints.nvir, low - 20_000)
+        except MemoryError:
+            break
+        low -= 20_000
+    r = E.kernel(ints, max_cycle=3, max_memory=low / 1e6)
+    assert r.plan.t3_file and r.diis_t3 and r.diis_on_disk
+
+
+@needs_c
 def test_kernel_plans_from_max_memory(mf, monkeypatch, tmp_path):
     '''max_memory drives the plan: enough gives the run in memory, the least
     that works puts T3 and the pp operator in the scratch file (same energy),

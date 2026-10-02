@@ -280,7 +280,8 @@ def residuals_terms(ints, blocks, t1, t2, t3b):
 
 
 def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=8,
-           verbose=False, diis_file=None, incore_complete=False, max_memory=None, plan=None):
+           verbose=False, diis_file=None, incore_complete=False, max_memory=None, plan=None,
+           diis_t3=True):
     '''Closed-shell spin-adapted CCSDT (Jacobi steps with DIIS).
 
     DIIS storage follows the PySCF settings (zccsdt.cc.diis): unless
@@ -295,6 +296,12 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
     directory and the passes are sliced.  ``incore_complete`` keeps
     everything in memory whatever the budget; ``plan`` gives a MemoryPlan
     explicitly.
+
+    ``diis_t3=False`` (an option, never chosen automatically): DIIS on T1 and
+    T2 only, T3 follows by its Jacobi step.  No T3-sized DIIS vectors are
+    stored then (2 ``diis_space`` of them otherwise) and an iteration does
+    without their passes, at the price of a few more iterations (about a
+    quarter more for N2 and H2S / cc-pVTZ).
 
     numpy's own BLAS (OpenBLAS) is kept single-threaded while it runs: its
     spinning threads would otherwise compete with the MKL threads of
@@ -315,7 +322,7 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
                            None if packed is None else
                            ('memory' if packed['scratch'] is None else 'file'))
     args = (ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
-            incore_complete, plan)
+            incore_complete, plan, diis_t3)
     try:
         from threadpoolctl import threadpool_limits
     except ImportError:
@@ -353,7 +360,7 @@ def add_q(ints, res, max_memory=None, tiles=None):
 
 
 def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
-            incore_complete, plan):
+            incore_complete, plan, diis_t3=True):
     import time
     from zccsdt.cc.diis import DIIS
     from zccsdt.sa import rccsdt_ref
@@ -393,19 +400,26 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
             t0 = time.perf_counter()
             r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b, r3b, plan)
             with timer('sa.diis'):
-                # the new vector and its error are built in the DIIS storage
-                xs, es = adiis.buffers((t1, t2, t3b))
-                n3 = jacobi(eo3, ev, wsq, t3b, r3b, xs[2].reshape(t3b.shape),
-                            es[2].reshape(t3b.shape))
+                if diis_t3:
+                    # the new vector and its error are built in the DIIS storage
+                    xs, es = adiis.buffers((t1, t2, t3b))
+                    n3 = jacobi(eo3, ev, wsq, t3b, r3b, xs[2].reshape(t3b.shape),
+                                es[2].reshape(t3b.shape))
+                else:
+                    # DIIS on T1 and T2 only; T3 takes its Jacobi step in place
+                    # (the scaled step overwrites the residual)
+                    xs, es = adiis.buffers((t1, t2))
+                    n3 = jacobi(eo3, ev, wsq, t3b, r3b, t3b, r3b)
                 normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.sqrt(n3))
                 for k, (t, q) in enumerate(((t1, r1 / d1), (t2, r2 / d2))):
                     xs[k][:] = (t + q).ravel()
                     es[k][:] = q.ravel()
                 # the extrapolated T3 goes into the old t3b array (not a DIIS vector)
-                out = adiis.update(xs, errors=es, out=[None, None, t3b])
+                out = adiis.update(xs, errors=es, out=[None, None, t3b] if diis_t3 else None)
             t1 = out[0].reshape(no, nv)
             t2 = out[1].reshape(no, no, nv, nv)
-            t3b = out[2].reshape(t3b.shape)
+            if diis_t3:
+                t3b = out[2].reshape(t3b.shape)
             e_new = rccsdt_ref.energy(t1, t2, ints)
             timings.append(time.perf_counter() - t0)
             if verbose:
@@ -426,6 +440,7 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
     res.timings = timings
     res.diis_on_disk = diis_on_disk
     res.plan = plan
+    res.diis_t3 = diis_t3
     return res
 
 
@@ -462,9 +477,9 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
     held ``pp_bytes`` at a time if they do not fit either.  T3 and its
     residual stay in memory if they fit next to an eighth of the dressed
     operator (they are passed over many times per iteration, the operator
-    once), else they go to the scratch file.  ``pp_cached``: the bare operator exists
-    already, in 'memory' or in a 'file'.  Raises MemoryError if the fixed
-    part does not fit in ``limit`` (default: the budget).'''
+    once), else they go to the scratch file.  ``pp_cached``: the bare
+    operator exists already, in 'memory' or in a 'file'.  Raises MemoryError
+    if the fixed part does not fit in ``limit`` (default: the budget).'''
     from zccsdt.sa.t3blocks import Blocks
     o, v = nocc, nvir
     n = o + v
