@@ -48,8 +48,7 @@ def _record(name, stats):
     for k, part in enumerate(('gather', 'gemm', 'reduce', 'drive')):
         if k >= len(stats) or (k == 3 and stats[k] == 0):
             continue
-        timing._totals['%s.%s' % (name, part)] += stats[k]
-        timing._counts['%s.%s' % (name, part)] += 1
+        timing.add('%s.%s' % (name, part), stats[k])
 
 
 def _io(io):

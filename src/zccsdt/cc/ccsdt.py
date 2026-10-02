@@ -303,8 +303,7 @@ class _Lap:
     def __call__(self, name):
         from zccsdt import timing
         t = self._time()
-        timing._totals[name] += t - self.t
-        timing._counts[name] += 1
+        timing.add(name, t - self.t)
         self.t = t
 
 
