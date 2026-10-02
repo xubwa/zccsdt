@@ -11,7 +11,8 @@ from zccsdt.scratch import Scratch
 @pytest.fixture(autouse=True)
 def _tmp(monkeypatch, tmp_path):
     monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
-    prev = scratch.hints(True)                  # as in a run that is short of memory
+    monkeypatch.setattr(scratch, 'IO_MODE', 1)  # ZCCSDT_IO=1 ...
+    prev = scratch.hints(True)                  # ... in a run that is short of memory
     yield
     scratch.hints(prev)
     assert list(tmp_path.iterdir()) == []       # temporary files are unlinked when opened

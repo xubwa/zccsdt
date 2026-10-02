@@ -10,12 +10,14 @@ The directory is ZCCSDT_TMPDIR, else PySCF's lib.param.TMPDIR (which follows
 PYSCF_TMPDIR / TMPDIR).
 
 Under a memory limit (a Slurm job: a memory cgroup) the page cache of these
-files competes with the arrays of the program.  A run that had to put large
-arrays into scratch files for lack of memory (hints(True), set by the
-kernels from their memory plan) therefore tells the operating system what it
-does with a region; with enough memory nothing is said, and the files simply
-stay in the page cache.  The environment variable ZCCSDT_IO=0 (IO_MODE)
-turns the hints off altogether.
+files competes with the arrays of the program.  By default all of that is
+left to the operating system.  With the environment variable ZCCSDT_IO=1
+(IO_MODE) a run that had to put large arrays into scratch files for lack of
+memory (hints(True), set by the kernels from their memory plan) tells the
+operating system what it does with a region.  On a scratch disk of its own
+(local NVMe, batch jobs) these hints were measured to change the time per
+iteration by -3% to +7%, so they are off unless asked for; they are meant
+for scratch disks that other jobs write to as well.
 
   written(a, ...)   the region was written and is final for now (a DIIS
                     vector, the new T3): start writing it to the file
@@ -34,14 +36,14 @@ import weakref
 import numpy as np
 
 
-IO_MODE = int(os.environ.get('ZCCSDT_IO', '1'))
+IO_MODE = int(os.environ.get('ZCCSDT_IO', '0'))
 _HINTS = [False]    # is memory short in the run that is under way?
 
 
 def hints(on=None):
     '''Are the I/O hints active?  With an argument: switch them on or off
     (memory is short / is not) and return the previous setting; they stay off
-    whatever is asked while IO_MODE is 0.'''
+    whatever is asked while IO_MODE is 0 (the default).'''
     prev = _HINTS[0]
     if on is not None:
         _HINTS[0] = bool(on)
