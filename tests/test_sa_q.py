@@ -214,7 +214,9 @@ def test_sliced_algorithm_five_occupied(monkeypatch, tmp_path):
         calls.append(kwargs)
         return slabs(*args, **kwargs)
     monkeypatch.setattr(rccsdt_q, 'q_correction_slabs', spy)
-    assert rccsdt_q.kernel(ints, B, r.t2, r.t3, tiles=0) == ref and not calls
+    def close(x):          # two threaded runs agree to rounding only
+        return abs(x[0] - ref[0]) < 1e-13 and abs(x[1] - ref[1]) < 1e-13
+    assert close(rccsdt_q.kernel(ints, B, r.t2, r.t3, tiles=0)) and not calls
     got = rccsdt_q.kernel(ints, B, r.t2, r.t3, tiles=2)
     assert calls.pop()['tiles'] == 2 and abs(got[1] - ref[1]) < 1e-13
     # (with so few virtual orbitals the slabs would take more than 10 v^4:
@@ -225,7 +227,7 @@ def test_sliced_algorithm_five_occupied(monkeypatch, tmp_path):
     sliced = block // 4
     monkeypatch.setattr(rccsdt_q, 'sliced_memory', lambda *a: sliced)
     monkeypatch.setattr(rccsdt_q, '_available_memory', lambda: 2 * block)
-    assert rccsdt_q.kernel(ints, B, r.t2, r.t3) == ref and not calls
+    assert close(rccsdt_q.kernel(ints, B, r.t2, r.t3)) and not calls
     # too little for the block algorithm: slabs, the rows of <vv|vv> mapped
     monkeypatch.setattr(rccsdt_q, '_available_memory', lambda: sliced + 1000)
     got = rccsdt.add_q(ints, r)
