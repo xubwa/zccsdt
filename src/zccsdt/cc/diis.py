@@ -9,34 +9,22 @@ parts of a vector with at least INCORE_SIZE elements are kept in an HDF5 file:
 TMPDIR).  Smaller parts, and everything with ``incore=True``, stay in memory.
 
 The file-backed vectors are contiguous HDF5 datasets that are accessed through
-numpy.memmap instead of explicit reads and writes: the kernels work directly
-on the page cache, so nothing is copied while the vectors fit in memory, and
-the operating system writes them out and pages them back in when they do not.
+numpy.memmap instead of explicit reads and writes (zccsdt.scratch): the
+kernels work directly on the page cache, so nothing is copied while the
+vectors fit in memory, and the operating system writes them out and pages
+them back in when they do not.
 '''
 
 import ctypes
-import os
-import tempfile
 
 import numpy as np
 import scipy.linalg
 
 from zccsdt.cc import t3pack
+from zccsdt.scratch import Scratch, scratch_dir          # noqa: F401
 from zccsdt.timing import timer
 
 INCORE_SIZE = 10_000_000        # elements; smaller parts always stay in memory
-
-
-def scratch_dir():
-    '''Directory of temporary DIIS files.'''
-    d = os.environ.get('ZCCSDT_TMPDIR')
-    if d:
-        return d
-    try:
-        from pyscf import lib
-        return lib.param.TMPDIR
-    except ImportError:
-        return os.environ.get('TMPDIR') or tempfile.gettempdir()
 
 
 def _vec_c(name, dtype):
@@ -109,59 +97,12 @@ def _same(a, b):
             and a.__array_interface__['data'][0] == b.__array_interface__['data'][0])
 
 
-class _Scratch:
-    '''HDF5 file holding the large DIIS vectors as contiguous datasets
-    'x<slot>.<part>' / 'e<slot>.<part>', mapped into memory.  A temporary file
-    is unlinked right after it is opened, so nothing is left behind however
-    the process ends; a named file is kept and stays a valid HDF5 file.'''
-
-    def __init__(self, filename=None):
-        import h5py
-        self.keep = filename is not None
-        if filename is None:
-            fd, filename = tempfile.mkstemp(prefix='zccsdt_diis_', suffix='.h5',
-                                            dir=scratch_dir())
-            os.close(fd)
-        self.filename = filename
-        try:
-            self.h5 = h5py.File(filename, 'w', locking=False)    # private to this object
-        except TypeError:                                         # h5py < 3.5
-            self.h5 = h5py.File(filename, 'w')
-        self.raw = open(filename, 'r+b')
-        if not self.keep:
-            os.unlink(filename)
-
-    def create(self, key, n, dtype):
-        '''New dataset of n elements as a numpy.memmap.  The space is
-        allocated at once: a full disk raises here, not as a bus error on a
-        later write.'''
-        import h5py
-        dtype = np.dtype(dtype)
-        dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
-        dcpl.set_layout(h5py.h5d.CONTIGUOUS)
-        dcpl.set_alloc_time(h5py.h5d.ALLOC_TIME_EARLY)
-        dcpl.set_fill_time(h5py.h5d.FILL_TIME_NEVER)
-        ds = h5py.h5d.create(self.h5.id, key.encode(), h5py.h5t.py_create(dtype),
-                             h5py.h5s.create_simple((n,)), dcpl)
-        offset = ds.get_offset()
-        self.h5.flush()
-        try:
-            os.posix_fallocate(self.raw.fileno(), offset, n * dtype.itemsize)
-        except OSError as err:
-            raise OSError(err.errno, 'cannot allocate %.1f GB for a DIIS vector in %s (%s); '
-                          'choose another scratch directory (ZCCSDT_TMPDIR / PYSCF_TMPDIR) or '
-                          'diis_file, a smaller diis_space, or keep the vectors in memory '
-                          '(incore_complete)' % (n * dtype.itemsize / 1e9, self.filename,
-                                                 err.strerror)) from err
-        return np.memmap(self.raw, dtype=dtype, mode='r+', offset=offset, shape=(n,))
-
-    def close(self):
-        if self.h5 is not None:
-            try:
-                self.h5.close()
-                self.raw.close()
-            finally:
-                self.h5 = self.raw = None
+def _Scratch(filename=None):
+    '''Scratch file of the large DIIS vectors, datasets 'x<slot>.<part>' /
+    'e<slot>.<part>'.'''
+    return Scratch(filename, prefix='zccsdt_diis_', what='a DIIS vector',
+                   hint=' or diis_file, a smaller diis_space, or keep the vectors in '
+                        'memory (incore_complete)')
 
 
 class DIIS:

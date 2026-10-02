@@ -132,13 +132,14 @@ def test_scratch_allocation_error_is_explicit(monkeypatch, tmp_path):
     '''A scratch file that cannot be allocated fails with a message naming the
     file and the options, when the vector is created.'''
     import errno
+    import os
     from zccsdt.cc import diis
     monkeypatch.setattr(diis, 'INCORE_SIZE', 100)
     monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
 
     def full(fd, offset, size):
         raise OSError(errno.ENOSPC, 'No space left on device')
-    monkeypatch.setattr(diis.os, 'posix_fallocate', full)
+    monkeypatch.setattr(os, 'posix_fallocate', full)
     d = DIIS(space=3)
     with pytest.raises(OSError, match='ZCCSDT_TMPDIR') as info:
         d.buffers([np.zeros(10), np.zeros(500)])
