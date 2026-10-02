@@ -445,6 +445,54 @@ c571, cores 0-7 pinned.
 | 37e26ce | 5.40 | slab pair gather |
 | 8963bdb | 5.12 | work arrays kept between iterations |
 
+### Against PySCF's RCCSDT
+
+PySCF has had an RHF-CCSDT of its own since December 2025 (`pyscf.cc.RCCSDT`,
+modules `rccsdt` and `rccsdt_highm`): T1-dressed, T3 stored either for
+i <= j <= k (`compact_tamps=True`, the default) or in full ("if memory is
+sufficient"), contractions through a pluggable einsum.  It is the closest
+open-source counterpart of `zccsdt.sa.rccsdt`.
+
+**Setup.**  One Slurm job on c157 (2 x Xeon Gold 6248R), 8 cores, each run a
+step of its own, zccsdt and PySCF one after the other: `bench/profile_sa.py`
+and `bench/pyscf/profile_rccsdt.py` (same geometries and length unit, all
+electrons).  PySCF 2.13.1 (git afea3d3bd, June 2026) with the einsum backend
+it recommends for this code, pytblis 0.0.16 (TBLIS, 8 threads); its default
+backend (numpy) is in the last row.  Its C helpers (`libccsdt`) rebuilt with
+`-O3 -march=native` changed nothing.  Time per iteration: the mean of the
+iterations after the first (PySCF: between two calls of its callback).
+Converged, the two programs agree: H2O/cc-pVTZ E_corr = -0.288726186090
+(PySCF, 22 iterations) and -0.288726186079 (zccsdt, 16 iterations).
+
+| System | o, v | zccsdt | PySCF, full T3 | ratio | PySCF, compact T3 | ratio |
+|---|---|---|---|---|---|---|
+| H2O/cc-pVTZ | 5, 53 | 0.47 s, 0.82 GB | 1.37 s, 1.13 GB | 2.9 | 3.81 s, 0.98 GB | 8.2 |
+| N2/cc-pVTZ | 7, 53 | 1.05 s, 0.88 GB | 3.67 s, 1.95 GB | 3.5 | 9.42 s, 1.45 GB | 9.0 |
+| H2O/cc-pVQZ | 5, 110 | 5.31 s, 4.57 GB | 21.6 s, 8.19 GB | 4.1 | 44.5 s, 6.64 GB | 8.4 |
+| C2H4/cc-pVTZ | 8, 108 | 19.7 s, 7.48 GB | 70.7 s, 23.1 GB | 3.6 | 134.5 s, 16.6 GB | 6.8 |
+| H2O/cc-pVTZ, PySCF defaults (compact, numpy) | 5, 53 | | | | 17.2 s, 1.67 GB | 37 |
+
+(memory: peak anonymous memory of the process; the DIIS vectors of zccsdt
+are in its scratch file, PySCF keeps its own on disk too unless
+`incore_complete`: 1.51 s instead of 1.37 s for the first row.)
+
+- **zccsdt is 3-4 times faster than PySCF's faster variant**, with half to a
+  third of its memory, and 7-9 times faster than the default variant.  The
+  ratio grows with v / o, as the ladder takes over.
+- **Arithmetic.**  `rccsdt_highm` builds the full o^3 v^3 residual: its pp
+  ladder is one o^3 v^5 contraction over the full `<ab|de>` and its ring
+  three o^4 v^4 contractions.  The spin-adapted engine contracts only sorted
+  occupied triples with the (d,e)-symmetric and -antisymmetric halves of the
+  operator (about o^3 v^5 / 4) and needs two o^4 v^4 GEMMs for the ring
+  (`docs/spin_adapted.md`).  The compact variant works on blocks of
+  occupied triples i <= j <= k of its block size (8); with o <= 8, as here,
+  that is one block with all triples, so it does the arithmetic of the full
+  variant plus the unpacking and accumulation of the compact storage.
+- **Memory.**  PySCF holds the full `pppp` integral array (n^4) and, in the
+  full variant, several o^3 v^3 arrays (23 GB for C2H4/cc-pVTZ); zccsdt holds
+  integral blocks, one packed copy of the pp operator and two T3-sized
+  arrays.
+
 ## CCSDT(Q), closed shell, 8 cores
 
 The perturbative quadruples correction of `zccsdt.sa.rccsdt_q` (design notes
