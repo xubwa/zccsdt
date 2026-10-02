@@ -201,6 +201,30 @@ cases.
   11.7 GB at v = 110), besides T3.  `ncc` needs 9-18 times more at cc-pVTZ
   and about twice as much at cc-pVQZ.
 
+### Are both programs on 8 cores, and does the idle rest of the node matter?
+
+- **Affinity.**  Every pinned run records its affinity list (0-7) in its log.
+  `bench/audit_threads.sh` samples all threads of a run: for zccsdt
+  (N2/cc-pVTZ, CCSDT + (Q)) and for `ncc` (H2O/cc-pVTZ) every thread is
+  allowed on CPUs 0-7 only and was only seen running there.  CPU time over
+  wall time is 6.4 cores for that zccsdt run (7.6 for the benzene run) and
+  7.1 for `ncc`.  The node has 48 physical cores and no hyperthreading.
+- **Fully loaded node.**  Six copies of the same job at once, one per group of
+  8 cores (all 48 cores busy), N2/cc-pVTZ:
+
+  | | alone on 8 cores | 6 jobs x 8 cores | slowdown |
+  |---|---|---|---|
+  | zccsdt CCSDT iteration | 1.06 s | 1.29-1.38 s | 1.25 |
+  | `ncc` CCSDT iteration | 3.81 s | 4.94-5.00 s | 1.30 |
+  | zccsdt (Q) | 18.5 s | 27.4-27.7 s | 1.5 |
+  | `ncc` (Q) | 282.5 s | 522-526 s | 1.9 |
+
+  Both programs lose speed when their neighbours compete for memory
+  bandwidth and cache, `ncc` at least as much as zccsdt: the ratio
+  `ncc` / zccsdt is 3.6 -> 3.7 for the CCSDT iteration and 15 -> 19 for (Q).
+  The absolute times in the tables of this document are those of an
+  otherwise lightly loaded node.
+
 ### Where the time goes
 
 | Step | H2O/cc-pVQZ (103 s) | C6H6/cc-pVDZ (3223 s) | Comment |
