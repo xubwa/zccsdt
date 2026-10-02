@@ -66,6 +66,13 @@ def _mo_chemist(mol, C, kind):
     return out
 
 
+def _ioblk(max_memory):
+    '''PySCF's ioblk_size (MB) for a transformation with ``max_memory`` MB:
+    the second half of the transformation works on blocks of this size and
+    their images (2.5 times as much for spinors), whatever max_memory is.'''
+    return float(min(256.0, max(16.0, max_memory / 4)))
+
+
 def _spinor_block(mol, mo_coeffs, max_memory):
     '''(12|34) of spinor MOs by PySCF's out-of-core transformation, with its
     buffers bounded by ``max_memory`` (MB).  ao2mo.general does not pass
@@ -81,11 +88,47 @@ def _spinor_block(mol, mo_coeffs, max_memory):
     os.close(fd)
     try:
         r_outcore.general(mol, mo_coeffs, name, dataname='eri_mo', intor='int2e_spinor',
-                          max_memory=max_memory, verbose=0)
+                          max_memory=max_memory, ioblk_size=_ioblk(max_memory), verbose=0)
         with h5py.File(name, 'r') as f:
             return np.asarray(f['eri_mo'])
     finally:
         os.remove(name)
+
+
+def _spinor_vvvv_rows(mol, Cv, max_memory):
+    '''Yields (a, Y) for the virtual spinors a = 0 .. v - 1 with
+    Y[c, b, d] = (ac|bd), Y being a buffer that the next step overwrites.
+
+    PySCF's out-of-core transformation writes the rows of a range of a to a
+    scratch file, a few ranges in turn: as many passes over the AO integrals
+    (two, or more for files above 32 GB), whatever the memory, and v^3
+    elements in memory.  Transforming a batch of a at a time in memory takes
+    one pass over the AO integrals per batch instead.'''
+    import os
+    import tempfile
+    import h5py
+    from pyscf.ao2mo import r_outcore
+    from zccsdt.scratch import scratch_dir
+    nv = Cv.shape[1]
+    nchunk = min(max(2, -(-16 * nv ** 4 // (32 << 30))), max(nv, 1))
+    bounds = [nv * k // nchunk for k in range(nchunk + 1)]
+    Y = np.empty((nv, nv * nv), dtype=np.complex128)
+    for h0, h1 in zip(bounds[:-1], bounds[1:]):
+        if h1 == h0:
+            continue
+        fd, name = tempfile.mkstemp(prefix='zccsdt_ao2mo_', suffix='.h5', dir=scratch_dir())
+        os.close(fd)
+        try:
+            r_outcore.general(mol, (Cv[:, h0:h1], Cv, Cv, Cv), name, dataname='eri_mo',
+                              intor='int2e_spinor', max_memory=max_memory,
+                              ioblk_size=_ioblk(max_memory), verbose=0)
+            with h5py.File(name, 'r') as f:
+                ds = f['eri_mo']
+                for a in range(h0, h1):
+                    ds.read_direct(Y, np.s_[(a - h0) * nv:(a - h0 + 1) * nv])
+                    yield a, Y.reshape(nv, nv, nv)
+        finally:
+            os.remove(name)
 
 
 def _chem_block(mol, kind, C1, C2, C3, C4, max_memory=None):
@@ -108,16 +151,29 @@ def _chem_block(mol, kind, C1, C2, C3, C4, max_memory=None):
 
 def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
     '''Antisymmetrized blocks from chemist blocks; vvvv returned packed over
-    a<b, c<d, computed in batches of a.  With a memory budget (``max_memory``
-    in MB for the whole process; default: 80% of what is available) the
-    batches shrink to fit, and the packed vvvv is a mapped array of a scratch
-    file when it does not fit twice (bare and dressed); the scratch object is
-    returned as well (None if in memory).'''
+    a<b, c<d, built one a at a time: from the rows that PySCF's out-of-core
+    transformation writes to a scratch file (spinors, _spinor_vvvv_rows), or
+    from batches of ``vir_batch`` values of a transformed in memory.  With a
+    memory budget (``max_memory`` in MB for the whole process; default: 80%
+    of what is available) the batches shrink to fit, and the packed vvvv is
+    a mapped array of a scratch file when it does not fit twice (bare and
+    dressed); the scratch object is returned as well (None if in memory).'''
     from zccsdt import memory
     from zccsdt.scratch import Scratch
     # (PySCF takes up to its max_memory for buffers: bound every transformation)
     ch = lambda a, b, c, d: _chem_block(mol, kind, a, b, c, d,       # noqa: E731
                                         memory.ao2mo_memory(max_memory))
+    # the ovvv block and its chemist form are what this step needs at least
+    no, nv = Co.shape[1], Cv.shape[1]
+    isz = 16 if kind == 'spinor' or np.iscomplexobj(Cv) else 8
+    floor = 2 * no * nv ** 3 * isz + 400_000_000
+    limit = memory.budget(max_memory) if max_memory is not None else memory.available()
+    if limit is not None and floor > limit:
+        raise MemoryError('the integrals for %d occupied and %d virtual spin orbitals need '
+                          'about %.1f GB of memory (the o v^3 block and the buffers of its '
+                          'transformation); %.1f GB are available (max_memory, or what the '
+                          'node and the memory limit of the job leave)'
+                          % (no, nv, floor / 1e9, limit / 1e9))
     oooo = ch(Co, Co, Co, Co)                         # (ij|kl)
     ooov = ch(Co, Co, Co, Cv)                         # (ij|ka)
     ovov = ch(Co, Cv, Co, Cv)                         # (ia|jb)
@@ -133,12 +189,14 @@ def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
     g['ovov'] = oovv.transpose(0, 2, 1, 3) - ovvo.transpose(0, 2, 3, 1)
     # <ia||bj> = (ib|aj) - (ij|ab)
     g['ovvo'] = ovvo.transpose(0, 2, 1, 3) - oovv.transpose(0, 2, 3, 1)
-    # <ia||bc> = (ib|ac) - (ic|ab)
-    g['ovvv'] = ovvv.transpose(0, 2, 1, 3) - ovvv.transpose(0, 2, 3, 1)
+    # <ia||bc> = (ib|ac) - (ic|ab), written into its own contiguous array (two
+    # ovvv-sized arrays at a time, not three)
+    g['ovvv'] = np.subtract(ovvv.transpose(0, 2, 1, 3), ovvv.transpose(0, 2, 3, 1),
+                            out=np.empty((no, nv, nv, nv), dtype=ovvv.dtype))
+    del ovvv
     g = {k: np.ascontiguousarray(0.5 * (b - b.transpose(1, 0, 2, 3)))
          if k[0] == k[1] else np.ascontiguousarray(b) for k, b in g.items()}
-    del oooo, ooov, ovov, oovv, ovvo, ovvv
-    nv = Cv.shape[1]
+    del oooo, ooov, ovov, oovv, ovvo
     pa, pb = np.triu_indices(nv, 1)
     dtype = np.result_type(g['oooo'], Cv)
     isz = np.dtype(dtype).itemsize
@@ -146,10 +204,11 @@ def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
     # one a of (ac|bd): the chemist block, its antisymmetrized form and the
     # buffers of the transformation
     per_a = 4 * nv ** 3 * isz
+    spinor = kind == 'spinor'
     budget = memory.budget(max_memory)
     scr = None
     if budget is not None:
-        if 2 * pp + min(vir_batch, nv) * per_a > budget:
+        if 2 * pp + (1 if spinor else min(vir_batch, nv)) * per_a > budget:
             scr = Scratch(prefix='zccsdt_vvvv_', what='the packed <ab||cd> integrals',
                           hint=' or give the calculation more memory (max_memory)')
         else:
@@ -157,23 +216,25 @@ def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
         vir_batch = int(max(1, min(vir_batch, budget // 2 // max(per_a, 1))))
     vpp = np.zeros((len(pa), len(pa)), dtype=dtype) if scr is None else \
         scr.create('vvvv', (len(pa), len(pa)), dtype)
+
+    def batches():              # (a, Y[c, b, d] = (ac|bd)) from batches of a in memory
+        for a0 in range(0, nv, vir_batch):
+            X = ch(Cv[:, a0:min(a0 + vir_batch, nv)], Cv, Cv, Cv)       # [a, c, b, d]
+            for a in range(a0, a0 + len(X)):
+                yield a, X[a - a0]
+
     from zccsdt import scratch
     hints = scratch.hints(scr is not None)          # memory is short: say what is done
     try:
         row = 0
-        for a0 in range(0, nv, vir_batch):
-            a1 = min(a0 + vir_batch, nv)
-            row0 = row
-            X = ch(Cv[:, a0:a1], Cv, Cv, Cv)                      # (ac|bd) as [a, c, b, d]
-            for a in range(a0, a1):
-                Y = X[a - a0]
-                G = Y.transpose(1, 0, 2) - Y.transpose(1, 2, 0)      # <ab||cd> as [b, c, d]
-                nb = nv - a - 1
-                vpp[row:row + nb] = G[a + 1:][:, pa, pb]
-                row += nb
-            del X
-            scratch.written(vpp, row0 * len(pa), row * len(pa))     # to the file now
-            scratch.unmap(vpp, row0 * len(pa), row * len(pa))
+        for a, Y in (_spinor_vvvv_rows(mol, Cv, memory.ao2mo_memory(max_memory)) if spinor
+                     else batches()):
+            G = Y.transpose(1, 0, 2) - Y.transpose(1, 2, 0)          # <ab||cd> as [b, c, d]
+            nb = nv - a - 1
+            vpp[row:row + nb] = G[a + 1:][:, pa, pb]
+            scratch.written(vpp, row * len(pa), (row + nb) * len(pa))   # to the file now
+            scratch.unmap(vpp, row * len(pa), (row + nb) * len(pa))
+            row += nb
     finally:
         scratch.hints(hints)
     return g, vpp, scr

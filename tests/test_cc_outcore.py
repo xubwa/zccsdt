@@ -237,8 +237,9 @@ def test_packed_vvvv_built_out_of_core(kind, monkeypatch, tmp_path):
     mf = water_ghf() if kind == 'ghf' else water_x2c()
     ref = E.from_scf(mf, frozen=2, packed_vvvv=True)
     assert not is_mapped(ref._vvvv_pp) and ref._scratch is None
-    new = E.from_scf(mf, frozen=2, packed_vvvv=True,
-                     max_memory=memory.resident() / 1e6 + 0.2)
+    with monkeypatch.context() as m:        # a budget too small for the packed vvvv
+        m.setattr(memory, 'budget', lambda max_memory=None: 200_000)
+        new = E.from_scf(mf, frozen=2, packed_vvvv=True)
     assert is_mapped(new._vvvv_pp) and new._scratch is not None
     np.testing.assert_allclose(new._vvvv_pp, ref._vvvv_pp, atol=1e-11)
     for name in E.BLOCKS[:-1]:
@@ -250,6 +251,14 @@ def test_packed_vvvv_built_out_of_core(kind, monkeypatch, tmp_path):
         plan=MemoryPlan(pp_file=True, pp_bytes=11 * row, pp_order='batch'), **kw))
     assert abs(a.e_tot - b.e_tot) < 1e-9
     assert list(tmp_path.iterdir()) == []
+
+
+def test_integrals_refuse_what_cannot_fit(monkeypatch):
+    '''The integral build says so before it starts if the ovvv block and
+    the transformation buffers cannot fit.'''
+    monkeypatch.setattr(memory, 'available', lambda: 300 * 10 ** 6)
+    with pytest.raises(MemoryError, match='o v\\^3'):
+        E.from_scf(water_ghf(), frozen=2, packed_vvvv=True)
 
 
 def test_place_vvvv_moves_the_bare_operator(monkeypatch, tmp_path):
