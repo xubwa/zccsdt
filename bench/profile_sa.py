@@ -81,6 +81,9 @@ def main():
     watch.start()
     timing.reset()
     r = rccsdt.kernel(ints, max_cycle=niter + 1, **opts)
+    # the timed run takes the memory plan of this one: the plan of a fresh
+    # run (a second call would plan again, with what the first left allocated)
+    opts['plan'] = r.plan
     del r                       # its T3 must not count in the memory of the timed run
     timing.reset()
     # time a further run of niter iterations without the warm-up costs

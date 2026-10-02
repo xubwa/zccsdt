@@ -41,7 +41,7 @@ grep -v -E '^\s*(#|$)' "$RUNS" | while read -r mem tag cmd; do
     echo "    $cmd"
     t0=$(date +%s)
     $SRUN -n1 -c $OMP_NUM_THREADS --mem=$mem bash -c "$cmd; $STAT" < /dev/null 2>&1 \
-        | grep -v -E "pyscf plugins|site-packages/pyscf|shciscf/pyscf|PYSCF_EXT_PATH"
+        | grep --line-buffered -v -E "pyscf plugins|site-packages/pyscf|shciscf/pyscf|PYSCF_EXT_PATH"
     echo "=== end $tag  $(( $(date +%s) - t0 )) s"
 done
 echo "done $(date)"

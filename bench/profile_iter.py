@@ -95,10 +95,12 @@ def main():
         kw['plan'] = eval('ccsdt_opt.MemoryPlan(%s)' % os.environ['ZC_PLAN'])
     watch = MemWatch()
     watch.start()
-    # one warm-up iteration (engine setup, caches, buffers), then the timed ones
+    # one warm-up iteration (engine setup, caches, buffers), then the timed
+    # ones with the same memory plan: the plan of a fresh run (a second call
+    # would plan again, with what the first one left allocated)
     r0 = solver.kernel(eris, 'ccsdt', solver.Options(max_cycle=1, **kw))
-    print('plan of the warm-up iteration: %s' % r0.plan)
     timing.reset()
+    kw['plan'] = r0.plan
     r = solver.kernel(eris, 'ccsdt', solver.Options(max_cycle=niter, **kw),
                       t1=r0.t1, t2=r0.t2, t3=r0.t3)
     watch.stop()
