@@ -402,7 +402,7 @@ def slab_tiles(v, tiles=1):
     return [(t, min(t + tiles, nt)) for t in range(0, nt, tiles)]
 
 
-def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
+def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None, cache_bytes=0):
     '''(E[Q], E(Q)) with the v^4 work arrays cut into slabs.
 
     The virtual quadruples are grouped by the slab [d0, d1) that holds their
@@ -433,7 +433,9 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
     the second into the layout [x_x, x_y, x_w, d].
 
     Memory: 24 n^3 nd (faces) + 2 o^2 n nd v^2 / 2 (N and M) + 2 v n^2 nd
-    elements with nd = 6 ``tiles``, instead of 10 v^4.'''
+    elements with nd = 6 ``tiles``, instead of 10 v^4.  N and M are unpacked
+    to dense [e, x, ., .] arrays for every use; ``cache_bytes`` more memory
+    keeps the dense forms of the pairs used last.'''
     from zccsdt.cc import t3pack
     from zccsdt.cc.t3pack import axpby
     from zccsdt.sa.rccsdt import vvvv_rows
@@ -493,7 +495,9 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
                 gemm(TM, E[(d0 + d) * v:(d0 + d + 1) * v], M[d].reshape(npair * n, ps))
         As, Bs = buf('As', n, n, 4, v), buf('Bs', 4, v, n, nd)
         As2, Bs2 = buf('As2', n, n, 4, no), buf('Bs2', 4, no, n, nd)
-        Nd, Md = buf('Nd', v, n, n, nd), buf('Md', v, n, n, nd)
+        # dense forms of N and M by pair, the most recently used last
+        ncache = min(2 + int(cache_bytes // (8 * v * n * n * nd)), 2 * npair)
+        dense, spare = {}, list(range(ncache))[::-1]         # buffers D0, D1, ... first
         Sall = buf('S', 24, n, n, n, nd)
 
         def gather(trips, shape, lo):
@@ -503,10 +507,25 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
             gather_boxes(t3b, offs, [st for _, st in views], out)
             return out.reshape(len(trips), -1)
 
-        def unpack(dst, src, rows):
-            with timer('q.unpack'):
-                lib.zc_sa_q_unpack_d(P(dst), I64(v), I64(n), I64(len(rows)), P(src),
-                                     P(np.ascontiguousarray(rows, dtype=np.int64)))
+        def unpacked(kind, ab):
+            # dense [e, x, y, d] (N) or [e, x, w, d] (M) of the pair ab
+            x = dense.pop((kind, ab), None)
+            if x is None:
+                if spare:
+                    x = buf('D%d' % spare.pop(), v, n, n, nd)
+                else:
+                    x = dense.pop(next(iter(dense)))
+                if kind == 'N':
+                    src = N
+                    rows = ((np.arange(n)[:, None] * npair + ab) * nd + np.arange(nd)[None, :]).ravel()
+                else:
+                    src = M
+                    rows = ((np.arange(nd)[None, :] * npair + ab) * n + np.arange(n)[:, None]).ravel()
+                with timer('q.unpack'):
+                    lib.zc_sa_q_unpack_d(P(x), I64(v), I64(n), I64(len(rows)), P(src),
+                                         P(np.ascontiguousarray(rows, dtype=np.int64)))
+            dense[kind, ab] = x
+            return x
 
         def fill_face(o, S):
             o3 = o[3]
@@ -543,9 +562,7 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
                         gemm(Tm.T, sm, S[0].reshape(n3, nd), beta=1.0)
                 # ---- B_c: Yv(w,x|y,3) + Yv(x,w|y,3) from N of the pair (y, 3)
                 with timer('q.Yv'):
-                    ab = oy * no + o3
-                    unpack(Nd, N.reshape(-1, ps),
-                           ((np.arange(n)[:, None] * npair + ab) * nd + np.arange(nd)[None, :]).ravel())
+                    Nd = unpacked('N', oy * no + o3)
                     twx = t2[ow, ox]
                     gemm(np.ascontiguousarray(twx[:n]), Nd.reshape(v, nn * nd),
                          S[3 + c].reshape(n, nn * nd))
@@ -557,9 +574,7 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
                 c1 = (c + 1) % 3
                 # ---- Yv(x,y|3,w) + Yv(y,x|3,w) from M of the pair (3, w): layout [x, y, w, 3]
                 with timer('q.Yv'):
-                    ab = o3 * no + ow
-                    unpack(Md, M.reshape(-1, ps),
-                           ((np.arange(nd)[None, :] * npair + ab) * n + np.arange(n)[:, None]).ravel())
+                    Md = unpacked('M', o3 * no + ow)
                     txy = t2[ox, oy]
                     gemm(np.ascontiguousarray(txy[:n]), Md.reshape(v, nn * nd),
                          S[3 + c1].reshape(n, nn * nd), beta=1.0)
@@ -643,6 +658,7 @@ def kernel(ints, blocks, t2, t3b, max_memory=None, tiles=None):
     no, v = ints.nocc, ints.nvir
     ints.__dict__.pop('_sa_wpp', None)          # work buffers of the CCSDT iterations
     scr = erows = None
+    cache = 0
     if tiles is None:
         def budget():
             avail = _available_memory()
@@ -668,17 +684,22 @@ def kernel(ints, blocks, t2, t3b, max_memory=None, tiles=None):
                     'arrays in memory (10 v^4) and %.1f GB in slabs; %.1f GB are available '
                     '(max_memory, or what the node and the memory limit of the job leave)'
                     % (v, memory_needed(no, v) / 1e9, sliced_memory(no, v) / 1e9, hard / 1e9))
-            if sliced_memory(no, v) + 8 * v * v * (v * (v + 1) // 2) > soft:
+            rows = 8 * v * v * (v * (v + 1) // 2)
+            if sliced_memory(no, v) + rows > soft:
                 from zccsdt.sa.rccsdt import vvvv_rows
                 from zccsdt.scratch import Scratch
                 scr = Scratch(prefix='zccsdt_q_', what='the <vv|vv> integrals of (Q)',
                               hint=' or give the calculation more memory (max_memory)')
                 erows = vvvv_rows(ints, out=scr.create('E', (v * v, v * (v + 1) // 2)),
                                   max_bytes=int(max(soft - sliced_memory(no, v), 1 << 28) // 2))
+                rows = 0
+            # half of what is left keeps dense pair intermediates
+            cache = max(0, soft - sliced_memory(no, v) - rows) // 2
 
     def run():
         if tiles:
-            return q_correction_slabs(ints, blocks, t2, t3b, tiles=tiles, erows=erows)
+            return q_correction_slabs(ints, blocks, t2, t3b, tiles=tiles, erows=erows,
+                                      cache_bytes=cache)
         return q_correction(ints, blocks, t2, t3b)
 
     try:

@@ -1351,10 +1351,9 @@ void zc_sa_q_energy_faces_d(int64_t v, int64_t t0, int64_t t1, const double **F,
     static const int64_t QS[4] = {Q3, Q2, QT, 1};
     int part[24][6];
     q_parts(part);
-    const double *t01 = tc, *t02 = tc + v2, *t03 = tc + 2 * v2;
-    const double *t12 = tc + 3 * v2, *t13 = tc + 4 * v2, *t23 = tc + 5 * v2;
-    const double *g23 = gc, *g13 = gc + v2, *g12 = gc + 2 * v2;
-    const double *g03 = gc + 3 * v2, *g02 = gc + 4 * v2, *g01 = gc + 5 * v2;
+    /* c[x] = sum over the six pair sets of tc[k][x_p, x_q] gc[k][x_r, x_s] */
+    static const int CP[6][4] = {{0, 1, 2, 3}, {0, 2, 1, 3}, {0, 3, 1, 2},
+                                 {1, 2, 0, 3}, {1, 3, 0, 2}, {2, 3, 0, 1}};
     double e5 = 0, e6 = 0;
     #pragma omp parallel reduction(+:e5, e6)
     {
@@ -1398,18 +1397,33 @@ void zc_sa_q_energy_faces_d(int64_t v, int64_t t0, int64_t t1, const double **F,
                     const double *s4 = f4 + ((xb * n + xc) * n + xa) * nd + off;
                     const double *s5 = f5 + ((xc * n + xa) * n + xb) * nd + off;
                     const int64_t lo = ua * la + ub * lb + uc * lc;
-                    y[q[0]] = xa; y[q[1]] = xb; y[q[2]] = xc;
+                    y[q[0]] = xa; y[q[1]] = xb; y[q[2]] = xc; y[k3] = bb[3];
+                    /* per pair set: the factor without the slab position is a
+                     * constant of the row, the other one a row (or column) of
+                     * its v x v matrix along the slab index */
+                    double cf[6];
+                    const double *cq[6];
+                    int64_t cs[6];
+                    for (int k = 0; k < 6; k++) {
+                        const int *c = CP[k];
+                        const double *tm = tc + k * v2, *gm = gc + k * v2;
+                        if (c[0] == k3 || c[1] == k3) {
+                            cf[k] = gm[y[c[2]] * v + y[c[3]]];
+                            cq[k] = tm + y[c[0]] * v + y[c[1]];
+                            cs[k] = c[0] == k3 ? v : 1;
+                        } else {
+                            cf[k] = tm[y[c[0]] * v + y[c[1]]];
+                            cq[k] = gm + y[c[2]] * v + y[c[3]];
+                            cs[k] = c[2] == k3 ? v : 1;
+                        }
+                    }
                     for (int64_t u3 = 0; u3 < n3; u3++) {
-                        y[k3] = bb[3] + u3;
                         const double a = s0[u3] + s1[u3] + s2[u3];
                         ap[lo + u3] = a;
                         rp[lo + u3] = a + s3[u3] + s4[u3] + s5[u3];
-                        cp[lo + u3] = t01[y[0] * v + y[1]] * g23[y[2] * v + y[3]]
-                                    + t02[y[0] * v + y[2]] * g13[y[1] * v + y[3]]
-                                    + t12[y[1] * v + y[2]] * g03[y[0] * v + y[3]]
-                                    + g12[y[1] * v + y[2]] * t03[y[0] * v + y[3]]
-                                    + g02[y[0] * v + y[2]] * t13[y[1] * v + y[3]]
-                                    + g01[y[0] * v + y[1]] * t23[y[2] * v + y[3]];
+                        cp[lo + u3] = cf[0] * cq[0][u3 * cs[0]] + cf[1] * cq[1][u3 * cs[1]]
+                                    + cf[2] * cq[2][u3 * cs[2]] + cf[3] * cq[3][u3 * cs[3]]
+                                    + cf[4] * cq[4][u3 * cs[4]] + cf[5] * cq[5][u3 * cs[5]];
                     }
                 }
             }

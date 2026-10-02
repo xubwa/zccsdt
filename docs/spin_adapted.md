@@ -329,8 +329,9 @@ into slabs of six virtual indices, one tile of the energy kernel:
   of 506 GB.  If that does not fit, `MemoryError` is raised.
 - **Time**: about twice the block algorithm.  The 12 I x T2 terms take four
   restricted products per face and layout, twice the arithmetic of the six
-  symmetrized products; quadruples with a repeated index are not shortened;
-  N and M are unpacked for every use.
+  symmetrized products, and quadruples with a repeated index are not
+  shortened.  N and M are unpacked to dense arrays for every use unless
+  memory is left to keep the dense forms of the pairs used last.
 
 ## Validation
 
