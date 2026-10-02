@@ -290,7 +290,7 @@ def residuals_terms(ints, blocks, t1, t2, t3b):
 
 def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=8,
            verbose=False, diis_file=None, incore_complete=False, max_memory=None, plan=None,
-           diis_t3=True):
+           diis_t3=True, callback=None):
     '''Closed-shell spin-adapted CCSDT (Jacobi steps with DIIS).
 
     DIIS storage follows the PySCF settings (zccsdt.cc.diis): unless
@@ -314,31 +314,43 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
 
     numpy's own BLAS (OpenBLAS) is kept single-threaded while it runs: its
     spinning threads would otherwise compete with the MKL threads of
-    zccsdt.blas.'''
+    zccsdt.blas.
+
+    ``callback(info)``, if given, is called after every iteration with a
+    dict: cycle, e_corr, de, norms (|R1|, |R2|, |R3|), normt, diis (vectors
+    in the subspace), wall, cpu (seconds of the iteration).'''
     ints.__dict__['_max_memory'] = max_memory       # for the integral transformations
-    if plan is None and incore_complete:
-        plan = plan_memory(ints.nocc, ints.nvir)
-    elif plan is None:
-        from zccsdt import memory
-        # arrays cached on the integral object by an earlier run are part of
-        # what the plan accounts for: they do not reduce the budget
-        cached = cached_bytes(ints)
-        budget = memory.budget(max_memory)
-        limit = budget if max_memory is not None else memory.available()
-        packed = getattr(ints, '_sa_packed', None)
-        plan = plan_memory(ints.nocc, ints.nvir,
-                           None if budget is None else budget + cached,
-                           None if limit is None else limit + cached,
-                           None if packed is None else
-                           ('memory' if packed['scratch'] is None else 'file'))
+    if plan is None:
+        plan = make_plan(ints, max_memory, incore_complete)
     args = (ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
-            incore_complete, plan, diis_t3)
+            incore_complete, plan, diis_t3, callback)
     try:
         from threadpoolctl import threadpool_limits
     except ImportError:
         return _kernel(*args)
     with threadpool_limits(limits={'openblas': 1}):
         return _kernel(*args)
+
+
+def make_plan(ints, max_memory=None, incore_complete=False):
+    '''The MemoryPlan of kernel() for these integrals: everything in memory
+    with ``incore_complete``, else what fits in ``max_memory`` (MB for the
+    whole process; default: 80% of what the node and the memory cgroups of
+    the process leave).'''
+    if incore_complete:
+        return plan_memory(ints.nocc, ints.nvir)
+    from zccsdt import memory
+    # arrays cached on the integral object by an earlier run are part of what
+    # the plan accounts for: they do not reduce the budget
+    cached = cached_bytes(ints)
+    budget = memory.budget(max_memory)
+    limit = budget if max_memory is not None else memory.available()
+    packed = getattr(ints, '_sa_packed', None)
+    return plan_memory(ints.nocc, ints.nvir,
+                       None if budget is None else budget + cached,
+                       None if limit is None else limit + cached,
+                       None if packed is None else
+                       ('memory' if packed['scratch'] is None else 'file'))
 
 
 def run(mf, ncore=0, q=False, **kwargs):
@@ -370,7 +382,7 @@ def add_q(ints, res, max_memory=None, tiles=None):
 
 
 def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
-            incore_complete, plan, diis_t3=True):
+            incore_complete, plan, diis_t3=True, callback=None):
     import time
     from zccsdt.cc.diis import DIIS
     from zccsdt.sa import rccsdt_ref
@@ -411,7 +423,7 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
     hints = scratch.hints(plan.t3_file or plan.pp_file or plan.pp_bytes is not None)
     try:
         for cycle in range(max_cycle):
-            t0 = time.perf_counter()
+            t0, c0 = time.perf_counter(), time.process_time()
             r1, r2, r3b = residuals(ints, blocks, t1, t2, t3b, r3b, plan)
             with timer('sa.diis'):
                 if diis_t3:
@@ -424,7 +436,8 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
                     # (the scaled step overwrites the residual)
                     xs, es = adiis.buffers((t1, t2))
                     n3 = jacobi(eo3, ev, wsq, t3b, r3b, t3b, r3b)
-                normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.sqrt(n3))
+                norms = (float(np.linalg.norm(r1)), float(np.linalg.norm(r2)), float(np.sqrt(n3)))
+                normt = sum(norms)
                 # (the residual is only added to by the passes, which leave it
                 # mapped, and is dead after the step: it is never sent to the
                 # file on purpose)
@@ -444,6 +457,10 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
             if verbose:
                 print('cycle %3d  E_corr = %.15f  dE = %.3e  |r| = %.3e  %.2fs'
                       % (cycle + 1, e_new, e_new - e_old, normt, timings[-1]))
+            if callback is not None:
+                callback(dict(cycle=cycle + 1, e_corr=e_new, de=e_new - e_old, norms=norms,
+                              normt=normt, diis=len(adiis.xs), wall=timings[-1],
+                              cpu=time.process_time() - c0))
             done = abs(e_new - e_old) < conv_tol and normt < conv_tol_normt
             e_old = e_new
             if done:

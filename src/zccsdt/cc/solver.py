@@ -36,6 +36,7 @@ class Options:
     max_memory: float = None    # MB for the whole process, as in PySCF (default:
                                 # 80% of what the node and the job limit leave)
     plan: object = None         # ccsdt_opt.MemoryPlan given explicitly
+    callback: object = None     # callback(info) after every iteration (kernel)
 
 
 @dataclass
@@ -107,7 +108,11 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     the memory cgroups of the process leave) decides where the large arrays
     live (ccsdt_opt.plan_memory); ``opts.incore_complete`` keeps everything
     in memory whatever the budget and ``opts.plan`` gives a MemoryPlan
-    explicitly.  The plan used is returned as Result.plan.'''
+    explicitly.  The plan used is returned as Result.plan.
+
+    ``opts.callback(info)``, if given, is called after every iteration with
+    a dict: cycle, e_corr, de, norms (|dt1|, |dt2|, |dt3| of the full
+    tensors), normt, diis (vectors in the subspace), wall, cpu (seconds).'''
     opts = opts or Options()
     method = method.lower()
     assert method in ('ccsd', 'ccsdt', 'ccsdt_ref')
@@ -159,7 +164,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
         adiis = DIIS(space=opts.diis_space, filename=opts.diis_file,
                      incore=opts.incore_complete)
         for icycle in range(opts.max_cycle):
-            t0 = time.perf_counter()
+            t0, c0 = time.perf_counter(), time.process_time()
             if with_t3:
                 if method == 'ccsdt':
                     rbuf = adiis.buffers(_parts(t1, t2, t3))[0][2] if r3_file else None
@@ -174,16 +179,18 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
             with timer('diis'):
                 first = adiis.xprev is None
                 if first:
-                    normt = np.linalg.norm(t1n - t1) + np.linalg.norm(t2n - t2)
+                    norms = [np.linalg.norm(t1n - t1), np.linalg.norm(t2n - t2), 0.0]
                     if with_t3:
                         with timer('diis.norm0'):
-                            normt += 6.0 * _diff_norm(t3n, t3)
+                            norms[2] = 6.0 * _diff_norm(t3n, t3)
                 parts = adiis.update(_parts(t1n, t2n, t3n),
                                      out=[None, None, t3] if in_place else None)
                 if not first:
                     # ||dt2_full|| = 2 ||dt2_packed||, ||dt3_full|| = 6 ||dt3_packed||
                     en = adiis.err_norms
-                    normt = en[0] + 2.0 * en[1] + (6.0 * en[2] if with_t3 else 0.0)
+                    norms = [en[0], 2.0 * en[1], 6.0 * en[2] if with_t3 else 0.0]
+                norms = [float(x) for x in norms]
+                normt = sum(norms)
                 with timer('diis.unpack'):
                     t1, t2, t3 = _from_parts(parts, nocc, nvir, with_t3)
             e_new = ccsd.energy(t1, t2, eris)
@@ -193,6 +200,11 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
             if opts.verbose:
                 print('cycle %3d  E_corr = %.15f  dE = %.3e  |dt| = %.3e  %.2fs'
                       % (icycle + 1, e_new.real, de.real, normt, timings[-1]))
+            if opts.callback is not None:
+                opts.callback(dict(cycle=icycle + 1, e_corr=float(np.real(e_new)),
+                                   de=float(np.real(de)), norms=tuple(norms), normt=normt,
+                                   diis=len(adiis.xs), wall=timings[-1],
+                                   cpu=time.process_time() - c0))
             if abs(de) < opts.conv_tol and normt < opts.conv_tol_normt:
                 conv = True
                 break

@@ -117,8 +117,10 @@ class DenseT3:
 
     def buffer_bytes(self, mem_mb, max_rows=None):
         '''Bytes of the batch buffers of a pass with ``mem_mb``: two thirds of
-        it for the half-expanded T3 batches, at least one occupied pair.'''
-        return int(max(mem_mb * 1e6 * 2 / 3, self._f()))
+        it for the half-expanded T3 batches, at least one occupied pair and
+        at most all of them (f per pair in pass 2).'''
+        f = self._f()
+        return int(min(max(mem_mb * 1e6 * 2 / 3, f), max(self.om.npair, 1) * f))
 
     def view(self, T3):
         return np.ascontiguousarray(np.asarray(T3, dtype=self.dtype).reshape(
