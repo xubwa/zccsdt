@@ -96,8 +96,17 @@ class Blocks:
         ws = self.__dict__.setdefault('_ws', {})
         x = ws.get(name)
         if x is None or x.shape != tuple(shape) or x.dtype != dtype:
+            ws.pop(name, None)
+            x = None                            # freed before the new one is made
             x = ws[name] = np.empty(shape, dtype=dtype)
         return x
+
+    def release(self, *names):
+        '''Give work arrays back (a run short of memory does, after the stage
+        that used them); buffer() allocates them again.'''
+        ws = self.__dict__.get('_ws', {})
+        for name in names:
+            ws.pop(name, None)
 
     def view(self, p, q, r, v):
         '''(element offset into t3b, strides) of the cube view t_pqr^{xyz}

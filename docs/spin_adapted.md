@@ -145,7 +145,22 @@ under a memory limit the kernel pages them.
 cgroups of the process leave (`zccsdt/memory.py`), so the limit of a Slurm
 job or step is seen.  If the sum above fits, nothing changes.  Otherwise:
 
-1. The work buffers of the k pass and of the ladder shrink.
+1. **Nothing outlives the stage that uses it** (`MemoryPlan.keep = False`).
+   A run in memory keeps integral blocks in a second layout (the transposed
+   `<ab|ei>`, the packed ovvv parts that dress the pp operator, the matrix of
+   the T1 term of the Fock operator) and keeps the work buffers of every
+   stage between the stages and the iterations, which is what the 23 o v^3
+   are.  Short of memory, the bra-dressed `<ab|ei>` is written from the ovvv
+   block and dressed in place (and becomes the vvvo intermediate), the packed
+   parts go after the sweep over the operator, the matrix after the Fock
+   dressing, and the buffers of the ladder, of the pair pass and of the k
+   pass after their stages (`Blocks.release`).  The largest stage then
+   decides: the pair pass, 16 o v^3 in the plan and 13.5-15 measured (its
+   accumulators, the five gathered cubes and three products of a pair:
+   10 o v^3, next to the ovvv block, the ring operand and `W_vvvo`).  The
+   ladder and the k pass have 6 o v^3 next to their buffers, which therefore
+   cost nothing up to 10 o v^3.  The price is what the caches saved: about a
+   tenth of the iteration time when everything else is still in memory.
 2. **The pp operator is sliced.**  The bare packed `<vv|vv>` goes to the
    scratch file, built from PySCF's out-of-core transformation with the rows
    of one first index at a time (`vvvv_row_blocks`).  If its dressed form
@@ -153,19 +168,36 @@ job or step is seen.  If the sum above fits, nothing changes.  Otherwise:
    virtual index (`pp_slabs`); each slab feeds the vvvo intermediate, the
    CCSD ladder and the T3 ladder of all blocks before the next one is made,
    so the dressed operator is never stored.
-3. **T3 and its residual go to the scratch file**, as mapped arrays like the
-   DIIS vectors, when they do not fit next to a few rows of the operator.
-   The passes work on them unchanged and the operating system keeps as much
+3. **T3 goes to the scratch file, then its residual**, as mapped arrays like
+   the DIIS vectors, when they do not fit next to a few rows of the operator.
+   T3 goes first and the residual stays in memory if it fits alone
+   (`MemoryPlan.r3_file = False`): the passes only read T3, so its pages can
+   be given up at no cost, while pages of the residual, to which every pass
+   adds, would have to be written to the file and read back.  The passes
+   work on mapped arrays unchanged and the operating system keeps as much
    of them in memory as there is room for.  With T3 in the file the sliced
    ladder runs batch-wise (all slabs for one batch of blocks), so that T3 and
-   the residual are passed over once.
-4. If the ovvv-sized part alone does not fit, `MemoryError` is raised before
-   anything is allocated.
+   the residual are passed over once.  The dressed rows are then kept in a
+   second scratch array by the first sweep and read back for the other
+   batches; as that pass over the operator is what a batch costs, the memory
+   that is left goes to larger batches and the slabs stay thin.
+4. If the pair pass does not fit, `MemoryError` is raised before anything
+   is allocated.
 
 The operator, which an iteration passes over once, goes out before T3, which
 every pass reads.  `incore_complete=True` keeps everything in memory whatever
 the budget, and `plan=MemoryPlan(...)` sets the plan explicitly.  Timings
 under memory limits are in `docs/benchmarks.md`.
+
+Paging of the mapped arrays is left to the operating system.  With
+`ZCCSDT_IO=1`, and a plan that has put anything into a scratch file, the
+passes tell it what they do with mapped blocks (`t3blocks.mapped_blocks`,
+`zccsdt/scratch.py`): the blocks a pair, an index k or a batch needs are
+announced (read-ahead), blocks of T3 a pass has read leave the page tables,
+and the DIIS vectors, which are final when written, are sent to the file at
+once.  On a local NVMe that the job has to itself this changed the iteration
+time by -3% to +7% (`docs/benchmarks.md`), so it is an option for scratch
+disks under load from other jobs, not the default.
 
 ### Leading arithmetic per iteration (FMA, o / v spatial)
 

@@ -30,7 +30,8 @@ from zccsdt.blas import gemm
 class MemoryPlan:
     '''Where the large arrays live and how the passes are sliced
     (plan_memory).  The default is everything in memory.'''
-    t3_file: bool = False          # T3 and its residual in the scratch file
+    t3_file: bool = False          # T3 in the scratch file
+    r3_file: bool = None           # its residual in the scratch file (None: as T3)
     pp_file: bool = False          # bare packed <vv|vv> in the scratch file
     pp_bytes: int = None           # rows of the dressed pp operator held at a time
                                    # (None: all of them)
@@ -40,6 +41,9 @@ class MemoryPlan:
     build_bytes: int = 1 << 30     # memory for building the packed <vv|vv>
     slab_bytes: int = 1 << 29      # per buffer of the k pass (drive_hh)
     batch: int = 8                 # T3 blocks per GEMM of the pp ladder
+    keep: bool = True              # integral blocks and work buffers stay allocated
+                                   # between the stages and the iterations (False:
+                                   # memory is short, each goes after its stage)
     need: int = 0                  # bytes of ordinary memory the plan takes
 
 
@@ -384,16 +388,16 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
     t1 = np.zeros((no, nv))
     t2 = ints.block('oovv') / d2
     scr = None
-    if plan.t3_file and blocks.nblk:
-        # T3 and its residual as mapped arrays of a scratch file (new file
-        # space reads as zeros)
+    shape = (blocks.nblk, nv, nv, nv)
+    t3_file = bool(plan.t3_file and blocks.nblk)
+    r3_file = bool((plan.t3_file if plan.r3_file is None else plan.r3_file) and blocks.nblk)
+    if t3_file or r3_file:
+        # T3 and / or its residual as mapped arrays of a scratch file (new
+        # file space reads as zeros)
         scr = Scratch(prefix='zccsdt_t3_', what='T3',
                       hint=' or give the calculation more memory (max_memory)')
-        t3b = scr.create('t3', (blocks.nblk, nv, nv, nv))
-        r3b = scr.create('r3', (blocks.nblk, nv, nv, nv))
-    else:
-        t3b = np.zeros((blocks.nblk, nv, nv, nv))
-        r3b = np.empty_like(t3b)
+    t3b = scr.create('t3', shape) if t3_file else np.zeros(shape)
+    r3b = scr.create('r3', shape) if r3_file else np.empty(shape)
     adiis = DIIS(space=diis_space, filename=diis_file, incore=incore_complete)
     # DIIS metric of the full t_ijk^abc: a block stands for 6 (distinct
     # occupied indices) or 3 (one repeated index) ordered triples; the T3
@@ -477,9 +481,10 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
     '''MemoryPlan for ``budget`` bytes of ordinary memory (None: no limit,
     everything in memory).
 
-    The memory of an iteration (8-byte elements; o, v spatial; n = o + v):
+    The memory of an iteration (8-byte elements; o, v spatial; n = o + v;
+    g = o v^3 elements):
 
-      fixed    about 23 o v^3 (ovvv-sized blocks, their dressed forms, the
+      fixed    about 23 g (ovvv-sized blocks, their dressed forms, the
                intermediates and the buffers of the pair pass), plus
                2 (o + v) o v^2 and n^2 o v
       k pass   2.6 slab_bytes
@@ -487,15 +492,32 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
       pp       v^4: the bare packed <vv|vv> and its dressed form, v^4 / 2 each
       T3       2 o^3 v^3 / 6: amplitudes and residual
 
-    (the DIIS vectors are in the scratch file already).  If that exceeds the
-    budget, the work buffers shrink.  The bare pp operator goes to the
-    scratch file when both of its forms do not fit, and its dressed rows are
-    held ``pp_bytes`` at a time if they do not fit either.  T3 and its
-    residual stay in memory if they fit next to an eighth of the dressed
-    operator (they are passed over many times per iteration, the operator
-    once), else they go to the scratch file.  ``pp_cached``: the bare
-    operator exists already, in 'memory' or in a 'file'.  Raises MemoryError
-    if the fixed part does not fit in ``limit`` (default: the budget).'''
+    (the DIIS vectors are in the scratch file already).  That is a run with
+    everything in memory, which keeps its blocks and work buffers between the
+    stages and the iterations.  If it exceeds the budget, nothing ovvv-sized
+    and no buffer outlives the stage that uses it (residuals), and the stages
+    count one by one:
+
+      pair pass   16 g: its accumulators, the five gathered cubes and three
+                  products of a pair (10 g), next to the bare ovvv block, the
+                  ring operand and W_vvvo (13.5-15 g measured)
+      ladder      6 g + the ladder buffers (those of the largest batch: a
+                  block with a repeated occupied index has two packed views
+                  instead of three)
+      k pass      6 g + its buffers
+
+    so that ladder and k-pass buffers up to 10 g cost nothing.  The bare pp
+    operator goes to the scratch file when both of its forms do not fit, and
+    its dressed rows are held ``pp_bytes`` at a time if they do not fit
+    either.  T3 and its residual stay in memory if they fit next to an eighth
+    of the dressed operator (they are passed over many times per iteration,
+    the operator once).  Else T3 goes to the scratch file first, and the
+    residual only if it does not fit alone: the passes only read T3, whose
+    pages are given up at no cost, while pages of the residual, which every
+    pass adds to, would have to be written to the file and read back.
+    ``pp_cached``: the bare operator exists already, in 'memory' or in a
+    'file'.  Raises MemoryError if the pair pass does not fit in ``limit``
+    (default: the budget).'''
     from zccsdt.sa.t3blocks import Blocks
     o, v = nocc, nvir
     n = o + v
@@ -504,26 +526,42 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
     t3 = 8 * Blocks.count(o) * v ** 3
     pp = 8 * (ps * ps + pa * pa)
     bare = 0 if plan.pp_file else pp
-    fixed = 8 * (23 * o * v ** 3 + 2 * n * o * v * v + n * n * o * v) + 100_000_000
+    g = 8 * o * v ** 3
+    small = 8 * (2 * n * o * v * v + n * n * o * v) + 100_000_000
+    fixed = 23 * g + small
 
     nblk = Blocks.count(o)
+    # packed views per block (ladder_pp): three with both parts for distinct
+    # occupied indices, else one with both parts and one symmetric
+    views = [(1, 1) if i == j or j == k else (3, 0)
+             for i in range(o) for j in range(i, o) for k in range(j, o) if not i == j == k]
 
     def ladder(batch):
-        return 16 * 3 * min(batch, nblk) * v * (ps + pa)
+        # the views of the largest batch and their products
+        b = max(1, min(batch, nblk))
+        most = 0
+        for b0 in range(0, nblk, b):
+            nf = sum(f for f, _ in views[b0:b0 + b])
+            ns = sum(s_ for _, s_ in views[b0:b0 + b])
+            most = max(most, 16 * v * (ps * (nf + ns) + pa * nf))
+        return most
 
     def kpass(slab):                                # the buffers hold at most all of x
         return int(2.6 * min(slab, 8 * o * o * v ** 3))
 
-    plan.need = fixed + kpass(plan.slab_bytes) + ladder(plan.batch) + bare + pp + 2 * t3
+    # (in memory the ladder buffers are counted in full: three views per block)
+    plan.need = fixed + kpass(plan.slab_bytes) + 48 * min(plan.batch, nblk) * v * (ps + pa) \
+        + bare + pp + 2 * t3
     if budget is None or plan.need <= budget:
         return plan
+    plan.keep = False
     slab_min = 8 * o * o * v * v                    # one virtual index per slab
     row_min = min(8 * (v * ps + (v - 1) * pa), pp)  # the rows of one a
     sunk = pp if pp_cached == 'memory' else 0
     hard = budget if limit is None else limit
 
     def base(batch, slab):
-        return fixed + kpass(slab) + ladder(batch) + sunk
+        return small + max(16 * g, 6 * g + ladder(batch), 6 * g + kpass(slab)) + sunk
 
     if base(1, slab_min) + row_min > hard:
         raise MemoryError('spin-adapted CCSDT with %d occupied and %d virtual orbitals needs '
@@ -531,16 +569,19 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
                           '%.1f GB are available (max_memory, or what the node and the memory '
                           'limit of the job leave)'
                           % (o, v, (base(1, slab_min) + row_min) / 1e9, hard / 1e9))
-    # work buffers: moderate ones if they fit, else the smallest
-    moderate = (8 if ladder(8) <= budget // 8 else int(max(1, (budget // 8) // max(ladder(1), 1))),
-                int(min(max(budget // 32, slab_min), 1 << 29)))
-    # T3 stays in memory if, with moderate buffers, at least an eighth of the
-    # dressed pp operator fits beside it: squeezing it in with tiny buffers
-    # and many thin slabs costs more than paging it
-    plan.t3_file = base(*moderate) + 2 * t3 + min(max(pp // 8, row_min), pp) > budget
+    # work buffers: the largest that the pair pass covers (up to the defaults)
+    moderate = (max([b for b in range(1, 9) if ladder(b) <= 10 * g] + [1]),
+                int(min(max(10 * g / 2.6, slab_min), 1 << 29)))
+    # T3 and its residual stay in memory if at least an eighth of the dressed
+    # pp operator fits beside them (squeezing them in with thin slabs costs
+    # more than paging them); else the residual alone, if it fits
+    beside = min(max(pp // 8, row_min), pp)
+    plan.t3_file = base(*moderate) + 2 * t3 + beside > budget
+    plan.r3_file = plan.t3_file and base(*moderate) + t3 + beside > budget
     plan.batch, plan.slab_bytes = moderate if base(*moderate) + row_min <= budget \
         else (1, slab_min)
-    plan.need = base(plan.batch, plan.slab_bytes) + (0 if plan.t3_file else 2 * t3)
+    held = (0 if plan.t3_file else t3) + (0 if plan.r3_file else t3)
+    plan.need = base(plan.batch, plan.slab_bytes) + held
     rest = max(budget - plan.need, 0)
     if pp_cached is None and 2 * pp <= rest:
         plan.need += 2 * pp                         # bare and dressed in memory
@@ -555,9 +596,10 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
         plan.pp_file = pp_cached != 'memory'
         plan.pp_order = 'batch'
         plan.pp_bytes = int(min(max(rest // 8, row_min), pp))
-        grow = (rest - plan.pp_bytes - rest // 8) // max(ladder(1), 1)
-        plan.batch = int(min(max(nblk, 1), plan.batch + max(grow, 0)))
-        plan.need = base(plan.batch, plan.slab_bytes) + plan.pp_bytes
+        room = budget - rest // 8 - plan.pp_bytes - sunk - small - 6 * g - held
+        while plan.batch < nblk and ladder(plan.batch + 1) <= room:
+            plan.batch += 1
+        plan.need = base(plan.batch, plan.slab_bytes) + plan.pp_bytes + held
     else:
         plan.pp_file = pp_cached != 'memory'
         plan.pp_bytes = int(max(rest // 2, row_min))
@@ -820,7 +862,8 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
     # (B) operator [(a | m), (x, m', y)]: <m'a|xy> + 1/2 d_ay Fov[m',x] (the
     # F_ov term rides in, since Z = Y with y <-> z), and G[m',m,x,y] for Wo
     VG = np.empty((v + no, v, no, v))
-    VG[:v] = D['ovvv'].transpose(1, 2, 0, 3)
+    VG[:v] = D.pop('ovvv').transpose(1, 2, 0, 3)        # (its last use: the block goes)
+    D.pop('vovv', None)
     for a in range(v):
         VG[a, :, :, a] += 0.5 * Fov.T
     VG[v:] = G.transpose(1, 2, 0, 3)
@@ -961,9 +1004,9 @@ def drive_hh(blocks, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=1 << 29):
         mapped_blocks(t3b, mine, drop=True)
 
 
-def dressed_blocks(ints, t1):
+def dressed_blocks(ints, t1, keep=True):
     '''(D, Fd): the T1-dressed blocks of DRESSED plus vovv, vooo and the bare
-    oovv, and the dressed Fock matrix.'''
+    oovv, and the dressed Fock matrix (``keep``: see dress_fock).'''
     bb = BareBlocks.of(ints)
     memo = {}
     D = {k: dress_block(bb, t1, k, memo=memo) for k in DRESSED}
@@ -971,7 +1014,24 @@ def dressed_blocks(ints, t1):
     D['vovv'] = D['ovvv'].transpose(1, 0, 3, 2)
     D['vooo'] = dress_block(bb, t1, 'ovoo', memo=memo).transpose(1, 0, 3, 2)
     D['oovv'] = bb.get('oovv')
-    return D, dress_fock(bb, ints.fock, t1)
+    return D, dress_fock(bb, ints.fock, t1, keep)
+
+
+def bra_dressed_vvvo(bb, t1):
+    '''dress_block(bb, t1, 'vvvo', ket=False), the bra-dressed <ab|ei>, in an
+    array of its own that the caller may overwrite: written from the bare ovvv
+    block (<ab|ei> = <ie|ba>) and dressed in place, without the cached
+    transposed copy of the block and without the intermediate of the two-slot
+    dressing.  What a run short of memory uses.'''
+    if bb.ints.V is not None:
+        out = np.array(bb.get('vvvo'))
+    else:
+        U = bb.get('ovvv')
+        out = permute(U, (3, 2, 1, 0), out=np.empty(U.shape[::-1]))
+    contract('xp,xqrs->pqrs', t1, bb.get('ovvo'), out=out, alpha=-1.0, beta=1.0)
+    contract('xq,pxrs->pqrs', t1, _dress(bb, t1, 'vovo', (0,), {}), out=out, alpha=-1.0,
+             beta=1.0)
+    return out
 
 
 def _kept_operator(ints):
@@ -1001,16 +1061,28 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
     from zccsdt.timing import timer
     no = ints.nocc
     plan = plan or MemoryPlan()
+    # memory is short: no ovvv-sized array and no work buffer outlives the
+    # stage that uses it (plan_memory counts on that)
+    tight = not plan.keep or plan.t3_file or plan.pp_file or plan.pp_bytes is not None
     bb = BareBlocks.of(ints)
     nv = ints.nvir
     with timer('sa.dress'):
-        D, Fd = dressed_blocks(ints, t1)
+        D, Fd = dressed_blocks(ints, t1, keep=not tight)
         G = D['oovv']
     r3b = np.zeros_like(t3b) if r3b is None else zero(r3b)
     with timer('sa.imds'):
         # vvvo: bra-dressed part + sum_f t1[i,f] (bra-dressed vvvv = W - t2.G)
-        B = dress_block(bb, t1, 'vvvo', ket=False)
-        P = permute(B, (0, 1, 2, 3), out=np.empty(B.shape))
+        if tight:
+            # in an array of its own that becomes the intermediate; what the
+            # dressed vvoo needs of the bra-dressed block is taken first
+            if ints.V is None:
+                ints.__dict__.get('_blocks', {}).pop('vvvo', None)
+            B = None
+            P = bra_dressed_vvvo(bb, t1)
+            vvoo_t1 = contract('if,abfj->abij', t1, P) + contract('jf,bafi->abij', t1, P)
+        else:
+            B = dress_block(bb, t1, 'vvvo', ket=False)
+            P = permute(B, (0, 1, 2, 3), out=np.empty(B.shape))
     tau = t2 + t1[:, None, :, None] * t1[None, :, None, :]
     lad = PairLadder(np.ascontiguousarray(tau.transpose(2, 3, 0, 1)).reshape(nv, nv, -1))
     # the pp operator, all rows at once or in slabs of its first virtual
@@ -1053,6 +1125,10 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
                 with timer('sa.ccsd'):
                     lad.add(Ws, Wa, rows)
             yield rows, Ws, Wa
+        if tight and not sweeps:            # the dressing is done: its packed ovvv parts go
+            packed = getattr(ints, '_sa_packed', None) or {}
+            packed.pop('Us', None)
+            packed.pop('Ua', None)
         sweeps.append(1)
 
     if batchwise:
@@ -1062,17 +1138,25 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
         for rows, Ws, Wa in dressed():
             with timer('sa.pp_ladder'):
                 ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=plan.batch, rows=rows)
+    if tight:
+        blocks.release('pp.Ts', 'pp.Ta', 'pp.S', 'pp.A')
     with timer('sa.imds'):
         im = intermediates(D, Fd, t2, no, P=P, t1=t1)
     with timer('sa.ccsd'):
         # vvoo: bra-dressed part and the single-t1 ket terms; the t1 t1 vvvv
         # term rides with the CCSD ladder (tau = t2 + t1 t1)
         Bvo = dress_block(bb, t1, 'vvoo', ket=False)
-        D['vvoo'] = Bvo + contract('if,abfj->abij', t1, B) + contract('jf,bafi->abij', t1, B)
+        if B is None:
+            D['vvoo'] = Bvo + vvoo_t1
+        else:
+            D['vvoo'] = Bvo + contract('if,abfj->abij', t1, B) \
+                + contract('jf,bafi->abij', t1, B)
         r1, r2 = ccsd_residual(D, Fd, t2, im, no, lad.result(), t1=t1)
     del lad, P, B
     with timer('sa.t3_pass'):
         r1t, r2t, Eab, Eba, dWo = t3_pass(blocks, t3b, im, D, no, r3b)
+    if tight:
+        blocks.release('t3p.W', 't3p.X')
     with timer('sa.drive_hh'):
         from zccsdt.cc.t3pack import axpby
         WvT = im['WvT']
@@ -1083,6 +1167,8 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
             axpby(out, Eba[:, k], 1.0, 1.0)
         drive_hh(blocks, t3b, t2, Wv, im['WoJ'] + dWo, hh_operator(im['Whh'], im['Fo']), r3b,
                  max_bytes=plan.slab_bytes)
+    if tight:           # (Eab and Eba are parts of the accumulator of the pair pass)
+        blocks.release('t3p.acc', 'dh.T', 'dh.K', 'dh.H')
     with timer('sa.project'):
         mapped_blocks(r3b, need=True)
         r3b = project_null(r3b)
@@ -1126,7 +1212,14 @@ class BareBlocks:
             M[:no, :no] = 2 * g('ooov').transpose(0, 2, 1, 3) - g('oovo').transpose(0, 3, 1, 2)
             M[:no, no:] = 2 * g('oovv').transpose(0, 2, 1, 3) - g('oovv').transpose(0, 3, 1, 2)
             M[no:, :no] = 2 * g('ovvo').transpose(1, 3, 0, 2) - g('ovov').transpose(1, 2, 0, 3)
-            M[no:, no:] = 2 * g('ovvv').transpose(1, 3, 0, 2) - g('ovvv').transpose(1, 2, 0, 3)
+            # (the large block with the threaded strided copy, no temporaries)
+            from zccsdt.cc.t3pack import axpby
+            U = g('ovvv')
+            Mvv = np.empty((v, v, no, v))
+            axpby(Mvv, U.transpose(1, 3, 0, 2), 2.0, 0.0)
+            axpby(Mvv, U.transpose(1, 2, 0, 3), -1.0, 1.0)
+            M[no:, no:] = Mvv
+            del Mvv
             M = self._c['fock_t1'] = M.reshape(n * n, -1)
         return M
 
@@ -1164,8 +1257,10 @@ def _dress(bb, t1, key, slots, memo):
     return out
 
 
-def dress_fock(bb, F, t1):
-    '''T1-dressed Fock matrix X (F + M t1) Y^T (see BareBlocks.fock_t1).'''
+def dress_fock(bb, F, t1, keep=True):
+    '''T1-dressed Fock matrix X (F + M t1) Y^T (see BareBlocks.fock_t1).
+    ``keep``: leave M (n^2 o v elements) cached for the next call; a run short
+    of memory builds it again every time.'''
     no = t1.shape[0]
     n = F.shape[0]
     X = np.eye(n)
@@ -1173,6 +1268,8 @@ def dress_fock(bb, F, t1):
     Y = np.eye(n)
     Y[:no, no:] += t1
     Fd = F + gemm(bb.fock_t1(), t1.reshape(-1, 1)).reshape(n, n)
+    if not keep:
+        bb._c.pop('fock_t1', None)
     return X @ Fd @ Y.T
 
 
@@ -1352,17 +1449,22 @@ def bare_packed(ints, plan=None):
                                       scr.create('Va', (len(a0), len(a0)))))
         else:
             Vs, Va = vvvv_packed(ints, max_bytes=plan.build_bytes)
-        U = ints.block('ovvv')                                  # <mb|de>
-        Us = 0.5 * (U[:, :, s0, s1] + U[:, :, s1, s0])
-        Ua = 0.5 * (U[:, :, a0, a1] - U[:, :, a1, a0])
         Gf = ints.block('oovv').reshape(no * no, v, v)          # <mn|de>
         Gs = 0.5 * (Gf[:, s0, s1] + Gf[:, s1, s0])
         Ga = 0.5 * (Gf[:, a0, a1] - Gf[:, a1, a0])
-        c = {k: np.ascontiguousarray(x) for k, x in
-             (('Us', Us), ('Ua', Ua), ('Gs', Gs), ('Ga', Ga))}
+        c = {k: np.ascontiguousarray(x) for k, x in (('Gs', Gs), ('Ga', Ga))}
         c['Vs'], c['Va'] = Vs, Va           # C-contiguous; mapped arrays stay mapped
         c['scratch'] = scr                  # keeps the file of mapped Vs / Va open
         ints._sa_packed = c
+    if 'Us' not in c:
+        # the packed ovvv parts (o v^3 elements together): on their own, as a
+        # run short of memory drops them after the sweep over the operator
+        v = ints.nvir
+        s0, s1 = np.triu_indices(v)
+        a0, a1 = np.triu_indices(v, 1)
+        U = ints.block('ovvv')                                  # <mb|de>
+        c['Us'] = np.ascontiguousarray(0.5 * (U[:, :, s0, s1] + U[:, :, s1, s0]))
+        c['Ua'] = np.ascontiguousarray(0.5 * (U[:, :, a0, a1] - U[:, :, a1, a0]))
     return c
 
 

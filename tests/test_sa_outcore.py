@@ -141,42 +141,86 @@ def test_kernel_out_of_core_equals_in_memory(mf, monkeypatch, tmp_path):
     a = E.add_q(R.from_scf(mf, ncore=1, full=False), ref)
     b = E.add_q(ints, r)
     assert abs(a.e_q - b.e_q) < 1e-9 and abs(a.e_q5 - b.e_q5) < 1e-9
-    del r, b
+    # only the amplitudes in the scratch file, the residual in memory
+    plan = E.MemoryPlan(t3_file=True, r3_file=False, keep=False)
+    r2 = E.kernel(R.from_scf(mf, ncore=1, full=False), conv_tol=1e-10, conv_tol_normt=1e-7,
+                  plan=plan)
+    assert r2.converged and r2.ncycle == ref.ncycle and abs(r2.e_tot - ref.e_tot) < 1e-10
+    assert isinstance(r2.t3, np.memmap) and abs(np.asarray(r2.t3) - ref.t3).max() < 1e-8
+    del r, b, r2
     assert list(tmp_path.iterdir()) == []
 
 
 def test_plan_memory():
     G = 10 ** 9
     o, v = 8, 108
+    g = 8 * o * v ** 3
     full = E.plan_memory(o, v)
-    assert not (full.t3_file or full.pp_file) and full.pp_bytes is None and full.need > 7 * G
-    assert E.plan_memory(o, v, full.need + 1).need == full.need
-    # a little short: the bare pp operator goes to the scratch file
+    assert full.keep and not (full.t3_file or full.pp_file) and full.pp_bytes is None
+    assert full.need > 7 * G
+    assert E.plan_memory(o, v, full.need + 1) == full
+    # a little short: still everything in memory, but no block and no work
+    # buffer outlives its stage, which is seven ovvv-sized arrays less
     p = E.plan_memory(o, v, 6 * G)
-    assert not p.t3_file and p.pp_file and p.pp_bytes is None and p.need <= 6 * G
-    # shorter: its dressed rows come in slabs (a small operator: batch-wise)
-    p = E.plan_memory(o, v, 56 * G // 10)
-    assert not p.t3_file and p.pp_file and p.pp_order == 'batch' and p.need <= 56 * G // 10
-    assert len(E.pp_slabs(v, p.pp_bytes)) > 1
-    # shorter: T3 goes to the scratch file before the buffers get tiny
-    p = E.plan_memory(o, v, 5 * G)
-    assert p.t3_file and not p.pp_file and p.batch == 8 and p.need <= 5 * G
-    # shorter: both, and the ladder reads T3 once per iteration
-    p = E.plan_memory(o, v, 3 * G)
-    assert p.t3_file and p.pp_file and p.pp_bytes < 4 * v ** 4 and p.pp_order == 'batch'
-    assert p.need <= 3 * G and p.slab_bytes < 1 << 29 and len(E.pp_slabs(v, p.pp_bytes)) > 1
+    assert not (p.keep or p.t3_file or p.pp_file) and p.pp_bytes is None and p.batch == 8
+    assert p.need <= full.need - 7 * g and p.need <= 51 * G // 10
+    # shorter: the dressed rows of the pp operator come in slabs (a small
+    # operator: batch-wise) next to T3 in memory
+    p = E.plan_memory(o, v, 4 * G)
+    assert not p.keep and not p.t3_file and p.pp_file and p.pp_order == 'batch'
+    assert p.need <= 4 * G and len(E.pp_slabs(v, p.pp_bytes)) > 1
+    # shorter: T3 goes to the scratch file, its residual stays (the passes
+    # only read T3), and more of the operator fits again
+    p = E.plan_memory(o, v, 35 * G // 10)
+    assert p.t3_file and p.r3_file is False and p.pp_bytes is None and p.need <= 35 * G // 10
+    q = E.plan_memory(o, v, 4 * G)
+    assert p.need < q.need and len(E.pp_slabs(v, q.pp_bytes)) > 1
+    # shorter: both; the ladder reads T3 once per iteration and the operator
+    # file once per batch of blocks, so what is left goes to larger batches
+    p = E.plan_memory(o, v, 2 * G)
+    assert p.t3_file and p.r3_file and p.pp_file and p.pp_bytes < 4 * v ** 4
+    assert p.pp_order == 'batch'
+    assert p.need <= 2 * G and p.batch > 8 and len(E.pp_slabs(v, p.pp_bytes)) > 1
     # small o, large v: T3 stays in memory, the large operator is sliced slab-wise
-    p = E.plan_memory(5, 282, 60 * G)
-    assert not p.t3_file and p.pp_file and p.pp_order == 'slab' and p.need <= 60 * G
+    p = E.plan_memory(5, 282, 40 * G)
+    assert not p.t3_file and p.pp_file and p.pp_order == 'slab' and p.need <= 40 * G
     assert len(E.pp_slabs(282, p.pp_bytes)) > 1
     # the bare operator exists already: where it is does not change
     assert not E.plan_memory(o, v, 3 * G, pp_cached='memory').pp_file
     assert E.plan_memory(o, v, 30 * G, pp_cached='file').pp_file
-    # below the fixed part: an error before anything is allocated
+    # below what the pair pass takes: an error before anything is allocated
     with pytest.raises(MemoryError, match='o v\\^3'):
         E.plan_memory(o, v, 1 * G)
     # the budget is soft: the limit decides
     assert E.plan_memory(o, v, 1 * G, limit=6 * G).t3_file
+
+
+@needs_c
+def test_short_of_memory_nothing_is_kept(mf, monkeypatch, tmp_path):
+    '''A plan that is short of memory (keep=False, or anything in a scratch
+    file) leaves no ovvv-sized cache and no work buffer behind a call of
+    residuals, and gives the residuals of the run in memory.'''
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    ints = R.from_scf(mf, ncore=1, full=False)
+    no, nv = ints.nocc, ints.nvir
+    B = Blocks(no)
+    t1, t2, t3b = _amplitudes(no, nv)
+    ref = E.residuals(ints, B, t1, t2, t3b)
+    held = E.cached_bytes(ints)
+    assert 'vvvo' in ints._blocks and 'Us' in ints._sa_packed
+    assert 'fock_t1' in ints._sa_bare._c and 't3p.W' in B._ws and 'pp.Ts' in B._ws
+    for plan in (E.MemoryPlan(keep=False), E.MemoryPlan(pp_bytes=8 * 3 * nv ** 3, batch=2)):
+        got = E.residuals(ints, B, t1, t2, t3b, plan=plan)
+        for x, y in zip(got, ref):
+            assert abs(x - y).max() < 1e-12
+        assert 'vvvo' not in ints._blocks and 'Us' not in ints._sa_packed
+        assert 'fock_t1' not in ints._sa_bare._c and not B._ws
+        assert E.cached_bytes(ints) < held - 16 * no * nv ** 3
+    # ... and a run in memory builds them again
+    got = E.residuals(ints, B, t1, t2, t3b)
+    for x, y in zip(got, ref):
+        assert abs(x - y).max() < 1e-12
+    assert 'vvvo' in ints._blocks and 'Us' in ints._sa_packed and 't3p.W' in B._ws
 
 
 @needs_c
