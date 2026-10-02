@@ -130,6 +130,55 @@ def test_mapped_step_equals_step_in_memory(fh, io_mode, monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.fixture(scope='module')
+def uhf():
+    mol = gto.M(atom='N 0 0 0; H 0 0.8036 0.6347; H 0 -0.8036 0.6347', basis='6-31g', spin=1,
+                verbose=0)
+    return scf.UHF(mol).run(conv_tol=1e-12)
+
+
+@pytest.mark.parametrize('form', ['rform', 'flip', 'uhf'])
+def test_sliced_step_spin_blocked(rhf, uhf, form):
+    '''U/R-form integrals: the pair blocks of the dressed operator in slabs
+    of rows (alpha-alpha rows serving beta-beta for RHF), slab-wise and
+    batch-wise, against the step in memory.'''
+    e = eris_spin.from_scf(uhf if form == 'uhf' else rhf, frozen=2 if form == 'uhf' else 4)
+    opts = solver.Options(spin_flip=form == 'flip')
+    eng = ccsdt_opt.engine_for(e, np.float64, opts.mem_mb, opts.spin_flip)
+    if not ccsdt_opt.sliceable(e, eng):
+        pytest.skip('C library not built')
+    r0 = solver.kernel(e, 'ccsdt', solver.Options(max_cycle=2, spin_flip=opts.spin_flip,
+                                                  incore_complete=True))
+    ref = [np.array(x) for x in ccsdt_opt.update_amps(opts, r0.t1, r0.t2, r0.t3, e)]
+    row = 8 * max(hi - lo for lo, hi in t3pack.maps_for(e)[1].blocks)
+    for pp_bytes, order, mem in ((3 * row, 'slab', 2000), (5 * row, 'batch', 2000),
+                                 (row, 'batch', 0.01), (7 * row, 'slab', 0.01),
+                                 (10 ** 9, 'slab', 2000)):
+        plan = MemoryPlan(pp_bytes=pp_bytes, pp_order=order, mem_mb=mem)
+        new = ccsdt_opt.update_amps(opts, r0.t1, r0.t2, r0.t3, e, plan=plan)
+        for a, b, name in zip(new, ref, ('t1', 't2', 't3')):
+            assert abs(a - b).max() < 1e-12 * max(1.0, abs(b).max()), (name, pp_bytes, order)
+
+
+def test_spin_blocked_vvvv_built_out_of_core(uhf, monkeypatch, tmp_path):
+    '''With a small max_memory the U-form pair blocks are built in batches
+    into mapped scratch arrays, equal to those built in memory.'''
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    ref = eris_spin.from_scf(uhf, frozen=2)
+    new = eris_spin.from_scf(uhf, frozen=2, max_memory=memory.resident() / 1e6 + 0.2)
+    assert not any(is_mapped(b) for b in ref.vvvv_blocks)
+    assert all(is_mapped(b) for b in new.vvvv_blocks)
+    for a, b in zip(new.vvvv_blocks, ref.vvvv_blocks):
+        np.testing.assert_allclose(a, b, atol=1e-11)
+    kw = dict(conv_tol=1e-8, conv_tol_normt=1e-5, max_cycle=4)
+    a = solver.kernel(ref, 'ccsdt', solver.Options(incore_complete=True, **kw))
+    row = 8 * max(b.shape[1] for b in new.vvvv_blocks)
+    b = solver.kernel(new, 'ccsdt', solver.Options(
+        plan=MemoryPlan(pp_file=True, pp_bytes=11 * row, pp_order='batch'), **kw))
+    assert abs(a.e_tot - b.e_tot) < 1e-9
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize('form', ['real', 'complex', 'spin', 'rform', 'flip'])
 def test_kernel_out_of_core(rhf, form, monkeypatch, tmp_path):
     '''Whole runs with T3 mapped (its residual in the DIIS storage) and the
@@ -150,7 +199,6 @@ def test_kernel_out_of_core(rhf, form, monkeypatch, tmp_path):
     ref = solver.kernel(e, 'ccsdt', solver.Options(incore_complete=True, **kw))
     assert ref.converged and not is_mapped(ref.t3) and not ref.plan.t3_file
     row = t3pack.maps_for(e)[1].npair * ref.t3.dtype.itemsize
-    sliceable = form in ('real', 'complex')
     for plan in (MemoryPlan(t3_file=True),
                  MemoryPlan(t3_file=True, pp_file=True, pp_bytes=4 * row, pp_order='batch',
                             mem_mb=0.02),
@@ -161,8 +209,11 @@ def test_kernel_out_of_core(rhf, form, monkeypatch, tmp_path):
         assert abs(r.e_tot - ref.e_tot) < 1e-8
         assert abs(r.t3 - ref.t3).max() < 1e-5
         assert is_mapped(r.t3) == plan.t3_file and r.plan is plan
-        if plan.pp_file and sliceable:
+        if plan.pp_file and form in ('real', 'complex'):
             assert is_mapped(e._vvvv_pp)
+        if plan.pp_file and form in ('rform', 'flip'):
+            assert all(is_mapped(b) for b in e.vvvv_blocks)
+            assert e.vvvv_blocks[2] is e.vvvv_blocks[0]     # still shared between spins
     assert list(tmp_path.iterdir()) == []       # scratch files are unlinked when opened
 
 

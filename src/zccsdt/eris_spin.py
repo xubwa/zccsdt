@@ -89,7 +89,9 @@ def from_scf(mf, frozen=0, vir_batch=16, max_memory=None):
     '''U/R-form integrals from a PySCF RHF, ROHF or UHF object.  ``frozen`` is
     the number of frozen spin orbitals (frozen // 2 alpha and beta each).
     ``max_memory`` (MB for the whole process; default: 80% of what is
-    available) bounds the buffers of the integral transformations.'''
+    available) bounds the buffers of the integral transformations; the packed
+    vvvv blocks, built ``vir_batch`` first virtual indices at a time, become
+    mapped arrays of a scratch file if they do not fit in memory twice.'''
     from zccsdt import memory
     ao_mem = memory.ao2mo_memory(max_memory)
     mol = mf.mol
@@ -193,14 +195,40 @@ def from_scf(mf, frozen=0, vir_batch=16, max_memory=None):
                     blocks[(s1, s2, s3, s4)] = b
         g[name] = SpinTensor((sp[P], sp[Q], sp[R], sp[S]), blocks)
 
-    # packed vvvv diagonal pair blocks
+    # packed vvvv diagonal pair blocks, built in batches of the first virtual
+    # index: in memory, or as mapped arrays of a scratch file when they do
+    # not fit twice (bare and dressed)
+    from zccsdt import scratch
+    naa, nbb = nva * (nva - 1) // 2, nvb * (nvb - 1) // 2
+    total = 8 * (naa * naa + (nva * nvb) ** 2 + (0 if rhf else nbb * nbb))
+    per_a = 4 * 8 * max(nva, nvb, 1) ** 3           # the chemist block of one a and its copies
+    budget = memory.budget(max_memory)
+    scr = None
+    if budget is not None:
+        if 2 * total + min(vir_batch, max(nva, nvb, 1)) * per_a > budget:
+            scr = scratch.Scratch(prefix='zccsdt_vvvv_', what='the packed <ab||cd> integrals',
+                                  hint=' or give the calculation more memory (max_memory)')
+        else:
+            budget -= total
+        vir_batch = int(max(1, min(vir_batch, budget // 2 // per_a)))
+
+    def new(name, shape):
+        if scr is None or 0 in shape:
+            return np.zeros(shape)
+        return scr.create(name, shape)
+
+    def stored(out, row0, row1):                    # rows written: to the file now
+        scratch.written(out, row0 * out.shape[1], row1 * out.shape[1])
+        scratch.unmap(out, row0 * out.shape[1], row1 * out.shape[1])
+
     def vv_same(s):
         nv_s = Cv[s].shape[1]
         iu, ju = np.triu_indices(nv_s, 1)
-        out = np.zeros((len(iu), len(iu)))
+        out = new('v%d%d' % (s, s), (len(iu), len(iu)))
         row = 0
         for a0 in range(0, nv_s, vir_batch):
             a1 = min(a0 + vir_batch, nv_s)
+            row0 = row
             X = ao2mo.general(mol, (Cv[s][:, a0:a1], Cv[s], Cv[s], Cv[s]), compact=False,
                               max_memory=ao_mem).reshape(a1 - a0, nv_s, nv_s, nv_s)
             for a in range(a0, a1):
@@ -209,18 +237,28 @@ def from_scf(mf, frozen=0, vir_batch=16, max_memory=None):
                 nb = nv_s - a - 1
                 out[row:row + nb] = G[a + 1:][:, iu, ju]
                 row += nb
+            stored(out, row0, row)
         return out
 
-    vaa = vv_same(0) if nva else np.zeros((0, 0))
-    vbb = vaa if rhf else (vv_same(1) if nvb else np.zeros((0, 0)))
-    if nva and nvb:
-        X = ao2mo.general(mol, (Cv[0], Cv[0], Cv[1], Cv[1]), compact=False,
-                          max_memory=ao_mem).reshape(nva, nva, nvb, nvb)   # (ac|bd): [a, c, b, d]
-        vab = np.ascontiguousarray(X.transpose(0, 2, 1, 3)).reshape(nva * nvb, nva * nvb)
-    else:
-        vab = np.zeros((nva * nvb, nva * nvb))
-    return SpinERIs(nocc=nocc, fock=fock, mo_energy=fock.diagonal().copy(), e_hf=e_hf,
-                    e_nuc=float(mf.energy_nuc()), spin_occ=spin_occ, spin_vir=spin_vir,
-                    g=g, vvvv_blocks=[vaa, vab, vbb], restricted=rhf,
-                    source='%s:spin-blocked' % type(mf).__name__,
-                    spaces={'o': o_sp, 'v': v_sp})
+    hints = scratch.hints(scr is not None)          # memory is short: say what is done
+    try:
+        vaa = vv_same(0) if nva else np.zeros((0, 0))
+        vbb = vaa if rhf else (vv_same(1) if nvb else np.zeros((0, 0)))
+        vab = new('v01', (nva * nvb, nva * nvb))
+        for a0 in range(0, nva if nvb else 0, vir_batch):
+            a1 = min(a0 + vir_batch, nva)
+            X = ao2mo.general(mol, (Cv[0][:, a0:a1], Cv[0], Cv[1], Cv[1]), compact=False,
+                              max_memory=ao_mem).reshape(a1 - a0, nva, nvb, nvb)
+            # (ac|bd) as [a, c, b, d] -> rows (a, b), columns (c, d)
+            vab[a0 * nvb:a1 * nvb] = X.transpose(0, 2, 1, 3).reshape((a1 - a0) * nvb, nva * nvb)
+            stored(vab, a0 * nvb, a1 * nvb)
+    finally:
+        scratch.hints(hints)
+    se = SpinERIs(nocc=nocc, fock=fock, mo_energy=fock.diagonal().copy(), e_hf=e_hf,
+                  e_nuc=float(mf.energy_nuc()), spin_occ=spin_occ, spin_vir=spin_vir,
+                  g=g, vvvv_blocks=[vaa, vab, vbb], restricted=rhf,
+                  source='%s:spin-blocked' % type(mf).__name__,
+                  spaces={'o': o_sp, 'v': v_sp})
+    if scr is not None:
+        se.__dict__['_scratches'] = [scr]           # keeps the scratch file open
+    return se

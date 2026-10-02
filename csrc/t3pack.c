@@ -1615,6 +1615,38 @@ void zc_breduce_ppl_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol,     \
             r[Rcol[A]] += acc;                                                 \
         }                                                                      \
     }                                                                          \
+}                                                                              \
+                                                                               \
+/* The same for one slab of the operator: only the terms whose free index c   \
+ * has spin sc and whose pair Q lies in the rows [q0, q1) of its block (first  \
+ * pair hoff), with X the GEMM output for these rows,                         \
+ *   R[I, A] += sum_s rs_s X[(Q - hoff - q0) nrows nc + ib nc + (c - coff)]. */ \
+void zc_breduce_ppl_rows_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol, \
+                               int64_t nrows, const int64_t *rows, int64_t nvt, \
+                               int64_t A0, int64_t A1, const int64_t *vfree,   \
+                               const int64_t *vpair, const int64_t *vspin,     \
+                               int64_t sc, int64_t hoff, int64_t q0, int64_t q1, \
+                               int64_t nc, int64_t coff, const T *X)           \
+{                                                                              \
+    const uint64_t nq = (uint64_t)(q1 - q0);                                   \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t ib = 0; ib < nrows; ib++) {                                   \
+        T *r = R + Rbase[rows[ib]];                                            \
+        for (int64_t A = A0; A < A1; A++) {                                    \
+            T acc = 0;                                                         \
+            int hit = 0;                                                       \
+            for (int s = 0; s < 3; s++) {                                      \
+                const int64_t c = vfree[s * nvt + A];                          \
+                if (vspin[c] != sc) continue;                                  \
+                const uint64_t q = (uint64_t)(vpair[s * nvt + A] - hoff - q0); \
+                if (q >= nq) continue;                                         \
+                const T v = X[(q * nrows + ib) * nc + (c - coff)];             \
+                acc += (s == 1) ? -v : v;                                      \
+                hit = 1;                                                       \
+            }                                                                  \
+            if (hit) r[Rcol[A]] += acc;                                        \
+        }                                                                      \
+    }                                                                          \
 }
 DEFINE_BLOCKED(double, d)
 DEFINE_BLOCKED(double complex, z)

@@ -250,6 +250,62 @@ def dressed_vvvv_blocks(se, t1, om, vm, t2pp=None, out=None):
     return res
 
 
+def dressed_vvvv_rows(se, t1, om, vm, h, q0, q1, out, C):
+    '''Rows q0:q1 (block-local) of pair block ``h`` of the packed dressed
+    <ab||de> (dressed_vvvv_blocks), written to ``out`` ((q1 - q0, n_h),
+    C-contiguous).  ``C`` (packed (P, Q)) is the coefficient of the pair term:
+    tau1, or tau1 + t2 for the rows of the T3 ladder operator.  The bare block
+    may be a mapped file.  For RHF block 2 is block 0.'''
+    from zccsdt import scratch
+    o, v = se.spaces['o'], se.spaces['v']
+    bp = bare_packed(se)
+    G, oovv = bp['ovvv_Q'], bp['oovv_PQ']
+    oa, ob = o.groups[0], o.groups[1]
+    va, vb = v.groups[0], v.groups[1]
+    lo, hi = vm.blocks[h]
+    plo, phi = om.blocks[h]
+    n = hi - lo
+    bare = se.vvvv_blocks[h]
+    dt = out.dtype
+    assert out.shape == (q1 - q0, n) and out.flags.c_contiguous
+    ta = np.ascontiguousarray(t1[oa[0]:oa[1], va[0]:va[1]], dtype=dt)
+    tb = np.ascontiguousarray(t1[ob[0]:ob[1], vb[0]:vb[1]], dtype=dt)
+    if h in (0, 2):
+        s_ = h // 2
+        tt = ta if s_ == 0 else tb
+        off = va[0] if s_ == 0 else vb[0]
+        GA = GB = G.blocks.get((s_, s_, h))               # [m, y, Q]
+        tA, tB = -tt, tt
+        pa, pb = vm.pa_c[lo + q0:lo + q1] - off, vm.pb_c[lo + q0:lo + q1] - off
+    else:
+        GA = G.blocks.get((0, 1, 1))                      # [m_a, b_b, Q]
+        GB = G.blocks.get((1, 0, 1))                      # [m_b, a_a, Q]
+        tA, tB = -ta, tb
+        pa, pb = vm.pa_c[lo + q0:lo + q1] - va[0], vm.pb_c[lo + q0:lo + q1] - vb[0]
+    scratch.need(bare, q0 * n, q1 * n)
+    t3pack.axpby(out, bare[q0:q1], 1.0, 0.0)
+    scratch.unmap(bare, q0 * n, q1 * n)
+
+    def arr(x):
+        return None if x is None else np.ascontiguousarray(x, dtype=dt)
+    tA, tB, GA, GB = arr(tA), arr(tB), arr(GA), arr(GB)
+    nmA = 0 if GA is None or tA.size == 0 else GA.shape[0]
+    nmB = 0 if GB is None or tB.size == 0 else GB.shape[0]
+    ptr = lambda x: None if x is None else t3pack._p(x)   # noqa: E731
+    I64 = t3pack._I64
+    getattr(t3pack._lib, 'zc_vvvv_dress_' + t3pack._sfx(dt))(
+        t3pack._p(out), t3pack._p(out), I64(q1 - q0), I64(n),
+        t3pack._p(np.ascontiguousarray(pa)), t3pack._p(np.ascontiguousarray(pb)),
+        ptr(tA), I64(tA.shape[1]), ptr(GA), I64(nmA), I64(0 if GA is None else GA.shape[1]),
+        ptr(tB), I64(tB.shape[1]), ptr(GB), I64(nmB), I64(0 if GB is None else GB.shape[1]),
+        None, None, I64(0))
+    H = oovv.blocks.get((h, h))
+    if H is not None and phi > plo:         # the pair term as one GEMM
+        gemm(np.asfortranarray(C[plo:phi, lo + q0:lo + q1].T, dtype=dt),
+             np.ascontiguousarray(H, dtype=dt), out, beta=1.0)
+    return out
+
+
 def _bare_vvvo(se, vm, dtype):
     '''<ab||ei> = -<ie||ab>^* packed over a<b, dense (npair_v, nvir, nocc),
     cached on the integral object (t1-independent part of bra_dressed_vvvo).'''

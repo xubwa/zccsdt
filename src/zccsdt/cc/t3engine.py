@@ -753,7 +753,8 @@ def _spin_block_c_methods():
         with timer('pass2'):
             self._pass2_c(T3, WringT, t2mn, Wv, Wo, t2P, R)
         with timer('pp_ladder'):
-            self._ppl_c(T3, Wpp, R)
+            if Wpp is not None:         # (else in R already, see pp_ladder_rows)
+                self._ppl_c(T3, Wpp, R)
         scratch.unmap(T3)               # (the blocked gathers leave the unmapping to here)
         with timer('hh_ladder'):
             for g in L.stored:
@@ -926,11 +927,90 @@ def _spin_block_c_methods():
                    I_(A0), I_(A1), p_(vm.free_c), p_(vm.pair_c), p_(vspin), p_(hoff),
                    p_(ncs), p_(coff), p_(X[0]), p_(X[1]))
 
-    return _pass1_c, _flip_outputs, _residual_c, _pass2_c, _ppl_c
+    def pp_ladder_rows(self, T3, slabs, R, order='slab', max_rows=None):
+        '''pp ladder with the operator given in slabs of rows of its pair
+        blocks: ``slabs()`` returns an iterator of (hs, q0, q1, W), the rows
+        q0:q1 (block-local) of the blocks ``hs`` (alpha-alpha and beta-beta
+        share their rows for RHF), W of shape (q1 - q0, n_h).  order 'slab':
+        for each slab all occupied triples; 'batch': for each batch of triples
+        all slabs (slabs() is called once per batch).  ``max_rows``: the
+        largest q1 - q0.  R as returned by target() (C kernels only).'''
+        om, vm, dtype, L = self.om, self.vm, self.dtype, self.L
+        isz = np.dtype(dtype).itemsize
+        vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
+        lib = t3pack._lib
+        fg = getattr(lib, 'zc_bgather_vir_' + t3pack._sfx(dtype))
+        fr = getattr(lib, 'zc_breduce_ppl_rows_' + t3pack._sfx(dtype))
+        I_, p_ = _CArgs.I, _CArgs.p
+        vspin = np.ascontiguousarray(vm.spins, dtype=np.int64)
+        coff = [vr[0][0], vr[1][0]]
+        ncs = [vr[0][1] - vr[0][0], vr[1][1] - vr[1][0]]
+        nQ = [int(vm.pair_off[h + 1] - vm.pair_off[h]) for h in range(3)]
+        max_rows = max(nQ) if max_rows is None else max_rows
+
+        def combos(g):                  # (spin of the free index, pair block) of group g
+            return [(sc, g - sc) for sc in (0, 1)
+                    if 0 <= g - sc <= 2 and ncs[sc] and nQ[g - sc]]
+
+        # per triple of a batch: the gathered T3 of both spins of the free
+        # index and one product; two thirds of the buffer budget
+        per = max([sum(nQ[h] * ncs[sc] for sc, h in combos(g)) + max_rows * max(ncs)
+                   for g in L.stored] + [1])
+        nbt = max(1, int(self.mem_mb * 1e6 * 2 / 3 // (per * isz)))
+        nbt = min(nbt, max(int(max(L.nI[g] for g in L.stored)), 1))
+        ws = np.empty(per * nbt, dtype=dtype)
+
+        def gather(rows, sc, h, off):
+            n = nQ[h] * len(rows) * ncs[sc]
+            T = ws[off:off + n].reshape(nQ[h], len(rows), ncs[sc])
+            with timer('ppl.gather'):
+                fg(p_(T3), p_(L.obase), p_(L.vcol), p_(L.osig), p_(L.vsig), p_(vm.tri_c),
+                   p_(vm.sgn_c), I_(vm.npair), I_(len(rows)), p_(rows), I_(vm.pair_off[h]),
+                   I_(nQ[h]), I_(coff[sc]), I_(ncs[sc]), p_(T))
+            return T, off + n
+
+        def apply(T, off, g, rows, sc, h, q0, q1, W):
+            X = ws[off:off + (q1 - q0) * len(rows) * ncs[sc]].reshape(q1 - q0, -1)
+            with timer('ppl.gemm'):
+                gemm(W, T.reshape(nQ[h], -1), X)
+            with timer('ppl.reduce'):
+                fr(p_(R), p_(self.Rbase), p_(self.Rcol), I_(len(rows)), p_(rows), I_(vm.ntri),
+                   I_(vm.tri_off[g]), I_(vm.tri_off[g + 1]), p_(vm.free_c), p_(vm.pair_c),
+                   p_(vspin), I_(sc), I_(vm.pair_off[h]), I_(q0), I_(q1), I_(ncs[sc]),
+                   I_(coff[sc]), p_(X))
+
+        def batches(g):
+            return _batches(om.tri_off[g], om.tri_off[g + 1], nbt) \
+                if vm.tri_off[g + 1] > vm.tri_off[g] else []
+
+        if order == 'slab':
+            for hs, q0, q1, W in slabs():
+                for h in hs:
+                    for g in L.stored:
+                        for sc, hh in combos(g):
+                            if hh != h:
+                                continue
+                            for rows in batches(g):
+                                T, off = gather(rows, sc, h, 0)
+                                apply(T, off, g, rows, sc, h, q0, q1, W)
+        else:
+            for g in L.stored:
+                cs = combos(g)
+                for rows in batches(g):
+                    Ts, off = {}, 0
+                    for sc, h in cs:
+                        Ts[sc], off = gather(rows, sc, h, off)
+                    for hs, q0, q1, W in slabs():
+                        for sc, h in cs:
+                            if h in hs:
+                                apply(Ts[sc], off, g, rows, sc, h, q0, q1, W)
+        scratch.unmap(T3)
+
+    return _pass1_c, _flip_outputs, _residual_c, _pass2_c, _ppl_c, pp_ladder_rows
 
 
 (SpinBlockT3._pass1_c, SpinBlockT3._flip_outputs, SpinBlockT3._residual_c,
- SpinBlockT3._pass2_c, SpinBlockT3._ppl_c) = _spin_block_c_methods()
+ SpinBlockT3._pass2_c, SpinBlockT3._ppl_c, SpinBlockT3.pp_ladder_rows) = _spin_block_c_methods()
 
 
 def make_engine(om, vm, dtype, mem_mb, flip=False):

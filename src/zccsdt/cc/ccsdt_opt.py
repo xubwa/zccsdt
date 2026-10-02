@@ -77,6 +77,15 @@ def cached_bytes(eris):
     return n + (overhead() if _STEPS[0] else 0)
 
 
+def sliceable(eris, eng):
+    '''Can the dressed packed <ab||de> be used in slabs of rows?  Yes for the
+    dense engine and, with the C kernels, for U/R-form integrals; not for
+    dense integrals on spin-grouped maps.'''
+    if _is_spin_eris(eris):
+        return bool(getattr(eng, 'use_c', False))
+    return eng.vm.spins is None
+
+
 def plan_for(eris, dtype, opts):
     '''MemoryPlan of a run with the solver options ``opts``: everything in
     memory with ``incore_complete``, else what fits in ``max_memory`` (MB for
@@ -87,12 +96,15 @@ def plan_for(eris, dtype, opts):
     isz = np.dtype(dtype).itemsize
     eng = engine_for(eris, dtype, opts.mem_mb, flip=getattr(opts, 'spin_flip', False))
     spin = _is_spin_eris(eris)
-    kw = dict(mem_mb=opts.mem_mb, t3_bytes=eng.size * isz,
-              sliceable=not spin and vm.spins is None)
+    kw = dict(mem_mb=opts.mem_mb, t3_bytes=eng.size * isz, sliceable=sliceable(eris, eng))
     if spin:        # bare pair blocks (alpha-alpha shared with beta-beta for RHF)
-        blocks = {id(b): b.nbytes for b in eris.vvvv_blocks}
-        kw['pp_bytes'] = sum(blocks.values())
-    where = 'file' if is_mapped(getattr(eris, '_vvvv_pp', None)) else 'memory'
+        blocks = {id(b): b for b in eris.vvvv_blocks}
+        kw['pp_bytes'] = sum(b.nbytes for b in blocks.values())
+        kw['row_bytes'] = max([b.shape[1] * b.itemsize for b in blocks.values()] + [1])
+        where = 'file' if all(is_mapped(b) or b.size == 0 for b in blocks.values()) \
+            else 'memory'
+    else:
+        where = 'file' if is_mapped(getattr(eris, '_vvvv_pp', None)) else 'memory'
     if opts.incore_complete:
         return plan_memory(om.n, vm.n, isz, pp_where=where, **kw)
     # arrays kept on the integral object by an earlier run are part of what
@@ -105,7 +117,7 @@ def plan_for(eris, dtype, opts):
 
 
 def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memory',
-                mem_mb=2000.0, t3_bytes=None, pp_bytes=None, sliceable=True):
+                mem_mb=2000.0, t3_bytes=None, pp_bytes=None, sliceable=True, row_bytes=None):
     '''MemoryPlan for ``budget`` bytes of ordinary memory beyond what the
     integral object holds already (None: no limit, everything in memory).
 
@@ -129,15 +141,16 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
     time if they do not fit either.  T3 and its residual stay in memory if
     they fit next to an eighth of the dressed operator (they are passed over
     many times per iteration, the operator once), else they go to the scratch
-    file.  ``t3_bytes`` / ``pp_bytes``: sizes of T3 and of the bare operator
-    if not those of the dense layout; ``sliceable``: False for the
-    spin-blocked forms, whose pp operator stays in memory.  Raises
+    file.  ``t3_bytes`` / ``pp_bytes`` / ``row_bytes``: sizes of T3, of the
+    bare operator and of its longest row if not those of the dense layout
+    (spin-blocked forms); ``sliceable``: False if the pp operator has to stay
+    in memory (ccsdt_opt.sliceable).  Raises
     MemoryError if the ovvv-sized part and the smallest buffers do not fit
     in ``limit`` (default: the budget).'''
     o, v = nocc, nvir
     nvp = v * (v - 1) // 2
     f = o * v ** 3 * itemsize
-    row = max(nvp * itemsize, 1)
+    row = max(nvp * itemsize, 1) if row_bytes is None else row_bytes
     pp = nvp * nvp * itemsize if pp_bytes is None else pp_bytes
     nto, nvt = o * (o - 1) * (o - 2) // 6, v * (v - 1) * (v - 2) // 6
     t3 = nto * nvt * itemsize if t3_bytes is None else t3_bytes
@@ -213,22 +226,32 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
 def place_vvvv(eris, plan):
     '''Move the bare packed <ab||de> of the integral object to a scratch
     file if the plan wants it there and it is still in memory.'''
-    from zccsdt.scratch import Scratch, is_mapped
-    V = getattr(eris, '_vvvv_pp', None)
-    if not plan.pp_file or V is None or is_mapped(V):
+    from zccsdt.scratch import Scratch, is_mapped, written, unmap
+    if not plan.pp_file:
+        return
+    spin = _is_spin_eris(eris)
+    blocks = list(eris.vvvv_blocks) if spin else [getattr(eris, '_vvvv_pp', None)]
+    todo = {id(V): V for V in blocks if V is not None and V.size and not is_mapped(V)}
+    if not todo:
         return
     scr = Scratch(prefix='zccsdt_vvvv_', what='the packed <ab||de> integrals',
                   hint=' or give the calculation more memory (max_memory)')
-    from zccsdt.scratch import written, unmap
-    M = scr.create('vvvv', V.shape, V.dtype)
-    step = max(1, (1 << 28) // max(V[0].nbytes, 1))
-    for q in range(0, V.shape[0], step):
-        M[q:q + step] = V[q:q + step]
-        written(M, q * V.shape[1], min(q + step, V.shape[0]) * V.shape[1])
-        unmap(M, q * V.shape[1], min(q + step, V.shape[0]) * V.shape[1])
-    eris._vvvv_pp = M
-    eris.__dict__['_scratch'] = scr             # keeps the file open
-    eris.__dict__.pop('_vvvv_blocks', None)     # cached views of the old array
+    moved = {}
+    for n, (key, V) in enumerate(todo.items()):
+        M = scr.create('vvvv%d' % n, V.shape, V.dtype)
+        step = max(1, (1 << 28) // max(V[0].nbytes, 1))
+        for q in range(0, V.shape[0], step):
+            M[q:q + step] = V[q:q + step]
+            written(M, q * V.shape[1], min(q + step, V.shape[0]) * V.shape[1])
+            unmap(M, q * V.shape[1], min(q + step, V.shape[0]) * V.shape[1])
+        moved[key] = M
+    if spin:        # (blocks shared between spins stay shared)
+        eris.vvvv_blocks = [moved.get(id(V), V) for V in blocks]
+    else:
+        eris._vvvv_pp = moved[id(blocks[0])]
+        eris.__dict__.pop('_vvvv_blocks', None)     # cached views of the old array
+    # keeps the file(s) open
+    eris.__dict__.setdefault('_scratches', []).append(scr)
 
 
 def pair_slabs(nrow, row_bytes, max_bytes=None):
@@ -515,8 +538,19 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
     npo = R2.shape[0]
     tt = t2pp + tau
     done = set()
+
+    def t2_part(k):         # the T2 part of the ladder operator, taken out again
+        if ladder_t2 is not None and ladder_t2[0][k] is not None:
+            klo, khi = vm.blocks[k]
+            plo, phi = om.blocks[k]
+            C1 = tt[:, klo:khi] @ ladder_t2[0][k].T                       # (P, P_k)
+            R2[:, klo:khi] -= C1 @ ladder_t2[1][plo:phi, klo:khi]
+
     if ladder is not None:
         R2 += ladder
+        for k, (klo, khi) in enumerate(vm.blocks):
+            if khi > klo:
+                t2_part(k)
     for h, (lo, hi) in enumerate(vm.blocks):
         if hi == lo or h in done or ladder is not None:
             continue
@@ -529,10 +563,7 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
         for j, k in enumerate(hs):
             klo, khi = vm.blocks[k]
             t3pack.axpby(R2[:, klo:khi], X[:, j * npo:(j + 1) * npo].T)
-            if ladder_t2 is not None and ladder_t2[0][k] is not None:
-                plo, phi = om.blocks[k]
-                C1 = tt[:, klo:khi] @ ladder_t2[0][k].T                   # (P, P_k)
-                R2[:, klo:khi] -= C1 @ ladder_t2[1][plo:phi, klo:khi]
+            t2_part(k)
     Wkl = np.ascontiguousarray(ge['oooo'][mm, nn][:, mm, nn])           # (kl, ij)
     gemm(goovv_pp, t2pp.T, Wkl, beta=1.0)
     gemm(np.asfortranarray(Wkl.T), t2pp, R2, beta=1.0)
@@ -713,12 +744,13 @@ def _persistent(eris, name):
     return eris.__dict__.setdefault('_buffers', {}).setdefault(name, [None, None, None])
 
 
-def _spin_dressing(eris, t1, om, vm, t2pp=None, vd_out=None):
+def _spin_dressing(eris, t1, om, vm, t2pp=None, vd_out=None, vvvv=True):
     '''T1 dressing for U/R-form integrals: small blocks dense, ovvv as a
     SpinTensor and packed over its virtual pair ('ovvv_Q'; the dressed vovv is
     minus its bra transpose, as the dressing treats both bra slots alike),
     packed vvvv as pair blocks (plus the T2 part of the T3 ladder operator if
-    t2pp is given, see spin_imds.dressed_vvvv_blocks).'''
+    t2pp is given, see spin_imds.dressed_vvvv_blocks; None without ``vvvv``:
+    the blocks are then dressed in slabs of rows, _pp_sweep_spin).'''
     fdr = spin_imds.dress_fock(eris, t1)
     mats = spin_imds._t1_tensors(eris, t1)
     ge, ges = {}, {}
@@ -728,7 +760,8 @@ def _spin_dressing(eris, t1, om, vm, t2pp=None, vd_out=None):
     with timer('dress.ovvv'):
         ges['ovvv'], ges['ovvv_Q'] = spin_imds.dressed_ovvv(eris, t1)
     with timer('dress.vvvv_pp'):
-        vvvv_pp = spin_imds.dressed_vvvv_blocks(eris, t1, om, vm, t2pp=t2pp, out=vd_out)
+        vvvv_pp = spin_imds.dressed_vvvv_blocks(eris, t1, om, vm, t2pp=t2pp, out=vd_out) \
+            if vvvv else None
     return fdr, ge, ges, vvvv_pp
 
 
@@ -758,19 +791,22 @@ def engine_for(eris, dtype, mem_mb=2000, flip=False):
     return _ENGINES[key]
 
 
-def _kept_operator(eris, nvp, dtype):
-    '''Mapped scratch array (nvp, nvp) for the rows of the T3 pp ladder
-    operator of the current iteration, kept on the integral object between
-    iterations.'''
+def _kept_operator(eris, sizes, dtype):
+    '''Mapped scratch arrays (n, n) for n in ``sizes`` (a number: one array)
+    for the rows of the T3 pp ladder operator of the current iteration, kept
+    on the integral object between iterations; a dict by pair block for a
+    list of sizes (U/R form: the blocks 0, 1(, 2) in that order).'''
     from zccsdt.scratch import Scratch
+    one = np.isscalar(sizes)
+    shapes = [(int(n), int(n)) for n in ([sizes] if one else sizes)]
     held = _persistent(eris, 'wpp_file')
-    if held[1] is None or held[1].shape != (nvp, nvp) or held[1].dtype != dtype:
+    if held[1] is None or [a.shape for a in held[1]] != shapes or held[1][0].dtype != dtype:
         if held[0] is not None:
             held[0].close()
         held[0] = Scratch(prefix='zccsdt_wpp_', what='the pp ladder operator',
                           hint=' or give the calculation more memory (max_memory)')
-        held[1] = held[0].create('wpp', (nvp, nvp), dtype)
-    return held[1]
+        held[1] = [held[0].create('wpp%d' % k, sh, dtype) for k, sh in enumerate(shapes)]
+    return held[1][0] if one else dict(enumerate(held[1]))
 
 
 def _pp_sweep(eng, plan, eris, t1, t2pp, goovv_pp, Feff_vv, om, vm, T3p, Wv, R3):
@@ -840,6 +876,94 @@ def _pp_sweep(eng, plan, eris, t1, t2pp, goovv_pp, Feff_vv, om, vm, T3p, Wv, R3)
     return lad
 
 
+def _spin_slabs(eris, vm, itemsize, max_bytes):
+    '''(h, q0, q1) for the slabs of rows of the distinct pair blocks of the
+    spin-blocked packed <ab||de> (aa, ab and, unless it is the aa block, bb),
+    at most ``max_bytes`` of dressed rows each; and the blocks each serves.'''
+    serves = {0: (0, 2) if eris.restricted else (0,), 1: (1,), 2: (2,)}
+    out = []
+    for h in ((0, 1) if eris.restricted else (0, 1, 2)):
+        lo, hi = vm.blocks[h]
+        if hi > lo:
+            out += [(h, q0, q1) for q0, q1 in pair_slabs(hi - lo, (hi - lo) * itemsize, max_bytes)]
+    return out, serves
+
+
+def _pp_sweep_spin(eng, plan, eris, t1, t2pp, Feff_vv, om, vm, T3p, Wv, R3):
+    '''_pp_sweep for U/R-form integrals: the pair blocks of the packed
+    dressed <ab||de>, one slab of rows at a time.  The rows include the T2
+    part of the T3 ladder operator from the start (one dressing pass); W_vvvo
+    and the CCSD ladder are corrected for it as in the step in memory.'''
+    from zccsdt import scratch
+    dtype = R3.dtype
+    slabs, serves = _spin_slabs(eris, vm, dtype.itemsize, plan.pp_bytes)
+    nQ = [hi - lo for lo, hi in vm.blocks]
+    size = max([(q1 - q0) * nQ[h] for h, q0, q1 in slabs] + [1])
+    bufs = _persistent(eris, 'vvvv_rows')
+    if bufs[0] is None or bufs[0].size != size or bufs[0].dtype != dtype:
+        bufs[0] = None                          # free before allocating again
+        bufs[0] = np.empty(size, dtype=dtype)
+    C = np.ascontiguousarray(t2pp + _tau1_pairs(t1, om, vm), dtype=dtype)     # (P, Q)
+    lad = np.zeros((om.npair, vm.npair), dtype=dtype)
+    calls = [0]
+    order = plan.pp_order if len(slabs) > 1 else 'slab'
+    kept = None
+    if order == 'batch':
+        hs = sorted({h for h, _, _ in slabs})
+        kept = dict(zip(hs, _kept_operator(eris, [nQ[h] for h in hs], dtype).values()))
+
+    def rows(h, q0, q1):
+        return bufs[0][:(q1 - q0) * nQ[h]].reshape(q1 - q0, nQ[h])
+
+    def first():
+        # the sweep that also feeds W_vvvo and the CCSD ladder
+        for h, q0, q1 in slabs:
+            W = rows(h, q0, q1)
+            with timer('dress.vvvv_pp'):
+                spin_imds.dressed_vvvv_rows(eris, t1, om, vm, h, q0, q1, W, C)
+            for k in serves[h]:
+                klo, khi = vm.blocks[k]
+                if khi == klo:
+                    continue
+                with timer('wv.vvvv_t1'):
+                    Vd, where = [None] * 3, [(0, 0)] * 3
+                    Vd[k], where[k] = W, (klo + q0, klo + q1)
+                    spin_imds.vvvv_t1_blocks(Wv, Vd, t1, om, vm, rows=where)
+                with timer('ccsd'):
+                    lad[:, klo + q0:klo + q1] = gemm(W, C[:, klo:khi].T).T
+            with timer('imd.Wpp'):      # + 1/2 A[F delta]: rows of the ladder operator
+                add_one_body_pairs(W, Feff_vv, vm, 0.5, block=h, rows=(q0, q1))
+                if kept is not None:
+                    K = kept[h]
+                    t3pack.axpby(K[q0:q1], W, 1.0, 0.0)
+                    scratch.written(K, q0 * nQ[h], q1 * nQ[h])
+                    scratch.unmap(K, q0 * nQ[h], q1 * nQ[h])
+            yield serves[h], q0, q1, W
+
+    def again():
+        # later sweeps (one per batch of triples): the kept rows
+        for h, q0, q1 in slabs:
+            W = rows(h, q0, q1)
+            with timer('imd.Wpp'):
+                K = kept[h]
+                scratch.need(K, q0 * nQ[h], q1 * nQ[h])
+                t3pack.axpby(W, K[q0:q1], 1.0, 0.0)
+                scratch.unmap(K, q0 * nQ[h], q1 * nQ[h])
+            yield serves[h], q0, q1, W
+
+    def sweep():
+        calls[0] += 1
+        return first() if calls[0] == 1 else again()
+
+    with timer('pp_ladder'):
+        eng.pp_ladder_rows(T3p, sweep, R3, order=order,
+                           max_rows=max([q1 - q0 for _, q0, q1 in slabs] + [1]))
+    if calls[0] == 0:                           # no triples: the other terms remain
+        for _ in first():
+            pass
+    return lad
+
+
 def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
     '''One Jacobi step.  T3p is packed (notri, nvtri) or flat; returns
     (t1new, t2new, T3p_new) with T3p_new flat.  ``out``: a flat array of the
@@ -863,8 +987,8 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
 
     spin = _is_spin_eris(eris)
-    # the dressed packed vvvv in slabs of rows (dense engine)
-    sliced = plan.pp_bytes is not None and not spin and vm.spins is None
+    # the dressed packed vvvv in slabs of rows
+    sliced = plan.pp_bytes is not None and sliceable(eris, eng)
     t2mn = t2[mm, nn]                                   # (P, a, b)
     t2pp_v = np.ascontiguousarray(t2mn[:, md, ne])      # (P, Q)
     with timer('t1_dress'):
@@ -872,7 +996,8 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
             # vvvv_pp then includes the T2 part of the ladder operator,
             # sum_{m<n} t2[mn,ab] <mn||de>; the CCSD ladder and W_vvvo correct for it
             fdr, ge, ges, vvvv_pp = _spin_dressing(eris, t1, om, vm, t2pp=t2pp_v,
-                                                   vd_out=_persistent(eris, 'vvvv'))
+                                                   vd_out=_persistent(eris, 'vvvv'),
+                                                   vvvv=not sliced)
         else:
             fdr = dress_fock(eris, t1)
             ge = {}
@@ -988,8 +1113,11 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
             # T3 pp ladder, which starts the T3 residual
             t_.__exit__(None, None, None)
             R3 = eng.target(out)
-            lad = _pp_sweep(eng, plan, eris, t1, t2pp_v, goovv_pp, Feff_vv, om, vm, T3p,
-                            Wv, R3)
+            if spin:
+                lad = _pp_sweep_spin(eng, plan, eris, t1, t2pp_v, Feff_vv, om, vm, T3p, Wv, R3)
+            else:
+                lad = _pp_sweep(eng, plan, eris, t1, t2pp_v, goovv_pp, Feff_vv, om, vm, T3p,
+                                Wv, R3)
             t_ = timer('ccsd'); t_.__enter__()
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
                                       Feff_oo, Weff_ovvo, om, vm, r1_vovv, ladder_t2,
