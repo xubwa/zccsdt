@@ -178,6 +178,38 @@ five):
   one GEMM per term ("I x T2 products" in the (Q) section).  Compiler flags
   cannot change this, which is why all builds give the same (Q) time.
 
+### Parallel scaling of the CCSDT iteration
+
+Seconds per iteration and, in parentheses, the speedup over one thread.
+cc-pVTZ, no symmetry, best `ncc` build; jobs with several threads one at a
+time on one socket, the one-thread jobs at the same time on separate cores of
+the other (zccsdt: first iterations; `ncc`: iterations 2-4):
+
+| threads | zccsdt, H2S (o = 9) | `ncc`, H2S | zccsdt, CH2O (o = 8) | `ncc`, CH2O |
+|---|---|---|---|---|
+| 1 | 13.1 | 34.4 | 45.5 | 108.5 |
+| 2 | 6.91 (1.9) | 17.2 (2.0) | 23.0 (2.0) | 60.9 (1.8) |
+| 4 | 3.75 (3.5) | 9.09 (3.8) | 12.0 (3.8) | 39.4 (2.8) |
+| 7 | | 6.07 (5.7) | 7.80 (5.8) | 17.9 (6.1) |
+| 8 | 2.24 (5.9) | 5.06 (6.8) | 6.60 (6.9) | 30.9 (3.5) |
+
+- **zccsdt does not scale better than `ncc` when `ncc`'s blocks are spread
+  evenly**: on 8 threads 5.9 against 6.8 for H2S, 4.8 against 6.6 for H2O,
+  5.9 against 5.5 for N2.  The time ratio is then decided on one core
+  (`ncc` / zccsdt 2.2-2.6) and is the same or a little smaller on 8 (H2S:
+  2.6 -> 2.3).
+- **For o = 8 `ncc` loses whenever the number of threads divides 8**:
+  speedups of 1.8, 2.8 and 3.5 with 2, 4 and 8 threads, 6.1 with 7.  The rule
+  of "Number of threads" above gives 1.7, 2.6, 3.2 and 7.0.  The ratio of 4.7
+  on 8 threads (6.4 with the reference build) comes from this and not from
+  the scaling of zccsdt; on one thread it is 2.4, on 7 threads each 2.3.
+- **zccsdt is threaded inside each operation**: MKL's threaded GEMM on the
+  stacked matrices and OpenMP loops in the gather, scatter and packing
+  kernels, so there are no blocks to hand out.  From 1 to 8 threads (H2O,
+  N2) the GEMMs gain 6.1-7.2 and the gathers and scatters 6.5-9, but DIIS
+  only 1.4-2.5 and the unpacking of the ladder 2.9, so small molecules scale
+  worse (4.8 for H2O) than larger ones (6.9 for CH2O).
+
 ### One core, and `ncc` with point-group symmetry
 
 cc-pVTZ, c233, one thread pinned to one core per job (all single-core jobs
