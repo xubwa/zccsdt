@@ -144,7 +144,10 @@ limit the kernel pages them (`docs/benchmarks.md`, "DIIS storage").
 spin-orbital, Sz-blocked, spin-orbital RCCSDT (spin flip) and spin-adapted
 representations with a model of CFOUR `ncc` counted from its source.  The
 spin-adapted engine needs 0.31-0.43 of the `ncc` model (H2O, N2, H2S cc-pVTZ;
-H2O cc-pVQZ); the spin-orbital RCCSDT needs 0.57-0.85.
+H2O cc-pVQZ); the spin-orbital RCCSDT needs 0.57-0.85.  That model
+overstates `ncc` about twofold: by `ncc`'s own flop counter the engine does
+0.6-0.9 of its GEMM arithmetic (`docs/benchmarks.md`, "Where the difference
+comes from").
 
 ## CCSDT(Q) (`sa/rccsdt_q.py`)
 

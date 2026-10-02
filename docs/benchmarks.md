@@ -12,7 +12,8 @@ Unless a table says otherwise, the numbers of this document are
   RHF reference, all electrons correlated unless frozen core is stated;
 - with the **same threads on the same cores**: `OMP_NUM_THREADS` =
   `MKL_NUM_THREADS` = 8 and both programs pinned to the same 8 cores (checked
-  per thread, see the (Q) section);
+  per thread, see the (Q) section).  Eight threads are not always the best
+  choice for `ncc`; the first subsection gives it its best number;
 - **without point-group symmetry**: CFOUR is run with `SYMMETRY=OFF`.  zccsdt
   has no point-group symmetry, so this is the like-for-like comparison of
   the two implementations, and it is the relevant one for molecules without
@@ -23,11 +24,166 @@ CPU time is not a clean measure for either program on several threads
 (idle OpenMP threads of `ncc` spin: its CCSDT(Q) step for H2O/cc-pVTZ takes
 405 CPU seconds on 8 threads and 300 on one).  The single-thread runs are.
 
+### The `ncc` reference: builds, threading, memory
+
+A factor of several against `ncc` calls for checking the reference first.
+The `ncc` source of the reference installation was rebuilt in a scratch copy
+with other compilers and flags (`bench/cfour/rebuild_ncc.sh`; same `xvscf`,
+`xvtran` and `xintprc`, same threaded MKL; the installation itself is
+unchanged).  c233, no point-group symmetry, wall time in seconds, zccsdt
+f7d3f51.
+
+**Compiler and flags.**  The reference installation compiles `ncc` with g++
+9.3 `-O2`, without `-march`.  H2O/cc-pVTZ; the 8-core jobs one at a time on
+cores 0-7, the one-core jobs all at the same time on separate cores of the
+other socket:
+
+| `ncc` build | iteration, 8 cores | (Q), 8 cores | iteration, 1 core | (Q), 1 core |
+|---|---|---|---|---|
+| reference: g++ `-O2` | 0.92 | 57.7 | 6.40 | 308 |
+| g++ `-O3 -march=native` | 0.75 | 55.9 | 4.95 | 296 |
+| icpc `-O3 -xHost` | 0.78 | 56.8 | 5.11 | 295 |
+| another installation on the cluster, icpc `-O3` | 0.81 | 57.2 | 5.37 | 301 |
+| zccsdt | 0.48 | 5.4 | 2.26 | 34.9 |
+
+- **Better flags make the CCSDT iteration of `ncc` 1.2-1.3 times faster and
+  leave (Q) as it is.**  N2/cc-pVTZ: 3.59 -> 2.72 s per iteration on 8 cores
+  and 20.4 -> 15.0 s on one; (Q) 283 -> 278 s and 1064 -> 1108 s.
+- **Threading environment: no effect.**  In the g++ builds `ncc`'s OpenMP
+  regions run on libgomp while MKL brings libiomp5, two runtimes in one
+  process; the icpc builds have libiomp5 only and are not faster.
+  `KMP_BLOCKTIME=0` (0.95 and 0.78 s per iteration for the two g++ builds) and
+  `OMP_PROC_BIND=close OMP_PLACES=cores` (0.79 s, icpc) change nothing.
+- **MRCC as a sanity check** (release of February 2018, a general-order
+  program; same node, 8 threads, no symmetry, H2O/cc-pVTZ): 39.5 s per CCSDT
+  iteration and 321 s for (Q).  `ncc` is 43-53 times faster per iteration and
+  5.6 times faster in (Q), so the reference is not a broken build.
+
+**Memory.**  `ncc` prints the memory it would like to have ("optimal memory
+requirement").  For the CCSDT iterations that is small (3.0 GiB for
+H2O/cc-pVQZ).  For (Q) it wants T4 and Z4 of all quadruples in memory: 9.0 GiB
+for H2O/cc-pVTZ, 30 GiB for N2/cc-pVTZ, 76 GiB for H2S/cc-pVTZ and 167 GiB for
+H2O/cc-pVQZ; with less it works through them in hunks.  The (Q) times of the
+other sections were taken with `MEMORY_SIZE` = 24 GB, below that optimum for
+the last three systems, so they are repeated here with more.
+
+**Number of threads.**  `ncc` assigns the blocks of a contraction to its
+threads by a fixed rule on the block indices (`core/contractions.cxx`): T3
+block (i, j, k) goes to thread (i + o j + o^2 k) mod n.  If the number of
+threads n divides o, the thread depends on one index alone and the work is
+very uneven; other combinations are uneven to a lesser degree.  With o = 8
+(CH2O, C2H4) and 8 threads one thread gets a third of the blocks, and `ncc`
+is 1.7-1.8 times faster with 7 threads: CH2O/cc-pVTZ 17.9 s
+per iteration against 30.9 s, C2H4/cc-pVTZ 57.6 s against 104.6 s.  For N2
+(o = 7) 6 threads are a little faster than 8 (2.58 s against 2.72 s per
+iteration, (Q) 241 s against 272 s).  For o = 5, 9 and 15 the rule is
+nearly balanced with 8 threads (the largest share is 1.03-1.13 of the mean
+for the T3 blocks); benzene (o = 15) is still a little faster with 7 threads
+(275 s against 295 s).  The earlier ratios for CH2O and C2H4 (6.4 and 7.0,
+"3.5 of the 8 cores busy") were taken in the unfavourable case.
+
+**Best `ncc` against zccsdt on 8 cores.**  Best build: g++ `-O3
+-march=native`.  `ncc` times per iteration are over the converged run (14-16
+iterations; CH2O, C2H4, benzene: iterations 2-4).  zccsdt: 8 threads, mean
+over a run of the same length (DIIS subspace 8), 2-8% more than the first
+iterations timed elsewhere in this document.
+
+| | zccsdt | `ncc`: reference build, 8 threads, 24 GB | best build, 8 threads | best build, best number of threads | best `ncc` / zccsdt |
+|---|---|---|---|---|---|
+| H2O/cc-pVTZ, iteration | 0.49 | 0.92 | 0.75 | 0.75 (8) | 1.5 |
+| N2/cc-pVTZ, iteration | 1.13 | 3.59 | 2.72 | 2.58 (6) | 2.3 |
+| H2S/cc-pVTZ, iteration | 2.38 | 6.75 | 4.79 | 4.79 (8) | 2.0 |
+| CH2O/cc-pVTZ, iteration | 6.95 | 41.1 | 30.9 | 17.9 (7) | 2.6 |
+| C2H4/cc-pVTZ, iteration | 20.6 | 135.3 | 104.6 | 57.6 (7) | 2.8 |
+| H2O/cc-pVQZ, iteration | 5.54 | 16.8 | 13.9 | 13.9 (8) | 2.5 |
+| C6H6/cc-pVDZ, frozen core, iteration | 87.7 | 455.7 | 295 | 275 (7) | 3.1 |
+| H2O/cc-pVTZ, (Q) | 5.4 | 57.7 | 55.9 | 55.9 (8) | 10 |
+| N2/cc-pVTZ, (Q) | 18.8 | 283 | 272 (40 GB) | 241 (6; 40 GB) | 13 |
+| H2S/cc-pVTZ, (Q) | 49.9 | 613 | 575 (90 GB; 81 GB resident) | 575 (8) | 12 |
+| H2O/cc-pVQZ, (Q) | 102 | 3837 | 2330 (100 GB; 80 GB resident) | 2330 (8) | 23 |
+
+Numbers of threads other than 8 were tried where the rule above predicts an
+imbalance (N2: 4, 6; CH2O, C2H4: 7) and for benzene (7).  The memory in
+parentheses is `ncc`'s `MEMORY_SIZE`, at or above its optimum except for
+H2O/cc-pVQZ, where the node cannot provide 167 GiB (3 hunks instead of 9).
+
+One core, best build: H2O/cc-pVTZ 4.95 s against 2.26 s per iteration (2.2)
+and 296 s against 34.9 s for (Q) (8.5); N2/cc-pVTZ 15.0 s against 6.27 s (2.4)
+and 1108 s against 133 s (8.3).
+
+- **Against the best `ncc` zccsdt is 1.5-3.1 times faster per CCSDT
+  iteration and 10-13 times faster in (Q) at cc-pVTZ** (23 times at cc-pVQZ;
+  no symmetry, 8 cores).  The ratios in the other sections of this document
+  (2.1-7.0 per iteration, up to 37 in (Q)) are against the reference build
+  with 8 threads and 24 GB.
+- More memory changes the (Q) time of `ncc` by a few percent at cc-pVTZ (N2,
+  same build: 278 -> 272 s) and by a factor of 1.6 at cc-pVQZ.  The (Q) step
+  of zccsdt needs 1.1-1.3 GB at cc-pVTZ and 14 GB at cc-pVQZ.
+- **With point-group symmetry the best `ncc` is ahead for these molecules**:
+  0.25, 0.58 and 0.96 s per iteration and 6.6, 12.8 and 43.2 s for (Q) (H2O
+  C2v, N2 D2h, H2S C2v; 8 cores).  That is 1.9-2.5 times faster than zccsdt
+  per iteration, and in (Q) between 1.2 times slower and 1.5 times faster.
+
+### `ncc`'s own profile
+
+`ncc` has built-in timers (`-DPROFILE`; summed up by
+`bench/cfour/ncc_profile.py`).  With them the icpc `-O3 -xHost` build runs at
+the speed of the plain one (0.79 and 2.85 s per iteration for H2O and
+N2/cc-pVTZ on 8 cores, 5.37 s for H2O on one, 299 s for benzene), and it
+reports how much of the iteration is DGEMM.  Seconds per CCSDT iteration (thread time divided by the
+number of threads), next to the GEMM timers of zccsdt in the same batch of
+jobs (the one-core batch had seven jobs at once, that of the table above
+five):
+
+| | `ncc` iteration | in DGEMM | elsewhere | zccsdt iteration | in GEMM | elsewhere |
+|---|---|---|---|---|---|---|
+| H2O/cc-pVTZ, 1 core | 5.37 | 2.61 | 2.76 | 2.35 | 1.27 | 1.08 |
+| H2O/cc-pVTZ, 8 cores | 0.79 | 0.31 | 0.48 | 0.48 | 0.19 | 0.29 |
+| N2/cc-pVTZ, 8 cores | 2.85 | 0.89 | 1.96 | 1.06 | 0.57 | 0.49 |
+| C6H6/cc-pVDZ, frozen core, 8 cores | 299 | 114 | 185 | 85.7 | 61 | 25 |
+
+- **The time ratio has three modest factors.**  `ncc` does 1.2-1.3 times
+  the GEMM arithmetic of zccsdt (7.9e10 against 6.0e10 flops for H2O, 2.33e11
+  against 1.89e11 for N2, 3.9e13 against 3.0e13 for benzene; operation counts
+  in "Where the difference comes from" below).  It executes it at 30-32
+  GFLOP/s per thread, one block per thread (at most 250 with 8 threads; 43
+  and 340 for benzene), where zccsdt reaches about 47 on one core and 320-330
+  with 8 threads in larger stacked products (515 for benzene).  And it spends
+  more outside the products: 51-69% of its iteration against 29-60% of a
+  shorter one.
+- **Outside DGEMM `ncc` is in BLAS 1 calls, spin adaptation and
+  transposition** of T3 blocks: 21%, 14% and 16% of the thread time for H2O
+  on 8 threads; 34%, 11% and 10% for N2, where the BLAS 1 calls run at 1.1-1.2
+  GFLOP/s per thread, the speed of memory.  For N2 on 8 threads some of the
+  rest is threads waiting for the one with the most blocks.  For benzene the
+  BLAS 1 calls alone (1.1 GFLOP/s per thread) take at least as long as DGEMM
+  (38%).  (The timers are nested, so the shares are approximate.)
+- **What `ncc` could reach.**  Without any cost outside DGEMM, at its present
+  DGEMM rate, an `ncc` iteration would take 0.31 s (H2O), 0.89 s (N2) and
+  114 s (benzene) on 8 cores, where zccsdt takes 0.48 s, 1.06 s and 86 s.  For
+  the small molecules zccsdt is not ahead of what `ncc`'s formulation
+  allows, only closer to it; for benzene it is ahead, by the smaller
+  operation count and the higher rate of large stacked products.
+- **(Q) is a different case: `ncc` spends 3-5% of it in DGEMM.**  H2O/cc-pVTZ
+  on one core (310 s): DGER 213 s, transposition 62 s, DGEMM 14 s.  On 8
+  threads: DGER 58%, transposition 17%, DGEMM 3% of the thread time and 14%
+  in no timer (N2: 43%, 12%, 2.5% and 37%; the last is mostly threads
+  waiting, the distribution of the quadruples over 8 threads being uneven
+  for o = 5 and more so for o = 7).
+  One term takes 69-73% of the step, W(abc,ije) t(ed,kl) -> Z(abcd,ijkl), the
+  product of the T2 x `<vv|vv>` intermediate with T2.  `ncc` stores W in
+  blocks numbered by (i, j, e), so the sum over e is v rank-1 updates of a
+  v^3 x v block of Z, each a pass over the whole block at 1.1-1.3 GFLOP/s per
+  thread.  zccsdt keeps e as a matrix dimension of the intermediate and does
+  one GEMM per term ("I x T2 products" in the (Q) section).  Compiler flags
+  cannot change this, which is why all builds give the same (Q) time.
+
 ### One core, and `ncc` with point-group symmetry
 
 cc-pVTZ, c233, one thread pinned to one core per job (all single-core jobs
 ran at the same time on separate cores of one socket).  zccsdt 0212757;
-times in seconds.
+`ncc`: reference build (its best build is 1.3 times faster per iteration, see
+above); times in seconds.
 
 | | zccsdt | `ncc`, no symmetry | `ncc` / zccsdt | `ncc`, with symmetry |
 |---|---|---|---|---|
@@ -62,6 +218,46 @@ The same on 8 cores (wall time; CPU time of all threads in parentheses):
   to compete for symmetric molecules.
 - The (Q) corrections of `ncc` with and without symmetry agree to 1e-13 Eh.
 
+### Where the difference comes from: operations and rates
+
+`ncc` counts its own BLAS operations (2 m n k per GEMM) and prints the rate.
+Counting the GEMMs of zccsdt in the same way (the count does not depend on
+the number of threads; no point-group symmetry in either program):
+
+| | `ncc` flops | zccsdt flops | zccsdt / `ncc` | `ncc` GFLOP/s, 8 threads (1) | zccsdt GFLOP/s, 8 threads (1) |
+|---|---|---|---|---|---|
+| H2O/cc-pVTZ, CCSDT iteration | 7.9e10 | 6.0e10 | 0.76 | 86 (12) | 131 (26-29) |
+| N2/cc-pVTZ, CCSDT iteration | 2.33e11 | 1.89e11 | 0.81 | 65 (11) | 180 (30-33) |
+| H2S/cc-pVTZ, CCSDT iteration | 5.27e11 | 4.54e11 | 0.86 | 78 | 208 (33) |
+| H2O/cc-pVQZ, CCSDT iteration | 2.53e12 | 1.60e12 | 0.63 | 151 | 310 |
+| H2O/cc-pVTZ, (Q) | 5.98e11 | 6.91e11 | 1.16 | 10.4 (2.0) | 133 (19-21) |
+| N2/cc-pVTZ, (Q) | 2.42e12 | 2.54e12 | 1.05 | 8.6 (2.3) | 137 (20-22) |
+| H2S/cc-pVTZ, (Q) | 6.88e12 | 6.80e12 | 0.99 | 11.2 | 138 (20) |
+| H2O/cc-pVQZ, (Q) | 2.19e13 | 2.53e13 | 1.16 | 5.7 | 251 |
+
+DGEMM on these cores: 540-580 GFLOP/s with 8 threads; with one thread 71-73
+for large square matrices and 31-41 for the thin shapes that occur here.
+
+- **The two programs do about the same amount of arithmetic**: zccsdt 0.6-0.9
+  of `ncc` in a CCSDT iteration and 1.0-1.2 in (Q).  The time difference
+  is almost entirely the rate at which that arithmetic is executed: `ncc`
+  reaches 12-28% of the DGEMM rate in the CCSDT iterations and 1-2% in (Q),
+  zccsdt 24-55% and 25-45%.  (Rates of the reference build of `ncc`; its
+  best build is 1.2-1.3 times faster in the iterations.)  The rest of
+  `ncc`'s time is outside the multiplications, see its profile above; zccsdt
+  is built around layouts in which the GEMM results need no further
+  permutation, for this one case (closed shell, no symmetry).
+- **Correction.**  Earlier versions of this document explained the speed by
+  "about a third of the arithmetic of `ncc`", from a model of `ncc`'s
+  algorithm in `bench/flop_counts.py`.  That model overestimates `ncc`'s own
+  count about twofold (H2O/cc-pVTZ: 6.4-7.9e10 FMA in the model, 3.95e10
+  counted by `ncc`).  The "arithmetic ratio (model)" columns and the
+  efficiency statements derived from them in the sections below are wrong by
+  that factor; the measured times are not affected.
+- With point-group symmetry `ncc` does far less arithmetic (H2O, C2v:
+  5.5e9 flops per iteration instead of 7.9e10), which is why it is faster
+  than zccsdt for symmetric molecules although its rate drops further.
+
 ## Closed-shell spin-adapted RCCSDT, 8 cores
 
 Fully spin-adapted closed-shell CCSDT on spatial orbitals (`zccsdt.sa.rccsdt`,
@@ -90,7 +286,9 @@ for nonrelativistic closed shells.  CFOUR `ncc` is spin-adapted the same way
 | H2O/cc-pVQZ | 5, 110 | 5.11 s | 17.0 s | 3.3 | 2.8-3.1 |
 
 The arithmetic ratio is the FMA count of the pp ladder and ring terms, `ncc`
-model over the spin-adapted engine (`bench/flop_counts.py`).
+model over the spin-adapted engine (`bench/flop_counts.py`).  It overstates
+the arithmetic of `ncc` about twofold; see "Where the difference comes from"
+above for the operation counts of the two programs.
 
 Larger systems, same procedure on c233 (same CPUs; the node was shared, with
 a 1-minute load of 4-24 during the runs), zccsdt 0154ff2 with the T3 DIIS
@@ -101,8 +299,12 @@ vectors in the scratch file:
 | C2H4/cc-pVTZ | 8, 108 | 1.1 GB | 19.4 s | 135.3 s | 7.0 | 2.4-2.9 | 7.6 GB, 5.0 GB |
 | C6H6/cc-pVDZ, frozen core | 15, 93 | 4.3 GB | 85.7 s | 455.7 s | 5.3 | 2.2-2.9 | 13.7 GB, 14.1 GB |
 
-- `ncc` keeps 3.5 of the 8 cores busy for C2H4 (477 s CPU per iteration) and
-  7.0 for benzene (3189 s); in core-seconds the ratios are 3.1 and 4.6.
+- `ncc` keeps 3.5 of the 8 cores busy for C2H4 (477 s CPU per iteration):
+  with o = 8 its distribution of blocks over 8 threads is uneven.  With 7
+  threads and its best build it takes 57.6 s, 2.8 times the zccsdt iteration
+  ("The `ncc` reference" at the top).  For benzene 7.0 cores are busy
+  (3189 s); its best build takes 295 s with 8 threads and 275 s with 7, 3.1
+  times the zccsdt iteration.
 - At CFOUR's geometry (see "Convergence and energies") the correlation
   energies of the first two iterations, before the two DIIS schemes diverge,
   agree with `ncc` to 4.4e-10 and 2.6e-10 Eh for benzene, and the SCF energy
@@ -113,16 +315,16 @@ vectors in the scratch file:
 
 **Reading the numbers.**
 
-- **zccsdt is 3.3-3.7 times faster than `ncc` from N2/cc-pVTZ upwards**,
-  somewhat above the arithmetic ratio.  The engine does about a third of the
-  arithmetic of `ncc` for the two dominant terms and runs it at a slightly
-  higher rate.  The pp ladder uses
-  (d,e)-symmetric / antisymmetric packed GEMMs, and blocks with a repeated
-  occupied index take less work.  The ring is four GEMM terms per occupied
-  pair.
+- **zccsdt is 3.3-3.7 times faster than the reference build of `ncc` from
+  N2/cc-pVTZ upwards** (no point-group symmetry in either program), and
+  2.0-3.1 times faster than `ncc` at its best: best build and number of
+  threads, "The `ncc` reference" at the top.  By the programs' own operation
+  counts zccsdt does 0.6-0.9 of the GEMM arithmetic of `ncc`.
 - **CH2O/cc-pVTZ:** `ncc` uses 150 s of CPU time per 41 s iteration, so only
-  3.7 of the 8 cores are busy (6.5-7.2 for the other systems).  In
-  core-seconds the ratio is 2.9, as the model predicts.
+  3.7 of the 8 cores are busy (6.5-7.2 for the other systems): o = 8 on 8
+  threads is the unfavourable case of its distribution of blocks over
+  threads.  With 7 threads and its best build `ncc` takes 17.9 s, 2.6 times
+  the zccsdt iteration.
 - **H2O/cc-pVTZ** is small (the dominant terms are about 50 GFLOP), so the rest
   of the iteration (DIIS, intermediates, dressing, Python-level work) is a
   large share of its 0.47 s.
@@ -235,7 +437,11 @@ load 3-20); `ncc` for H2O and N2 was run twice, at load 10-20 and at load
 
 The zccsdt memory is the peak anonymous memory of the (Q) step at cc-pVTZ and
 the size of its work arrays (10 v^4 and smaller ones) for the two larger
-cases.
+cases.  `ncc`: reference build, 8 threads and `MEMORY_SIZE` = 24 GB, less
+than it would like for all but H2O/cc-pVTZ.  With its best build, number of
+threads and more memory its times are 3-15% shorter at cc-pVTZ and 39%
+shorter at cc-pVQZ (ratios 10-13 and 23): see "The `ncc` reference" at the
+top, which also shows where `ncc` spends the step.
 
 - **Energies.**  With CCSDT converged in both programs (to different
   thresholds), the (Q) corrections agree to 3e-11 - 2e-10 Eh:
@@ -252,7 +458,8 @@ cases.
 - **Cost.**  The (Q) step takes as long as 12-22 CCSDT iterations of zccsdt
   for the small molecules and 37 for benzene; for `ncc` it is 57-86 of its
   own iterations at cc-pVTZ and 226 at cc-pVQZ, where it keeps only 3 of its
-  8 cores busy (11522 s CPU in 3837 s).
+  8 cores busy (11522 s CPU in 3837 s; that run had 22 GiB where `ncc` asks
+  for 167).
 - **Benzene.**  CCSDT converged in 14 iterations (correlation energy
   -0.859518675 Eh, energy threshold 1e-7); E[Q] = -0.000887989 Eh and
   E(Q) = -0.002741990 Eh in 54 minutes.  `ncc` was not run: scaled from its
@@ -392,7 +599,9 @@ spin-orbital RCCSDT is superseded by the spin-adapted code above.
 | O2/cc-pVTZ, UHF (triplet) | 9+7, 51+53 | UCCSDT 5.70 s | `ecc` 56.1 s | 0.10 | -- |
 
 The arithmetic ratio is the FMA count of the dominant terms (pp ladder and
-ring), RCCSDT over the `ncc` model, from `bench/flop_counts.py`.
+ring), RCCSDT over the `ncc` model, from `bench/flop_counts.py`.  (The `ncc`
+model overstates `ncc`'s own flop count about twofold; see "Where the
+difference comes from" at the top.)
 
 Same node, pinned cores (c571, otherwise idle), H2O/cc-pVQZ:
 
@@ -507,7 +716,10 @@ dominant terms (pp ladder o^3 v^5, ring o^4 v^4) in three representations:
 - **Sz-blocked:** only Ms-conserving blocks, as in a spin-integrated UHF
   code (`ecc`/`vcc` with REF=UHF).
 - **ncc model:** CFOUR `ncc` (RHF, spin-adapted), counted from its source
-  code:
+  code.  *Correction:* `ncc`'s own flop counter gives about half of this
+  model (see "Where the difference comes from" at the top), so the ratios
+  "spin-orbital / ncc (theory)" and the `ncc` rates in the tables below are
+  too high by about that factor.  The model:
   - T3 is stored as i<=j<=k blocks (not all equal), each a full abc cube.
   - The pp ladder is 3 GEMMs of v^2 x v^2 x v per block (the MAGIC_CYCLE
     states with constraints 1, 4 and 7).
