@@ -457,12 +457,12 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
       T3       2 o^3 v^3 / 6: amplitudes and residual
 
     (the DIIS vectors are in the scratch file already).  If that exceeds the
-    budget, the work buffers shrink.  T3 and its residual stay in memory if
-    they fit next to a few rows of the pp operator (they are passed over many
-    times per iteration, the operator once), else they go to the scratch
-    file.  The bare pp operator goes there when both forms do not fit, and
-    its dressed rows are held ``pp_bytes`` at a time if they do not fit
-    either.  ``pp_cached``: the bare operator exists
+    budget, the work buffers shrink.  The bare pp operator goes to the
+    scratch file when both of its forms do not fit, and its dressed rows are
+    held ``pp_bytes`` at a time if they do not fit either.  T3 and its
+    residual stay in memory if they fit next to an eighth of the dressed
+    operator (they are passed over many times per iteration, the operator
+    once), else they go to the scratch file.  ``pp_cached``: the bare operator exists
     already, in 'memory' or in a 'file'.  Raises MemoryError if the fixed
     part does not fit in ``limit`` (default: the budget).'''
     from zccsdt.sa.t3blocks import Blocks
@@ -500,17 +500,15 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
                           '%.1f GB are available (max_memory, or what the node and the memory '
                           'limit of the job leave)'
                           % (o, v, (base(1, slab_min) + row_min) / 1e9, hard / 1e9))
-    # work buffers: moderate ones, then the smallest that still work well;
-    # T3 stays in memory with the first choice that leaves room for it
-    choices = [(8 if ladder(8) <= budget // 8 else int(max(1, (budget // 8) // max(ladder(1), 1))),
-                int(min(max(budget // 32, slab_min), 1 << 29))),
-               (1, int(min(max(budget // 128, slab_min), 1 << 29))),
-               (1, slab_min)]
-    room = 2 * t3 + min(4 * row_min, pp)
-    fits = [c for c in choices if base(*c) + room <= budget]
-    plan.t3_file = not fits
-    plan.batch, plan.slab_bytes = fits[0] if fits else \
-        ([c for c in choices if base(*c) + row_min <= budget] + choices[-1:])[0]
+    # work buffers: moderate ones if they fit, else the smallest
+    moderate = (8 if ladder(8) <= budget // 8 else int(max(1, (budget // 8) // max(ladder(1), 1))),
+                int(min(max(budget // 32, slab_min), 1 << 29)))
+    # T3 stays in memory if, with moderate buffers, at least an eighth of the
+    # dressed pp operator fits beside it: squeezing it in with tiny buffers
+    # and many thin slabs costs more than paging it
+    plan.t3_file = base(*moderate) + 2 * t3 + min(max(pp // 8, row_min), pp) > budget
+    plan.batch, plan.slab_bytes = moderate if base(*moderate) + row_min <= budget \
+        else (1, slab_min)
     plan.need = base(plan.batch, plan.slab_bytes) + (0 if plan.t3_file else 2 * t3)
     rest = max(budget - plan.need, 0)
     if pp_cached is None and 2 * pp <= rest:
@@ -522,8 +520,14 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
         plan.pp_file = pp_cached != 'memory'
         plan.pp_bytes = int(max(rest // 2, row_min))
         plan.need += plan.pp_bytes
-        # with T3 in the file each slab-wise sweep would read it again
-        plan.pp_order = 'batch' if plan.t3_file else 'slab'
+        # slab-wise, T3 is packed again for every slab (and read again if it
+        # is in the file); batch-wise, the bare operator is passed over for
+        # every batch of blocks, which is cheap only while the page cache
+        # can hold it
+        nslab = len(pp_slabs(v, plan.pp_bytes))
+        nbatch = -(-nblk // plan.batch)
+        plan.pp_order = 'batch' if plan.t3_file or (
+            pp <= budget // 4 and 2 * pp * nbatch < 3 * t3 * nslab) else 'slab'
     if plan.pp_file:
         plan.build_bytes = int(min(max((budget - plan.need) // 2, 1 << 28), 1 << 30))
     return plan

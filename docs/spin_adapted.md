@@ -90,11 +90,20 @@ attached or block-local.
    corrections from blocks with one slot switched (bra virtual -> occupied,
    ket occupied -> virtual), built from cached contiguous bare blocks.
    <am|fe> and <am|ji> follow from ovvv and ovoo by pair symmetry.
-2. **pp operator.**  W_ab^de = ~<ab|de> + sum_mn tau_mn^ab <mn|de> as its
-   (d,e)-symmetric and antisymmetric parts packed over a <= b, d <= e
-   (a < b, d < e), in one pass over the packed bare integrals.
+2. **pp operator and block pass.**  W_ab^de = ~<ab|de> + sum_mn tau_mn^ab
+   <mn|de> as its (d,e)-symmetric and antisymmetric parts packed over
+   a <= b, d <= e (a < b, d < e), in one pass over the packed bare integrals;
+   all rows at once, or in slabs of a when memory is short (below).  The
+   rows at hand feed
+   - the vvvo intermediate sum_f W_ab^ef t1_i^f and the CCSD ladder (tau,
+     so the t1 t1 vvvv term rides along);
+   - the T3 ladder (`ladder_pp`): for every block, its three pair views are
+     packed into symmetric / antisymmetric pair matrices and multiplied by
+     the packed W.  This takes half the arithmetic of a full v^2 x v^2 GEMM.
+     Blocks with a repeated index need only the symmetric part of one view,
+     and one of the other two views follows from the other by symmetry.
 3. **Intermediates and CCSD part.**  Wv is built directly in the layout of the
-   drive GEMM; the t1 t1 vvvv term rides with the CCSD ladder (tau).
+   drive GEMM.
 4. **Pair pass** (`t3_pass`), one loop over occupied pairs p <= q.  The cubes
    t_mpq of all m are gathered once into five layouts with the
    contraction index (x, m) leading: Y = t~, T, T2 = t^{yxz}, T3 = t^{yzx},
@@ -106,30 +115,57 @@ attached or block-local.
 5. **k pass** (`drive_hh`), one loop over k: the drive P[D + E] in attached
    form (one GEMM over all pairs) and the hh ladder (one GEMM over the gathered
    t_mnk), with one scatter of their sum; virtual slabs bound the memory.
-6. **Block pass** (`ladder_pp`): for every block, its three pair views are
-   packed into symmetric / antisymmetric pair matrices and multiplied by the
-   packed W.  This takes half the arithmetic of a full v^2 x v^2 GEMM.  Blocks
-   with a repeated index need only the symmetric part of one view, and one of
-   the other two views follows from the other by symmetry.
-7. Null projection; Jacobi step with the DIIS vectors in one pass (the DIIS
+6. Null projection; Jacobi step with the DIIS vectors in one pass (the DIIS
    metric weights a block by the number of ordered triples it stands for).
    The new vector and its error vector are written directly into the DIIS
    storage.
 
-### Memory and DIIS storage
+### Memory, and when it is short
 
-In memory: T3 and its residual, the packed pp operator and bare vvvv (v^4
-elements together), ovvv-sized blocks, and the work arrays of the passes
-(a few T3- or o v^3-sized buffers, bounded by slabs where they would grow
-with o^2 v^3).
+With everything in memory an iteration takes (8-byte elements, n = o + v):
 
-The DIIS subspace needs 2 x `diis_space` T3-sized vectors, more than
-everything else for larger molecules.  As in PySCF they are stored in an HDF5
-scratch file unless `incore_complete=True` (`diis_file` names the file; the
-default is a temporary file in `ZCCSDT_TMPDIR` or PySCF's `lib.param.TMPDIR`).
-The file is memory-mapped: with enough free memory the vectors stay in the
-page cache and the DIIS step runs as fast as in memory, and under a memory
-limit the kernel pages them (`docs/benchmarks.md`, "DIIS storage").
+| Part | Elements | |
+|---|---|---|
+| T3 and its residual | 2 o^3 v^3 / 6 | |
+| pp operator | v^4 | the bare packed `<vv\|vv>` and its dressed form, v^4 / 2 each |
+| ovvv-sized arrays | about 23 o v^3 | integral blocks, their dressed forms, intermediates, the buffers of the pair pass |
+| k pass | 2.6 `slab_bytes` | slabs of the virtual index of k |
+| pp ladder | 6 `batch` v^3 | packed views of `batch` blocks and their products |
+| DIIS | 2 `diis_space` T3-sized vectors | in the scratch file by default |
+
+The DIIS vectors are stored as in PySCF: in an HDF5 scratch file unless
+`incore_complete=True` (`diis_file` names the file; the default is a
+temporary file in `ZCCSDT_TMPDIR` or PySCF's `lib.param.TMPDIR`).  The file
+is memory-mapped (`zccsdt/scratch.py`): with enough free memory the vectors
+stay in the page cache and the DIIS step runs as fast as in memory, and
+under a memory limit the kernel pages them.
+
+`kernel(..., max_memory=)` (MB, as in PySCF) plans the rest (`plan_memory`,
+`MemoryPlan`).  The default budget is 80% of what the node and the memory
+cgroups of the process leave (`zccsdt/memory.py`), so the limit of a Slurm
+job or step is seen.  If the sum above fits, nothing changes.  Otherwise:
+
+1. The work buffers of the k pass and of the ladder shrink.
+2. **The pp operator is sliced.**  The bare packed `<vv|vv>` goes to the
+   scratch file, built from PySCF's out-of-core transformation with the rows
+   of one first index at a time (`vvvv_row_blocks`).  If its dressed form
+   does not fit either, the dressed rows are produced in slabs of the first
+   virtual index (`pp_slabs`); each slab feeds the vvvo intermediate, the
+   CCSD ladder and the T3 ladder of all blocks before the next one is made,
+   so the dressed operator is never stored.
+3. **T3 and its residual go to the scratch file**, as mapped arrays like the
+   DIIS vectors, when they do not fit next to a few rows of the operator.
+   The passes work on them unchanged and the operating system keeps as much
+   of them in memory as there is room for.  With T3 in the file the sliced
+   ladder runs batch-wise (all slabs for one batch of blocks), so that T3 and
+   the residual are passed over once.
+4. If the ovvv-sized part alone does not fit, `MemoryError` is raised before
+   anything is allocated.
+
+The operator, which an iteration passes over once, goes out before T3, which
+every pass reads.  `incore_complete=True` keeps everything in memory whatever
+the budget, and `plan=MemoryPlan(...)` sets the plan explicitly.  Timings
+under memory limits are in `docs/benchmarks.md`.
 
 ### Leading arithmetic per iteration (FMA, o / v spatial)
 
@@ -254,8 +290,47 @@ about as much as its GEMM, so nothing is transposed:
 Leading cost per quadruple: 12 + 6 products of v^5 FMA (7 + 4 with a
 repeated index among the first three), at most 0.75 o^4 v^5 in total, against
 o^3 v^5 / 4 + 2 o^4 v^4 for a CCSDT iteration.  Memory: 10 v^4 (6
-accumulators, 3 intermediates, the `<vv|vv>` integrals) besides T3;
-`rccsdt_q.kernel` checks it against the available memory first.
+accumulators, 3 intermediates, the `<vv|vv>` integrals) besides T3.
+
+### When 10 v^4 does not fit (`q_correction_slabs`)
+
+`rccsdt_q.kernel` takes the block algorithm if its work arrays fit in the
+memory budget (`max_memory` as for the iterations) and otherwise cuts them
+into slabs of six virtual indices, one tile of the energy kernel:
+
+- **Slabs of the largest index.**  The energy is a sum over sorted virtual
+  quadruples, each of which needs r and a at its 24 permutations.  With the
+  quadruples grouped by the slab [d0, d1) of their largest index, a slab
+  needs r only where one index is in the slab and the other three are below
+  d1: four *faces* per occupied quadruple, one for each pair that can carry
+  the slab index.  Face p is what the block algorithm computes for the
+  quadruple with pair p moved to the end, with the last index restricted to
+  the slab and the others to [0, d1): six arrays (d1, d1, d1, 6) instead of
+  six v^4 arrays.  Summed over the slabs every element of r is computed
+  once.  Equal occupied indices give equal faces, which are computed once.
+- **Kernel** (`zc_sa_q_energy_faces`): the tile quadruples whose largest
+  tile is in the slab; a permuted tile is read from the face of the position
+  at which the slab tile sits.  M r and the energy are shared with the full
+  kernel.
+- **`<vv|vv>` terms.**  Restricted to a slab the I x T2 terms would still
+  need the v^4 intermediate I, so the two contractions are done in the other
+  order.  For every slab and ordered occupied pair (a, b)
+
+      N[y, d, (e x)] = sum_f (y f|e x) t_ab^{f d},   y < d1, d in the slab,
+      M[d, w, (e x)] = sum_f (d f|e x) t_ab^{f w},   d in the slab, w < d1,
+
+  packed over e >= x, are formed in one pass over the rows E[(y f), (e x)] of
+  the integrals (`rccsdt.vvvv_rows`: 4 v^4 bytes, mapped from the scratch
+  file when they do not fit).  A face contracts them with the other T2 of
+  each term; where the result would land transposed in its first two
+  indices, the product is done slice by slice (`blas.gemm_slices`).
+- **Memory** per slab index: 24 v^3 (faces), o^2 v^3 (N and M) and 2 v^3.
+  H2O/cc-pVQZ: 3.6 GB instead of 11.7 GB; v = 282 with o = 5: 60 GB instead
+  of 506 GB.  If that does not fit, `MemoryError` is raised.
+- **Time**: about twice the block algorithm.  The 12 I x T2 terms take four
+  restricted products per face and layout, twice the arithmetic of the six
+  symmetrized products; quadruples with a repeated index are not shortened;
+  N and M are unpacked for every use.
 
 ## Validation
 
@@ -268,10 +343,14 @@ accumulators, 3 intermediates, the `<vv|vv>` integrals) besides T3;
   terms, integral blocks from AO integrals vs the full V.
 - `tests/test_references.py`: converged energies vs MRCC / CFOUR (H2O
   6-31G and cc-pVDZ fc, HF cc-pVDZ, N2 6-31G) to better than 1e-10 Eh.
+- `tests/test_sa_outcore.py`: the sliced pp operator (both loop orders, in
+  memory and in the scratch file), mapped T3, the out-of-core `<vv|vv>`
+  build and whole calculations planned from `max_memory` against the run in
+  memory; `tests/test_memory.py`: the cgroup-aware budget, scratch arrays.
 - `tests/test_sa_q.py`: (Q) spin-orbital terms vs the Fock-space evaluation,
   the energy metric vs the spin-orbital sum, per-quadruple arrays vs the
   dense term-by-term evaluation, the block algorithm and its C kernel vs the
-  plain versions.  `tests/test_references.py`: CCSDT[Q] and CCSDT(Q) vs MRCC
+  plain versions, the sliced algorithm vs the block algorithm.  `tests/test_references.py`: CCSDT[Q] and CCSDT(Q) vs MRCC
   (CFOUR ncc gives the same (Q) to 3e-12 Eh).  With the block algorithm the
   CCSDT(Q) total energies of all five reference systems agree with MRCC to
   8e-11 Eh, the corrections themselves to 1e-11 Eh.

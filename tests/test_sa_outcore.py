@@ -154,17 +154,21 @@ def test_plan_memory():
     # a little short: the bare pp operator goes to the scratch file
     p = E.plan_memory(o, v, 6 * G)
     assert not p.t3_file and p.pp_file and p.pp_bytes is None and p.need <= 6 * G
-    # shorter: its dressed rows come in slabs
+    # shorter: its dressed rows come in slabs (a small operator: batch-wise)
     p = E.plan_memory(o, v, 56 * G // 10)
-    assert not p.t3_file and p.pp_file and p.pp_order == 'slab' and p.need <= 56 * G // 10
+    assert not p.t3_file and p.pp_file and p.pp_order == 'batch' and p.need <= 56 * G // 10
     assert len(E.pp_slabs(v, p.pp_bytes)) > 1
-    # shorter: T3 too, which is then read once per iteration by the ladder
+    # shorter: T3 goes to the scratch file before the buffers get tiny
+    p = E.plan_memory(o, v, 5 * G)
+    assert p.t3_file and not p.pp_file and p.batch == 8 and p.need <= 5 * G
+    # shorter: both, and the ladder reads T3 once per iteration
     p = E.plan_memory(o, v, 3 * G)
     assert p.t3_file and p.pp_file and p.pp_bytes < 4 * v ** 4 and p.pp_order == 'batch'
     assert p.need <= 3 * G and p.slab_bytes < 1 << 29 and len(E.pp_slabs(v, p.pp_bytes)) > 1
-    # small o, large v: T3 stays in memory, the pp operator is sliced slab-wise
-    p = E.plan_memory(5, 282, 40 * G)
-    assert not p.t3_file and p.pp_file and p.pp_order == 'slab' and p.need <= 40 * G
+    # small o, large v: T3 stays in memory, the large operator is sliced slab-wise
+    p = E.plan_memory(5, 282, 60 * G)
+    assert not p.t3_file and p.pp_file and p.pp_order == 'slab' and p.need <= 60 * G
+    assert len(E.pp_slabs(282, p.pp_bytes)) > 1
     # the bare operator exists already: where it is does not change
     assert not E.plan_memory(o, v, 3 * G, pp_cached='memory').pp_file
     assert E.plan_memory(o, v, 30 * G, pp_cached='file').pp_file

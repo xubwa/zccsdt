@@ -91,6 +91,19 @@ void zc_gemm_z(int ta, int tb, int64_t m, int64_t n, int64_t k,
     gemm_z(ta, tb, m, n, k, *alpha, a, lda, b, ldb, *beta, c, ldc);
 }
 
+/* Batched GEMM over slices: C_i = alpha op(A) B_i + beta C_i for i < nb, with
+ * B_i = b + i sb (k x n, leading dimension ldb) and C_i = c + i sc (m x n,
+ * leading dimension ldc).  One slice per thread, BLAS sequential inside. */
+void zc_gemm_slices_d(int ta, int64_t nb, int64_t m, int64_t n, int64_t k,
+                      const double *alpha, const double *a, int64_t lda,
+                      const double *b, int64_t sb, int64_t ldb, const double *beta,
+                      double *c, int64_t sc, int64_t ldc)
+{
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int64_t i = 0; i < nb; i++)
+        gemm_d(ta, 0, m, n, k, *alpha, a, lda, b + i * sb, ldb, *beta, c + i * sc, ldc);
+}
+
 #define DEFINE_T3(T, SFX)                                                      \
                                                                                \
 /* T[P - p0, d, m, Q] = osgn * vsgn * T3p[otri[m, P], vtri[d, Q]] */          \

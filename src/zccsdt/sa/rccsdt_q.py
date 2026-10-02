@@ -26,7 +26,7 @@ from itertools import permutations
 
 import numpy as np
 
-from zccsdt.blas import gemm
+from zccsdt.blas import gemm, gemm_slices
 from zccsdt.sa import derive
 
 
@@ -432,7 +432,7 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
 
     the second into the layout [x_x, x_y, x_w, d].
 
-    Memory: 24 n^3 nd (faces) + 2 o^2 n nd v^2 / 2 (N and M) + 3 v n^2 nd
+    Memory: 24 n^3 nd (faces) + 2 o^2 n nd v^2 / 2 (N and M) + 2 v n^2 nd
     elements with nd = 6 ``tiles``, instead of 10 v^4.'''
     from zccsdt.cc import t3pack
     from zccsdt.cc.t3pack import axpby
@@ -493,7 +493,7 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
                 gemm(TM, E[(d0 + d) * v:(d0 + d + 1) * v], M[d].reshape(npair * n, ps))
         As, Bs = buf('As', n, n, 4, v), buf('Bs', 4, v, n, nd)
         As2, Bs2 = buf('As2', n, n, 4, no), buf('Bs2', 4, no, n, nd)
-        Nd, Md, X = buf('Nd', v, n, n, nd), buf('Md', v, n, n, nd), buf('X', n, n, n, nd)
+        Nd, Md = buf('Nd', v, n, n, nd), buf('Md', v, n, n, nd)
         Sall = buf('S', 24, n, n, n, nd)
 
         def gather(trips, shape, lo):
@@ -549,8 +549,9 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
                     twx = t2[ow, ox]
                     gemm(np.ascontiguousarray(twx[:n]), Nd.reshape(v, nn * nd),
                          S[3 + c].reshape(n, nn * nd))
-                    gemm(np.ascontiguousarray(twx.T[:n]), Nd.reshape(v, nn * nd), X.reshape(n, nn * nd))
-                    axpby(S[3 + c], X.transpose(1, 0, 2, 3), 1.0, 1.0)
+                    # (w <-> x): [x_w][x_x, (x_y d)] += t_wx^T N[:, x_w]
+                    gemm_slices(twx.T[:n], Nd.reshape(v, n, n * nd),
+                                S[3 + c].reshape(n, n, n * nd), beta=1.0)
             for c, (w, x, y) in enumerate(ROT):
                 ow, ox, oy = o[w], o[x], o[y]
                 c1 = (c + 1) % 3
@@ -562,8 +563,8 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
                     txy = t2[ox, oy]
                     gemm(np.ascontiguousarray(txy[:n]), Md.reshape(v, nn * nd),
                          S[3 + c1].reshape(n, nn * nd), beta=1.0)
-                    gemm(np.ascontiguousarray(txy.T[:n]), Md.reshape(v, nn * nd), X.reshape(n, nn * nd))
-                    axpby(S[3 + c1], X.transpose(1, 0, 2, 3), 1.0, 1.0)
+                    gemm_slices(txy.T[:n], Md.reshape(v, n, n * nd),
+                                S[3 + c1].reshape(n, n, n * nd), beta=1.0)
                 # ---- T2 x G for the ordered pairs (w,x), (x,w), (y,3), (3,y) on T2
                 with timer('q.G'):
                     As2[:, :, 0] = t2[ow].transpose(1, 2, 0)[:n, :n]
@@ -609,13 +610,13 @@ def memory_needed(nocc, nvir):
 
 def sliced_memory(nocc, nvir, tiles=1):
     '''Bytes of ordinary memory of q_correction_slabs: per slab index 24 v^3
-    (faces), o^2 v^3 (N and M) and 3 v^3 (their dense forms and a product),
-    besides the stacked operands and the gathered cubes.  The integral rows
+    (faces), o^2 v^3 (N and M) and 2 v^3 (their dense forms), besides the
+    stacked operands and the gathered cubes.  The integral rows
     (4 v^4 bytes) are not counted: they may be mapped from the scratch file.'''
     o, v = nocc, nvir
     nd = min(QT * tiles, v)
     ps = v * (v + 1) // 2
-    return 8 * (nd * (27 * v ** 3 + 2 * o * o * v * ps) + (4 + 5 * o) * v ** 3)
+    return 8 * (nd * (26 * v ** 3 + 2 * o * o * v * ps) + (4 + 5 * o) * v ** 3)
 
 
 def _available_memory():

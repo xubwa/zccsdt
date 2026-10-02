@@ -78,3 +78,27 @@ def gemm(A, B, C=None, alpha=1.0, beta=0.0):
     if not np.shares_memory(out, C):
         C[...] = out.T
     return C
+
+
+def gemm_slices(A, B, C, alpha=1.0, beta=0.0):
+    '''C[i] = alpha * A @ B[:, i, :] + beta * C[i] for all i, in place: A
+    (m, k), B (k, nb, n) and C (nb, m, n) C-contiguous float64.  The slices
+    run on separate threads (one sequential GEMM each), which suits many
+    small products whose result must land transposed in the first two axes
+    of a (k-independent) array.'''
+    k, nb, n = B.shape
+    m = A.shape[0]
+    assert A.shape == (m, k) and C.shape == (nb, m, n)
+    assert B.flags.c_contiguous and C.flags.c_contiguous and B.dtype == C.dtype == np.float64
+    A = np.ascontiguousarray(A, dtype=np.float64)
+    lib = _clib()
+    if lib is not None and hasattr(lib, 'zc_gemm_slices_d') and nb and m and n and k:
+        al, be = np.array(alpha, dtype=np.float64), np.array(beta, dtype=np.float64)
+        p = lambda x: x.ctypes.data_as(ctypes.c_void_p)       # noqa: E731
+        i = ctypes.c_int64
+        lib.zc_gemm_slices_d(ctypes.c_int(0), i(nb), i(m), i(n), i(k), p(al), p(A), i(k),
+                             p(B), i(n), i(nb * n), p(be), p(C), i(m * n), i(n))
+        return C
+    for j in range(nb):
+        gemm(A, B[:, j, :], C[j], alpha=alpha, beta=beta)
+    return C
