@@ -65,9 +65,12 @@ class Context:
             self.Wc = np.ascontiguousarray(ints.V[no:, no:, no:, no:].transpose(0, 2, 1, 3))
         else:
             from pyscf import ao2mo
+            from zccsdt import memory
             Cv = np.ascontiguousarray(ints.mo_coeff[:, no:])
             self.Wc = np.ascontiguousarray(
-                ao2mo.general(ints.mol, (Cv, Cv, Cv, Cv), compact=False).reshape((v,) * 4))
+                ao2mo.general(ints.mol, (Cv, Cv, Cv, Cv), compact=False,
+                              max_memory=memory.ao2mo_memory(
+                                  ints.__dict__.get('_max_memory'))).reshape((v,) * 4))
         # integrals of G with the summed index last / first
         self._oooo = np.ascontiguousarray(g('oooo').transpose(2, 3, 0, 1))      # [q,s][m,n]
         self._ovvo = np.ascontiguousarray(g('ovvo').transpose(3, 0, 1, 2))      # [s][m,d,e]
@@ -437,6 +440,7 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None, cache_bytes=0
     to dense [e, x, ., .] arrays for every use; ``cache_bytes`` more memory
     keeps the dense forms of the pairs used last.'''
     from zccsdt.cc import t3pack
+    from zccsdt import scratch
     from zccsdt.cc.t3pack import axpby
     from zccsdt.sa.rccsdt import vvvv_rows
     from zccsdt.sa.t3blocks import gather_boxes
@@ -493,6 +497,7 @@ def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None, cache_bytes=0
                 gemm(TN, E[y * v:(y + 1) * v], N[y].reshape(npair * nd, ps))
             for d in range(nd):
                 gemm(TM, E[(d0 + d) * v:(d0 + d + 1) * v], M[d].reshape(npair * n, ps))
+            scratch.unmap(E, 0, n * v * ps)         # (rows read from a mapped file)
         As, Bs = buf('As', n, n, 4, v), buf('Bs', 4, v, n, nd)
         As2, Bs2 = buf('As2', n, n, 4, no), buf('Bs2', 4, no, n, nd)
         # dense forms of N and M by pair, the most recently used last
@@ -702,6 +707,8 @@ def kernel(ints, blocks, t2, t3b, max_memory=None, tiles=None):
                                       cache_bytes=cache)
         return q_correction(ints, blocks, t2, t3b)
 
+    from zccsdt import scratch
+    hints = scratch.hints(bool(tiles))          # slabs: memory is short
     try:
         try:
             from threadpoolctl import threadpool_limits
@@ -710,5 +717,6 @@ def kernel(ints, blocks, t2, t3b, max_memory=None, tiles=None):
         with threadpool_limits(limits={'openblas': 1}):
             return run()
     finally:
+        scratch.hints(hints)
         if scr is not None:
             scr.close()

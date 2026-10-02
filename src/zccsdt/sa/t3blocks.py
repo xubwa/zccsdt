@@ -118,6 +118,35 @@ class Blocks:
         return np.ascontiguousarray(t3[self.tri[:, 0], self.tri[:, 1], self.tri[:, 2]])
 
 
+def _spans(idx):
+    '''Contiguous ranges [(b0, b1), ...] covering the indices idx (>= 0).'''
+    idx = np.unique(np.asarray(idx, dtype=np.int64).ravel())
+    idx = idx[idx >= 0]
+    if len(idx) == 0:
+        return []
+    cuts = np.nonzero(np.diff(idx) > 1)[0] + 1
+    return [(int(s[0]), int(s[-1]) + 1) for s in np.split(idx, cuts)]
+
+
+def mapped_blocks(a, idx=None, need=False, wrote=False, drop=False):
+    '''Tell the operating system about the blocks ``idx`` (default: all) of
+    a block array that is a view of a mapped scratch file (zccsdt.scratch):
+    ``need`` - they are read next; ``wrote`` - they were written, start
+    writing them to the file; ``drop`` - done with them for now, out of the
+    page tables.  Nothing happens for an array in ordinary memory.'''
+    from zccsdt import scratch
+    if not scratch.hints() or not scratch._MAPS or len(a) == 0 or scratch.file_range(a) is None:
+        return
+    n = a[0].size
+    for b0, b1 in ([(0, len(a))] if idx is None else _spans(idx)):
+        if need:
+            scratch.need(a, b0 * n, b1 * n)
+        if wrote:
+            scratch.written(a, b0 * n, b1 * n)
+        if drop:
+            scratch.unmap(a, b0 * n, b1 * n)
+
+
 def project_null(r3b):
     '''Remove the redundant component of every cube: r - (1/6) sum_sigma
     r^{sigma(abc)} (in place for C-contiguous float64 / complex128 input).'''

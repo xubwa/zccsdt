@@ -110,6 +110,7 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8, rows=None, slabs=None):
     iterable of (rows, Ws, Wa) that covers all rows; it is called once per
     batch of blocks, so T3 and the residual are passed over once.'''
     from zccsdt.cc import t3pack
+    from zccsdt.sa.t3blocks import mapped_blocks
     from zccsdt.timing import timer
     lib = t3pack._lib
     nb, v = t3b.shape[0], t3b.shape[1]
@@ -142,6 +143,9 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8, rows=None, slabs=None):
         Ts = Tsb[:ps * ncol].reshape(ps, ncol)
         Ta = Tab[:pa * nf * v].reshape(pa, nf * v)
         F, S_ = arr(full), arr(sym)
+        these = range(b0, min(b0 + batch, nb))
+        mapped_blocks(t3b, these, need=True)
+        mapped_blocks(r3b, these, need=True)
         _t = timer('pp.pack'); _t.__enter__()
         if nf:
             lib.zc_sa_pair_pack_d(P(t3b), I64(nf), P(np.ascontiguousarray(F[:, 0])),
@@ -154,6 +158,7 @@ def ladder_pp(blocks, t3b, Ws, Wa, r3b, batch=8, rows=None, slabs=None):
                                   P(np.ascontiguousarray(S_[:, 3])), I64(v), I64(v),
                                   t3pack.ctypes.c_void_p(Ts.ctypes.data + 8 * nf * v), I64(ncol),
                                   None, I64(0))
+        mapped_blocks(t3b, these, drop=True)
         _t.__exit__(None, None, None)
         S = Sb[:ms * ncol].reshape(ms, ncol)
         A = Ab[:ma * nf * v].reshape(ma, nf * v) if nf else None
@@ -306,6 +311,7 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
     numpy's own BLAS (OpenBLAS) is kept single-threaded while it runs: its
     spinning threads would otherwise compete with the MKL threads of
     zccsdt.blas.'''
+    ints.__dict__['_max_memory'] = max_memory       # for the integral transformations
     if plan is None and incore_complete:
         plan = plan_memory(ints.nocc, ints.nvir)
     elif plan is None:
@@ -364,7 +370,8 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
     import time
     from zccsdt.cc.diis import DIIS
     from zccsdt.sa import rccsdt_ref
-    from zccsdt.sa.t3blocks import Blocks, jacobi
+    from zccsdt import scratch
+    from zccsdt.sa.t3blocks import Blocks, jacobi, mapped_blocks
     from zccsdt.scratch import Scratch
     from zccsdt.timing import timer
     no, nv = ints.nocc, ints.nvir
@@ -395,6 +402,9 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
     e_old = rccsdt_ref.energy(t1, t2, ints)
     conv = False
     timings = []
+    # memory is short if the plan has put anything into a scratch file: the
+    # passes then tell the operating system what they do with mapped arrays
+    hints = scratch.hints(plan.t3_file or plan.pp_file or plan.pp_bytes is not None)
     try:
         for cycle in range(max_cycle):
             t0 = time.perf_counter()
@@ -411,6 +421,11 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
                     xs, es = adiis.buffers((t1, t2))
                     n3 = jacobi(eo3, ev, wsq, t3b, r3b, t3b, r3b)
                 normt = float(np.linalg.norm(r1) + np.linalg.norm(r2) + np.sqrt(n3))
+                # (the residual is only added to by the passes, which leave it
+                # mapped, and is dead after the step: it is never sent to the
+                # file on purpose)
+                mapped_blocks(t3b, wrote=not diis_t3, drop=True)
+                mapped_blocks(r3b, drop=True)
                 for k, (t, q) in enumerate(((t1, r1 / d1), (t2, r2 / d2))):
                     xs[k][:] = (t + q).ravel()
                     es[k][:] = q.ravel()
@@ -432,6 +447,7 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
                 break
         diis_on_disk = adiis.on_disk()
     finally:
+        scratch.hints(hints)
         adiis.close()
         if scr is not None:
             scr.close()             # the mapped t3b stays valid (the file is unlinked)
@@ -776,7 +792,7 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
     T3 parts (r1, r2, Eab, Eba, dWo) of R1, R2, Wv (J) and Wo (J), with
     dWv[a,b,e,i] = Eab[e,i,a,b] + Eba[e,i,b,a].  For the
     reversed pair (q, p) the roles are T2 <-> T3 and Y <-> Z.'''
-    from zccsdt.sa.t3blocks import scatter, zero
+    from zccsdt.sa.t3blocks import mapped_blocks, scatter, zero
     from zccsdt.timing import timer
     no, v = blocks.nocc, t3b.shape[1]
     ov, vv = no * v, v * v
@@ -811,7 +827,9 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
     for p in range(no):
         for q in range(p, no):
             with timer('t3p.gather'):
+                mapped_blocks(t3b, blocks.blk[:, p, q], need=True)
                 pair_gather(blocks, t3b, p, q, W)
+                mapped_blocks(t3b, blocks.blk[:, p, q], drop=True)
             # ---- ring: X_{i;pq}^{a;bc} = X1[(a,i),(b,c)] + X2[(b,i),(a,c)] + X3[(c,i),(a,b)]
             with timer('t3p.ring_gemm'):
                 X1 = gemm(JK, W[0:2].reshape(2 * ov, vv), Xb[0]).reshape(v, no, v, v)
@@ -823,6 +841,8 @@ def t3_pass(blocks, t3b, imds, D, nocc, r3b):
                     parts = (X1[:, i], X2[:, i].transpose(1, 0, 2), X3[:, i].transpose(1, 2, 0))
                     for B, axes in blocks.uses_attached(i, p, q):
                         items.append((B, (0, 0, 0), [x.transpose(axes) for x in parts]))
+                touched = [B for B, _, _ in items]
+                mapped_blocks(r3b, touched, need=True)
                 scatter(r3b, items)
             with timer('t3p.pass1'):
                 Gpq, Gqp = G[p, q], G[q, p]
@@ -878,7 +898,7 @@ def drive_hh(blocks, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=1 << 29):
     scatter of their sum.  The virtual of k (x) is processed in slabs so that
     K and the gathered cubes stay within ``max_bytes`` each.  ``Wv``: the
     array Wv[a,b,e,i], or a function Wv(k, out) writing out[e,x,y] = Wv[y,x,e,k].'''
-    from zccsdt.sa.t3blocks import gather_boxes, scatter
+    from zccsdt.sa.t3blocks import gather_boxes, mapped_blocks, scatter
     from zccsdt.timing import timer
     no, v = blocks.nocc, t3b.shape[1]
     vv = v * v
@@ -904,6 +924,10 @@ def drive_hh(blocks, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=1 << 29):
         views = [blocks.view(m, n, k, v) for m in range(no) for n in range(no)]
         off0 = np.array([o for o, _ in views], dtype=np.int64)
         st = np.array([s_ for _, s_ in views], dtype=np.int64)
+        # the blocks with the index k: read by the gathers, added to by the scatters
+        mine = blocks.blk[:, :, k]
+        mapped_blocks(t3b, mine, need=True)
+        mapped_blocks(r3b, mine, need=True)
         for x0 in range(0, v, nx):
             n = min(nx, v - x0)
             with timer('dh.K_gemm'):
@@ -924,6 +948,7 @@ def drive_hh(blocks, t3b, t2, Wv, Wo, Wh, r3b, max_bytes=1 << 29):
                         lo = tuple(x0 if axes[a] == 0 else 0 for a in range(3))
                         items.append((Bk, lo, [x.transpose(axes) for x in srcs]))
                 scatter(r3b, items)
+        mapped_blocks(t3b, mine, drop=True)
 
 
 def dressed_blocks(ints, t1):
@@ -939,13 +964,30 @@ def dressed_blocks(ints, t1):
     return D, dress_fock(bb, ints.fock, t1)
 
 
+def _kept_operator(ints):
+    '''Mapped scratch arrays (packed symmetric, antisymmetric) for the rows of
+    the dressed pp operator of the current iteration, kept on the integral
+    object between iterations.'''
+    from zccsdt.scratch import Scratch
+    v = ints.nvir
+    ps, pa = v * (v + 1) // 2, v * (v - 1) // 2
+    held = ints.__dict__.setdefault('_sa_kept', [None, None, None])
+    if held[1] is None or held[1].shape != (ps, ps):
+        if held[0] is not None:
+            held[0].close()
+        held[0] = Scratch(prefix='zccsdt_wpp_', what='the dressed <vv|vv> operator',
+                          hint=' or give the calculation more memory (max_memory)')
+        held[1], held[2] = held[0].create('Ws', (ps, ps)), held[0].create('Wa', (pa, pa))
+    return held[1], held[2]
+
+
 def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
     '''(R1, R2, R3 blocks): dressed small blocks, the packed pp operator in
     one pass, explicit intermediates and CCSD part, one loop over occupied
     pairs for the ring (with F_vv) and T3 -> T1/T2/W, then drive and the
     ladders (F_oo in the hh operator).  ``r3b``: optional output array;
     ``plan``: MemoryPlan (default: everything in memory).'''
-    from zccsdt.sa.t3blocks import project_null, zero
+    from zccsdt.sa.t3blocks import mapped_blocks, project_null, zero
     from zccsdt.timing import timer
     no = ints.nocc
     plan = plan or MemoryPlan()
@@ -967,13 +1009,34 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
     slabs = pp_slabs(nv, plan.pp_bytes)
     cap = [max(q[n + 1] - q[n] for q in (pair_rows(nv, *r) for r in slabs)) for n in (0, 2)]
     sweeps = []
+    batchwise = plan.pp_order == 'batch' and len(slabs) > 1 and blocks.nblk
+    # batch-wise the operator is needed once per batch of blocks: its rows are
+    # kept in a scratch file by the first sweep and read back by the others
+    # (a pass over the file instead of the dressing)
+    kept = _kept_operator(ints) if batchwise else None
 
     def dressed():
         # the dressed rows slab by slab; the first sweep also feeds the vvvo
         # intermediate and the CCSD ladder
+        from zccsdt import scratch
+        from zccsdt.cc.t3pack import axpby
         for rows in slabs:
+            q = pair_rows(nv, *rows)
             with timer('sa.Wpp'):
-                Ws, Wa = pp_operator_packed(ints, t1, t2, rows, plan, cap)
+                if not sweeps:
+                    Ws, Wa = pp_operator_packed(ints, t1, t2, rows, plan, cap)
+                else:           # the work buffers of the first sweep, refilled
+                    Ws, Wa = (ints._sa_wpp[k][:m] for k, m in ((0, q[1] - q[0]), (1, q[3] - q[2])))
+                for W, K, q0, q1 in ((Ws, kept[0], q[0], q[1]), (Wa, kept[1], q[2], q[3])) \
+                        if kept is not None else ():
+                    n = K.shape[1]
+                    if not sweeps:
+                        axpby(K[q0:q1], W, 1.0, 0.0)
+                        scratch.written(K, q0 * n, q1 * n)
+                    else:
+                        scratch.need(K, q0 * n, q1 * n)
+                        axpby(W, K[q0:q1], 1.0, 0.0)
+                    scratch.unmap(K, q0 * n, q1 * n)
             if not sweeps:
                 with timer('sa.imds'):
                     vvvv_t1_packed(Ws, Wa, t1, out=P, rows=rows)
@@ -982,7 +1045,7 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
             yield rows, Ws, Wa
         sweeps.append(1)
 
-    if plan.pp_order == 'batch' and len(slabs) > 1 and blocks.nblk:
+    if batchwise:
         with timer('sa.pp_ladder'):
             ladder_pp(blocks, t3b, None, None, r3b, batch=plan.batch, slabs=dressed)
     else:
@@ -1011,6 +1074,7 @@ def residuals(ints, blocks, t1, t2, t3b, r3b=None, plan=None):
         drive_hh(blocks, t3b, t2, Wv, im['WoJ'] + dWo, hh_operator(im['Whh'], im['Fo']), r3b,
                  max_bytes=plan.slab_bytes)
     with timer('sa.project'):
+        mapped_blocks(r3b, need=True)
         r3b = project_null(r3b)
     return r1 + r1t, r2 + r2t, r3b
 
@@ -1186,10 +1250,14 @@ def vvvv_rows(ints, out=None, max_bytes=1 << 30):
     pair (b >= e) packed: the array of the row blocks of vvvv_row_blocks
     (4 v^4 bytes), written into ``out`` if given (a mapped scratch array).'''
     v = ints.nvir
+    from zccsdt.scratch import written, unmap
     if out is None:
         out = np.empty((v * v, v * (v + 1) // 2))
+    ncol = out.shape[1]
     for a, R in vvvv_row_blocks(ints, max_bytes):
         out[a * v:(a + 1) * v] = R
+        written(out, a * v * ncol, (a + 1) * v * ncol)
+        unmap(out, a * v * ncol, (a + 1) * v * ncol)
     return out
 
 
@@ -1217,10 +1285,21 @@ def vvvv_packed(ints, max_bytes=1 << 30, out=None):
     have_c = t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_pack_a_d')
     if 8 * ps ** 2 <= max_bytes and have_c:
         # (ad|be) with 4-fold symmetry in one transformation, then repacked
+        from zccsdt import memory
         Cv = np.ascontiguousarray(ints.mo_coeff[:, no:])
-        E4 = np.ascontiguousarray(ao2mo.kernel(ints.mol, Cv, compact=True))
+        E4 = np.ascontiguousarray(ao2mo.kernel(
+            ints.mol, Cv, compact=True,
+            max_memory=memory.ao2mo_memory(ints.__dict__.get('_max_memory'))))
         lib.zc_sa_vvvv_pack_d(t3pack._p(E4), t3pack._I64(v), t3pack._p(Vs), t3pack._p(Va))
         return Vs, Va
+    from zccsdt.scratch import written, unmap
+
+    def stored(a):                      # the rows of a were written (mapped arrays)
+        rs0, rs1, ra0, ra1 = pair_rows(v, a, a + 1)
+        for X, q0, q1 in ((Vs, rs0, rs1), (Va, ra0, ra1)):
+            written(X, q0 * X.shape[1], q1 * X.shape[1])
+            unmap(X, q0 * X.shape[1], q1 * X.shape[1])
+
     for a, R in vvvv_row_blocks(ints, max_bytes):
         rs0, rs1, ra0, ra1 = pair_rows(v, a, a + 1)
         if have_c:
@@ -1230,6 +1309,7 @@ def vvvv_packed(ints, max_bytes=1 << 30, out=None):
                                     t3pack._p(vs), t3pack._p(va))
             if not np.shares_memory(vs, Vs):
                 Vs[rs0:rs1], Va[ra0:ra1] = vs, va
+            stored(a)
             continue
         Y = pyscf_lib.unpack_tril(R)                  # [d, b, e] = (ad|be)
         for b in range(a, v):
@@ -1237,6 +1317,7 @@ def vvvv_packed(ints, max_bytes=1 << 30, out=None):
             Vs[rs0 + b - a] = 0.5 * (Yb + Yb.T)[s0, s1]
             if b > a:
                 Va[ra0 + b - a - 1] = 0.5 * (Yb - Yb.T)[a0, a1]
+        stored(a)
     return Vs, Va
 
 
@@ -1282,6 +1363,7 @@ def pp_operator_packed(ints, t1, t2, rows=None, plan=None, cap=None):
     pairs (a, b) with a0 <= a < a1 (pair_rows).  The arrays returned are work
     buffers that the next call overwrites; ``cap``: their numbers of rows
     (symmetric, antisymmetric; default: those of this call).'''
+    from zccsdt import scratch
     from zccsdt.cc import t3pack
     lib = t3pack._lib
     c = bare_packed(ints, plan)
@@ -1307,9 +1389,11 @@ def pp_operator_packed(ints, t1, t2, rows=None, plan=None, cap=None):
             W = ws[n] = np.empty((max(m, cap[n] if cap else m), ncol))
         W = W[:m]
         tB = np.ascontiguousarray(sgnB * t1)
+        scratch.need(bare, q0 * ncol, q1 * ncol)
         lib.zc_vvvv_dress_d(P(W), P(bare[q0:q1]), I64(m), I64(ncol), P(r0), P(r1),
                             P(mt), I64(v), P(U), I64(no), I64(v),
                             P(tB), I64(v), P(U), I64(no), I64(v),
                             P(CT), P(G), I64(no * no))
+        scratch.unmap(bare, q0 * ncol, q1 * ncol)
         out.append(W)
     return out

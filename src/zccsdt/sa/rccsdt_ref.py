@@ -53,15 +53,19 @@ class RHFIntegrals:
                 x = np.ascontiguousarray(self.block('ovvv').transpose(3, 2, 1, 0))
             else:
                 C = [self.mo_coeff[:, sl[c]] for c in key]
-                x = ao_block(self.mol, C)
+                x = ao_block(self.mol, C, self.__dict__.get('_max_memory'))
             cache[key] = x
         return x
 
 
-def ao_block(mol, C):
-    '''<pq|rs> = (pr|qs) for MO coefficient blocks C = (Cp, Cq, Cr, Cs).'''
+def ao_block(mol, C, max_memory=None):
+    '''<pq|rs> = (pr|qs) for MO coefficient blocks C = (Cp, Cq, Cr, Cs).
+    ``max_memory`` (MB for the whole process; default: 80% of what is
+    available) bounds the buffers of the transformation.'''
     from pyscf import ao2mo
-    eri = ao2mo.general(mol, (C[0], C[2], C[1], C[3]), compact=False)
+    from zccsdt import memory
+    eri = ao2mo.general(mol, (C[0], C[2], C[1], C[3]), compact=False,
+                        max_memory=memory.ao2mo_memory(max_memory))
     eri = eri.reshape(C[0].shape[1], C[2].shape[1], C[1].shape[1], C[3].shape[1])
     return np.ascontiguousarray(eri.transpose(0, 2, 1, 3))
 
