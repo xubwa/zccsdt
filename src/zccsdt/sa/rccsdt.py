@@ -547,18 +547,28 @@ def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
     elif pp <= rest:
         plan.pp_file = pp_cached != 'memory'        # all dressed rows at once
         plan.need += pp
+    elif plan.t3_file:
+        # T3 in the file: the ladder runs batch-wise, and the rows of the
+        # operator, kept in a scratch file, are passed over once per batch of
+        # blocks.  So what is left goes to larger batches first and the slabs
+        # stay thin.
+        plan.pp_file = pp_cached != 'memory'
+        plan.pp_order = 'batch'
+        plan.pp_bytes = int(min(max(rest // 8, row_min), pp))
+        grow = (rest - plan.pp_bytes - rest // 8) // max(ladder(1), 1)
+        plan.batch = int(min(max(nblk, 1), plan.batch + max(grow, 0)))
+        plan.need = base(plan.batch, plan.slab_bytes) + plan.pp_bytes
     else:
         plan.pp_file = pp_cached != 'memory'
         plan.pp_bytes = int(max(rest // 2, row_min))
         plan.need += plan.pp_bytes
-        # slab-wise, T3 is packed again for every slab (and read again if it
-        # is in the file); batch-wise, the bare operator is passed over for
-        # every batch of blocks, which is cheap only while the page cache
-        # can hold it
+        # slab-wise, T3 is packed again for every slab; batch-wise, the rows
+        # of the operator are kept in a scratch file and read once per batch
+        # of blocks, which is cheap only while the page cache can hold them
         nslab = len(pp_slabs(v, plan.pp_bytes))
         nbatch = -(-nblk // plan.batch)
-        plan.pp_order = 'batch' if plan.t3_file or (
-            pp <= budget // 4 and 2 * pp * nbatch < 3 * t3 * nslab) else 'slab'
+        plan.pp_order = 'batch' if pp <= budget // 4 and 2 * pp * nbatch < 3 * t3 * nslab \
+            else 'slab'
     if plan.pp_file:
         plan.build_bytes = int(min(max((budget - plan.need) // 2, 1 << 28), 1 << 30))
     return plan

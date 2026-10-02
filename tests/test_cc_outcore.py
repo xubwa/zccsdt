@@ -299,10 +299,16 @@ def test_plan_memory(monkeypatch):
     p2 = plan_memory(o, v, isz, budget=2 * GB)
     assert p2.pp_file and not p2.t3_file and v * row <= p2.pp_bytes < pp
     assert p2.need <= 2 * GB + pp
-    # still less: T3 goes to the file as well and the ladder runs batch-wise
+    # still less: T3 goes to the file as well and the ladder runs batch-wise;
+    # the kept operator is then read once per batch of triples, so what is
+    # left goes to the buffers and the slabs stay thin
     p3 = plan_memory(o, v, isz, budget=int(1.3 * GB))
-    assert p3.t3_file and p3.pp_file and v * row <= p3.pp_bytes < pp and p3.pp_order == 'batch'
-    assert p3.need <= 1.3 * GB + pp and p3.mem_mb < p2.mem_mb
+    assert p3.t3_file and p3.pp_file and p3.pp_order == 'batch'
+    assert v * row <= p3.pp_bytes < p2.pp_bytes and p3.need <= 1.3 * GB + pp
+    assert p3.mem_mb > 1.5 * f / 1e6
+    # ... but not beyond three times the buffers asked for
+    p3 = plan_memory(o, v, isz, budget=int(1.3 * GB), mem_mb=150.0)
+    assert p3.t3_file and 286 < p3.mem_mb <= 3 * 286 and p3.need <= 1.3 * GB + pp
     # the ovvv-sized arrays and the buffers must fit
     with pytest.raises(MemoryError, match='o v\\^3'):
         plan_memory(o, v, isz, budget=int(0.5 * GB))

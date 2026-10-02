@@ -207,19 +207,32 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
         plan.pp_file = True                         # all dressed rows at once
         plan.pp_bytes = pp
         plan.need += pp
+    elif plan.t3_file:
+        # T3 in the file: the ladder runs batch-wise, and the rows of the
+        # operator, kept in a scratch file, are passed over once per batch of
+        # triples.  So what is left goes to the batch buffers first (up to
+        # three times what was asked for) and the slabs stay thin.
+        plan.pp_file = True
+        plan.pp_order = 'batch'
+        plan.pp_bytes = int(min(max(rest // 8, row_min), pp))
+        room = budget - small - int(1.75 * f) - plan.pp_bytes - rest // 8
+        want = min(max(room, bufs(mem)), 3 * bufs(mem_mb))
+        if want > bufs(mem):
+            plan.mem_mb = mem = want * 1.5 / 1e6
+        plan.need = base(mem) + plan.pp_bytes
     else:
         plan.pp_file = True
         plan.pp_bytes = int(max(rest // 2, row_min))
         plan.need += plan.pp_bytes
-        # slab-wise, T3 is gathered again for every slab (and read again if
-        # it is in the file); batch-wise, the rows of the operator are kept
-        # in a scratch file and read once per batch of triples, which is
-        # cheap only while the page cache can hold them
+        # slab-wise, T3 is gathered again for every slab; batch-wise, the
+        # rows of the operator are kept in a scratch file and read once per
+        # batch of triples, which is cheap only while the page cache can
+        # hold them
         nslab = len(pair_slabs(nvp, row, plan.pp_bytes))
         per_triple = (nvp + plan.pp_bytes // row) * v * itemsize
         nbatch = -(-nto // max(1, int(mem * 1e6 * 2 / 3 // max(per_triple, 1))))
-        plan.pp_order = 'batch' if plan.t3_file or (
-            pp <= budget // 4 and 2 * pp * nbatch < 3 * t3 * nslab) else 'slab'
+        plan.pp_order = 'batch' if pp <= budget // 4 and 2 * pp * nbatch < 3 * t3 * nslab \
+            else 'slab'
     return plan
 
 
