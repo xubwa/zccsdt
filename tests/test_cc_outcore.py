@@ -235,6 +235,9 @@ def test_kernel_out_of_core(rhf, form, monkeypatch, tmp_path):
     for plan in (MemoryPlan(t3_file=True),
                  MemoryPlan(t3_file=True, pp_file=True, pp_bytes=4 * row, pp_order='batch',
                             mem_mb=0.02),
+                 MemoryPlan(t3_file=True, r3_file=False),       # the residual in memory
+                 MemoryPlan(t3_file=True, r3_file=False, pp_file=True, pp_bytes=5 * row,
+                            pp_order='batch'),
                  MemoryPlan(pp_bytes=9 * row, pp_order='slab')):
         r = solver.kernel(e, 'ccsdt', solver.Options(plan=plan, **kw))
         # two runs differ by threaded summation order, at the level of conv_tol
@@ -332,11 +335,16 @@ def test_plan_memory(monkeypatch):
     p2 = plan_memory(o, v, isz, budget=2 * GB)
     assert p2.pp_file and not p2.t3_file and v * row <= p2.pp_bytes < pp
     assert p2.need <= 2 * GB + pp
+    # less: T3 goes to the file, its residual stays in memory (the passes
+    # only read T3)
+    pr = plan_memory(o, v, isz, budget=int(1.7 * GB))
+    assert pr.t3_file and pr.r3_file is False and pr.pp_order == 'batch'
+    assert pr.need <= 1.7 * GB + pp and pr.need > t3
     # still less: T3 goes to the file as well and the ladder runs batch-wise;
     # the kept operator is then read once per batch of triples, so what is
     # left goes to the buffers and the slabs stay thin
     p3 = plan_memory(o, v, isz, budget=int(1.3 * GB))
-    assert p3.t3_file and p3.pp_file and p3.pp_order == 'batch'
+    assert p3.t3_file and p3.r3_file and p3.pp_file and p3.pp_order == 'batch'
     assert v * row <= p3.pp_bytes < p2.pp_bytes and p3.need <= 1.3 * GB + pp
     assert p3.mem_mb > 1.5 * f / 1e6
     # ... but not beyond three times the buffers asked for

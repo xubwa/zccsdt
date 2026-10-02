@@ -192,14 +192,18 @@ job or step is seen.  If the sum above fits, nothing changes.  Otherwise:
    is never held as a whole.  The reduction of a slab adds, to each packed
    element of the residual, the one to three terms whose pair lies in the
    slab (`zc_reduce_pair_first_rows`).
-3. **T3 and its residual go to the scratch file**, as mapped arrays like the
-   DIIS vectors, when they do not fit next to an eighth of the dressed
-   operator.  The residual is then accumulated directly in the storage of
-   the next DIIS vector, the Jacobi update is written over it, and the DIIS
-   extrapolation is written over the old T3: no T3-sized array exists in
-   ordinary memory.  The occupied operator (hh ladder and F_oo) is applied
-   in blocks of columns, so that one GEMM touches a block of T3 and of the
-   residual instead of all of both.
+3. **T3 goes to the scratch file, then its residual**, as mapped arrays like
+   the DIIS vectors, when they do not fit next to an eighth of the dressed
+   operator.  T3 goes first and the residual stays in memory if it fits
+   alone (`MemoryPlan.r3_file = False`): the passes only read T3, so its
+   pages can be given up at no cost, while pages of the residual, to which
+   every pass adds, would have to be written to the file and read back.  If
+   the residual does not fit either, it is accumulated directly in the
+   storage of the next DIIS vector, the Jacobi update is written over it,
+   and the DIIS extrapolation is written over the old T3: no T3-sized array
+   exists in ordinary memory.  The occupied operator (hh ladder and F_oo) is
+   applied in blocks of columns, so that one GEMM touches a block of T3 and
+   of the residual instead of all of both.
 4. With T3 in the file the sliced ladder runs batch-wise: for each batch of
    occupied triples all slabs, so that T3 and the residual are passed over
    once.  The rows of the ladder operator are then kept in a second scratch

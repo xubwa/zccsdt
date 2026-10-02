@@ -39,7 +39,8 @@ STORED = ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv')
 class MemoryPlan:
     '''Where the large arrays live and how the passes are sliced
     (plan_memory).  The default is everything in memory.'''
-    t3_file: bool = False       # T3 and its residual in a scratch file
+    t3_file: bool = False       # T3 in a scratch file
+    r3_file: bool = None        # its residual in the scratch file (None: as T3)
     pp_file: bool = False       # bare packed <ab||de> in a scratch file
     pp_bytes: int = None        # dressed rows of the packed <ab||de> held at a
                                 # time (None: all of them)
@@ -171,8 +172,11 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
     of its forms do not fit, and its dressed rows are held ``pp_bytes`` at a
     time if they do not fit either.  T3 and its residual stay in memory if
     they fit next to an eighth of the dressed operator (they are passed over
-    many times per iteration, the operator once), else they go to the scratch
-    file.  ``t3_bytes`` / ``pp_bytes`` / ``row_bytes``: sizes of T3, of the
+    many times per iteration, the operator once).  Else T3 goes to the
+    scratch file first, and the residual only if it does not fit alone: the
+    passes only read T3, whose pages are given up at no cost, while pages of
+    the residual, which every pass adds to, would have to be written to the
+    file and read back.  ``t3_bytes`` / ``pp_bytes`` / ``row_bytes``: sizes of T3, of the
     bare operator and of its longest row if not those of the dense layout
     (spin-blocked forms); ``sliceable``: False if the pp operator has to stay
     in memory (ccsdt_opt.sliceable).  Raises
@@ -238,7 +242,9 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
     # fits beside it: squeezing it in with thin slabs costs more than paging it
     beside = min(max(pp // 8, row_min), pp) if sliceable else 0
     plan.t3_file = base(mem) + 2 * t3 + beside > budget
-    plan.need = base(mem) + (0 if plan.t3_file else 2 * t3)
+    plan.r3_file = plan.t3_file and base(mem) + t3 + beside > budget
+    held = (0 if plan.t3_file else t3) + (0 if plan.r3_file else t3)
+    plan.need = base(mem) + held
     if not sliceable:
         return plan
     rest = max(budget - plan.need, 0)
@@ -258,11 +264,11 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
         plan.pp_order = 'batch'
         plan.pp_bytes = int(min(max(rest // 8, row_min), pp))
         if not kept:
-            room = budget - small - int(f_beside * f) - plan.pp_bytes - rest // 8
+            room = budget - small - int(f_beside * f) - plan.pp_bytes - rest // 8 - held
             want = min(max(room, bufs(mem)), 3 * bufs(mem_mb))
             if want > bufs(mem):
                 plan.mem_mb = mem = want * 1.5 / 1e6
-        plan.need = base(mem) + plan.pp_bytes
+        plan.need = base(mem) + plan.pp_bytes + held
     else:
         plan.pp_file = True
         plan.pp_bytes = int(max(rest // 2, row_min))

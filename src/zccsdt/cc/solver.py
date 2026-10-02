@@ -120,12 +120,15 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     t1 = t1.astype(dtype)
     t2 = t2.astype(dtype)
     plan = scr = None
-    tight = False
+    tight = r3_file = False
     if method == 'ccsdt':
         plan = opts.plan or ccsdt_opt.plan_for(eris, dtype, opts)
         # memory is short if the plan has put anything into a scratch file:
         # the kernels then tell the operating system what they do with mapped arrays
         tight = plan.t3_file or plan.pp_file or plan.pp_bytes is not None
+        # the residual of T3 in the scratch file (with T3, unless the plan
+        # keeps it in memory): it is then built in the storage of the DIIS vectors
+        r3_file = plan.t3_file if plan.r3_file is None else plan.r3_file
     hints = scratch.hints(tight)
     adiis = None
     timings = []
@@ -140,8 +143,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
         if with_t3:
             size = ccsdt_opt.engine_for(eris, dtype, flip=opts.spin_flip).size
             if plan is not None and plan.t3_file and size:
-                # T3 as a mapped array of a scratch file (new file space reads
-                # as zeros); its residual is built in the storage of the DIIS vectors
+                # T3 as a mapped array of a scratch file (new file space reads as zeros)
                 scr = Scratch(prefix='zccsdt_t3_', what='T3',
                               hint=' or give the calculation more memory (max_memory)')
                 mapped = scr.create('t3', size, dtype)
@@ -160,7 +162,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
             t0 = time.perf_counter()
             if with_t3:
                 if method == 'ccsdt':
-                    rbuf = adiis.buffers(_parts(t1, t2, t3))[0][2] if scr is not None else None
+                    rbuf = adiis.buffers(_parts(t1, t2, t3))[0][2] if r3_file else None
                     t1n, t2n, t3n = ccsdt_opt.update_amps(opts, t1, t2, t3, eris,
                                                           mem_mb=opts.mem_mb, out=rbuf,
                                                           plan=plan)
