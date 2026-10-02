@@ -160,6 +160,39 @@ def test_sliced_step_spin_blocked(rhf, uhf, form):
             assert abs(a - b).max() < 1e-12 * max(1.0, abs(b).max()), (name, pp_bytes, order)
 
 
+def test_spin_engine_buffers(uhf):
+    '''The spin-blocked engine takes its batch buffers from one work array:
+    never more than buffer_bytes says, given back when the budget changes;
+    one engine per integral object whatever the budget; and a step that is
+    short of memory keeps no ovvv-sized array for the next one.'''
+    from zccsdt.cc import t3engine
+    e = eris_spin.from_scf(uhf, frozen=2)
+    opts = solver.Options()
+    eng = ccsdt_opt.engine_for(e, np.float64)
+    if not ccsdt_opt.sliceable(e, eng):
+        pytest.skip('C library not built')
+    r0 = solver.kernel(e, 'ccsdt', solver.Options(max_cycle=2, incore_complete=True))
+    ref = [np.array(x) for x in ccsdt_opt.update_amps(opts, r0.t1, r0.t2, r0.t3, e)]
+    assert '_bare_vvvo' in e.__dict__ and ccsdt_opt._persistent(e, 'bv')[0] is not None
+    assert ccsdt_opt._persistent(e, 'vvvv')[0] is not None
+    row = 8 * max(hi - lo for lo, hi in t3pack.maps_for(e)[1].blocks)
+    for mem, pp_bytes, order in ((2000, None, 'slab'), (0.05, None, 'slab'),
+                                 (0.3, 3 * row, 'batch'), (0.02, 5 * row, 'slab')):
+        plan = MemoryPlan(pp_bytes=pp_bytes, pp_order=order, mem_mb=mem)
+        new = ccsdt_opt.update_amps(opts, r0.t1, r0.t2, r0.t3, e, plan=plan)
+        for a, b in zip(new, ref):
+            assert abs(a - b).max() < 1e-12 * max(1.0, abs(b).max())
+        assert ccsdt_opt.engine_for(e, np.float64) is eng and eng.mem_mb == mem
+        assert 0 < t3engine.workspace_bytes() <= eng.buffer_bytes(mem)
+        if pp_bytes is not None:
+            assert '_bare_vvvo' not in e.__dict__
+            assert ccsdt_opt._persistent(e, 'bv')[0] is None
+            assert ccsdt_opt._persistent(e, 'vvvv')[0] is None
+    assert ccsdt_opt.cached_bytes(e) >= t3engine.workspace_bytes() > 0
+    eng.set_memory(1.0)
+    assert t3engine.workspace_bytes() == 0
+
+
 def test_spin_blocked_vvvv_built_out_of_core(uhf, monkeypatch, tmp_path):
     '''With a small max_memory the U-form pair blocks are built in batches
     into mapped scratch arrays, equal to those built in memory.'''
@@ -324,6 +357,53 @@ def test_plan_memory(monkeypatch):
     p6 = plan_memory(o, v, 8, budget=int(1.3 * GB), t3_bytes=t3 // 4, pp_bytes=pp // 4,
                      sliceable=False)
     assert p6.t3_file and p6.pp_bytes is None
+
+
+def test_plan_memory_spin_engine(uhf, monkeypatch):
+    '''The planner with the numbers of the spin-blocked engine (U/R-form
+    integrals): its work array counts next to everything else, ovvv-sized
+    arrays are kept between the iterations only when memory is not short,
+    and the buffers never grow beyond what was asked for.'''
+    monkeypatch.setattr(ccsdt_opt, 'overhead', lambda: 0)
+    e = eris_spin.from_scf(uhf, frozen=2)
+    eng = ccsdt_opt.engine_for(e, np.float64)
+    om, vm = t3pack.maps_for(e)
+    o, v = om.n, vm.n
+    f = o * v ** 3 * 8
+    blocks = {id(b): b for b in e.vvvv_blocks}
+    pp = sum(b.nbytes for b in blocks.values())
+    row = max(b.shape[1] * 8 for b in blocks.values())
+    t3 = eng.size * 8
+    small = 8 * o * o * v * v * 8 + 2 * om.ntri ** 2 * 8
+    mem = 0.5                               # MB: a few pairs and triples per batch
+    kw = dict(t3_bytes=t3, pp_bytes=pp, row_bytes=row, engine=eng, mem_mb=mem,
+              pp_where='file')
+    a, b, kept = ccsdt_opt.OVVV_SPIN
+    kw.update(ovvv=ccsdt_opt.OVVV_SPIN, dress_bytes=0)
+    assert eng.kept_buffers and kept > 0 and eng.mem_min() < mem
+    assert eng.buffer_bytes(eng.mem_min()) <= eng.buffer_bytes(mem) <= eng.buffer_bytes(2000)
+    # everything in memory: one more f of ovvv-sized arrays is kept
+    p = plan_memory(o, v, 8, **kw)
+    assert not p.t3_file and p.pp_bytes is None and p.mem_mb == mem
+    ovvv = max(int((a + kept) * f), int((b + kept) * f) + int(mem * 250_000))
+    assert p.need == small + eng.buffer_bytes(mem) + ovvv + 2 * t3 + pp
+    assert plan_memory(o, v, 8, budget=p.need, **kw) == p
+    # a byte less: the dressed rows in slabs, nothing kept, smaller buffers
+    q = plan_memory(o, v, 8, budget=p.need - 1, **kw)
+    assert q.pp_bytes is not None and q.mem_mb <= mem and q.need < p.need
+    # the least that works: the smallest buffers, T3 in the file, the
+    # thinnest slabs batch-wise; the buffers do not grow
+    least = small + eng.buffer_bytes(eng.mem_min()) \
+        + max(int(a * f), int(b * f) + int(eng.mem_min() * 250_000)) + min(v * row, pp)
+    q = plan_memory(o, v, 8, budget=least, **kw)
+    assert q.t3_file and q.pp_file and q.pp_order == 'batch'
+    assert q.pp_bytes == min(v * row, pp) and q.mem_mb == eng.mem_min() and q.need == least
+    with pytest.raises(MemoryError, match='o v\\^3'):
+        plan_memory(o, v, 8, budget=least - 1, **kw)
+    # more room with T3 in the file goes to the slabs, not to the buffers
+    q2 = plan_memory(o, v, 8, budget=least + t3 // 2, **kw)
+    if q2.t3_file:
+        assert q2.mem_mb <= mem and q2.pp_bytes >= q.pp_bytes
 
 
 def test_kernel_plans_from_max_memory(fh, monkeypatch, tmp_path):

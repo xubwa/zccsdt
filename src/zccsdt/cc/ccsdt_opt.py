@@ -52,6 +52,16 @@ class MemoryPlan:
 
 _STEPS = [0]                # CCSDT steps taken by this process
 
+# The o v^3-sized arrays of a step in units of f = o v^3 elements (o, v: spin
+# orbitals): up to the end of pass 1, afterwards, and what a run that is not
+# short of memory keeps between the iterations on top of both.
+OVVV_DENSE = (3.5, 1.75, 0.0)
+# U/R-form integrals: spin-blocked where the algebra is (dressed ovvv 3/8 f,
+# packed 3/16 f), dense where the engine takes dense operands (pass-1 operand
+# and result, W_vvvo: f / 2 each); kept: the bare <ab||ei> and the array of
+# W_vvvo
+OVVV_SPIN = (2.0, 1.25, 1.0)
+
 
 def overhead():
     '''Bytes that the threaded BLAS (work buffers per thread) and the
@@ -77,7 +87,9 @@ def cached_bytes(eris):
         arrs += list(getattr(x, 'blocks', {}).values())
     seen = {id(x): x for x in arrs                      # (blocks shared between spins once)
             if isinstance(x, np.ndarray) and not is_mapped(x)}
-    return sum(x.nbytes for x in seen.values()) + (overhead() if _STEPS[0] else 0)
+    # (and the work array of the spin-blocked engine, which stays allocated)
+    return sum(x.nbytes for x in seen.values()) + t3engine.workspace_bytes() \
+        + (overhead() if _STEPS[0] else 0)
 
 
 def sliceable(eris, eng):
@@ -97,9 +109,12 @@ def plan_for(eris, dtype, opts):
     from zccsdt.scratch import is_mapped
     om, vm = t3pack.maps_for(eris)
     isz = np.dtype(dtype).itemsize
-    eng = engine_for(eris, dtype, opts.mem_mb, flip=getattr(opts, 'spin_flip', False))
+    eng = engine_for(eris, dtype, flip=getattr(opts, 'spin_flip', False))
     spin = _is_spin_eris(eris)
-    kw = dict(mem_mb=opts.mem_mb, t3_bytes=eng.size * isz, sliceable=sliceable(eris, eng))
+    kw = dict(mem_mb=opts.mem_mb, t3_bytes=eng.size * isz, sliceable=sliceable(eris, eng),
+              engine=eng, ovvv=OVVV_SPIN if spin else OVVV_DENSE)
+    if spin:        # (the pair blocks are dressed in place, block by block)
+        kw['dress_bytes'] = 0
     if spin:        # bare pair blocks (alpha-alpha shared with beta-beta for RHF)
         blocks = {id(b): b for b in eris.vvvv_blocks}
         kw['pp_bytes'] = sum(b.nbytes for b in blocks.values())
@@ -120,7 +135,8 @@ def plan_for(eris, dtype, opts):
 
 
 def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memory',
-                mem_mb=2000.0, t3_bytes=None, pp_bytes=None, sliceable=True, row_bytes=None):
+                mem_mb=2000.0, t3_bytes=None, pp_bytes=None, sliceable=True, row_bytes=None,
+                engine=None, ovvv=OVVV_DENSE, dress_bytes=None):
     '''MemoryPlan for ``budget`` bytes of ordinary memory beyond what the
     integral object holds already (None: no limit, everything in memory).
 
@@ -135,9 +151,21 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
       pp       v^4 / 4 elements each for the bare packed <ab||de> and its
                dressed form
       T3       2 C(o,3) C(v,3): amplitudes and residual
+      small    eight o^2 v^2-sized arrays and the occupied operator, C(o,3)^2
       overhead what the threaded BLAS and the allocator keep (overhead())
 
-    (the DIIS vectors are in the scratch file already).  If that exceeds the
+    (the DIIS vectors are in the scratch file already).  These are the numbers
+    of dense integrals and the dense engine.  ``engine`` (a T3 engine) gives
+    the buffers of another one: the spin-blocked engine has one work array
+    for all passes, which stays allocated (its buffer_bytes(mem_mb), next to
+    everything else), and works with any buffer size.  ``ovvv`` gives the
+    ovvv-sized arrays of another form of the integrals (OVVV_SPIN for the
+    U/R form: 2 f up to the end of pass 1 and 1.25 f afterwards, and one f
+    more that is kept between the iterations when memory is not short), and
+    ``dress_bytes`` the transient of dressing the whole pp operator (default:
+    that of the dense operator; 0 for the U/R form).
+
+    If that exceeds the
     budget, the buffers shrink.  The bare pp operator goes to a scratch file
     (``pp_where``: it is in 'memory' now, or in a 'file' already) when both
     of its forms do not fit, and its dressed rows are held ``pp_bytes`` at a
@@ -157,29 +185,40 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
     pp = nvp * nvp * itemsize if pp_bytes is None else pp_bytes
     nto, nvt = o * (o - 1) * (o - 2) // 6, v * (v - 1) * (v - 2) // 6
     t3 = nto * nvt * itemsize if t3_bytes is None else t3_bytes
-    small = 8 * o * o * v * v * itemsize + overhead()
+    # o^2 v^2-sized arrays, the occupied operator C(o,3)^2 (and a copy of its
+    # blocks), and what the BLAS threads and the allocator keep
+    small = 8 * o * o * v * v * itemsize + 2 * nto * nto * itemsize + overhead()
+    kept = bool(getattr(engine, 'kept_buffers', False))
+    f_before, f_beside, f_cached = ovvv
 
     def bufs(mem):
+        if engine is not None:
+            return int(engine.buffer_bytes(mem))
         return int(max(mem * 1e6 * 2 / 3, f))
 
-    def floor(extra):
+    def floor(mem, extra=0, cached=0.0):
         # the ovvv-sized arrays before the T3 passes, or half of them next to
-        # the buffers (and whatever else is alive then)
-        return small + max(int(3.5 * f), int(1.75 * f) + extra)
+        # the buffers (and whatever else is alive then: ``extra``).  A work
+        # array that is kept is there at all times, and the blocks of the
+        # occupied operator (mem / 4) come on top of it.
+        a, b = int((f_before + cached) * f), int((f_beside + cached) * f)
+        if kept:
+            return small + bufs(mem) + max(a, b + max(extra, int(mem * 250_000)))
+        return small + max(a, b + max(bufs(mem), extra))
 
     plan = MemoryPlan(mem_mb=mem_mb, pp_file=pp_where == 'file')
     # the whole-operator dressing has a transient of its own
-    dress = min(2_000_000_000, 2 * pp) + f // 2
-    plan.need = floor(max(bufs(mem_mb), dress)) + 2 * t3 + pp
+    dress = min(2_000_000_000, 2 * pp) + f // 2 if dress_bytes is None else dress_bytes
+    plan.need = floor(mem_mb, dress, f_cached) + 2 * t3 + pp
     if budget is None or plan.need <= budget:
         return plan
     hard = budget if limit is None else limit
     if pp_where == 'memory' and sliceable:
         budget, hard = budget + pp, hard + pp       # the bare operator can leave memory
-    mem_min = 1.5 * f / 1e6
+    mem_min = 1.5 * f / 1e6 if engine is None else engine.mem_min()
 
     def base(mem):
-        return floor(bufs(mem)) + (0 if sliceable else pp)
+        return floor(mem) + (0 if sliceable else pp)
 
     # the thinnest slab of the dressed operator: v of its rows (those of one
     # first index at most)
@@ -218,10 +257,11 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memo
         plan.pp_file = True
         plan.pp_order = 'batch'
         plan.pp_bytes = int(min(max(rest // 8, row_min), pp))
-        room = budget - small - int(1.75 * f) - plan.pp_bytes - rest // 8
-        want = min(max(room, bufs(mem)), 3 * bufs(mem_mb))
-        if want > bufs(mem):
-            plan.mem_mb = mem = want * 1.5 / 1e6
+        if not kept:
+            room = budget - small - int(f_beside * f) - plan.pp_bytes - rest // 8
+            want = min(max(room, bufs(mem)), 3 * bufs(mem_mb))
+            if want > bufs(mem):
+                plan.mem_mb = mem = want * 1.5 / 1e6
         plan.need = base(mem) + plan.pp_bytes
     else:
         plan.pp_file = True
@@ -793,18 +833,28 @@ def _spin_r1_vovv(eris, ges, t2, vm):
 _ENGINES = {}
 
 
-def engine_for(eris, dtype, mem_mb=2000, flip=False):
+def _engine_key(eris, dtype, flip=False):
+    om, vm = t3pack.maps_for(eris)
+    return (id(om), id(vm), np.dtype(dtype).str, bool(flip))
+
+
+def engine_for(eris, dtype, mem_mb=None, flip=False):
     '''T3 engine for these integrals: spin-blocked if the orbitals carry spin
-    labels, dense otherwise (cached per maps / dtype / memory budget).'''
+    labels, dense otherwise (cached per maps / dtype).  ``mem_mb``: its buffer
+    budget from now on (default: as it is; 2000 for a new engine).'''
     om, vm = t3pack.maps_for(eris)
     if flip and (om.spins is None or 2 * int(np.sum(om.spins == 0)) != om.n
                  or 2 * int(np.sum(vm.spins == 0)) != vm.n):
         raise ValueError('spin_flip (RCCSDT) needs alpha-first orbitals of a closed-shell '
                          'RHF reference (from_scf(..., spin_order=True))')
-    key = (id(om), id(vm), np.dtype(dtype).str, float(mem_mb), bool(flip))
-    if key not in _ENGINES:
-        _ENGINES[key] = t3engine.make_engine(om, vm, dtype, mem_mb, flip=flip)
-    return _ENGINES[key]
+    key = _engine_key(eris, dtype, flip)
+    eng = _ENGINES.get(key)
+    if eng is None:
+        eng = _ENGINES[key] = t3engine.make_engine(om, vm, dtype,
+                                                   2000 if mem_mb is None else mem_mb, flip=flip)
+    elif mem_mb is not None:
+        eng.set_memory(mem_mb)
+    return eng
 
 
 def _kept_operator(eris, sizes, dtype):
@@ -956,9 +1006,12 @@ def _pp_sweep_spin(eng, plan, eris, t1, t2pp, Feff_vv, om, vm, T3p, Wv, R3):
                     scratch.unmap(K, q0 * nQ[h], q1 * nQ[h])
             yield serves[h], q0, q1, W
 
-    def again():
-        # later sweeps (one per batch of triples): the kept rows
+    def again(need):
+        # later sweeps (one per batch of triples): the kept rows of the
+        # blocks that the spin group of the batch needs
         for h, q0, q1 in slabs:
+            if need is not None and not need.intersection(serves[h]):
+                continue
             W = rows(h, q0, q1)
             with timer('imd.Wpp'):
                 K = kept[h]
@@ -967,9 +1020,9 @@ def _pp_sweep_spin(eng, plan, eris, t1, t2pp, Feff_vv, om, vm, T3p, Wv, R3):
                 scratch.unmap(K, q0 * nQ[h], q1 * nQ[h])
             yield serves[h], q0, q1, W
 
-    def sweep():
+    def sweep(need=None):
         calls[0] += 1
-        return first() if calls[0] == 1 else again()
+        return first() if calls[0] == 1 else again(need)
 
     with timer('pp_ladder'):
         eng.pp_ladder_rows(T3p, sweep, R3, order=order,
@@ -1005,6 +1058,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
     spin = _is_spin_eris(eris)
     # the dressed packed vvvv in slabs of rows
     sliced = plan.pp_bytes is not None and sliceable(eris, eng)
+    # memory is short: no ovvv-sized array is kept for the next iteration
+    tight = plan.t3_file or plan.pp_file or plan.pp_bytes is not None
+    # (nor what an earlier run with another plan has kept for the operator)
+    eris.__dict__.get('_buffers', {}).pop('vvvv' if sliced else 'vvvv_rows', None)
     t2mn = t2[mm, nn]                                   # (P, a, b)
     t2pp_v = np.ascontiguousarray(t2mn[:, md, ne])      # (P, Q)
     with timer('t1_dress'):
@@ -1052,6 +1109,11 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
         G_mQ = G_mQ.reshape(nocc * vm.npair, nocc + nvir)
     with timer('pass1'):
         Xacc, Yall, r1, rA = eng.pass1(T3p, G_Pd, G_mQ, goovv_pp, fov)
+    # sum ~<ak||Q> t2[i,k,Q] with the pass-1 operand G_mQ[(k,Q), no + a] = ~<ak||Q>,
+    # which is then dropped (ovvv-sized arrays are dropped as soon as they
+    # have been used: they decide how much memory a run needs at least)
+    r1_vovv = gemm(np.ascontiguousarray(t2P).reshape(nocc, -1), G_mQ[:, nocc:])
+    del G_mQ
     C0 = -2 * Xacc[nvir:].transpose(1, 0, 2)               # [i, j, Q]
     dWo = Yall[:, :, :nocc].transpose(2, 1, 0)             # [m, a, P(ij)]
     B0 = -2 * Yall[:, :, nocc:].transpose(0, 2, 1)         # [P, a, b]
@@ -1069,14 +1131,20 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
         with timer('wv.Bv'):
             if spin:
                 buf = _persistent(eris, 'bv')
-                Bv = spin_imds.bra_dressed_vvvo(eris, t1, om, vm, out=buf[0])
-                buf[0] = Bv
+                Bv = spin_imds.bra_dressed_vvvo(eris, t1, om, vm, out=buf[0], keep=not tight)
+                buf[0] = None if tight else Bv
             else:
                 Bv = bra_dressed_vvvo_pp(eris, t1, om, vm)
         xterm = (lambda W: spin_imds.t2_ovvv_add(W, t2, ges['ovvv'], om, vm)) \
             if spin else None
         with timer('wv.vvoo'):
             vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)    # needs Bv before W
+        # W_vvvo is built in Bv from here on.  Its T3 part first, so that the
+        # pass-1 result can go: Wv[Q, e, i] += Xacc[e, i, Q]
+        with timer('wv.dWv'):
+            t3pack.add_transposed(Bv.reshape(vm.npair, -1),
+                                  Xacc[:nvir].reshape(nvir * nocc, vm.npair))
+        del Xacc
         oovo_extra = None
         if spin:     # vvvv_pp includes t2pp^T oovv: remove sum_f oovv[P,(e,f)] t1[i,f]
             with timer('wv.zcorr'):
@@ -1087,12 +1155,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
                 oovo_extra = -Z
         Wv = wvvvo_packed(Bv, vvvv_pp, t1, t2, fov, ge, om, vm, xterm, inplace=True,
                           oovo_extra=oovo_extra)
-        with timer('wv.dWv'):                                 # Wv[Q, e, i] += Xacc[e, i, Q]
-            t3pack.add_transposed(Wv.reshape(vm.npair, -1),
-                                  Xacc[:nvir].reshape(nvir * nocc, vm.npair))
-        # (ovvv-sized arrays are dropped as soon as they have been used: they
-        # decide how much memory a run needs at least)
-        del Bv, Xacc
+        del Bv
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wvooo'); t_.__enter__()
         Wvooo = govoo.copy()
@@ -1117,9 +1180,6 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
         # packed vvvv is turned into the T3 ladder operator in place
         t_ = timer('ccsd'); t_.__enter__()
         ladder_t2 = None
-        # sum ~<ak||Q> t2[i,k,Q] with the pass-1 operand G_mQ[(k,Q), no + a] = ~<ak||Q>
-        r1_vovv = gemm(np.ascontiguousarray(t2P).reshape(nocc, -1), G_mQ[:, nocc:])
-        del G_mQ
         if spin:
             Hb = spin_imds.bare_packed(eris)['oovv_PQ']
             ladder_t2 = ([Hb.blocks.get((h, h)) for h in range(3)], t2pp_v)

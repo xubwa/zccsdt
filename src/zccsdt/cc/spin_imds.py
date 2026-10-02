@@ -306,13 +306,17 @@ def dressed_vvvv_rows(se, t1, om, vm, h, q0, q1, out, C):
     return out
 
 
-def _bare_vvvo(se, vm, dtype):
-    '''<ab||ei> = -<ie||ab>^* packed over a<b, dense (npair_v, nvir, nocc),
-    cached on the integral object (t1-independent part of bra_dressed_vvvo).'''
-    c = se.__dict__.get('_bare_vvvo')
-    if c is None or c.dtype != dtype:
+def _bare_vvvo(se, vm, dtype, out=None):
+    '''<ab||ei> = -<ie||ab>^* packed over a<b, dense (npair_v, nvir, nocc):
+    the t1-independent part of bra_dressed_vvvo, cached on the integral
+    object, or written to ``out`` and not kept.'''
+    c = se.__dict__.get('_bare_vvvo') if out is None else out
+    if out is not None or c is None or c.dtype != dtype:
         o, v = se.spaces['o'], se.spaces['v']
-        c = np.zeros((vm.npair, v.n, o.n), dtype=dtype)
+        if out is None:
+            c = np.zeros((vm.npair, v.n, o.n), dtype=dtype)
+        else:
+            c[...] = 0
         for (si, se_, h), blk in bare_packed(se)['ovvv_Q'].blocks.items():
             lo, hi = vm.blocks[h]
             (e0, e1), (i0, i1) = v.groups[se_], o.groups[si]
@@ -321,24 +325,32 @@ def _bare_vvvo(se, vm, dtype):
                 blk = blk.conj()
             # loop order (e, i, Q): contiguous reads of blk
             t3pack.axpby(c[lo:hi, e0:e1, i0:i1].transpose(1, 2, 0), blk.transpose(1, 0, 2), -1.0)
-        se.__dict__['_bare_vvvo'] = c
+        if out is None:
+            se.__dict__['_bare_vvvo'] = c
     return c
 
 
-def bra_dressed_vvvo(se, t1, om, vm, out=None):
+def bra_dressed_vvvo(se, t1, om, vm, out=None, keep=True):
     '''Bra-dressed <ab||ei> packed over a<b, dense (npair_v, nvir, nocc)
     (see ccsdt_opt.bra_dressed_vvvo_pp), written block by block:
       B[(ab), e, i] = <ab||ei> - L[a,b,e,i] + L[b,a,e,i] + sum_{m<n} tau1[mn,ab] <mn||ei>,
       <ab||ei> = -<ie||ab>^*,  L[a,b,e,i] = sum_m t1[m,a] <mb||ei>.
-    Only the Ms-allowed (e, i) blocks of each pair group are touched.'''
+    Only the Ms-allowed (e, i) blocks of each pair group are touched.
+    ``keep``: cache the bare <ab||ei> on the integral object (an array of the
+    size of the result; without it the bare block is written again in every
+    call, which is what a run short of memory does).'''
     nocc, nvir = t1.shape
     o, v = se.spaces['o'], se.spaces['v']
     Ps = pair_space('P', om)
     dtype = np.result_type(t1, se.fock)
-    base = _bare_vvvo(se, vm, dtype)                        # <ab||ei>
-    B = out if out is not None and out.shape == base.shape and out.dtype == dtype \
-        else np.empty_like(base)
-    t3pack.axpby(B, base, 1.0, 0.0)
+    shape = (vm.npair, v.n, o.n)
+    B = out if out is not None and out.shape == shape and out.dtype == dtype \
+        else np.empty(shape, dtype=dtype)
+    if keep:
+        t3pack.axpby(B, _bare_vvvo(se, vm, dtype), 1.0, 0.0)    # <ab||ei>
+    else:
+        se.__dict__.pop('_bare_vvvo', None)
+        _bare_vvvo(se, vm, dtype, out=B)
     ovvo = se.g['ovvo']                                     # [m, b, e, i] blocks
     oa, ob = o.groups
     va, vb = v.groups

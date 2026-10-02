@@ -147,14 +147,142 @@ contiguous GEMM on blocks that differ only in that slot's source space.
 The full n^4 tensor and the n^5 transformation of the starting point are
 gone.
 
-## 3. Open items
+## 3. Memory, and when it is short
+
+With everything in memory an iteration of the spin-orbital / spinor code
+takes, with f = o v^3 elements (8 bytes real, 16 complex):
+
+| Part | Elements | |
+|---|---|---|
+| T3 and its residual | 2 C(o,3) C(v,3) | fully packed |
+| pp operator | 2 n_Q^2 ~ v^4 / 2 | the bare packed `<ab\|\|de>` and its dressed form (the T3 ladder operator is made from the dressed form in place) |
+| ovvv-sized arrays | at most 3.5 f at a time | packed bare ovvv (f / 2, kept), dressed ovvv (f), pass-1 operand and result, `W_vvvo` (f / 2 each); 1.75 f while the batch buffers are alive |
+| batch buffers | 2/3 `mem_mb` | half-expanded T3 of a batch of occupied pairs (pass 1, pass 2) or triples (ladder) and its product |
+| DIIS | 2 `diis_space` T3-sized vectors | in the scratch file by default |
+| overhead | 0.3 GB + 0.05 GB per thread | buffers of the BLAS threads, allocator |
+
+The integral object holds the full ovvv block (f) besides.  The ovvv-sized
+arrays are dropped as soon as they have been used, because they are what a
+run needs at least: the dressed vovv is never formed (it is minus the bra
+transpose of the dressed ovvv), the pass-1 operand goes when pass 1 has
+returned and its result as soon as it has been added to `W_vvvo` (first of
+all terms), the `t2 x ovvv` term of `W_vvvo` runs in batches of the first
+virtual index on ovvv as stored, and pass 2 gets its drive operand written
+directly.
+
+`solver.Options(max_memory=)` (MB for the whole process, as in PySCF) plans
+the rest (`ccsdt_opt.plan_memory`, `MemoryPlan`; the plan used is
+`Result.plan`).  The default budget is 80% of what the node and the memory
+cgroups of the process leave (`zccsdt/memory.py`), so the limit of a Slurm
+job or step is seen.  If the sum above fits, nothing changes.  Otherwise:
+
+1. The batch buffers shrink (`mem_mb`, down to one occupied pair).
+2. **The pp operator is sliced** (`_pp_sweep`).  The bare packed
+   `<ab||de>` is a mapped array of a scratch file: `eris.from_scf(...,
+   packed_vvvv=True, max_memory=)` builds it there when it does not fit in
+   memory twice (for spinors from the rows that PySCF's out-of-core
+   transformation writes for a few ranges of the first virtual index: two
+   passes over the AO integrals, v^3 elements in memory), and
+   `place_vvvv` moves it there if the plan of the iterations says so.  Its
+   dressed rows are produced `pp_bytes` at a time (`dressed_vvvv_rows`: one
+   pass of a C kernel for the two one-index terms, one GEMM for the pair
+   term).  Each slab feeds `sum_f ~<ab||ef> t1[i,f]` of `W_vvvo`, the CCSD
+   ladder and, turned into rows of the ladder operator, the T3 ladder
+   (`pp_ladder_rows`), before the next one is made: the dressed operator
+   is never held as a whole.  The reduction of a slab adds, to each packed
+   element of the residual, the one to three terms whose pair lies in the
+   slab (`zc_reduce_pair_first_rows`).
+3. **T3 and its residual go to the scratch file**, as mapped arrays like the
+   DIIS vectors, when they do not fit next to an eighth of the dressed
+   operator.  The residual is then accumulated directly in the storage of
+   the next DIIS vector, the Jacobi update is written over it, and the DIIS
+   extrapolation is written over the old T3: no T3-sized array exists in
+   ordinary memory.  The occupied operator (hh ladder and F_oo) is applied
+   in blocks of columns, so that one GEMM touches a block of T3 and of the
+   residual instead of all of both.
+4. With T3 in the file the sliced ladder runs batch-wise: for each batch of
+   occupied triples all slabs, so that T3 and the residual are passed over
+   once.  The rows of the ladder operator are then kept in a second scratch
+   array by the first sweep and read back for the other batches.  That pass
+   over the operator file is what a batch costs, so the memory that is left
+   goes to the batch buffers (up to three times `mem_mb`) and the slabs stay
+   thin.  With T3 in memory the ladder runs slab-wise (T3 is gathered again
+   for each slab, which is cheap) unless the operator is small.
+5. If the ovvv-sized part and the smallest buffers do not fit,
+   `MemoryError` is raised before the iterations start.
+
+The operator, which an iteration passes over once, goes out before T3, which
+every pass reads.  `incore_complete=True` keeps everything in memory whatever
+the budget, and `plan=MemoryPlan(...)` sets the plan explicitly.
+
+Mapped arrays and the operating system (`zccsdt/scratch.py`): by default
+paging is left to the kernel.  With `ZCCSDT_IO=1`, and a plan that has put
+anything into a scratch file, the kernels announce the rows they are about
+to read (`madvise(WILLNEED)`), drop the rows of T3 they have read from the
+page tables (`madvise(DONTNEED)`: the data stays in the page cache while
+there is room and is cheap to take back when there is not), and start
+writing data that is final for the iteration - the new T3, the DIIS
+vectors - as soon as it is written (`sync_file_range`).  On a local NVMe
+that the job has to itself these hints changed the iteration time by -3% to
++7% (`docs/benchmarks.md`), which is why they are optional; writing the
+residual out after every pass, or unmapping it, cost 6-40% and is not done.
+
+U / R-form integrals (`eris_spin`: UCCSDT and the spin-flip RCCSDT) are
+handled the same way with the spin-blocked T3 engine: T3 and its residual are
+mapped (stored spin blocks), `eris_spin.from_scf(..., max_memory=)` builds
+the alpha-alpha, alpha-beta and beta-beta pair blocks of the packed vvvv in
+batches into a scratch file, and `_pp_sweep_spin` dresses and applies each
+block in slabs of rows (`spin_imds.dressed_vvvv_rows`,
+`SpinBlockT3.pp_ladder_rows`, `zc_breduce_ppl_rows`).  For RHF the
+alpha-alpha rows serve the beta-beta block as well, as in memory.  Batch-wise,
+a batch of triples reads back only the pair blocks its spin group contracts
+with (alpha-alpha-alpha: the alpha-alpha block alone).
+
+The memory of this engine differs from the table in three ways, which the
+engine tells the planner (`buffer_bytes`, `kept_buffers`, `ovvv`,
+`ovvv_cached`; f still counts spin orbitals):
+
+- **The batch buffers are one work array** that stays allocated between the
+  passes and the iterations (`t3engine.workspace`; pass 1 takes half of
+  `mem_mb` from it, the ladder by rows up to two thirds, pass 2 a third of f
+  per occupied pair).  It therefore counts next to every stage of the
+  iteration, not only next to the passes, and `plan_memory` asks the engine
+  for its exact size.  It is released when the buffer budget changes; there
+  is one engine per set of orbital maps whatever the budget.
+- **The ovvv-sized arrays** are spin-blocked where the algebra is (dressed
+  ovvv 3/8 f, packed 3/16 f) and dense where the engine takes dense operands
+  (pass-1 operand and result, `W_vvvo`: f / 2 each): 2 f up to the end of
+  pass 1 and 1.25 f afterwards.
+- **A run that is not short of memory keeps one more f** between the
+  iterations: the bare `<ab||ei>`, from which the bra-dressed block starts,
+  and the array of `W_vvvo`.  A plan with anything in a scratch file keeps
+  neither (the bare block is then written again in every iteration).
+
+Any buffer size works (one pair or one triple per batch), so the least this
+engine needs is 2 f plus a third of f for the work array plus the overhead.
+
+Limits of this version:
+
+- **Dense integrals on spin-grouped maps** (`eris.from_scf(...,
+  spin_order=True)`, a validation path): T3 can be mapped, the pp operator
+  stays in memory.
+- **The ovvv-sized arrays** (3.5 f, plus the full ovvv block of the integral
+  object) must fit: 0.7 GB for X2C H2O/cc-pVTZ (o = 10, v = 106), 6 GB for
+  o = 10 and v = 220, 30 GB for o = 20 and v = 300 (complex; plus the
+  overhead of the table).  With U / R-form integrals it is 2.3 f of real
+  numbers: 1.8 GB for NH2/cc-pVQZ (o = 9, v = 221).
+
+Timings under memory limits are in `docs/benchmarks.md`.
+
+## 4. Open items
 
 - **CCSD part.** The T2 ladder could reuse the packed W(ab,de)
   (o^2 v^4/4 instead of o^2 v^4). Some intermediates are still built with
   generic einsum.
 - **Pass 1 matrix-vector passes.** r1 and rA could be fused into the C
   gather.
-- **Memory.** The integral container still holds full vvvv (v^4). Only the
-  packed form is needed after the first iteration.
+- **Memory.** Without `packed_vvvv=True` the integral container holds the
+  full vvvv (v^4); the packed build keeps only `<ab||cd>` with a<b, c<d.
+  The full ovvv block (o v^3) is still held next to its packed form.
 - **Real/complex.** Both are covered by the same code. Complex runs about
   4x the real flops, as expected.

@@ -90,7 +90,7 @@ def test_spin_block_step_equals_dense(system):
     # the same step with the dense engine on the same (spin-sorted) integrals
     om, vm = t3pack.maps_for(e)
     dense = t3engine.DenseT3(om, vm, np.float64, 2000)
-    key = (id(om), id(vm), np.dtype(np.float64).str, 2000.0, False)
+    key = ccsdt_opt._engine_key(e, np.float64)
     saved = ccsdt_opt._ENGINES[key]
     try:
         ccsdt_opt._ENGINES[key] = dense

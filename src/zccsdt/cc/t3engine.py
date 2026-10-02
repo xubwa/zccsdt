@@ -18,6 +18,12 @@ update_amps when memory is short, see scratch.io_desc): the kernels then
 announce the rows they are about to read and unmap the rows of T3 they have
 read, and the new T3 is sent to the file when the update has written it;
 nothing below makes a copy of either array.
+
+Batch buffers: both engines size their batches by ``mem_mb`` (set_memory) and
+tell the memory planner what that costs (buffer_bytes, mem_min,
+``kept_buffers``: see ccsdt_opt.plan_memory).  The dense engine allocates its
+buffers per pass; the spin-blocked engine takes them from one work array that
+stays allocated between the passes and the iterations (workspace).
 '''
 
 import ctypes
@@ -50,6 +56,30 @@ def occ_cols(nrow, itemsize, mem_mb):
     return max(64, int(mem_mb * 1e6 / 8 // max(nrow * itemsize, 1)))
 
 
+_WORK = [None]      # the work array of the spin-blocked engine
+
+
+def workspace(n, dtype):
+    '''A work array of at least n elements, kept between batches, passes and
+    iterations (fresh large arrays pay page faults on every first touch).
+    One user at a time: callers take non-overlapping views.  It is released
+    when the buffer budget of an engine changes (set_memory).'''
+    w = _WORK[0]
+    if w is None or w.size < n or w.dtype != dtype:
+        _WORK[0] = w = None                     # free before allocating again
+        w = _WORK[0] = np.empty(n, dtype=dtype)
+    return w[:n]
+
+
+def release_workspace():
+    _WORK[0] = None
+
+
+def workspace_bytes():
+    '''Bytes of the work array that is allocated now.'''
+    return 0 if _WORK[0] is None else _WORK[0].nbytes
+
+
 def _target(out, shape, dtype, clear):
     '''The residual array: ``out`` viewed in ``shape`` (zeroed if ``clear``),
     or new zeros.'''
@@ -65,12 +95,30 @@ def _target(out, shape, dtype, clear):
 # --------------------------------------------------------------------- dense
 
 class DenseT3:
+    kept_buffers = False        # (for plan_memory) the buffers live for one pass only
+
     def __init__(self, om, vm, dtype, mem_mb):
-        self.om, self.vm, self.dtype, self.mem_mb = om, vm, dtype, mem_mb
+        self.om, self.vm, self.dtype = om, vm, dtype
         self.size = om.ntri * vm.ntri
-        nocc, nvir = om.n, vm.n
-        self.nb = pair_batch_size(nocc, nvir, np.dtype(dtype).itemsize, mem_mb)
         self.io = None
+        self.set_memory(mem_mb)
+
+    def set_memory(self, mem_mb):
+        '''Batch sizes for a buffer budget of ``mem_mb`` MB.'''
+        self.mem_mb = mem_mb
+        self.nb = pair_batch_size(self.om.n, self.vm.n, np.dtype(self.dtype).itemsize, mem_mb)
+
+    def _f(self):
+        return self.om.n * self.vm.n ** 3 * np.dtype(self.dtype).itemsize
+
+    def mem_min(self):
+        '''The smallest useful ``mem_mb``: one occupied pair per batch.'''
+        return 1.5 * self._f() / 1e6
+
+    def buffer_bytes(self, mem_mb, max_rows=None):
+        '''Bytes of the batch buffers of a pass with ``mem_mb``: two thirds of
+        it for the half-expanded T3 batches, at least one occupied pair.'''
+        return int(max(mem_mb * 1e6 * 2 / 3, self._f()))
 
     def view(self, T3):
         return np.ascontiguousarray(np.asarray(T3, dtype=self.dtype).reshape(
@@ -326,23 +374,20 @@ def _flip_triples(m, idx):
 class SpinBlockT3:
     '''Spin-blocked engine (numpy reference implementation).'''
 
+    kept_buffers = True         # (for plan_memory) one work array that stays allocated
+
     def __init__(self, om, vm, dtype, mem_mb, flip=False):
-        self.om, self.vm, self.dtype, self.mem_mb = om, vm, dtype, mem_mb
+        self.om, self.vm, self.dtype = om, vm, dtype
         self.L = T3Layout(om, vm, flip)
         self.size = self.L.size
         so, sv = om.spins, vm.spins
         self.orng = [np.where(so == s)[0] for s in (0, 1)]
         self.vrng = [np.where(sv == s)[0] for s in (0, 1)]
-        self.nb = pair_batch_size(om.n, vm.n, np.dtype(dtype).itemsize, mem_mb)
-        # pass 1 keeps one gathered block T[P, d, m, Q] (single spins of d, m)
-        # per pair alive: larger batches than pass 2, for larger GEMMs
-        nmax = max(len(r) for r in self.orng) * max(len(r) for r in self.vrng)
-        nqmax = max(vm.pair_off[g + 1] - vm.pair_off[g] for g in range(3))
-        per_pair = 2 * nmax * nqmax * np.dtype(dtype).itemsize
-        self.nb1 = max(self.nb, int(mem_mb * 1e6 // max(per_pair, 1)))
         # composite (d, m) / (a, i) index sets D_delta, delta = s(vir) - s(occ),
         # as lists of (s_vir, s_occ) sub-blocks, each vir-major
         self.dsub = {-1: [(0, 1)], 0: [(0, 0), (1, 1)], 1: [(1, 0)]}
+        self.mem_mb = None
+        self.set_memory(mem_mb)
         self.use_c = t3pack.USE_C and hasattr(t3pack._lib, 'zc_bgather_d')
         self.io = None
         L = self.L
@@ -369,15 +414,86 @@ class SpinBlockT3:
         addr = L.obase[I][:, None, :, None] + L.vcol[A][None, :, None, :]
         return T3[addr] * so[:, None, :, None] * sv[None, :, None, :]
 
-    # ---- pass 1
+    # ---- batch sizes and buffers
+    def _batch_sizes(self, mem_mb):
+        '''(pairs per batch of pass 2, of pass 1, triples per batch of the pp
+        ladder) for a buffer budget of ``mem_mb`` MB.'''
+        om, vm = self.om, self.vm
+        isz = np.dtype(self.dtype).itemsize
+        nb = pair_batch_size(om.n, vm.n, isz, mem_mb)
+        # pass 1 keeps one gathered block T[P, d, m, Q] (single spins of d, m)
+        # per pair alive: larger batches than pass 2, for larger GEMMs
+        nmax = max(len(r) for r in self.orng) * max(len(r) for r in self.vrng)
+        nqmax = max(vm.pair_off[g + 1] - vm.pair_off[g] for g in range(3))
+        per_pair = 2 * nmax * nqmax * isz
+        nb1 = max(nb, int(mem_mb * 1e6 // max(per_pair, 1)))
+        nbt = max(1, int(mem_mb * 1e6 // max(3 * vm.npair * vm.n * isz, 1)))
+        return nb, nb1, nbt
+
+    def set_memory(self, mem_mb):
+        '''Batch sizes for a buffer budget of ``mem_mb`` MB.  A change gives
+        the work array back: it is allocated again with the new sizes.'''
+        if mem_mb == self.mem_mb:
+            return
+        self.mem_mb = mem_mb
+        self.nb, self.nb1, self.nbt = self._batch_sizes(mem_mb)
+        self.__dict__.pop('_redt', None)        # (targets cached per batch of pairs)
+        release_workspace()
+
+    def mem_min(self):
+        '''The smallest useful ``mem_mb``: every pass works with batches of
+        one pair or one triple whatever the budget, so a quarter of f.'''
+        return 0.25 * self.om.n * self.vm.n ** 3 * np.dtype(self.dtype).itemsize / 1e6
+
+    def _row_unit(self):
+        '''Elements of the gathered T3 per occupied triple in the pp ladder
+        by rows (both spins of the free index).'''
+        vm, L = self.vm, self.L
+        ncs = [len(r) for r in self.vrng]
+        nQ = [int(vm.pair_off[h + 1] - vm.pair_off[h]) for h in range(3)]
+        return max([sum(nQ[g - sc] * ncs[sc] for sc in (0, 1) if 0 <= g - sc <= 2)
+                    for g in L.stored] + [1])
+
+    def buffer_bytes(self, mem_mb, max_rows=None):
+        '''Bytes of the work array with ``mem_mb``: the largest of what the
+        passes take from it (``max_rows``: rows per slab of the pp ladder by
+        rows; default: a whole pair block).'''
+        om, vm, L = self.om, self.vm, self.L
+        isz = np.dtype(self.dtype).itemsize
+        nb, nb1, nbt = self._batch_sizes(mem_mb)
+        no, nv = [len(r) for r in self.orng], [len(r) for r in self.vrng]
+        nP = [int(om.pair_off[g + 1] - om.pair_off[g]) for g in range(3)]
+        nQ = [int(vm.pair_off[g + 1] - vm.pair_off[g]) for g in range(3)]
+        nI = [int(om.tri_off[g + 1] - om.tri_off[g]) for g in range(4)]
+        nD = {d: sum(nv[sa] * no[si] for sa, si in self.dsub[d]) for d in (-1, 0, 1)}
+        n = 1
+        for gP in range(3):
+            # pass 1: one gathered block T[P, d, m, Q]
+            for sd in (0, 1):
+                for sm in (0, 1):
+                    if 0 <= gP + sm - sd <= 2:
+                        n = max(n, min(nb1, nP[gP]) * nv[sd] * no[sm] * nQ[gP + sm - sd])
+            # pass 2: the products of all pair groups and one gathered block
+            sizes = [nD[gP - gQ] * nQ[gQ] for gQ in range(3) if abs(gP - gQ) <= 1 and nQ[gQ]]
+            if sizes:
+                n = max(n, min(nb, nP[gP]) * (sum(sizes) + max(sizes)))
+        for g in L.stored:
+            # pp ladder: the products of both spins of the free index and one
+            # gathered block (operator in memory), or the gathered blocks and
+            # one product (operator by rows: two thirds of the budget)
+            sizes = [nQ[g - sc] * nv[sc] for sc in (0, 1) if 0 <= g - sc <= 2 and nQ[g - sc]]
+            if sizes and nI[g]:
+                n = max(n, min(nbt, nI[g]) * (sum(sizes) + max(sizes)))
+        per = self._row_unit() + (max(nQ) if max_rows is None else max_rows) * max(nv)
+        n = max(n, min(max(nI[g] for g in L.stored) * per,
+                       max(int(mem_mb * 1e6 * 2 / 3 // isz), per)))
+        return n * isz
+
     def _workspace(self, n):
-        '''Reusable work array of at least n elements, kept across batches and
-        iterations (fresh large arrays pay page faults on every first touch).
-        One user at a time: callers take non-overlapping views.'''
-        w = getattr(self, '_work', None)
-        if w is None or w.size < n:
-            w = self._work = np.empty(n, dtype=self.dtype)
-        return w[:n]
+        '''n elements of the work array (see workspace).'''
+        return workspace(n, self.dtype)
+
+    # ---- pass 1
 
     def _red_targets(self, p0, p1):
         '''Targets of the pass-2 reduction for the occupied pairs [p0, p1):
@@ -894,7 +1010,7 @@ def _spin_block_c_methods():
         coff = np.array([vr[0][0], vr[1][0]], dtype=np.int64)
         ncs = np.array([vr[0][1] - vr[0][0], vr[1][1] - vr[1][0]], dtype=np.int64)
         dummy = np.zeros(1, dtype=dtype)
-        nbt = max(1, int(self.mem_mb * 1e6 // (3 * vm.npair * nvir * np.dtype(dtype).itemsize)))
+        nbt = self.nbt
         for g in L.stored:
             A0, A1 = vm.tri_off[g], vm.tri_off[g + 1]
             if A1 == A0:
@@ -929,12 +1045,14 @@ def _spin_block_c_methods():
 
     def pp_ladder_rows(self, T3, slabs, R, order='slab', max_rows=None):
         '''pp ladder with the operator given in slabs of rows of its pair
-        blocks: ``slabs()`` returns an iterator of (hs, q0, q1, W), the rows
-        q0:q1 (block-local) of the blocks ``hs`` (alpha-alpha and beta-beta
-        share their rows for RHF), W of shape (q1 - q0, n_h).  order 'slab':
-        for each slab all occupied triples; 'batch': for each batch of triples
-        all slabs (slabs() is called once per batch).  ``max_rows``: the
-        largest q1 - q0.  R as returned by target() (C kernels only).'''
+        blocks: ``slabs(need)`` returns an iterator of (hs, q0, q1, W), the
+        rows q0:q1 (block-local) of the blocks ``hs`` (alpha-alpha and
+        beta-beta share their rows for RHF), W of shape (q1 - q0, n_h); it
+        may leave out blocks that are not in the set ``need`` (None: all are
+        needed).  order 'slab': for each slab all occupied triples; 'batch':
+        for each batch of triples the slabs of the blocks its spin group
+        needs (slabs() is called once per batch).  ``max_rows``: the largest
+        q1 - q0.  R as returned by target() (C kernels only).'''
         om, vm, dtype, L = self.om, self.vm, self.dtype, self.L
         isz = np.dtype(dtype).itemsize
         vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
@@ -958,7 +1076,7 @@ def _spin_block_c_methods():
                    for g in L.stored] + [1])
         nbt = max(1, int(self.mem_mb * 1e6 * 2 / 3 // (per * isz)))
         nbt = min(nbt, max(int(max(L.nI[g] for g in L.stored)), 1))
-        ws = np.empty(per * nbt, dtype=dtype)
+        ws = self._workspace(per * nbt)
 
         def gather(rows, sc, h, off):
             n = nQ[h] * len(rows) * ncs[sc]
@@ -984,7 +1102,7 @@ def _spin_block_c_methods():
                 if vm.tri_off[g + 1] > vm.tri_off[g] else []
 
         if order == 'slab':
-            for hs, q0, q1, W in slabs():
+            for hs, q0, q1, W in slabs(None):
                 for h in hs:
                     for g in L.stored:
                         for sc, hh in combos(g):
@@ -1000,7 +1118,7 @@ def _spin_block_c_methods():
                     Ts, off = {}, 0
                     for sc, h in cs:
                         Ts[sc], off = gather(rows, sc, h, off)
-                    for hs, q0, q1, W in slabs():
+                    for hs, q0, q1, W in slabs({h for _, h in cs}):
                         for sc, h in cs:
                             if h in hs:
                                 apply(Ts[sc], off, g, rows, sc, h, q0, q1, W)

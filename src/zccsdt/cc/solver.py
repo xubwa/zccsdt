@@ -138,7 +138,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
         if plan is not None:
             ccsdt_opt.place_vvvv(eris, plan)
         if with_t3:
-            size = ccsdt_opt.engine_for(eris, dtype, opts.mem_mb, opts.spin_flip).size
+            size = ccsdt_opt.engine_for(eris, dtype, flip=opts.spin_flip).size
             if plan is not None and plan.t3_file and size:
                 # T3 as a mapped array of a scratch file (new file space reads
                 # as zeros); its residual is built in the storage of the DIIS vectors
