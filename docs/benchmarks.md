@@ -601,53 +601,123 @@ passes over v^4 arrays.  For 15 occupied orbitals the o-contracted terms take
 
 What happens when the arrays do not fit is described in
 `docs/spin_adapted.md` ("Memory, and when it is short"; "When 10 v^4 does not
-fit"); here is what it costs.  Each run is a Slurm job step of 8 cores with a
-memory limit (`srun --mem`), which zccsdt sees through its memory cgroup; the
-plan is the automatic one (budget: 80% of what the limit leaves).  c233, the
-node of the other measurements, scratch on its local NVMe (2.4 GB/s
-sequential read), zccsdt ec877db - 75cc5c4.  "In memory" is the same
-calculation without a limit; under every limit of the table it needs more
-than the limit and is killed (the (Q) step refuses to start).
+fit") and in Section 3 of `docs/factorization.md`; here is what it costs.
 
-| System | In memory: needs, time | Limit | Goes to the scratch file | Time | Anonymous memory |
-|---|---|---|---|---|---|
-| H2O/cc-pVQZ, iteration | 4.5 GB, 5.15 s | 3 GB | T3, residual; pp operator in 6 slabs | 9.5-9.9 s | 2.4 GB |
-| C2H4/cc-pVTZ, iteration | 7.6 GB, 19.4-20.1 s | 6 GB | T3, residual | 28.1 s | 4.3 GB |
-| C2H4/cc-pVTZ, iteration | | 4 GB | T3, residual; pp operator in 6 slabs | 42.7 s | 3.3 GB |
-| C6H6/cc-pVDZ, frozen core, iteration | 13.7 GB, 85.7 s | 8 GB | T3, residual | 155 s | 4.5 GB |
-| H2O/cc-pVQZ, (Q) | 14 GB, 102 s | 6 GB | (v^4 arrays in slabs) | 194-225 s | 5.2 GB |
+**Setup.**
 
-The DIIS vectors (2 x 8 T3-sized vectors) are in the scratch file in all
-runs, also "in memory".  The node was shared with other jobs during these
-runs (the benzene run at a 1-minute load of 15); the same set is queued as
-separate Slurm jobs (`bench/slurm_memory.sh`).
+- **Memory limits.** Each run is a step of a Slurm batch job with a memory
+  limit of its own (`srun --mem`, `bench/slurm_steps.sh`), which zccsdt sees
+  through its memory cgroup; the plan is the automatic one (budget: 80% of
+  what the limit leaves).  "In memory" is the same calculation as a step
+  whose limit does not matter.  The steps of a job run one after the other
+  on the same cores and on the same node-local NVMe (mapped reads at
+  1.75 GB/s, writes at 0.6-1.0 GB/s).
+- **What is timed.** The mean of 2-3 iterations after a warm-up call.  The
+  DIIS subspace holds few vectors in runs this short; with a full subspace
+  the DIIS step reads 16 T3-sized vectors per iteration instead of 2-6 (see
+  "DIIS storage" above for what that costs when they are not in the page
+  cache).
+- **Memory.** Peak anonymous memory of the process, that is, its arrays;
+  mapped scratch files are page cache, which the limit takes back.
+- c157 (2 x Xeon Gold 6248R; benzene: c395, the same CPUs), 8 cores unless
+  stated.  Some steps shared the node with another benchmark job, which is
+  why each ratio is taken against the run in memory of the same job.
+- Versions: spin-orbital engines 20087bd (the X2C rows a4858a4: the same
+  dense engine); spin-adapted engine 210f5b7 with the pair pass planned at
+  15 instead of 16 o v^3 (benzene: a4858a4, see below).  Neither had the
+  residual-in-memory placement of 210f5b7 / 664e367 yet: where T3 leaves
+  memory in these tables, its residual leaves with it.
 
-- **The runs complete, with the energies of the runs in memory** (the (Q)
-  correction to all printed digits), where the version without these
-  changes was killed by the memory limit.
-- **Cost: 1.4-2.2 times the time in memory** when a third to a half of the
-  memory is missing; the sliced (Q) algorithm takes about twice the block
-  algorithm.
-- **Where the time goes: reading and writing T3.**  With T3 in the file an
-  iteration reads it about 8 times and reads and writes the residual about
-  8 times (three touches in the pair pass, three in the k pass, the ladder,
-  the null projection, the Jacobi step), and DIIS reads its 16 vectors and
-  writes 3: about 40 T3 volumes per iteration, 180 GB for benzene, at
-  2 GB/s unless the page cache holds them.  The time above the run in memory
-  is this.  A smaller `diis_space` reduces it (and the scratch space, 18 T3
-  volumes by default); `diis_t3=False` (DIIS on T1 and T2 only) removes the
-  DIIS part at the price of about a quarter more iterations.
-- **The pp operator costs little to slice**: it is passed over once per
-  iteration.  H2O/cc-pVQZ without a limit, but with an extreme plan (T3
-  mapped, the operator in 10 slabs of 64 MB, one block per product): 7.9 s
-  instead of 5.2 s per iteration, the difference being thin GEMMs and
-  repeated packing.
-- **What must still fit**: the ovvv-sized arrays, about 23 o v^3 elements
-  (1.5 GB for H2O/cc-pVQZ, 2.7 GB for benzene/cc-pVDZ, 25 GB for
-  H2O/cc-pV5Z, 46 GB for benzene/cc-pVTZ with frozen core); below that
-  `MemoryError` is raised at the start.  For (Q) in slabs: 6 (26 + o^2) v^3
-  elements (3.6 GB for H2O/cc-pVQZ, 60 GB for v = 282 and o = 5, where the
-  block algorithm needs 506 GB).
+### Spin-adapted RCCSDT
+
+| System | o, v | In memory | Limit | What leaves memory | Time | Ratio | Anonymous memory |
+|---|---|---|---|---|---|---|---|
+| H2O/cc-pVQZ | 5, 110 | 5.6 s, 4.5 GB | 3 GB | caches; bare pp operator, dressed rows in 3 slabs | 8.0 s | 1.4 | 2.6 GB |
+| | | | 2 GB | and T3 with its residual, ladder batch-wise | 17.6 s | 3.2 | 1.5 GB |
+| C2H4/cc-pVTZ | 8, 108 | 20.9 s, 7.5 GB | 6 GB | caches; bare pp operator | 27.6 s | 1.3 | 4.6 GB |
+| | | | 4 GB | caches; T3 and its residual | 38.7 s | 1.9 | 2.9 GB |
+| | | | 3 GB | caches; T3, its residual, bare pp operator | 44.4 s | 2.1 | 2.4 GB |
+| H2O/cc-pV5Z, 16 cores | 5, 196 | 30.7 s, 27.9 GB | 16 GB | caches; bare pp operator, dressed rows in 5 slabs | 38.4 s | 1.25 | 11.7 GB |
+| | | | 12 GB | and T3 with its residual, ladder in 3 batches | 77.6 s | 2.5 | 8.0 GB |
+| | | | 9 GB | the same with the thinnest slabs, 5 batches | 131 s | 4.3 | 6.8 GB |
+| C6H6/cc-pVDZ, frozen core (a4858a4) | 15, 93 | 75.5 s, 13.7 GB | 8 GB | T3 and its residual | 156 s | 2.1 | 4.5 GB |
+| | | | 6 GB | T3 and its residual | 184 s | 2.4 | 4.4 GB |
+| H2O/cc-pVQZ, (Q) | 5, 110 | 102 s, 13.5 GB | 6 GB | (v^4 arrays in slabs) | 185 s | 1.8 | 5.5 GB |
+
+"Caches" are the second layouts of integral blocks and the work buffers
+that a run in memory keeps between its stages (8 o v^3 together); a run
+short of memory gives each back after the stage that uses it, which by
+itself costs about a tenth of the iteration time (H2O/cc-pVQZ: 5.7-6.1 s
+instead of 5.2-5.6 s with everything else in memory).  Before that change
+(a4858a4) the plan counted 23 o v^3 as fixed, T3 left memory much earlier and
+the ladder batches shrank: H2O/cc-pVQZ took 11.7 s under 3 GB, C2H4 46.5 s
+under 4 GB, H2O/cc-pV5Z 89.7 s under 16 GB and 266 s under 12 GB (one block
+per batch: the operator file was read 30 times per iteration).
+
+### Spin-orbital and spinor engines
+
+| System | o, v (spin orbitals) | In memory | Limit | What leaves memory | Time | Ratio | Anonymous memory |
+|---|---|---|---|---|---|---|---|
+| X2C H2O/cc-pVTZ (spinors, complex) | 10, 106 | 15.6 s, 5.1 GB | 4 GB | bare pp operator (dressed rows at once) | 16.5 s | 1.06 | 3.8 GB |
+| | | | 3 GB | bare pp operator, dressed rows in 6 slabs | 21.2 s | 1.36 | 2.9 GB |
+| | | | 2.5 GB | and T3 with its residual, ladder batch-wise | 21.7 s | 1.39 | 2.0 GB |
+| | | | 2 GB | the same with thin slabs | 28.7 s | 1.84 | 1.8 GB |
+| UHF NH2/cc-pVQZ (U form) | 9, 221 | 16.2 s, 8.9 GB | 6 GB | bare pp blocks, dressed rows in 4 slabs | 17.8 s | 1.10 | 4.9 GB |
+| | | | 5 GB | the same in 15 slabs | 20.3 s | 1.26 | 4.1 GB |
+| | | | 4 GB | and T3 with its residual, ladder batch-wise | 34.3 s | 2.1 | 3.0 GB |
+| | | | 3.5 GB | the same with the smallest buffers | 55.7 s | 3.4 | 2.9 GB |
+| RHF H2O/cc-pVQZ (R form, spin flip) | 10, 220 | 12.7 s, 7.8 GB | 5 GB | bare pp blocks, dressed rows in slabs | 17.9 s | 1.4 | 4.0 GB |
+| | | | 4 GB | and T3 with its residual, ladder batch-wise | 27.1 s | 2.1 | 3.1 GB |
+
+- **The runs complete with the energies of the runs in memory**: the
+  correlation energy of every iteration agrees to 2e-14 (spin-orbital
+  engines) and 1e-13 (spin-adapted, cc-pV5Z), the (Q) correction to all
+  printed digits.
+- **Below what must fit, the run stops before the iterations** with a
+  `MemoryError` that says how much is needed: X2C H2O/cc-pVTZ under 1.8 GB
+  (needs 1.5 GB beyond the integrals; 2 GB is the edge, where one of two
+  runs was refused), UHF NH2/cc-pVQZ under 3 GB (2.8 GB), RHF H2O/cc-pVQZ in
+  the R form under 3 GB (3.0 GB).  No run was killed by its limit.  One was
+  before 20087bd: UHF NH2/cc-pVQZ under 5 GB, planned at 3.7 GB, because the
+  spin-blocked engine kept a work array that the plan did not count (and a
+  second one after a second plan); under 6 GB that version took 28.9 s.
+- **The integrals stay within the limit as well**: built for the scratch
+  file when the budget is short, the integral stage peaks at 1.3-1.6 GB for
+  X2C H2O/cc-pVTZ (2.9 GB in memory; 14.5-15.2 s either way) and 1.6-1.8 GB
+  for UHF NH2/cc-pVQZ (3.3 GB; 32-34 s).
+- **What it costs depends on what has to leave.**
+  1. *Caches only, or the bare pp operator*: 1.06-1.4 times the time in
+     memory.  The operator file is read once per iteration (5.9 GB for
+     cc-pV5Z: 3 s), and the dressed rows come in a few slabs.
+  2. *T3 and its residual*: 1.4-2.5 times.  Every block of T3 is read by
+     each pass that needs it (three pair positions, three positions of the
+     index k, the ladder, the Jacobi step: about 9 times per iteration), and
+     every block of the residual is read and written as often; what the
+     page cache under the limit cannot hold goes through the disk.  Benzene,
+     where two T3-sized arrays are 8.6 GB of the 13.7 GB, is the example:
+     about 40 GB read and 40 GB written per iteration.  (The planner now
+     keeps the residual in memory when it fits alone, so that only reads of
+     T3 remain; not measured yet.)
+  3. *Close to the least that works*: 3-4 times and more.  The buffers are
+     at their smallest, the ladder runs in many batches, and each batch is a
+     pass over the file with the rows of the ladder operator (cc-pV5Z under
+     9 GB: 5 passes over 5.9 GB in 127 slabs each).
+- **Telling the operating system does not help on a quiet node.**  With the
+  hints of `ZCCSDT_IO=1` against without: benzene 183.9 s against 183.5 s
+  (6 GB) and 159.4 s against 155.7 s (8 GB); C2H4 32.0 s against 29.9 s
+  (6 GB) and 50.2 s against 49.1 s (4 GB); H2O/cc-pVQZ 13.0 s against
+  12.6 s (3 GB); X2C H2O/cc-pVTZ 21.9 s against 22.5 s (3 GB) and 25.8 s
+  both ways (2.5 GB).  They are an option, not the default.
+- **What must still fit** (next to the integral blocks):
+  spin-adapted, 16 o v^3 plus 2 n o v^2 + n^2 o v elements: 1.1 GB for
+  H2O/cc-pVQZ, 1.7 GB for C2H4/cc-pVTZ, 2.0 GB for benzene/cc-pVDZ, 5.9 GB
+  for H2O/cc-pV5Z, 38 GB for o = 30, v = 200;
+  spinors and spin orbitals, 3.5 o v^3 of complex or real numbers plus the
+  overhead: 1.5 GB for X2C H2O/cc-pVTZ, 7.3 GB for X2C H2O/cc-pVQZ;
+  U / R form, 2.3 o v^3 of real numbers plus the overhead: 2.8 GB for
+  NH2/cc-pVQZ.
+  For (Q) in slabs: 6 (26 + o^2) v^3 elements (3.6 GB for H2O/cc-pVQZ, 60 GB
+  for v = 282 and o = 5, where the block algorithm needs 506 GB).
 
 ## Spinor against spin-adapted CCSDT: time ratios and their theory, 8 cores
 

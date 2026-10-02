@@ -290,3 +290,14 @@ Timings under memory limits are in `docs/benchmarks.md`.
   The full ovvv block (o v^3) is still held next to its packed form.
 - **Real/complex.** Both are covered by the same code. Complex runs about
   4x the real flops, as expected.
+- **Memory floor of the U/R form.** The pass-1 operand and result and
+  `W_vvvo` are still dense arrays (f / 2 each) of which spin conservation
+  leaves 3/8; with spin-blocked operands the 2 f of this form would be
+  about 1.5 f.
+- **Both T3 arrays in the file.** Each amplitude is then read, and each
+  element of the residual read and written, once per pass that touches it
+  (pass 1, pass 2, the ladders, the update): the iteration is I/O-bound.
+  Fusing passes over batches of occupied triples would cut that; so would a
+  DIIS that reads its stored vectors once per iteration instead of twice
+  (the error vectors for the overlaps, the amplitude vectors for the
+  extrapolation).

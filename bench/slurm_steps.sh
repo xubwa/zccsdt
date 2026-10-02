@@ -24,14 +24,22 @@ export PYSCF_TMPDIR=$ZCCSDT_TMPDIR
 mkdir -p $ZCCSDT_TMPDIR
 trap 'rm -rf $ZCCSDT_TMPDIR' EXIT
 RUNS=$(readlink -f "$1")
+# (the login shell of a batch job may not have the Slurm commands in its PATH)
+SRUN=$(command -v srun || echo /cm/shared/apps/slurm/current/bin/srun)
+SQUEUE=$(dirname $SRUN)/squeue
+# Benchmark jobs must not share a node: its memory bandwidth and its local
+# disk are what the timings depend on.  Wait while an earlier job of this
+# script (job name final_* / steps_*, smaller job id) runs on this node.
+while $SQUEUE -h -u $USER -w $(hostname -s) -t R -o "%i %j" 2>/dev/null \
+        | awk -v me=$SLURM_JOB_ID '$2 ~ /^(final_|steps_)/ && $1 < me {found = 1} END {exit !found}'; do
+    sleep 30
+done
 # ZC_ROOT: run from a snapshot of the repository (default: the working tree)
 cd ${ZC_ROOT:-/home/xwang405/apps/zccsdt}
 echo "host $(hostname)  $(date)  cpus $(taskset -cp $$ | sed 's/.*: //')  mem ${SLURM_MEM_PER_NODE} MB"
 lscpu | grep 'Model name'
 df -h /tmp | tail -1
 export PYTHONPATH=src:$PYTHONPATH PYTHONDONTWRITEBYTECODE=1
-# (the login shell of a batch job may not have the Slurm commands in its PATH)
-SRUN=$(command -v srun || echo /cm/shared/apps/slurm/current/bin/srun)
 # what the memory cgroup of a step counted (the limit is on the step, the
 # parent of the cgroup of its task): times the limit was hit, page faults
 # that had to read from the disk
