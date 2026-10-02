@@ -1090,6 +1090,112 @@ void zc_vzero_d(int64_t n, double *x)
 static const int Q_PERM[24][4] = {{0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1}, {0, 3, 1, 2}, {0, 3, 2, 1}, {1, 0, 2, 3}, {1, 0, 3, 2}, {1, 2, 0, 3}, {1, 2, 3, 0}, {1, 3, 0, 2}, {1, 3, 2, 0}, {2, 0, 1, 3}, {2, 0, 3, 1}, {2, 1, 0, 3}, {2, 1, 3, 0}, {2, 3, 0, 1}, {2, 3, 1, 0}, {3, 0, 1, 2}, {3, 0, 2, 1}, {3, 1, 0, 2}, {3, 1, 2, 0}, {3, 2, 0, 1}, {3, 2, 1, 0}};
 /* transpositions of the factors of M: (03), (13), (23); (02), (12); (01) */
 static const int Q_TR[6][2] = {{0, 3}, {1, 3}, {2, 3}, {0, 2}, {1, 2}, {0, 1}};
+/* part[pi][t]: the permutation pi with the two entries of transposition t swapped */
+static void q_parts(int part[24][6])
+{
+    for (int pi = 0; pi < 24; pi++)
+        for (int t = 0; t < 6; t++) {
+            int q[4] = {Q_PERM[pi][0], Q_PERM[pi][1], Q_PERM[pi][2], Q_PERM[pi][3]};
+            q[Q_TR[t][0]] = Q_PERM[pi][Q_TR[t][1]];
+            q[Q_TR[t][1]] = Q_PERM[pi][Q_TR[t][0]];
+            for (int p2 = 0; p2 < 24; p2++)
+                if (Q_PERM[p2][0] == q[0] && Q_PERM[p2][1] == q[1] && Q_PERM[p2][2] == q[2]) part[pi][t] = p2;
+        }
+}
+
+/* M r and the energy of one sorted tile quadruple from its 24 base-ordered
+ * buffers (al, cl, rl: a, c and r at the 24 permuted positions of every base
+ * element), row by row of the base tile; adds to e5 (c M r / D) and e6
+ * (a M r / D).  bb / nn: first index and size of the four tiles. */
+static void q_tile_energy(const double *al, const double *cl, const double *rl,
+                          int part[24][6], const int64_t *bb, const int64_t *nn, int rep,
+                          double eocc, const double *ev, double *e5, double *e6)
+{
+    const int64_t m3 = nn[3];
+    for (int64_t u0 = 0; u0 < nn[0]; u0++)
+    for (int64_t u1 = 0; u1 < nn[1]; u1++)
+    for (int64_t u2 = 0; u2 < nn[2]; u2++) {
+        const int64_t x0 = bb[0] + u0, x1 = bb[1] + u1, x2 = bb[2] + u2;
+        if (rep && (x0 > x1 || x1 > x2)) continue;
+        const int64_t row = (u0 * QT + u1) * Q2 + u2 * QT;
+        double t1[24][QT], t2[24][QT], s5[QT] = {0}, s6[QT] = {0};
+        for (int pi = 0; pi < 24; pi++) {
+            const double *r0 = rl + pi * Q4 + row, *ra = rl + part[pi][0] * Q4 + row;
+            const double *rb = rl + part[pi][1] * Q4 + row, *rc = rl + part[pi][2] * Q4 + row;
+            for (int64_t u3 = 0; u3 < m3; u3++)
+                t1[pi][u3] = 2 * r0[u3] - ra[u3] - rb[u3] - rc[u3];
+        }
+        for (int pi = 0; pi < 24; pi++) {
+            const double *q0 = t1[pi], *qa = t1[part[pi][3]], *qb = t1[part[pi][4]];
+            for (int64_t u3 = 0; u3 < m3; u3++) t2[pi][u3] = 2 * q0[u3] - qa[u3] - qb[u3];
+        }
+        for (int pi = 0; pi < 24; pi++) {
+            const double *q0 = t2[pi], *qa = t2[part[pi][5]];
+            const double *ar = al + pi * Q4 + row, *cr = cl + pi * Q4 + row;
+            for (int64_t u3 = 0; u3 < m3; u3++) {
+                const double m = 2 * q0[u3] - qa[u3];
+                s5[u3] += cr[u3] * m;
+                s6[u3] += ar[u3] * m;
+            }
+        }
+        const double d0 = eocc - ev[x0] - ev[x1] - ev[x2];
+        if (!rep) {
+            for (int64_t u3 = 0; u3 < m3; u3++) {
+                const double f = 2 / (d0 - ev[bb[3] + u3]);
+                *e5 += s5[u3] * f;
+                *e6 += s6[u3] * f;
+            }
+        } else {
+            for (int64_t u3 = 0; u3 < m3; u3++) {
+                const int64_t x3 = bb[3] + u3;
+                if (x3 < x2) continue;
+                /* 1 / |stabilizer| of the sorted element */
+                const int e01 = x0 == x1, e12 = x1 == x2, e23 = x2 == x3;
+                double st = 1;
+                if (e01 && e12 && e23) st = 24;
+                else if ((e01 && e12) || (e12 && e23)) st = 6;
+                else if (e01 && e23) st = 4;
+                else if (e01 || e12 || e23) st = 2;
+                const double f = 2 / (st * (d0 - ev[x3]));
+                *e5 += s5[u3] * f;
+                *e6 += s6[u3] * f;
+            }
+        }
+    }
+}
+
+/* copy the buffers of an earlier permutation whose tile position coincides
+ * with that of pi (coinciding tiles); returns 1 if one was found */
+static int q_copy_tile(double *al, double *cl, double *rl, int pi, const int64_t *T,
+                       const int64_t *nn)
+{
+    static const int64_t QS[4] = {Q3, Q2, QT, 1};
+    const int *P = Q_PERM[pi];
+    int p0 = -1;
+    for (int q = 0; q < pi && p0 < 0; q++)
+        if (T[Q_PERM[q][0]] == T[P[0]] && T[Q_PERM[q][1]] == T[P[1]]
+            && T[Q_PERM[q][2]] == T[P[2]] && T[Q_PERM[q][3]] == T[P[3]]) p0 = q;
+    if (p0 < 0) return 0;
+    const int *P0 = Q_PERM[p0];
+    const int64_t n0 = nn[P[0]], n1 = nn[P[1]], n2 = nn[P[2]], n3 = nn[P[3]];
+    const int64_t l0 = QS[P[0]], l1 = QS[P[1]], l2 = QS[P[2]], l3 = QS[P[3]];
+    const int64_t m0 = QS[P0[0]], m1 = QS[P0[1]], m2 = QS[P0[2]], m3 = QS[P0[3]];
+    double *ap = al + pi * Q4, *cp = cl + pi * Q4, *rp = rl + pi * Q4;
+    const double *a0 = al + p0 * Q4, *c0 = cl + p0 * Q4, *r0 = rl + p0 * Q4;
+    for (int64_t u0 = 0; u0 < n0; u0++)
+    for (int64_t u1 = 0; u1 < n1; u1++)
+    for (int64_t u2 = 0; u2 < n2; u2++) {
+        const int64_t lo = u0 * l0 + u1 * l1 + u2 * l2;
+        const int64_t mo = u0 * m0 + u1 * m1 + u2 * m2;
+        for (int64_t u3 = 0; u3 < n3; u3++) {
+            ap[lo + u3 * l3] = a0[mo + u3 * m3];
+            rp[lo + u3 * l3] = r0[mo + u3 * m3];
+            cp[lo + u3 * l3] = c0[mo + u3 * m3];
+        }
+    }
+    return 1;
+}
+
 void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const double *gc,
                       double eocc, const double *ev, int mirror, double *out)
 {
@@ -1108,14 +1214,7 @@ void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const doubl
     static const int64_t QS[4] = {Q3, Q2, QT, 1};
     /* buffer of the permutation pi with two entries swapped */
     int part[24][6];
-    for (int pi = 0; pi < 24; pi++)
-        for (int t = 0; t < 6; t++) {
-            int q[4] = {Q_PERM[pi][0], Q_PERM[pi][1], Q_PERM[pi][2], Q_PERM[pi][3]};
-            q[Q_TR[t][0]] = Q_PERM[pi][Q_TR[t][1]];
-            q[Q_TR[t][1]] = Q_PERM[pi][Q_TR[t][0]];
-            for (int p2 = 0; p2 < 24; p2++)
-                if (Q_PERM[p2][0] == q[0] && Q_PERM[p2][1] == q[1] && Q_PERM[p2][2] == q[2]) part[pi][t] = p2;
-        }
+    q_parts(part);
     double e5 = 0, e6 = 0;
     #pragma omp parallel reduction(+:e5, e6)
     {
@@ -1137,31 +1236,9 @@ void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const doubl
                 const int64_t n0 = nn[P[0]], n1 = nn[P[1]], n2 = nn[P[2]], n3 = nn[P[3]];
                 const int64_t l0 = QS[P[0]], l1 = QS[P[1]], l2 = QS[P[2]], l3 = QS[P[3]];
                 double *ap = al + pi * Q4, *cp = cl + pi * Q4, *rp = rl + pi * Q4;
-                if (rep) {
-                    /* coinciding tiles: the same tile position may have been
-                     * loaded for an earlier permutation; copy it in cache */
-                    int p0 = -1;
-                    for (int q = 0; q < pi && p0 < 0; q++)
-                        if (T[Q_PERM[q][0]] == T[P[0]] && T[Q_PERM[q][1]] == T[P[1]]
-                            && T[Q_PERM[q][2]] == T[P[2]] && T[Q_PERM[q][3]] == T[P[3]]) p0 = q;
-                    if (p0 >= 0) {
-                        const int *P0 = Q_PERM[p0];
-                        const int64_t m0 = QS[P0[0]], m1 = QS[P0[1]], m2 = QS[P0[2]], m3 = QS[P0[3]];
-                        const double *a0 = al + p0 * Q4, *c0 = cl + p0 * Q4, *r0 = rl + p0 * Q4;
-                        for (int64_t u0 = 0; u0 < n0; u0++)
-                        for (int64_t u1 = 0; u1 < n1; u1++)
-                        for (int64_t u2 = 0; u2 < n2; u2++) {
-                            const int64_t lo = u0 * l0 + u1 * l1 + u2 * l2;
-                            const int64_t mo = u0 * m0 + u1 * m1 + u2 * m2;
-                            for (int64_t u3 = 0; u3 < n3; u3++) {
-                                ap[lo + u3 * l3] = a0[mo + u3 * m3];
-                                rp[lo + u3 * l3] = r0[mo + u3 * m3];
-                                cp[lo + u3 * l3] = c0[mo + u3 * m3];
-                            }
-                        }
-                        continue;
-                    }
-                }
+                /* coinciding tiles: the same tile position may have been
+                 * loaded for an earlier permutation; copy it in cache */
+                if (rep && q_copy_tile(al, cl, rl, pi, T, nn)) continue;
                 /* the rows of a tile are scattered over the accumulators:
                  * request them all before use, so that the misses overlap */
                 for (int64_t u0 = 0; u0 < n0; u0++)
@@ -1235,64 +1312,136 @@ void zc_sa_q_energy_d(int64_t v, const double **S, const double *tc, const doubl
                         r0[e] = r1[e] = sr;
                     }
                 }
-            /* ---- M r and the energy, row by row of the base tile */
-            const int64_t m3 = nn[3];
-            for (int64_t u0 = 0; u0 < nn[0]; u0++)
-            for (int64_t u1 = 0; u1 < nn[1]; u1++)
-            for (int64_t u2 = 0; u2 < nn[2]; u2++) {
-                const int64_t x0 = bb[0] + u0, x1 = bb[1] + u1, x2 = bb[2] + u2;
-                if (rep && (x0 > x1 || x1 > x2)) continue;
-                const int64_t row = (u0 * QT + u1) * Q2 + u2 * QT;
-                double t1[24][QT], t2[24][QT], s5[QT] = {0}, s6[QT] = {0};
-                for (int pi = 0; pi < 24; pi++) {
-                    const double *r0 = rl + pi * Q4 + row, *ra = rl + part[pi][0] * Q4 + row;
-                    const double *rb = rl + part[pi][1] * Q4 + row, *rc = rl + part[pi][2] * Q4 + row;
-                    for (int64_t u3 = 0; u3 < m3; u3++)
-                        t1[pi][u3] = 2 * r0[u3] - ra[u3] - rb[u3] - rc[u3];
-                }
-                for (int pi = 0; pi < 24; pi++) {
-                    const double *q0 = t1[pi], *qa = t1[part[pi][3]], *qb = t1[part[pi][4]];
-                    for (int64_t u3 = 0; u3 < m3; u3++) t2[pi][u3] = 2 * q0[u3] - qa[u3] - qb[u3];
-                }
-                for (int pi = 0; pi < 24; pi++) {
-                    const double *q0 = t2[pi], *qa = t2[part[pi][5]];
-                    const double *ar = al + pi * Q4 + row, *cr = cl + pi * Q4 + row;
-                    for (int64_t u3 = 0; u3 < m3; u3++) {
-                        const double m = 2 * q0[u3] - qa[u3];
-                        s5[u3] += cr[u3] * m;
-                        s6[u3] += ar[u3] * m;
-                    }
-                }
-                const double d0 = eocc - ev[x0] - ev[x1] - ev[x2];
-                if (!rep) {
-                    for (int64_t u3 = 0; u3 < m3; u3++) {
-                        const double f = 2 / (d0 - ev[bb[3] + u3]);
-                        e5 += s5[u3] * f;
-                        e6 += s6[u3] * f;
-                    }
-                } else {
-                    for (int64_t u3 = 0; u3 < m3; u3++) {
-                        const int64_t x3 = bb[3] + u3;
-                        if (x3 < x2) continue;
-                        /* 1 / |stabilizer| of the sorted element */
-                        const int e01 = x0 == x1, e12 = x1 == x2, e23 = x2 == x3;
-                        double st = 1;
-                        if (e01 && e12 && e23) st = 24;
-                        else if ((e01 && e12) || (e12 && e23)) st = 6;
-                        else if (e01 && e23) st = 4;
-                        else if (e01 || e12 || e23) st = 2;
-                        const double f = 2 / (st * (d0 - ev[x3]));
-                        e5 += s5[u3] * f;
-                        e6 += s6[u3] * f;
-                    }
-                }
-            }
+            q_tile_energy(al, cl, rl, part, bb, nn, rep, eocc, ev, &e5, &e6);
         }
         free(al);
     }
     free(orb);
     out[0] = e5;
     out[1] = e6;
+}
+
+/* The same for the sorted tile quadruples whose largest tile lies in the slab
+ * of tiles t0 <= T3 < t1, from the *faces* of the quadruple: with d0 = t0 QT,
+ * n = min(v, t1 QT) and nd = n - d0, face p (the pair p carries the slab
+ * index) is given by six arrays F[6 p + k] of shape (n, n, n, nd) in the
+ * three cyclic layouts of the other pairs q0 < q1 < q2,
+ *   a[x] = F[6p][x_q0, x_q1, x_q2, x_p - d0] + F[6p+1][x_q1, x_q2, x_q0, .]
+ *        + F[6p+2][x_q2, x_q0, x_q1, .]      (b: F[6p+3 .. 6p+5]),
+ * valid where x_p is in the slab and the other indices are below n.  Every
+ * permuted position of an element whose largest index is in the slab has
+ * that index at some position p and is read from face p.  tc / gc as in
+ * zc_sa_q_energy_d (v x v matrices). */
+void zc_sa_q_energy_faces_d(int64_t v, int64_t t0, int64_t t1, const double **F,
+                            const double *tc, const double *gc, double eocc,
+                            const double *ev, double *out)
+{
+    const int64_t d0 = t0 * QT, v2 = v * v;
+    const int64_t n = t1 * QT < v ? t1 * QT : v, nd = n - d0;
+    int64_t norb = 0;
+    for (int64_t d = t0; d < t1; d++) norb += (d + 1) * (d + 2) * (d + 3) / 6;
+    int64_t *orb = malloc(4 * (norb > 0 ? norb : 1) * sizeof(int64_t));
+    int64_t cnt = 0;
+    for (int64_t d = t0; d < t1; d++)
+    for (int64_t a = 0; a <= d; a++)
+    for (int64_t b = a; b <= d; b++)
+    for (int64_t c = b; c <= d; c++) {
+        orb[4 * cnt] = a; orb[4 * cnt + 1] = b; orb[4 * cnt + 2] = c; orb[4 * cnt + 3] = d; cnt++;
+    }
+    static const int64_t QS[4] = {Q3, Q2, QT, 1};
+    int part[24][6];
+    q_parts(part);
+    const double *t01 = tc, *t02 = tc + v2, *t03 = tc + 2 * v2;
+    const double *t12 = tc + 3 * v2, *t13 = tc + 4 * v2, *t23 = tc + 5 * v2;
+    const double *g23 = gc, *g13 = gc + v2, *g12 = gc + 2 * v2;
+    const double *g03 = gc + 3 * v2, *g02 = gc + 4 * v2, *g01 = gc + 5 * v2;
+    double e5 = 0, e6 = 0;
+    #pragma omp parallel reduction(+:e5, e6)
+    {
+        double *al = malloc(3 * 24 * Q4 * sizeof(double));
+        double *cl = al + 24 * Q4, *rl = al + 48 * Q4;
+        #pragma omp for schedule(dynamic)
+        for (int64_t w = 0; w < norb; w++) {
+            const int64_t *T = orb + 4 * w;
+            int64_t bb[4], nn[4];
+            for (int k = 0; k < 4; k++) {
+                bb[k] = T[k] * QT;
+                nn[k] = v - bb[k] < QT ? v - bb[k] : QT;
+            }
+            const int rep = T[0] == T[1] || T[1] == T[2] || T[2] == T[3];
+            for (int pi = 0; pi < 24; pi++) {
+                const int *P = Q_PERM[pi];
+                if (rep && q_copy_tile(al, cl, rl, pi, T, nn)) continue;
+                /* position k3 holds the base index 3 (the slab tile); the
+                 * other positions q[0] < q[1] < q[2] */
+                int k3 = 0, q[3], m = 0;
+                for (int k = 0; k < 4; k++) {
+                    if (P[k] == 3) k3 = k;
+                    else q[m++] = k;
+                }
+                const double *f0 = F[6 * k3], *f1 = F[6 * k3 + 1], *f2 = F[6 * k3 + 2];
+                const double *f3 = F[6 * k3 + 3], *f4 = F[6 * k3 + 4], *f5 = F[6 * k3 + 5];
+                const int64_t ba = bb[P[q[0]]], bbq = bb[P[q[1]]], bc = bb[P[q[2]]];
+                const int64_t na = nn[P[q[0]]], nb = nn[P[q[1]]], nc = nn[P[q[2]]];
+                const int64_t la = QS[P[q[0]]], lb = QS[P[q[1]]], lc = QS[P[q[2]]];
+                const int64_t n3 = nn[3], off = bb[3] - d0;
+                double *ap = al + pi * Q4, *cp = cl + pi * Q4, *rp = rl + pi * Q4;
+                int64_t y[4];
+                for (int64_t ua = 0; ua < na; ua++)
+                for (int64_t ub = 0; ub < nb; ub++)
+                for (int64_t uc = 0; uc < nc; uc++) {
+                    const int64_t xa = ba + ua, xb = bbq + ub, xc = bc + uc;
+                    const double *s0 = f0 + ((xa * n + xb) * n + xc) * nd + off;
+                    const double *s1 = f1 + ((xb * n + xc) * n + xa) * nd + off;
+                    const double *s2 = f2 + ((xc * n + xa) * n + xb) * nd + off;
+                    const double *s3 = f3 + ((xa * n + xb) * n + xc) * nd + off;
+                    const double *s4 = f4 + ((xb * n + xc) * n + xa) * nd + off;
+                    const double *s5 = f5 + ((xc * n + xa) * n + xb) * nd + off;
+                    const int64_t lo = ua * la + ub * lb + uc * lc;
+                    y[q[0]] = xa; y[q[1]] = xb; y[q[2]] = xc;
+                    for (int64_t u3 = 0; u3 < n3; u3++) {
+                        y[k3] = bb[3] + u3;
+                        const double a = s0[u3] + s1[u3] + s2[u3];
+                        ap[lo + u3] = a;
+                        rp[lo + u3] = a + s3[u3] + s4[u3] + s5[u3];
+                        cp[lo + u3] = t01[y[0] * v + y[1]] * g23[y[2] * v + y[3]]
+                                    + t02[y[0] * v + y[2]] * g13[y[1] * v + y[3]]
+                                    + t12[y[1] * v + y[2]] * g03[y[0] * v + y[3]]
+                                    + g12[y[1] * v + y[2]] * t03[y[0] * v + y[3]]
+                                    + g02[y[0] * v + y[2]] * t13[y[1] * v + y[3]]
+                                    + g01[y[0] * v + y[1]] * t23[y[2] * v + y[3]];
+                    }
+                }
+            }
+            q_tile_energy(al, cl, rl, part, bb, nn, rep, eocc, ev, &e5, &e6);
+        }
+        free(al);
+    }
+    free(orb);
+    out[0] = e5;
+    out[1] = e6;
+}
+
+/* Dense [e, x, k] (e < v, x < n, k < K) from rows packed over pairs e >= x:
+ *   out[(e n + x) K + k] = src[row[k] ps + tri(e, x)],  ps = v (v + 1) / 2
+ * (a quantity symmetric in (e, x), one packed row per k).  Rows in chunks, so
+ * that few read streams are open at a time. */
+#define QU_CHUNK 16
+void zc_sa_q_unpack_d(double *out, int64_t v, int64_t n, int64_t K, const double *src,
+                      const int64_t *row)
+{
+    const int64_t ps = v * (v + 1) / 2, nch = (K + QU_CHUNK - 1) / QU_CHUNK;
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int64_t ch = 0; ch < nch; ch++)
+    for (int64_t e = 0; e < v; e++) {
+        const int64_t k0 = ch * QU_CHUNK;
+        const int64_t k1 = k0 + QU_CHUNK < K ? k0 + QU_CHUNK : K;
+        for (int64_t x = 0; x < n; x++) {
+            const int64_t t = tri_idx(e, x);
+            double *o = out + (e * n + x) * K;
+            for (int64_t k = k0; k < k1; k++) o[k] = src[row[k] * ps + t];
+        }
+    }
 }
 
 /* ---- spin-blocked T3 (Ms-conserving blocks, see zccsdt/cc/t3engine.py) ----

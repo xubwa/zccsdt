@@ -166,3 +166,81 @@ def test_memory_guard(h2o, monkeypatch):
     monkeypatch.setattr(rccsdt_q, '_available_memory', lambda: 1000)
     with pytest.raises(MemoryError, match='10 v\\^4'):
         rccsdt_q.kernel(ints, B, t2, t3b)
+
+
+def test_sliced_algorithm_equals_block(h2o):
+    '''The v^4 work arrays cut into slabs of the largest virtual index (one
+    slab, and one kernel tile per slab) against the block algorithm.'''
+    from zccsdt.cc import t3pack
+    from zccsdt.sa import rccsdt_q
+    if not t3pack.USE_C:
+        pytest.skip('no C library')
+    ints, B, t2, t3b, t3, val = h2o
+    ref = rccsdt_q.q_correction(ints, B, t2, t3b)
+    assert rccsdt_q.slab_tiles(ints.nvir) == [(0, 1), (1, 2)]
+    assert rccsdt_q.slab_tiles(13, 2) == [(0, 2), (2, 3)]
+    for tiles in (1, 2):
+        got = rccsdt_q.q_correction_slabs(ints, B, t2, t3b, tiles=tiles)
+        assert abs(got[0] - ref[0]) < 1e-13 and abs(got[1] - ref[1]) < 1e-13
+
+
+def test_sliced_algorithm_five_occupied(monkeypatch, tmp_path):
+    '''All kinds of occupied quadruples (repeated indices at every position),
+    three slabs with a short last one, integrals from the AO basis; and the
+    choice of the algorithm by the memory budget, with the integral rows
+    mapped from the scratch directory.'''
+    from pyscf import gto, scf
+    from zccsdt.cc import t3pack
+    from zccsdt.sa import rccsdt, rccsdt_q, rccsdt_ref
+    from zccsdt.sa.t3blocks import Blocks
+    if not t3pack.USE_C:
+        pytest.skip('no C library')
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='6-31g*', verbose=0)
+    mf = scf.RHF(mol).run(conv_tol=1e-12)
+    ints = rccsdt_ref.from_scf(mf, full=False)
+    no, nv = ints.nocc, ints.nvir
+    assert no == 5 and len(rccsdt_q.slab_tiles(nv)) == 3 and nv % rccsdt_q.QT
+    r = rccsdt.kernel(ints, max_cycle=3)
+    B = Blocks(no)
+    ref = rccsdt_q.q_correction(ints, B, r.t2, r.t3)
+    got = rccsdt_q.q_correction_slabs(ints, B, r.t2, r.t3)
+    assert abs(got[0] - ref[0]) < 1e-13 and abs(got[1] - ref[1]) < 1e-13
+    # kernel: explicit choice, and by the budget
+    calls = []
+    slabs = rccsdt_q.q_correction_slabs
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return slabs(*args, **kwargs)
+    monkeypatch.setattr(rccsdt_q, 'q_correction_slabs', spy)
+    assert rccsdt_q.kernel(ints, B, r.t2, r.t3, tiles=0) == ref and not calls
+    got = rccsdt_q.kernel(ints, B, r.t2, r.t3, tiles=2)
+    assert calls.pop()['tiles'] == 2 and abs(got[1] - ref[1]) < 1e-13
+    # (with so few virtual orbitals the slabs would take more than 10 v^4:
+    # the model is replaced to exercise the choice)
+    assert rccsdt_q.sliced_memory(5, 110) < rccsdt_q.memory_needed(5, 110) / 3
+    assert rccsdt_q.sliced_memory(5, 282) < rccsdt_q.memory_needed(5, 282) / 8
+    block = rccsdt_q.memory_needed(no, nv)
+    sliced = block // 4
+    monkeypatch.setattr(rccsdt_q, 'sliced_memory', lambda *a: sliced)
+    monkeypatch.setattr(rccsdt_q, '_available_memory', lambda: 2 * block)
+    assert rccsdt_q.kernel(ints, B, r.t2, r.t3) == ref and not calls
+    # too little for the block algorithm: slabs, the rows of <vv|vv> mapped
+    monkeypatch.setattr(rccsdt_q, '_available_memory', lambda: sliced + 1000)
+    got = rccsdt.add_q(ints, r)
+    kw = calls.pop()
+    assert kw['tiles'] == 1 and isinstance(kw['erows'], np.memmap)
+    assert abs(got.e_q5 - ref[0]) < 1e-13 and abs(got.e_q - ref[1]) < 1e-13
+    assert getattr(ints, '_sa_packed', None) is None        # freed for the (Q) step
+    assert list(tmp_path.iterdir()) == []
+    # max_memory (MB) instead of what is available
+    from zccsdt import memory
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    monkeypatch.setattr(rccsdt_q, '_available_memory', lambda: 10 * block)
+    got = rccsdt_q.kernel(ints, B, r.t2, r.t3, max_memory=(sliced + 8 * nv ** 4) / 1e6)
+    kw = calls.pop()
+    assert kw['tiles'] == 1 and not isinstance(kw['erows'], np.memmap)
+    assert abs(got[1] - ref[1]) < 1e-13
+    with pytest.raises(MemoryError, match='slabs'):
+        rccsdt_q.kernel(ints, B, r.t2, r.t3, max_memory=sliced / 2e6)

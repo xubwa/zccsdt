@@ -49,7 +49,7 @@ def unique_quadruples(nocc):
 class Context:
     '''Integral blocks and T2 intermediates shared by all quadruples.'''
 
-    def __init__(self, ints, blocks, t2, t3b):
+    def __init__(self, ints, blocks, t2, t3b, wc=True):
         self.no, self.nv = no, v = ints.nocc, ints.nvir
         self.blocks, self.t2, self.t3b = blocks, t2, t3b
         self.eo, self.ev = ints.mo_energy[:no], ints.mo_energy[no:]
@@ -58,7 +58,10 @@ class Context:
         self.ovoo = g('ovoo')                       # <md|kl>
         self.oovv = g('oovv')                       # <kl|cd>
         # (e x|y f) = <e y|x f>: Wc[e, x, y, f], contraction index e leading
-        if ints.V is not None:
+        # (the sliced algorithm reads rows of the packed integrals instead)
+        if not wc:
+            self.Wc = None
+        elif ints.V is not None:
             self.Wc = np.ascontiguousarray(ints.V[no:, no:, no:, no:].transpose(0, 2, 1, 3))
         else:
             from pyscf import ao2mo
@@ -387,10 +390,232 @@ def q_correction(ints, blocks, t2, t3b):
     return e5, e5 + e6
 
 
+# ------------------------------------------------------- sliced algorithm
+
+QT = 6          # tile size of the energy kernels (csrc/t3pack.c)
+
+
+def slab_tiles(v, tiles=1):
+    '''[(t0, t1)]: slabs of ``tiles`` kernel tiles of the largest virtual
+    index (the indices t0 QT .. min(v, t1 QT) - 1).'''
+    nt = (v + QT - 1) // QT
+    return [(t, min(t + tiles, nt)) for t in range(0, nt, tiles)]
+
+
+def q_correction_slabs(ints, blocks, t2, t3b, tiles=1, erows=None):
+    '''(E[Q], E(Q)) with the v^4 work arrays cut into slabs.
+
+    The virtual quadruples are grouped by the slab [d0, d1) that holds their
+    largest index.  For those, r and a are needed where one index (of pair
+    p, say) is in the slab and the other three are below n = d1: the *face*
+    p of the occupied quadruple, six arrays (n, n, n, d1 - d0) per face
+    (parts A and B in the three cyclic layouts of the other pairs, the slab
+    index last).  Face p is what the block algorithm computes for the
+    quadruple with pair p moved to the end, restricted to those ranges, so
+    every element of r is still computed once.  The energy kernel reads
+    the 24 permuted positions of an element from the four faces
+    (zc_sa_q_energy_faces).
+
+    Only the Yv terms need <vv|vv>.  For every slab and every ordered
+    occupied pair (a, b) two intermediates are formed from the rows
+    E[(y f), tri(e x)] = (y f|e x) of the integrals (rccsdt.vvvv_rows; a
+    mapped scratch array or ``erows``), packed over e >= x:
+
+      N[y, ab, d, (e x)] = sum_f (y f|e x) t_ab^{f d}     y < n, d in the slab
+      M[d, ab, w, (e x)] = sum_f (d f|e x) t_ab^{f w}     d in the slab, w < n
+
+    (one pass over the rows y < n, resp. the rows of the slab).  A face then
+    takes, per layout [x_w, x_x, x_y, d] and with 3 the slab pair,
+
+      sum_e t_wx^{x_w e} N_y3[e, x_x, x_y, d] + (w <-> x)      (Yv(w,x|y,3), Yv(x,w|y,3))
+      sum_e t_xy^{x_x e} M_3w[e, x_y, x_w, d] + (x <-> y)      (Yv(x,y|3,w), Yv(y,x|3,w))
+
+    the second into the layout [x_x, x_y, x_w, d].
+
+    Memory: 24 n^3 nd (faces) + 2 o^2 n nd v^2 / 2 (N and M) + 3 v n^2 nd
+    elements with nd = 6 ``tiles``, instead of 10 v^4.'''
+    from zccsdt.cc import t3pack
+    from zccsdt.cc.t3pack import axpby
+    from zccsdt.sa.rccsdt import vvvv_rows
+    from zccsdt.sa.t3blocks import gather_boxes
+    from zccsdt.timing import timer
+    lib = t3pack._lib
+    I64, P = t3pack._I64, t3pack._p
+    ctx = Context(ints, blocks, t2, t3b, wc=False)
+    no, v = ctx.no, ctx.nv
+    ps = v * (v + 1) // 2
+    eo, ev = ctx.eo, np.ascontiguousarray(ctx.ev, dtype=np.float64)
+    VO = np.ascontiguousarray(ctx.vvvo.transpose(3, 0, 1, 2))      # [o][c,d,e] = <cd|eo>
+    ovoo, oovv = ctx.ovoo, ctx.oovv
+    E = vvvv_rows(ints) if erows is None else erows
+    occ = np.arange(no)
+    npair = no * no
+    t2p = t2.reshape(npair, v, v)
+    nmax = QT * tiles
+    pool = {}
+
+    def buf(name, *shape):
+        # work array: a prefix of a flat buffer of the largest size needed
+        size = int(np.prod(shape, dtype=np.int64))
+        big = pool.get(name)
+        if big is None or big.size < size:
+            big = pool[name] = np.empty(size)
+        return big[:size].reshape(shape)
+
+    gh = {}
+
+    def Gh(q, r, s):
+        # G(q,r,s) + G(q,s,r)^T does not depend on the slab: kept (o^4 v^2 at most)
+        x = gh.get((q, r, s))
+        if x is None:
+            if len(gh) * no * v * v * 8 > 1 << 30:
+                gh.clear()
+            x = gh[q, r, s] = ctx.Gh(q, r, s)
+        return x
+
+    def cube(a, b, c):
+        return blocks.cube(t3b, a, b, c)
+
+    e5 = e6 = 0.0
+    for t0, t1 in slab_tiles(v, tiles):
+        d0, n = t0 * QT, min(v, t1 * QT)
+        nd = n - d0
+        nn, n3 = n * n, n * n * n
+        with timer('q.NM'):
+            # pair intermediates of the slab, rows packed over e >= x
+            TN = np.ascontiguousarray(t2p[:, :, d0:n].transpose(0, 2, 1)).reshape(npair * nd, v)
+            TM = np.ascontiguousarray(t2p[:, :, :n].transpose(0, 2, 1)).reshape(npair * n, v)
+            N = buf('N', n, npair, nd, ps)
+            M = buf('M', nd, npair, n, ps)
+            for y in range(n):
+                gemm(TN, E[y * v:(y + 1) * v], N[y].reshape(npair * nd, ps))
+            for d in range(nd):
+                gemm(TM, E[(d0 + d) * v:(d0 + d + 1) * v], M[d].reshape(npair * n, ps))
+        As, Bs = buf('As', n, n, 4, v), buf('Bs', 4, v, n, nd)
+        As2, Bs2 = buf('As2', n, n, 4, no), buf('Bs2', 4, no, n, nd)
+        Nd, Md, X = buf('Nd', v, n, n, nd), buf('Md', v, n, n, nd), buf('X', n, n, n, nd)
+        Sall = buf('S', 24, n, n, n, nd)
+
+        def gather(trips, shape, lo):
+            views = [blocks.view(a, b, c, v) for a, b, c in trips]
+            offs = [o_ if o_ < 0 else o_ + int(np.dot(lo, st)) for o_, st in views]
+            out = buf('Tg', len(trips), *shape)
+            gather_boxes(t3b, offs, [st for _, st in views], out)
+            return out.reshape(len(trips), -1)
+
+        def unpack(dst, src, rows):
+            with timer('q.unpack'):
+                lib.zc_sa_q_unpack_d(P(dst), I64(v), I64(n), I64(len(rows)), P(src),
+                                     P(np.ascontiguousarray(rows, dtype=np.int64)))
+
+        def fill_face(o, S):
+            o3 = o[3]
+            for c, (w, x, y) in enumerate(ROT):
+                ow, ox, oy = o[w], o[x], o[y]
+                # ---- A_c: T3 x <vv|vo> for the partition {w x | y 3}
+                with timer('q.stack'):
+                    axpby(As[:, :, 0], cube(ow, ox, oy)[:n, :n], 1.0, 0.0)
+                    axpby(As[:, :, 1], cube(ow, ox, o3)[:n, :n], 1.0, 0.0)
+                    axpby(As[:, :, 2], VO[ox][:n, :n], 1.0, 0.0)
+                    axpby(As[:, :, 3], VO[ow].transpose(1, 0, 2)[:n, :n], 1.0, 0.0)
+                    axpby(Bs[0], VO[o3].transpose(2, 0, 1)[:, :n, d0:n], 1.0, 0.0)
+                    axpby(Bs[1], VO[oy].transpose(2, 1, 0)[:, :n, d0:n], 1.0, 0.0)
+                    axpby(Bs[2], cube(ow, oy, o3)[:, :n, d0:n], 1.0, 0.0)
+                    axpby(Bs[3], cube(ox, oy, o3)[:, :n, d0:n], 1.0, 0.0)
+                with timer('q.Xp'):
+                    gemm(As.reshape(nn, 4 * v), Bs.reshape(4 * v, n * nd), S[c].reshape(nn, n * nd))
+                # ---- Xh, special pair w first: m in the slot of x, y or 3
+                with timer('q.gather'):
+                    Tm = gather([(m, oy, o3) for m in occ] + [(ox, m, o3) for m in occ]
+                                + [(ox, oy, m) for m in occ], (n, n, nd), (0, 0, d0))
+                with timer('q.Xh'):
+                    sm = np.ascontiguousarray(
+                        np.hstack([-ovoo[:, :, r, ow].T for r in (ox, oy, o3)])[:n])
+                    gemm(sm, Tm, S[c].reshape(n, nn * nd), beta=1.0)
+                if c == 0:
+                    # special pair 3 last: [(x_0 x_1 x_2); x_3]
+                    with timer('q.gather'):
+                        Tm = gather([(m, o[1], o[2]) for m in occ] + [(o[0], m, o[2]) for m in occ]
+                                    + [(o[0], o[1], m) for m in occ], (n, n, n), (0, 0, 0))
+                    with timer('q.Xh'):
+                        sm = np.ascontiguousarray(
+                            np.vstack([-ovoo[:, :, r, o3] for r in (o[0], o[1], o[2])])[:, d0:n])
+                        gemm(Tm.T, sm, S[0].reshape(n3, nd), beta=1.0)
+                # ---- B_c: Yv(w,x|y,3) + Yv(x,w|y,3) from N of the pair (y, 3)
+                with timer('q.Yv'):
+                    ab = oy * no + o3
+                    unpack(Nd, N.reshape(-1, ps),
+                           ((np.arange(n)[:, None] * npair + ab) * nd + np.arange(nd)[None, :]).ravel())
+                    twx = t2[ow, ox]
+                    gemm(np.ascontiguousarray(twx[:n]), Nd.reshape(v, nn * nd),
+                         S[3 + c].reshape(n, nn * nd))
+                    gemm(np.ascontiguousarray(twx.T[:n]), Nd.reshape(v, nn * nd), X.reshape(n, nn * nd))
+                    axpby(S[3 + c], X.transpose(1, 0, 2, 3), 1.0, 1.0)
+            for c, (w, x, y) in enumerate(ROT):
+                ow, ox, oy = o[w], o[x], o[y]
+                c1 = (c + 1) % 3
+                # ---- Yv(x,y|3,w) + Yv(y,x|3,w) from M of the pair (3, w): layout [x, y, w, 3]
+                with timer('q.Yv'):
+                    ab = o3 * no + ow
+                    unpack(Md, M.reshape(-1, ps),
+                           ((np.arange(nd)[None, :] * npair + ab) * n + np.arange(n)[:, None]).ravel())
+                    txy = t2[ox, oy]
+                    gemm(np.ascontiguousarray(txy[:n]), Md.reshape(v, nn * nd),
+                         S[3 + c1].reshape(n, nn * nd), beta=1.0)
+                    gemm(np.ascontiguousarray(txy.T[:n]), Md.reshape(v, nn * nd), X.reshape(n, nn * nd))
+                    axpby(S[3 + c1], X.transpose(1, 0, 2, 3), 1.0, 1.0)
+                # ---- T2 x G for the ordered pairs (w,x), (x,w), (y,3), (3,y) on T2
+                with timer('q.G'):
+                    As2[:, :, 0] = t2[ow].transpose(1, 2, 0)[:n, :n]
+                    As2[:, :, 1] = t2[ox].transpose(2, 1, 0)[:n, :n]
+                    As2[:, :, 2] = Gh(o3, ow, ox).transpose(1, 2, 0)[:n, :n]
+                    As2[:, :, 3] = Gh(oy, ow, ox).transpose(1, 2, 0)[:n, :n]
+                    Bs2[0] = Gh(ox, oy, o3)[:, :n, d0:n]
+                    Bs2[1] = Gh(ow, oy, o3)[:, :n, d0:n]
+                    Bs2[2] = t2[oy][:, :n, d0:n]
+                    Bs2[3] = t2[o3].transpose(0, 2, 1)[:, :n, d0:n]
+                    gemm(As2.reshape(nn, 4 * no), Bs2.reshape(4 * no, n * nd),
+                         S[3 + c].reshape(nn, n * nd), beta=1.0)
+
+        for o, mult in unique_quadruples(no):
+            # face p: the quadruple with pair p last; equal occupied indices
+            # give equal faces
+            faces, done, k = [], {}, 0
+            for p in range(4):
+                op = tuple(o[q] for q in range(4) if q != p) + (o[p],)
+                if op not in done:
+                    done[op] = Sall[6 * k:6 * k + 6]
+                    k += 1
+                    fill_face(op, done[op])
+                faces.append(done[op])
+            with timer('q.energy'):
+                tc = np.array([t2[o[p], o[q]] for p, q, r, s in PAIRS])
+                gc = np.array([oovv[o[r], o[s]] for p, q, r, s in PAIRS])
+                ptr = (t3pack.ctypes.c_void_p * 24)(*[f[i].ctypes.data for f in faces for i in range(6)])
+                out = np.zeros(2)
+                lib.zc_sa_q_energy_faces_d(I64(v), I64(t0), I64(t1), ptr, P(tc), P(gc),
+                                           t3pack.ctypes.c_double(float(sum(eo[i] for i in o))),
+                                           P(ev), P(out))
+            e5 += mult / 24 * out[0]
+            e6 += mult / 24 * out[1]
+    return e5, e5 + e6
+
+
 def memory_needed(nocc, nvir):
     '''Bytes of the work arrays of q_correction (10 v^4 and smaller ones).'''
     v = nvir
     return 8 * (10 * v ** 4 + (2 * nocc + 8) * v ** 3 + 3 * nocc * v ** 3)
+
+
+def sliced_memory(nocc, nvir, tiles=1):
+    '''Bytes of ordinary memory of q_correction_slabs: per slab index 24 v^3
+    (faces), o^2 v^3 (N and M) and 3 v^3 (their dense forms and a product),
+    besides the stacked operands and the gathered cubes.  The integral rows
+    (4 v^4 bytes) are not counted: they may be mapped from the scratch file.'''
+    o, v = nocc, nvir
+    nd = min(QT * tiles, v)
+    ps = v * (v + 1) // 2
+    return 8 * (nd * (27 * v ** 3 + 2 * o * o * v * ps) + (4 + 5 * o) * v ** 3)
 
 
 def _available_memory():
@@ -400,18 +625,68 @@ def _available_memory():
     return memory.available()
 
 
-def kernel(ints, blocks, t2, t3b):
-    '''(E[Q], E(Q)) for converged CCSDT amplitudes (q_correction, with
-    numpy's own BLAS kept single-threaded as in rccsdt.kernel).  Raises
-    MemoryError if the work arrays (10 v^4) clearly do not fit in the
-    available memory.'''
-    need, avail = memory_needed(ints.nocc, ints.nvir), _available_memory()
-    if avail is not None and need > avail:
-        raise MemoryError('CCSDT(Q) needs about %.1f GB of work arrays (10 v^4, v = %d); '
-                          '%.1f GB are available' % (need / 1e9, ints.nvir, avail / 1e9))
+def kernel(ints, blocks, t2, t3b, max_memory=None, tiles=None):
+    '''(E[Q], E(Q)) for converged CCSDT amplitudes, with numpy's own BLAS
+    kept single-threaded as in rccsdt.kernel.
+
+    With enough memory for the work arrays of one occupied quadruple (10 v^4)
+    this is the block algorithm q_correction.  Otherwise the v^4 arrays are
+    cut into slabs of the largest virtual index (q_correction_slabs, six
+    indices per slab), and the <vv|vv> integrals are read from a mapped
+    scratch array unless they fit in memory as well.  ``max_memory`` (MB, as
+    in rccsdt.kernel; default: 80% of the available memory) is the budget;
+    ``tiles`` chooses explicitly: 0 for the block algorithm, else the number
+    of kernel tiles (of six indices) per slab.  Raises MemoryError if the
+    slabs do not fit either.'''
+    from zccsdt import memory
+    no, v = ints.nocc, ints.nvir
+    ints.__dict__.pop('_sa_wpp', None)          # work buffers of the CCSDT iterations
+    scr = erows = None
+    if tiles is None:
+        def budget():
+            avail = _available_memory()
+            if max_memory is not None:
+                b = memory.budget(max_memory)
+                return b, b
+            return (None, None) if avail is None else (int(memory.FRACTION * avail), avail)
+
+        soft, hard = budget()
+        if soft is None or memory_needed(no, v) <= soft:
+            tiles = 0
+        else:
+            # not enough for the block algorithm: free the in-memory packed
+            # <vv|vv> of the iterations (rebuilt if needed again), take slabs
+            packed = getattr(ints, '_sa_packed', None)
+            if packed is not None and packed.get('scratch') is None:
+                ints._sa_packed = None
+                soft, hard = budget()
+            tiles = 1
+            if sliced_memory(no, v) > hard:
+                raise MemoryError(
+                    'CCSDT(Q) with %d virtual orbitals needs about %.1f GB with all work '
+                    'arrays in memory (10 v^4) and %.1f GB in slabs; %.1f GB are available '
+                    '(max_memory, or what the node and the memory limit of the job leave)'
+                    % (v, memory_needed(no, v) / 1e9, sliced_memory(no, v) / 1e9, hard / 1e9))
+            if sliced_memory(no, v) + 8 * v * v * (v * (v + 1) // 2) > soft:
+                from zccsdt.sa.rccsdt import vvvv_rows
+                from zccsdt.scratch import Scratch
+                scr = Scratch(prefix='zccsdt_q_', what='the <vv|vv> integrals of (Q)',
+                              hint=' or give the calculation more memory (max_memory)')
+                erows = vvvv_rows(ints, out=scr.create('E', (v * v, v * (v + 1) // 2)),
+                                  max_bytes=int(max(soft - sliced_memory(no, v), 1 << 28) // 2))
+
+    def run():
+        if tiles:
+            return q_correction_slabs(ints, blocks, t2, t3b, tiles=tiles, erows=erows)
+        return q_correction(ints, blocks, t2, t3b)
+
     try:
-        from threadpoolctl import threadpool_limits
-    except ImportError:
-        return q_correction(ints, blocks, t2, t3b)
-    with threadpool_limits(limits={'openblas': 1}):
-        return q_correction(ints, blocks, t2, t3b)
+        try:
+            from threadpoolctl import threadpool_limits
+        except ImportError:
+            return run()
+        with threadpool_limits(limits={'openblas': 1}):
+            return run()
+    finally:
+        if scr is not None:
+            scr.close()

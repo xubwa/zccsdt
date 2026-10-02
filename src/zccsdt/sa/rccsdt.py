@@ -331,20 +331,23 @@ def run(mf, ncore=0, q=False, **kwargs):
 
     ``q``: add the perturbative quadruples correction (zccsdt.sa.rccsdt_q):
     the result then has e_q (the (Q) correction), e_q5 (its fifth-order part,
-    the [Q] correction) and e_tot_q = E(CCSDT(Q)).'''
+    the [Q] correction) and e_tot_q = E(CCSDT(Q)).  ``max_memory`` applies to
+    the (Q) step as well.'''
     from zccsdt.sa import rccsdt_ref
     ints = rccsdt_ref.from_scf(mf, ncore=ncore, full=False)
     res = kernel(ints, **kwargs)
     if q:
-        add_q(ints, res)
+        add_q(ints, res, max_memory=kwargs.get('max_memory'))
     return res
 
 
-def add_q(ints, res):
-    '''Attach the (Q) correction to a CCSDT result (see run).'''
+def add_q(ints, res, max_memory=None, tiles=None):
+    '''Attach the (Q) correction to a CCSDT result (see run; ``max_memory``
+    and ``tiles`` as in rccsdt_q.kernel).'''
     from zccsdt.sa import rccsdt_q
     from zccsdt.sa.t3blocks import Blocks
-    res.e_q5, res.e_q = rccsdt_q.kernel(ints, Blocks(ints.nocc), res.t2, res.t3)
+    res.e_q5, res.e_q = rccsdt_q.kernel(ints, Blocks(ints.nocc), res.t2, res.t3,
+                                        max_memory=max_memory, tiles=tiles)
     res.e_tot_q = res.e_tot + res.e_q
     return res
 
@@ -1118,41 +1121,29 @@ def vvvv_t1_packed(Ws, Wa, t1, out=None, rows=None):
     return out
 
 
-def vvvv_packed(ints, max_bytes=1 << 30, out=None):
-    '''Bare <ab|de> symmetric / antisymmetric in (d,e), packed over rows
-    a<=b (a<b) and columns d<=e (d<e) in numpy.triu_indices order: (Vs, Va),
-    written into ``out`` if given (e.g. mapped arrays of a scratch file).
+def vvvv_row_blocks(ints, max_bytes=1 << 30):
+    '''Yields (a, R) for a = 0 .. v - 1 with R[d, tri(b,e)] = (ad|be) = <ab|de>:
+    v rows, columns packed over b >= e at b (b + 1) / 2 + e.  R is a buffer
+    that the next step overwrites.
 
-    Without the full V: from the 4-fold packed (ad|be) in memory when that
-    fits in ``max_bytes``.  Else PySCF's out-of-core transformation writes
-    (ad|be) with rows (a, d) and packed columns (b >= e) to a scratch file,
-    for one half of the a at a time (so that the first two orbital sets
-    differ and (a, d) is not packed), and the rows of each a are repacked
-    from it: two passes over the AO integrals, 4 v^3 bytes in memory.'''
+    Without the full V, PySCF's out-of-core transformation writes these rows
+    to a scratch file for one half of the a at a time (so that the first two
+    orbital sets differ and (a, d) is not packed): two passes over the AO
+    integrals, 4 v^3 bytes in memory besides PySCF's ``max_bytes``.'''
     no, v = ints.nocc, ints.nvir
-    s0, s1 = np.triu_indices(v)
-    a0, a1 = np.triu_indices(v, 1)
-    ps, pa = len(s0), len(a0)
-    Vs, Va = out if out is not None else (np.empty((ps, ps)), np.empty((pa, pa)))
+    ps = v * (v + 1) // 2
     if ints.V is not None:
         Vv = ints.V[no:, no:, no:, no:]
-        Vs[...] = 0.5 * (Vv[s0, s1][:, s0, s1] + Vv[s0, s1][:, s1, s0])
-        Va[...] = 0.5 * (Vv[a0, a1][:, a0, a1] - Vv[a0, a1][:, a1, a0])
-        return Vs, Va
+        i, j = np.tril_indices(v)
+        for a in range(v):
+            yield a, np.ascontiguousarray(Vv[a].transpose(1, 0, 2)[:, i, j])
+        return
     import os
     import tempfile
     import h5py
-    from pyscf import ao2mo, lib as pyscf_lib
-    from zccsdt.cc import t3pack
+    from pyscf import ao2mo
     from zccsdt.scratch import scratch_dir
     Cv = np.ascontiguousarray(ints.mo_coeff[:, no:])
-    lib = t3pack._lib
-    have_c = t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_pack_a_d')
-    if 8 * ps ** 2 <= max_bytes and have_c:
-        # (ad|be) with 4-fold symmetry in one transformation, then repacked
-        E4 = np.ascontiguousarray(ao2mo.kernel(ints.mol, Cv, compact=True))
-        lib.zc_sa_vvvv_pack_d(t3pack._p(E4), t3pack._I64(v), t3pack._p(Vs), t3pack._p(Va))
-        return Vs, Va
     R = np.empty((v, ps))
     h = v // 2
     for h0, h1 in ((0, h), (h, v)) if h else ((0, v),):
@@ -1166,23 +1157,67 @@ def vvvv_packed(ints, max_bytes=1 << 30, out=None):
                 ds = f['eri']
                 for a in range(h0, h1):
                     ds.read_direct(R, np.s_[(a - h0) * v:(a - h0 + 1) * v])
-                    rs0, rs1, ra0, ra1 = pair_rows(v, a, a + 1)
-                    if have_c:
-                        # the row buffers: views of the output or copies
-                        vs, va = np.ascontiguousarray(Vs[rs0:rs1]), np.ascontiguousarray(Va[ra0:ra1])
-                        lib.zc_sa_vvvv_pack_a_d(t3pack._p(R), t3pack._I64(v), t3pack._I64(a),
-                                                t3pack._p(vs), t3pack._p(va))
-                        if not np.shares_memory(vs, Vs):
-                            Vs[rs0:rs1], Va[ra0:ra1] = vs, va
-                        continue
-                    Y = pyscf_lib.unpack_tril(R)                  # [d, b, e] = (ad|be)
-                    for b in range(a, v):
-                        Yb = Y[:, b]
-                        Vs[rs0 + b - a] = 0.5 * (Yb + Yb.T)[s0, s1]
-                        if b > a:
-                            Va[ra0 + b - a - 1] = 0.5 * (Yb - Yb.T)[a0, a1]
+                    yield a, R
         finally:
             os.remove(name)
+
+
+def vvvv_rows(ints, out=None, max_bytes=1 << 30):
+    '''E[(a d), tri(b,e)] = (ad|be) for all a, d (rows a v + d) with the
+    pair (b >= e) packed: the array of the row blocks of vvvv_row_blocks
+    (4 v^4 bytes), written into ``out`` if given (a mapped scratch array).'''
+    v = ints.nvir
+    if out is None:
+        out = np.empty((v * v, v * (v + 1) // 2))
+    for a, R in vvvv_row_blocks(ints, max_bytes):
+        out[a * v:(a + 1) * v] = R
+    return out
+
+
+def vvvv_packed(ints, max_bytes=1 << 30, out=None):
+    '''Bare <ab|de> symmetric / antisymmetric in (d,e), packed over rows
+    a<=b (a<b) and columns d<=e (d<e) in numpy.triu_indices order: (Vs, Va),
+    written into ``out`` if given (e.g. mapped arrays of a scratch file).
+
+    Without the full V: from the 4-fold packed (ad|be) in memory when that
+    fits in ``max_bytes``, else from the row blocks of vvvv_row_blocks, the
+    rows of one a at a time.'''
+    no, v = ints.nocc, ints.nvir
+    s0, s1 = np.triu_indices(v)
+    a0, a1 = np.triu_indices(v, 1)
+    ps, pa = len(s0), len(a0)
+    Vs, Va = out if out is not None else (np.empty((ps, ps)), np.empty((pa, pa)))
+    if ints.V is not None:
+        Vv = ints.V[no:, no:, no:, no:]
+        Vs[...] = 0.5 * (Vv[s0, s1][:, s0, s1] + Vv[s0, s1][:, s1, s0])
+        Va[...] = 0.5 * (Vv[a0, a1][:, a0, a1] - Vv[a0, a1][:, a1, a0])
+        return Vs, Va
+    from pyscf import ao2mo, lib as pyscf_lib
+    from zccsdt.cc import t3pack
+    lib = t3pack._lib
+    have_c = t3pack.USE_C and hasattr(lib, 'zc_sa_vvvv_pack_a_d')
+    if 8 * ps ** 2 <= max_bytes and have_c:
+        # (ad|be) with 4-fold symmetry in one transformation, then repacked
+        Cv = np.ascontiguousarray(ints.mo_coeff[:, no:])
+        E4 = np.ascontiguousarray(ao2mo.kernel(ints.mol, Cv, compact=True))
+        lib.zc_sa_vvvv_pack_d(t3pack._p(E4), t3pack._I64(v), t3pack._p(Vs), t3pack._p(Va))
+        return Vs, Va
+    for a, R in vvvv_row_blocks(ints, max_bytes):
+        rs0, rs1, ra0, ra1 = pair_rows(v, a, a + 1)
+        if have_c:
+            # the row buffers: views of the output or copies
+            vs, va = np.ascontiguousarray(Vs[rs0:rs1]), np.ascontiguousarray(Va[ra0:ra1])
+            lib.zc_sa_vvvv_pack_a_d(t3pack._p(R), t3pack._I64(v), t3pack._I64(a),
+                                    t3pack._p(vs), t3pack._p(va))
+            if not np.shares_memory(vs, Vs):
+                Vs[rs0:rs1], Va[ra0:ra1] = vs, va
+            continue
+        Y = pyscf_lib.unpack_tril(R)                  # [d, b, e] = (ad|be)
+        for b in range(a, v):
+            Yb = Y[:, b]
+            Vs[rs0 + b - a] = 0.5 * (Yb + Yb.T)[s0, s1]
+            if b > a:
+                Va[ra0 + b - a - 1] = 0.5 * (Yb - Yb.T)[a0, a1]
     return Vs, Va
 
 
