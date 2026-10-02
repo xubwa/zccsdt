@@ -74,14 +74,10 @@ def main():
     watch.start()
     packed = os.environ.get('ZC_PACKED', '0') == '1'
     spin = os.environ.get('ZC_SPIN', '0') == '1' and kind == 'ghf'
-    if kind == 'uhf':
+    if kind == 'uhf' or ru:
         from zccsdt import eris_spin
         eris = eris_spin.from_scf(mf, frozen=frozen,
-                                  vir_batch=int(os.environ.get('ZC_VBATCH', 16)))
-    elif ru:
-        from zccsdt import eris_spin
-        eris = eris_spin.from_scf(mf, frozen=frozen,
-                                  vir_batch=int(os.environ.get('ZC_VBATCH', 16)))
+                                  vir_batch=int(os.environ.get('ZC_VBATCH', 16)), **mem)
     else:
         eris = E.from_scf(mf, frozen=frozen, packed_vvvv=packed,
                           vir_batch=int(os.environ.get('ZC_VBATCH', 16)), spin_order=spin,

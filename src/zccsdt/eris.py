@@ -66,6 +66,28 @@ def _mo_chemist(mol, C, kind):
     return out
 
 
+def _spinor_block(mol, mo_coeffs, max_memory):
+    '''(12|34) of spinor MOs by PySCF's out-of-core transformation, with its
+    buffers bounded by ``max_memory`` (MB).  ao2mo.general does not pass
+    max_memory on for spinor integrals (r_outcore.general_iofree drops it)
+    and then takes its default of 4000 MB, so the file-based routine is
+    called directly.'''
+    import os
+    import tempfile
+    import h5py
+    from pyscf.ao2mo import r_outcore
+    from zccsdt.scratch import scratch_dir
+    fd, name = tempfile.mkstemp(prefix='zccsdt_ao2mo_', suffix='.h5', dir=scratch_dir())
+    os.close(fd)
+    try:
+        r_outcore.general(mol, mo_coeffs, name, dataname='eri_mo', intor='int2e_spinor',
+                          max_memory=max_memory, verbose=0)
+        with h5py.File(name, 'r') as f:
+            return np.asarray(f['eri_mo'])
+    finally:
+        os.remove(name)
+
+
 def _chem_block(mol, kind, C1, C2, C3, C4, max_memory=None):
     '''Chemist-notation MO block (12|34) via pyscf.ao2mo (no full n^4 tensor).
     ``max_memory`` (MB): work memory of the transformation.'''
@@ -74,8 +96,7 @@ def _chem_block(mol, kind, C1, C2, C3, C4, max_memory=None):
     shape = (C1.shape[1], C2.shape[1], C3.shape[1], C4.shape[1])
     kw = {'max_memory': memory.ao2mo_memory() if max_memory is None else max_memory}
     if kind == 'spinor':
-        out = ao2mo.general(mol, (C1, C2, C3, C4), intor='int2e_spinor', **kw)
-        return np.asarray(out).reshape(shape)
+        return _spinor_block(mol, (C1, C2, C3, C4), kw['max_memory']).reshape(shape)
     nao = mol.nao_nr()
     out = 0
     for s1 in (slice(0, nao), slice(nao, None)):
