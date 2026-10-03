@@ -1,5 +1,6 @@
 '''The spinor CCSD and (T) copied from socutils (zccsdt.zccsd): the same
-energies as zccsdt's CCSD and PySCF's GCCSD(T), both (T) loops alike.'''
+energies as zccsdt's CCSD and PySCF's GCCSD(T), both (T) loops alike; the
+integrals of zccsdt.zccsd.ao2mo against the route of socutils (nrr_outcore).'''
 
 import numpy as np
 import pytest
@@ -8,7 +9,8 @@ from pyscf.cc import gccsd_t as pyscf_gccsd_t
 
 from zccsdt import eris as E
 from zccsdt.cc import solver
-from zccsdt.zccsd import DirectZCCSD, ZCCSD, gccsd_t
+from zccsdt.cc import gintermediates as imd
+from zccsdt.zccsd import DirectZCCSD, ZCCSD, ao2mo, gccsd_t
 from zccsdt.zccsd.zccsd_direct import get_ovvv
 
 
@@ -33,6 +35,52 @@ def test_ccsd_equals_zccsdt(x2c_h2o, monkeypatch, tmp_path):
     for cls in (ZCCSD, DirectZCCSD):
         mycc = _run(cls, x2c_h2o)
         assert abs(mycc.e_corr - ref.e_corr.real) < 1e-9, cls.__name__
+
+
+def test_integrals_equal_nrr_outcore(x2c_h2o, monkeypatch, tmp_path):
+    monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    mol = x2c_h2o.mol
+    old = ZCCSD(x2c_h2o, frozen=2)
+    old.verbose, old.ao2mo_outcore = 0, True
+    ref = old.ao2mo()                               # all MO integrals, HDF5
+    imd._make_vvvv_tril(ref)
+    nocc, nao = ref.nocc, mol.nao_nr()
+    Ca, Cb = ao2mo.spin_components(mol, ref.mo_coeff)
+    eri4 = ao2mo.ao_eri_s4(mol)
+    for slab_bytes in (ao2mo.SLAB_BYTES, 1):        # one slab; one orbital per slab
+        new = ao2mo.occupied_blocks(eri4, Ca, Cb, nocc, slab_bytes=slab_bytes)
+        for key in ao2mo.BLOCKS:
+            assert abs(new[key] - np.asarray(getattr(ref, key))).max() < 1e-12, key
+        vvvv, (ti, tj) = ao2mo.packed_vvvv(eri4, Ca, Cb, nocc, slab_bytes=slab_bytes)
+        assert abs(vvvv - np.asarray(ref.vvvv_tril)).max() < 1e-12
+        assert np.array_equal(ti, ref.vvvv_tril_idx[0]) and np.array_equal(tj, ref.vvvv_tril_idx[1])
+    assert 'ovvv' not in ao2mo.occupied_blocks(eri4, Ca, Cb, nocc, with_ovvv=False)
+    # the AO operators of the ladder, as socutils builds them from the 4-index array
+    E = mol.intor('int2e')
+    ao_eri, W, (pi, pj) = ao2mo.ladder_operators(eri4, nao)
+    assert abs(ao_eri - E.transpose(1, 3, 0, 2).reshape(nao * nao, nao * nao)).max() < 1e-12
+    W_ref = (E[pi[:, None], pi[None, :], pj[:, None], pj[None, :]]
+             - E[pi[:, None], pj[None, :], pj[:, None], pi[None, :]])
+    assert abs(W - W_ref).max() < 1e-12
+    # the default route of ZCCSD.ao2mo gives the same object
+    eris = ZCCSD(x2c_h2o, frozen=2).ao2mo()
+    assert eris.vvvv is None and abs(eris.ovvv - np.asarray(ref.ovvv)).max() < 1e-12
+    assert abs(np.asarray(eris.vvvv_tril) - np.asarray(ref.vvvv_tril)).max() < 1e-12
+
+
+def test_socutils_routes_kept(x2c_h2o, monkeypatch, tmp_path):
+    '''ovvv from the AO integrals in every term, and the integrals through
+    nrr_outcore: the same energies as the defaults.'''
+    monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    e_ref = _run(DirectZCCSD, x2c_h2o).e_corr
+    for cls, switch in ((DirectZCCSD, 'ovvv_direct'), (ZCCSD, 'ao2mo_outcore')):
+        mycc = cls(x2c_h2o, frozen=2)
+        setattr(mycc, switch, True)
+        mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-11, 1e-8
+        mycc.kernel()
+        assert mycc.converged and abs(mycc.e_corr - e_ref) < 1e-9, switch
+        if cls is DirectZCCSD:
+            assert mycc.eris.ovvv is None and mycc.eris.E4 is not None
 
 
 def test_t_loops_complex(x2c_h2o, monkeypatch, tmp_path):

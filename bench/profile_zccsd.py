@@ -4,7 +4,10 @@
 
 usage: python bench/profile_zccsd.py MOLECULE BASIS VARIANT [NITER] [T_ALGS]
   MOLECULE: h2o | n2 | c6h6 | ... (the geometries of bench/profile_iter.py)
-  VARIANT:  direct (DirectZCCSD: AO ladder, no vvvv / ovvv) | mo (ZCCSD)
+  VARIANT:  direct (DirectZCCSD: AO ladder, ovvv stored) | mo (ZCCSD: packed
+            <ab||ef>), both with the integrals of zccsdt.zccsd.ao2mo; the
+            routes of socutils: direct-ao (ovvv terms from the AO integrals)
+            and mo-nrr (all MO integrals through nrr_outcore and HDF5)
   NITER:    CCSD iterations (default 4); the first is left out of the means
   T_ALGS:   (T) loops to time, comma separated (default occ_loop; none)
 X2C-1e spinors from PySCF (x2c.UHF), all electrons.  The copied code is not
@@ -96,15 +99,18 @@ def main():
     # the terms of update_amps (both variants call gintermediates as imd)
     for name in ('make_tau', 'cc_Foo', 'cc_Fov', 'cc_Woooo'):
         wrap(imd, name)
-    if variant == 'direct':
+    base, _, route = variant.partition('-')
+    if base == 'direct':
         for name in ('_cc_Fvv', '_cc_Wovvo', 'update_t2_vvvv_direct', '_ladder_lc',
                      '_ovvv_ladder', '_ovvv_t1', '_ovvv_t2', '_ovvv_fvv', '_ovvv_wovvo'):
             wrap(zd, name)
         mycc = zd.DirectZCCSD(mf)
+        mycc.ovvv_direct = route == 'ao'
     else:
         for name in ('cc_Fvv', 'cc_Wovvo', 'update_t2_vvvv_sym', '_make_vvvv_tril'):
             wrap(imd, name)
         mycc = zccsd.ZCCSD(mf)
+        mycc.ao2mo_outcore = route == 'nrr'
     mycc.max_memory = maxmem
     mycc.verbose = 0
     nocc = mycc.nocc
@@ -115,11 +121,16 @@ def main():
 
     watch = MemWatch()
     watch.start()
+    timing.reset()
     t0 = time.perf_counter()
     eris = mycc.ao2mo()
     t_ints = time.perf_counter() - t0
     watch.stop()
     print('integrals %.1f s (peak anonymous %.2f GB)' % (t_ints, watch.anon / 1e6))
+    stages = [(k, t) for k, t, _ in timing.report() if k.startswith('ao2mo.')]
+    if stages:
+        print('  ' + '  '.join('%s %.2f s' % (k[6:], t) for k, t in stages)
+              + '  other %.2f s' % (t_ints - sum(t for _, t in stages)))
 
     # one pass of the CC loop = update_amps + DIIS + energy: timed start to
     # start; the timers are read at the start of every pass
@@ -162,7 +173,7 @@ def main():
         watch = MemWatch()
         watch.start()
         t0 = time.perf_counter()
-        if variant == 'direct' and eris.ovvv is None:
+        if eris.ovvv is None:
             eris.ovvv = zd.get_ovvv(eris)
             print('(T): ovvv rebuilt from the AO integrals in %.1f s'
                   % (time.perf_counter() - t0))

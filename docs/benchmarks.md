@@ -1127,6 +1127,60 @@ benzene (T) is the 1500 s of job 31533171 (c146, whose CCSD iteration took
   for H2O (1.67 s and 23.1 s on c146), but it runs benzene, where the
   integrals of zccsdt's CCSD did not fit 30 GB.
 
+### Integrals of the copied CCSD: slabs from the packed AO integrals
+
+`zccsdt.zccsd.ao2mo` replaces the integral transformation of the copied code
+(socutils: all nmo^4 MO integrals through `nrr_outcore` and HDF5 for `ZCCSD`,
+einsums on the 4-index AO array for `DirectZCCSD`). The scalar AO integrals
+are computed once with 8-fold symmetry and kept packed (2 N^4 bytes); slabs
+of the first MO index are transformed (two quarter transformations by real
+GEMMs, the second half by PySCF's `_ao2mo.r_e2`) and antisymmetrized into the
+blocks at once. `DirectZCCSD` gets the blocks with a first occupied index,
+ovvv included and now stored by default; `ZCCSD` gets these and <ab||ef>
+packed on (a>b, e>f), in memory, without the full vvvv block.
+
+One job, one after the other on one node (c329, 2 x Xeon Gold 6248R, 8 cores;
+job 31547944): CFOUR (`CALC=CCSD`, 4 cycles), the new routes (3 iterations),
+then the routes of socutils that the code keeps (`mo-nrr`, `direct-ao`; 1
+iteration). Times without the SCF.
+
+| Integrals, seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| CFOUR `xx2cvtran` (reads the AO integrals; no <ab\|\|cd>) | 0.50 | 3.35 | 11.8 |
+| `DirectZCCSD`, ovvv included | 0.7 | 5.5 | 14.3 |
+| - AO integrals (s8) | 0.06 | 0.37 | 0.49 |
+| - first half / second half | 0.06 / 0.19 | 0.66 / 1.09 | 2.36 / 4.31 |
+| - antisymmetrized blocks | 0.09 | 0.53 | 4.16 |
+| - AO operators of the ladder | 0.03 | 0.79 | 0.77 |
+| - other (Fock matrix by PySCF's direct spinor J/K) | 0.26 | 2.08 | 2.21 |
+| `DirectZCCSD` as copied, without ovvv (c028) | 1.1 | 10.1 | 29.7 |
+| `ZCCSD`, packed <ab\|\|ef> included | 2.2 | 38.8 | 34.1 |
+| `ZCCSD` through `nrr_outcore` | 13.2 | 245 | 222 |
+
+- The transformation proper (the two halves and the blocks) takes 0.34 s,
+  2.3 s and 10.8 s against 0.50 s, 3.35 s and 11.8 s of `xx2cvtran`.
+- `ZCCSD`: 6-6.5 times faster; the route through `nrr_outcore` packs
+  <ab||ef> in its first iteration on top (about 2 s, 50 s and 24 s on c028).
+- Reserves: the antisymmetrization of ovvv is a Python loop over (i, a)
+  (4.2 s for benzene); the gather of the AO rows is repeated for every slab
+  and the first half writes strided (12 of the 39 s of `ZCCSD` for
+  H2O/cc-pVQZ); the Fock matrix could come from the packed AO integrals.
+
+| CCSD iteration, seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| CFOUR | 0.32 | 2.75 | 26.7 |
+| `DirectZCCSD`, ovvv stored | 1.39 (4.3x) | 9.39 (3.4x) | 93.1 (3.5x) |
+| `DirectZCCSD`, ovvv terms from the AO integrals (1 iteration) | 2.32 | 22.6 | 126.6 |
+| `ZCCSD`, packed <ab\|\|ef> in memory | 1.40 (4.4x) | 10.4 (3.8x) | 91.9 (3.4x) |
+| peak RSS, `DirectZCCSD` / `ZCCSD` (GB) | 1.3 / 3.4 | 8.1 / 15.4 | 23.8 / 26.7 |
+
+- With ovvv stored the copied iteration is 1.4-2.4 times faster, but its
+  five ovvv terms are still half of the iteration for H2O/cc-pVQZ (5.0 of
+  9.4 s): einsums that transpose or conjugate the whole 1.7 GB array.
+- The integrals now live in memory (scratch files only when a block would
+  take more than half of the free memory), and the copied iteration makes
+  large temporaries: 24-27 GB for benzene under the 30 GB limit of the job.
+
 ## Correctness references
 
 | Reference | Agreement | Test |

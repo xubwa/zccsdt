@@ -5,6 +5,10 @@
 # author, as the starting point of the spinor CCSD(T) of zccsdt.  Changed:
 # the imports of socutils.cc, get_ovvv (for (T)) moved here from
 # eom_zccsd_direct.py, the EOM entry points left out.
+# Changed since: the integrals of ladder='ao' come from zccsdt.zccsd.ao2mo
+# (slabs of the first occupied index from the packed AO integrals) and ovvv
+# is stored by default (DirectZCCSD.ovvv_direct = True: evaluated from the
+# AO integrals in every term, as in socutils).
 #
 # Two-component (spinor) CCSD that never builds or stores the ``vvvv`` block.
 #
@@ -34,6 +38,7 @@ from pyscf.lib import logger
 from pyscf.cc import ccsd
 from pyscf.cc import gccsd
 from pyscf.ao2mo import nrr_outcore
+from pyscf.ao2mo import restore as ao2mo_restore
 from pyscf import __config__
 
 from zccsdt.cc import gintermediates as imd     # identical to socutils' copy
@@ -371,7 +376,13 @@ class DirectZCCSD(_zccsd.ZCCSD):
         Pre-computed AO Cholesky vectors (only used when ``ladder='chol'``).
     max_error : float
         Threshold for the on-the-fly Cholesky decomposition.
+    ovvv_direct : bool
+        ``ladder='ao'`` only.  False (default): <ma||ef> is transformed and
+        stored (o v^3).  True: it is never built and its five terms are
+        evaluated from the AO integrals in every iteration, as in socutils.
     '''
+
+    ovvv_direct = False
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -494,54 +505,32 @@ def _make_eris_direct(mycc, mo_coeff=None):
                    einsum('cmn,mp,nq->cpq', Lc, mob.conj(), mob))
         _eris_from_cholmo(eris, chol_mo, nocc)
     else:
-        # Exact integrals, AO-direct ovvv: only blocks with at most two virtual
-        # indices are transformed (oooo, ooov, oovv, ovov, ovvo).  Neither vvvv
-        # nor ovvv is ever formed -- the ovvv terms are evaluated AO-direct from
-        # eris.E4 during the iterations.
-        E = mol.intor('int2e_sph').reshape(nao, nao, nao, nao)
-        eris.E4 = E
-        # ladder operator, [(nu,sigma),(mu,lambda)] layout for a single GEMM
-        eris.ao_eri = E.transpose(1, 3, 0, 2).reshape(nao*nao, nao*nao).copy()
-        eris.ao_chol = None
-        eris.ovvv = None
-
+        # Exact integrals from the packed scalar AO integrals (zccsdt.zccsd.ao2mo):
+        # the blocks with a first occupied index, slab by slab; vvvv is never
+        # formed.  ovvv is stored unless ovvv_direct, in which case its terms
+        # are evaluated AO-direct from eris.E4 during the iterations.
+        from zccsdt.zccsd import ao2mo as slab
+        eri4 = slab.ao_eri_s4(mol)
         Ca, Cb = mog[:nao], mog[nao:]
-        Co = [Ca[:, :nocc], Cb[:, :nocc]]
-        Cv = [Ca[:, nocc:], Cb[:, nocc:]]
-        Cf = [Ca, Cb]
-        # Shared electron-1 half transform: H[i,q,lambda,sigma], i occ, q full.
-        H = 0.
-        for s in (0, 1):
-            t = einsum('mi,mnls->inls', Co[s].conj(), E)
-            H = H + einsum('inls,nq->iqls', t, Cf[s])
-
-        def e2(Hx, Cr, Cs):
-            '''Finish the electron-2 transform of Hx onto the (Cr, Cs) ket.'''
-            out = 0.
-            for s in (0, 1):
-                u = einsum('iqls,lr->iqrs', Hx, Cr[s].conj())
-                out = out + einsum('iqrs,st->iqrt', u, Cs[s])
-            return out
-
-        no = nocc
-        g_qoo = e2(H, Co, Co)              # (i, q, o, o)
-        g_qov = e2(H, Co, Cv)             # (i, q, o, v)
-        g_qvo = e2(H, Cv, Co)             # (i, q, v, o)
-        g_ovv = e2(H[:, :no], Cv, Cv)     # (i, o, v, v)  (q restricted to occ)
-        H = None
-        eris.oooo = g_qoo[:, :no].transpose(0,2,1,3) - g_qoo[:, :no].transpose(0,2,3,1)
-        eris.ooov = g_qov[:, :no].transpose(0,2,1,3) - g_qoo[:, no:].transpose(0,2,3,1)
-        eris.oovv = g_qov[:, no:].transpose(0,2,1,3) - g_qov[:, no:].transpose(0,2,3,1)
-        eris.ovov = g_ovv.transpose(0,2,1,3) - g_qvo[:, no:].transpose(0,2,3,1)
-        eris.ovvo = g_qvo[:, no:].transpose(0,2,1,3) - g_ovv.transpose(0,2,3,1)
-
-        # Packed antisymmetrized same-spin AO integral <mu nu||si rho> on the
-        # (mu>nu, si>rho) triangles, for the Liu-Cheng particle-particle ladder.
-        # Amplitude independent -> built once.
-        pi, pj = np.tril_indices(nao, -1)
-        eris.ao_tril = (pi, pj)
-        eris.W_same = (E[pi[:, None], pi[None, :], pj[:, None], pj[None, :]] -
-                       E[pi[:, None], pj[None, :], pj[:, None], pi[None, :]])
+        nvir = mog.shape[1] - nocc
+        ovvv = scr = None
+        if not mycc.ovvv_direct and not slab.fits_in_memory(16 * nocc * nvir**3):
+            from zccsdt.scratch import Scratch
+            scr = eris._scratch = Scratch(prefix='zccsd_ovvv_', what='the <ia||bc> integrals')
+            ovvv = scr.create('ovvv', (nocc, nvir, nvir, nvir), np.complex128)
+        blocks = slab.occupied_blocks(eri4, Ca, Cb, nocc, with_ovvv=not mycc.ovvv_direct,
+                                      ovvv=ovvv)
+        eris.oooo, eris.ooov, eris.oovv = blocks['oooo'], blocks['ooov'], blocks['oovv']
+        eris.ovov, eris.ovvo = blocks['ovov'], blocks['ovvo']
+        eris.ovvv = blocks.get('ovvv')
+        eris.ao_chol = None
+        # ladder operator [(nu,sigma),(mu,lambda)] for a single GEMM and the
+        # packed antisymmetrized same-spin AO integral <mu nu||si rho> on the
+        # (mu>nu, si>rho) triangles (Liu-Cheng ladder); amplitude independent
+        eris.ao_eri, eris.W_same, eris.ao_tril = slab.ladder_operators(eri4, nao)
+        # 4-index AO integrals: only for the AO-direct ovvv terms
+        eris.E4 = ao2mo_restore(1, eri4, nao) if mycc.ovvv_direct else None
+        eri4 = None
 
     log.timer('CCSD integral transformation (vvvv/ovvv-free)', *cput0)
     return eris
