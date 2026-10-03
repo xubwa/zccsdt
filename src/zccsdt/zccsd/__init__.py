@@ -12,6 +12,9 @@ says what was changed):
   passes in C with the s4 symmetry of the AO integrals (csrc/nrr_ao2mo_opt.c,
   built into lib/libnrr_opt.so against the installed PySCF by
   `cmake -S csrc -B build && cmake --build build`).
+- amps: the amplitude equations of DirectZCCSD on packed pairs and fixed
+  layouts (the equations of socutils' update_amps, which stays as
+  DirectZCCSD.socutils_amps; kernels in csrc/zccsd_kernels.c).
 - ao2mo: the integrals of both classes for a two-component reference on
   nrr_fast, within max_memory: slabs of the first MO index that are
   antisymmetrized into their blocks at once, the blocks that do not fit

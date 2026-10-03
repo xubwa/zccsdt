@@ -213,34 +213,46 @@ def _allocate(shapes, dtype, mem_bytes, what):
     return out, used
 
 
-def occupied_blocks(mol, Ca, Cb, nocc, with_ovvv=True, max_memory=None, plan=None):
+def occupied_blocks(mol, Ca, Cb, nocc, with_ovvv=True, max_memory=None, plan=None,
+                    names=None):
     '''The antisymmetrized blocks <pq||rs> with a first occupied index: an
-    Arrays dict with oooo, ooov, oovv, ovov, ovvo and (``with_ovvv``) ovvv.
+    Arrays dict with oooo, ooov, oovv, ovov, ovvo and (``with_ovvv``) ovvv,
+    or with the blocks in ``names``, which may also ask for 'ovvv_p':
+    <ia||bc> packed over b > c (numpy.tril_indices(nvir, -1)), half of ovvv.
     ``max_memory`` (MB) decides which of them are mapped scratch arrays and
     how the passes are sliced (``plan``: an explicit Plan for the latter).'''
     nmo = Ca.shape[1]
     nvir = nmo - nocc
     dim = {'o': nocc, 'v': nvir}
+    if names is None:
+        names = BLOCKS[:5 + bool(with_ovvv)]
+    bv, cv = np.tril_indices(nvir, -1)
+    shapes = {k: [dim[c] for c in k] for k in names if k != 'ovvv_p'}
+    if 'ovvv_p' in names:
+        shapes['ovvv_p'] = (nocc, nvir, bv.size)
     budget = memory.budget(max_memory)
     need = plan_slabs(mol, nocc, nmo).need if plan is None else plan.need
-    out, used = _allocate({k: [dim[c] for c in k] for k in BLOCKS[:5 + bool(with_ovvv)]},
-                          np.complex128, _store_bytes(budget, need), 'the MO integrals')
+    out, used = _allocate(shapes, np.complex128, _store_bytes(budget, need), 'the MO integrals')
     if plan is None:
         plan = plan_slabs(mol, nocc, nmo, None if budget is None else budget - used)
     out.plan = plan
     o, v = slice(0, nocc), slice(nocc, nmo)
+    # <iq||rs> = (ir|qs) - (is|qr) from gi[q, r, s] = (iq|rs): the two parts of each block
+    parts = {'oooo': ((o, o, o), (o, o, o)), 'ooov': ((o, o, v), (v, o, o)),
+             'oovv': ((v, o, v), (v, o, v)), 'ovov': ((o, v, v), (v, v, o)),
+             'ovvo': ((v, v, o), (o, v, v))}
 
-    def sort(i, gi):
-        # gi[q, r, s] = (iq|rs); <iq||rs> = (ir|qs) - (is|qr), one orbital per thread
-        sub = np.subtract
-        sub(gi[o, o, o].transpose(1, 0, 2), gi[o, o, o].transpose(1, 2, 0), out=out['oooo'][i])
-        sub(gi[o, o, v].transpose(1, 0, 2), gi[v, o, o].transpose(1, 2, 0), out=out['ooov'][i])
-        sub(gi[v, o, v].transpose(1, 0, 2), gi[v, o, v].transpose(1, 2, 0), out=out['oovv'][i])
-        sub(gi[o, v, v].transpose(1, 0, 2), gi[v, v, o].transpose(1, 2, 0), out=out['ovov'][i])
-        sub(gi[v, v, o].transpose(1, 0, 2), gi[o, v, v].transpose(1, 2, 0), out=out['ovvo'][i])
-        if with_ovvv:                                   # <ia||bc> = (ib|ac) - (ic|ab)
+    def sort(i, gi):                                    # one orbital per thread
+        for k in names:
+            if k in parts:
+                x, y = parts[k]
+                np.subtract(gi[x].transpose(1, 0, 2), gi[y].transpose(1, 2, 0), out=out[k][i])
+        if 'ovvv' in names or 'ovvv_p' in names:       # <ia||bc> = (ib|ac) - (ic|ab)
             t = np.ascontiguousarray(gi[v, v, v].transpose(1, 0, 2))    # [a, b, c] = (ib|ac)
-            sub(t, t.transpose(0, 2, 1), out=out['ovvv'][i])
+            if 'ovvv' in names:
+                np.subtract(t, t.transpose(0, 2, 1), out=out['ovvv'][i])
+            if 'ovvv_p' in names:
+                np.subtract(t[:, bv, cv], t[:, cv, bv], out=out['ovvv_p'][i])
 
     with ThreadPoolExecutor(min(_threads(), plan.nket)) as pool:
         for i0, i1, g in slabs(mol, Ca, Cb, (0, nocc), None, plan):
@@ -283,52 +295,70 @@ def packed_vvvv(mol, Ca, Cb, nocc, max_memory=None, plan=None):
     return out
 
 
-def ladder_operators(mol, max_memory=None):
-    '''The two AO operators of the AO-driven pp ladder (DirectZCCSD): an
-    Arrays dict with 'ao_eri', (mu nu|la si) as a matrix [(nu si), (mu la)],
-    and 'W_same', the antisymmetrized same-spin integral (mu si|nu rho) -
-    (mu rho|nu si) packed over mu > nu and si > rho; the pair indices are its
-    attribute ``idx`` = (pi, pj).  Built from the AO integrals of batches of
-    shells in the first place, (nu mu|si la) = (mu nu|la si); in memory or
-    mapped by ``max_memory`` (MB).'''
+def ladder_operators(mol, max_memory=None, names=('ao_eri', 'W_same')):
+    '''AO operators of the AO-driven pp ladder (DirectZCCSD), an Arrays dict
+    with those in ``names``:
+
+    'W_same'  the antisymmetrized integral (mu si|nu rho) - (mu rho|nu si)
+              packed over mu > nu and si > rho (pair indices: the attribute
+              ``idx`` = (pi, pj)), for antisymmetric AO amplitudes;
+    'W_plus'  (mu nu|la si) + (mu si|la nu), rows packed over nu >= si (half
+              of it on nu = si) and columns over mu >= la, for symmetric ones;
+    'ao_eri'  (mu nu|la si) as the full matrix [(nu si), (mu la)].
+
+    Built from the AO integrals of batches of shells in the first place; in
+    memory or mapped by ``max_memory`` (MB).'''
     nao, nbas, ao_loc = mol.nao_nr(), mol.nbas, mol.ao_loc_nr()
     pi, pj = np.tril_indices(nao, -1)
+    si, sj = np.tril_indices(nao)
     budget = memory.budget(max_memory)
-    # a batch of AO functions: its integrals and the two gathers of W
-    per_ao = 8 * nao ** 3 + 16 * nao * pi.size
+    # a batch of AO functions: its integrals and the two gathers of a W
+    per_ao = 8 * nao ** 3 + 16 * nao * si.size
     need = 2 * int((ao_loc[1:] - ao_loc[:-1]).max()) * per_ao           # one shell
     if budget is not None and need > budget:
         raise MemoryError('the AO operators of the ladder need %s for one shell at a time '
                           '(%d AO functions), %s are left of max_memory'
                           % (_size(need), nao, _size(budget)))
-    out, used = _allocate({'ao_eri': (nao, nao, nao, nao), 'W_same': (pi.size, pi.size)},
-                          np.float64, _store_bytes(budget, need),
-                          'the AO operators of the ladder')
+    shapes = {'ao_eri': (nao, nao, nao, nao), 'W_same': (pi.size, pi.size),
+              'W_plus': (si.size, si.size)}
+    out, used = _allocate({k: shapes[k] for k in names}, np.float64,
+                          _store_bytes(budget, need), 'the AO operators of the ladder')
     out.idx = (pi, pj)
-    ao4, W = out['ao_eri'], out['W_same']
+    ao4, W, Wp = out.get('ao_eri'), out.get('W_same'), out.get('W_plus')
     w = WORK_BYTES if budget is None else min(budget - used, WORK_BYTES)
     nthr = _threads()
     with timer('ao2mo.ladder'), ThreadPoolExecutor(nthr) as pool:
         sh0 = 0
         while sh0 < nbas:
             sh1 = sh0 + 1
-            while sh1 < nbas and (ao_loc[sh1 + 1] - ao_loc[sh0]) * per_ao <= w // 2:
+            while sh1 < nbas and int(ao_loc[sh1 + 1] - ao_loc[sh0]) * per_ao <= w // 2:
                 sh1 += 1
             m0, m1 = int(ao_loc[sh0]), int(ao_loc[sh1])
             E = mol.intor('int2e', shls_slice=(sh0, sh1, 0, nbas, 0, nbas, 0, nbas))
             E = E.reshape(m1 - m0, nao, nao, nao)             # [nu, mu, si, la] = (nu mu|si la)
-            ao4[m0:m1] = E.transpose(0, 2, 1, 3)              # [nu, si, mu, la]
-            # rows of W with mu in the batch: (mu si|nu rho) - (mu rho|nu si)
+            if ao4 is not None:
+                ao4[m0:m1] = E.transpose(0, 2, 1, 3)          # [nu, si, mu, la]
+            # rows of W_same with mu in the batch: (mu si|nu rho) - (mu rho|nu si)
             r0, r1 = m0 * (m0 - 1) // 2, m1 * (m1 - 1) // 2
             edges = [r0 + (r1 - r0) * j // nthr for j in range(nthr + 1)]
+            # rows of W_plus with nu in the batch: (nu mu|si la) + (nu la|si mu)
+            q0, q1 = m0 * (m0 + 1) // 2, m1 * (m1 + 1) // 2
+            qedges = [q0 + (q1 - q0) * j // nthr for j in range(nthr + 1)]
 
             def rows(j):
                 a, b = edges[j], edges[j + 1]
-                if b > a:
+                if W is not None and b > a:
                     mu, nu = pi[a:b, None] - m0, pj[a:b, None]
                     W[a:b] = E[mu, pi[None, :], nu, pj[None, :]]
                     W[a:b] -= E[mu, pj[None, :], nu, pi[None, :]]
+                a, b = qedges[j], qedges[j + 1]
+                if Wp is not None and b > a:
+                    nu, sg = si[a:b, None] - m0, sj[a:b, None]
+                    Wp[a:b] = E[nu, si[None, :], sg, sj[None, :]]
+                    Wp[a:b] += E[nu, sj[None, :], sg, si[None, :]]
+                    Wp[a:b][si[a:b] == sj[a:b]] *= 0.5
             list(pool.map(rows, range(nthr)))
             sh0 = sh1
-    out['ao_eri'] = ao4.reshape(nao * nao, nao * nao)
+    if ao4 is not None:
+        out['ao_eri'] = ao4.reshape(nao * nao, nao * nao)
     return out

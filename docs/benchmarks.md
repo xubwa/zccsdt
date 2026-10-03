@@ -1205,6 +1205,40 @@ the AO integrals, as copied: 2.3 s, 22.6 s, 127 s on c329); `ZCCSD` 1.48 s,
 10.7 s and 92.9 s; CFOUR 0.32 s, 2.75 s, 26.7 s. Peak RSS for benzene 24-27
 GB: the copied iteration is not planned (large einsum temporaries).
 
+### The amplitude equations of `DirectZCCSD` on fixed layouts (`zccsd/amps.py`)
+
+The same equations as socutils' `update_amps` (the two agree to 1e-16 per
+element, `tests/test_zccsd.py`), evaluated differently:
+
+- pairs packed, i > j and a > b; tau formed once;
+- the two o^3 v^3 terms, W(mbej) += <mn||ef> t2 and the ring t2 W, as one
+  ZGEMM each on matrices [(i a), (j b)];
+- <ma||ef> stored packed over e > f (half of ovvv) and read once per
+  iteration, one occupied index at a time, for its five terms;
+- the AO ladder over the pairs i > j, the alpha-beta block of the
+  back-transformed tau split into its symmetric and antisymmetric parts:
+  two packed real operators of 2 nao^4 bytes each instead of the
+  nao^2 x nao^2 matrix, and half the multiply-adds.
+
+First version (numpy and one C kernel), 8 cores of c318, one job
+(31550503): CFOUR first, then `DirectZCCSD` with these equations and with
+socutils' `update_amps` on the same stored integrals. Seconds per iteration:
+
+| | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| CFOUR `xx2cccsd` | 0.26 | 2.07 | 22.95 |
+| socutils' `update_amps`, ovvv stored | | 7.03 | 75.0 |
+| `zccsd/amps.py`, first version | 0.31 | 2.18 | 36.6 |
+| peak memory of the iterations (GB): CFOUR / socutils / amps | 0.7 / / 0.7 | 2.2 / 7.9 / 2.9 | 11.0 / 23.7 / 18.6 |
+
+Where the 36.6 s of benzene go: the two o^3 v^3 ZGEMMs 13.9 s (7.6e12
+flops at 550 Gflop/s: the rate of the machine; CFOUR spends 6.0 s + 6.1 s
+in the same two terms with real DGEMMs), the <ma||ef> terms 6.2 s (half of
+it a transposed add in numpy), the remaining T2 terms 5.0 s and the ladder
+4.3 s (CFOUR 3.1 s), both mostly index gathers on one thread, layouts of
+t2 2.9 s, unpacking 1.1 s, DIIS, energy and vector conversions of PySCF's
+driver 2.3 s. About 15 s are shuffles that a threaded kernel does in 1-2 s.
+
 ## Correctness references
 
 | Reference | Agreement | Test |

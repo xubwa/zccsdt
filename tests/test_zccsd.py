@@ -103,7 +103,8 @@ def test_socutils_routes_kept(x2c_h2o, monkeypatch, tmp_path):
     nrr_outcore: the same energies as the defaults.'''
     monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
     e_ref = _run(DirectZCCSD, x2c_h2o).e_corr
-    for cls, switch in ((DirectZCCSD, 'ovvv_direct'), (ZCCSD, 'ao2mo_outcore')):
+    for cls, switch in ((DirectZCCSD, 'ovvv_direct'), (DirectZCCSD, 'socutils_amps'),
+                        (ZCCSD, 'ao2mo_outcore')):
         mycc = cls(x2c_h2o, frozen=2)
         setattr(mycc, switch, True)
         mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-11, 1e-8
@@ -111,6 +112,39 @@ def test_socutils_routes_kept(x2c_h2o, monkeypatch, tmp_path):
         assert mycc.converged and abs(mycc.e_corr - e_ref) < 1e-9, switch
         if switch == 'ovvv_direct':
             assert mycc.eris.ovvv is None and mycc.eris.E4 is not None
+        if switch == 'socutils_amps':
+            assert mycc.eris.residual is None and mycc.eris.ovvv is not None
+
+
+def test_amps_equal_socutils(x2c_h2o):
+    '''The amplitude equations on fixed layouts (zccsdt.zccsd.amps) against
+    update_amps as copied from socutils, for amplitudes with a large T1.'''
+    from zccsdt.zccsd import zccsd_direct as zd
+    new = DirectZCCSD(x2c_h2o, frozen=2)
+    old = DirectZCCSD(x2c_h2o, frozen=2)
+    old.socutils_amps = True
+    new.verbose = old.verbose = 0
+    e_new, e_old = new.ao2mo(), old.ao2mo()
+    assert e_new.ovvv is None and e_new.ovvo is None and e_new.ao_eri is None
+    nocc, nvir = e_new.nocc, e_new.fock.shape[0] - e_new.nocc
+    b, c = np.tril_indices(nvir, -1)
+    assert abs(e_new.ovvv_p - e_old.ovvv[:, :, b, c]).max() < 1e-12
+    rng = np.random.default_rng(7)
+    t1 = 0.05 * (rng.standard_normal((nocc, nvir)) + 1j * rng.standard_normal((nocc, nvir)))
+    t2 = rng.standard_normal((nocc,) * 2 + (nvir,) * 2) + 1j * rng.standard_normal((nocc,) * 2 + (nvir,) * 2)
+    t2 = 0.02 * (t2 - t2.transpose(1, 0, 2, 3))
+    t2 = t2 - t2.transpose(0, 1, 3, 2)
+    for shift in (0.0, 0.3):
+        new.level_shift = old.level_shift = shift
+        t1n, t2n = new.update_amps(t1, t2, e_new)
+        t1o, t2o = zd.update_amps(old, t1, t2, e_old)
+        assert abs(t1n - t1o).max() < 1e-12 and abs(t2n - t2o).max() < 1e-12
+    # the ladder alone, and (T) from the packed <ia||bc>
+    io, jo = np.tril_indices(nocc, -1)
+    tau = imd.make_tau(t2, t1, t1)
+    L = e_new.residual.ladder(tau[io, jo][:, b, c])
+    assert abs(L - zd._ladder_lc(tau, e_old)[io, jo][:, b, c]).max() < 1e-12
+    assert abs(get_ovvv(e_new) - e_old.ovvv).max() < 1e-12
 
 
 def test_t_loops_complex(x2c_h2o, monkeypatch, tmp_path):

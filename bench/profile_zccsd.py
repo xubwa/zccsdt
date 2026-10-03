@@ -4,10 +4,12 @@
 
 usage: python bench/profile_zccsd.py MOLECULE BASIS VARIANT [NITER] [T_ALGS]
   MOLECULE: h2o | n2 | c6h6 | ... (the geometries of bench/profile_iter.py)
-  VARIANT:  direct (DirectZCCSD: AO ladder, ovvv stored) | mo (ZCCSD: packed
-            <ab||ef>), both with the integrals of zccsdt.zccsd.ao2mo; the
-            routes of socutils: direct-ao (ovvv terms from the AO integrals)
-            and mo-nrr (all MO integrals through nrr_outcore and HDF5)
+  VARIANT:  direct (DirectZCCSD: AO ladder, the amplitude equations of
+            zccsdt.zccsd.amps) | mo (ZCCSD: packed <ab||ef>), both with the
+            integrals of zccsdt.zccsd.ao2mo; the routes of socutils:
+            direct-soc (its update_amps, ovvv stored), direct-ao (ovvv terms
+            from the AO integrals) and mo-nrr (all MO integrals through
+            nrr_outcore and HDF5)
   NITER:    CCSD iterations (default 4); the first is left out of the means;
             0: the integrals only
   T_ALGS:   (T) loops to time, comma separated (default occ_loop; none)
@@ -109,6 +111,7 @@ def main():
             wrap(zd, name)
         mycc = zd.DirectZCCSD(mf)
         mycc.ovvv_direct = route == 'ao'
+        mycc.socutils_amps = route == 'soc'
     else:
         for name in ('cc_Fvv', 'cc_Wovvo', 'update_t2_vvvv_sym', '_make_vvvv_tril'):
             wrap(imd, name)

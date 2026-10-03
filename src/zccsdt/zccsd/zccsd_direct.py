@@ -9,7 +9,9 @@
 # (slabs of the first occupied index, transformed by socutils' nrr_fast,
 # within max_memory: what does not fit is mapped from a scratch file) and
 # ovvv is stored by default (DirectZCCSD.ovvv_direct = True: evaluated from the
-# AO integrals in every term, as in socutils).
+# AO integrals in every term, as in socutils).  The amplitude equations are
+# those of zccsdt.zccsd.amps (packed pairs, fixed layouts, the same
+# equations); DirectZCCSD.socutils_amps = True runs update_amps below.
 #
 # Two-component (spinor) CCSD that never builds or stores the ``vvvv`` block.
 #
@@ -381,9 +383,14 @@ class DirectZCCSD(_zccsd.ZCCSD):
         ``ladder='ao'`` only.  False (default): <ma||ef> is transformed and
         stored (o v^3).  True: it is never built and its five terms are
         evaluated from the AO integrals in every iteration, as in socutils.
+    socutils_amps : bool
+        False (default, ``ladder='ao'`` with stored <ma||ef>): the amplitude
+        equations of zccsdt.zccsd.amps.  True: update_amps of this module,
+        as copied from socutils (einsums on the full arrays).
     '''
 
     ovvv_direct = False
+    socutils_amps = False
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -393,7 +400,17 @@ class DirectZCCSD(_zccsd.ZCCSD):
         self.max_error = max_error
         self.eris = None
 
-    update_amps = update_amps
+    def _fixed_layouts(self):
+        '''Do the amplitude equations run in zccsdt.zccsd.amps?'''
+        return self.ladder == 'ao' and not (self.socutils_amps or self.ovvv_direct)
+
+    def update_amps(self, t1, t2, eris):
+        if not self._fixed_layouts():
+            return update_amps(self, t1, t2, eris)
+        if eris.residual is None:
+            from zccsdt.zccsd import amps
+            eris.residual = amps.Residual(eris)
+        return eris.residual.update(t1, t2, self.level_shift)
 
     def ao2mo(self, mo_coeff=None):
         if mo_coeff is None:
@@ -420,7 +437,7 @@ class DirectZCCSD(_zccsd.ZCCSD):
         if eris is None:
             eris = self.eris if self.eris is not None else self.ao2mo()
         if eris.ovvv is None:
-            eris.ovvv = get_ovvv(eris)
+            eris.ovvv = get_ovvv(eris)              # from the packed array or the AO integrals
         return gccsd_t.kernel(self, eris, t1, t2, self.verbose)
 
     # (the vvvv-free EOM-CCSD entry points of socutils are not copied: EOM
@@ -449,6 +466,10 @@ class _PhysicistsERIs(gccsd._PhysicistsERIs):
         self.W_same = None          # packed antisymmetric same-spin AO integral <mu nu||si rho>
         self.ao_tril = None         # (mu>nu) pair indices
         self._spin_mo_cache = None
+        # zccsdt.zccsd.amps
+        self.ovvv_p = None          # <ma||ef> packed over e > f
+        self.W_plus = None          # packed symmetrized AO integral
+        self.residual = None        # amps.Residual of these integrals
 
     def _common_init_(self, mycc, mo_coeff=None):
         if mo_coeff is None:
@@ -513,20 +534,27 @@ def _make_eris_direct(mycc, mo_coeff=None):
         # does not fit mycc.max_memory is a mapped array of a scratch file.
         from zccsdt.zccsd import ao2mo as slab
         Ca, Cb = mog[:nao], mog[nao:]
-        blocks = slab.occupied_blocks(mol, Ca, Cb, nocc, with_ovvv=not mycc.ovvv_direct,
-                                      max_memory=mycc.max_memory)
+        if mycc._fixed_layouts():       # zccsdt.zccsd.amps: packed ovvv, no ovvo
+            names, ops = ('oooo', 'ooov', 'oovv', 'ovov', 'ovvv_p'), ('W_same', 'W_plus')
+        else:
+            names = slab.BLOCKS[:5 + (not mycc.ovvv_direct)]
+            ops = ('ao_eri', 'W_same')
+        blocks = slab.occupied_blocks(mol, Ca, Cb, nocc, max_memory=mycc.max_memory, names=names)
         eris.oooo, eris.ooov, eris.oovv = blocks['oooo'], blocks['ooov'], blocks['oovv']
-        eris.ovov, eris.ovvo = blocks['ovov'], blocks['ovvo']
-        eris.ovvv = blocks.get('ovvv')
+        eris.ovov, eris.ovvo = blocks['ovov'], blocks.get('ovvo')
+        eris.ovvv, eris.ovvv_p = blocks.get('ovvv'), blocks.get('ovvv_p')
         eris.ao_chol = None
         log.info('MO integrals %s', blocks.describe())
-        # ladder operator [(nu,sigma),(mu,lambda)] for a single GEMM and the
-        # packed antisymmetrized same-spin AO integral <mu nu||si rho> on the
-        # (mu>nu, si>rho) triangles (Liu-Cheng ladder); amplitude independent
-        ops = slab.ladder_operators(mol, mycc.max_memory)
-        eris.ao_eri, eris.W_same, eris.ao_tril = ops['ao_eri'], ops['W_same'], ops.idx
-        log.info('AO operators of the ladder %s', ops.describe())
-        eris._scratch = (blocks.scratch, ops.scratch)       # keeps the scratch files open
+        # the AO operators of the ladder (amplitude independent): the packed
+        # antisymmetrized same-spin integral <mu nu||si rho> on the (mu>nu,
+        # si>rho) triangles (Liu-Cheng ladder) and, for the alpha-beta block,
+        # the packed symmetrized integral (amps) or the full matrix
+        # [(nu,sigma),(mu,lambda)] (socutils)
+        aops = slab.ladder_operators(mol, mycc.max_memory, names=ops)
+        eris.ao_eri, eris.W_same, eris.W_plus = aops.get('ao_eri'), aops['W_same'], aops.get('W_plus')
+        eris.ao_tril = aops.idx
+        log.info('AO operators of the ladder %s', aops.describe())
+        eris._scratch = (blocks.scratch, aops.scratch)      # keeps the scratch files open
         # 4-index AO integrals, in memory: only for the AO-direct ovvv terms
         eris.E4 = (ao2mo_restore(1, mol.intor('int2e', aosym='s8'), nao)
                    if mycc.ovvv_direct else None)
@@ -562,6 +590,14 @@ def get_ovvv(eris):
     '''Reconstruct ``<ia||bc>`` once from the scalar AO integrals (O(o v^3)).'''
     if eris.ovvv is not None:
         return np.asarray(eris.ovvv)
+    if getattr(eris, 'ovvv_p', None) is not None:      # zccsdt: from the packed array
+        p = np.asarray(eris.ovvv_p)
+        nocc, nvir = p.shape[:2]
+        b, c = np.tril_indices(nvir, -1)
+        out = np.zeros((nocc, nvir, nvir, nvir), dtype=p.dtype)
+        out[:, :, b, c] = p
+        out[:, :, c, b] = -p
+        return out
     Co, Cv, Cf = _spin_mo(eris)
     E = eris.E4
     out = 0.
