@@ -22,7 +22,7 @@ set_target_properties(zc_t3pack PROPERTIES
 
 # kernels of the spinor CCSD amplitude equations (zccsdt/zccsd/amps.py)
 add_library(zc_zccsd SHARED zccsd_kernels.c)
-target_compile_options(zc_zccsd PRIVATE -O3 -march=native)
+target_compile_options(zc_zccsd PRIVATE -O3 -march=native -fcx-limited-range)
 target_link_libraries(zc_zccsd PUBLIC OpenMP::OpenMP_C m)
 set_target_properties(zc_zccsd PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)

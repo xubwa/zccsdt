@@ -409,8 +409,25 @@ class DirectZCCSD(_zccsd.ZCCSD):
             return update_amps(self, t1, t2, eris)
         if eris.residual is None:
             from zccsdt.zccsd import amps
-            eris.residual = amps.Residual(eris)
+            eris.residual = amps.Residual(eris, self.max_memory, self.diis_space)
         return eris.residual.update(t1, t2, self.level_shift)
+
+    def ccsd(self, t1=None, t2=None, eris=None, mbpt2=None):
+        if mbpt2 or not self._fixed_layouts():
+            return _zccsd.ZCCSD.ccsd(self, t1, t2, eris, mbpt2)
+        # the iterations of zccsdt.zccsd.amps: T2 packed throughout
+        from zccsdt.zccsd import amps
+        if self.verbose >= logger.WARN:
+            self.check_sanity()
+        self.dump_flags()
+        self.e_hf = self.get_e_hf()
+        if eris is None:
+            eris = self.eris if self.eris is not None else self.ao2mo(self.mo_coeff)
+        self.converged, self.e_corr, self.t1, self.t2 = amps.kernel(
+            self, eris, t1, t2, max_cycle=self.max_cycle, tol=self.conv_tol,
+            tolnormt=self.conv_tol_normt, verbose=self.verbose, callback=self.callback)
+        self._finalize()
+        return self.e_corr, self.t1, self.t2
 
     def ao2mo(self, mo_coeff=None):
         if mo_coeff is None:
@@ -468,8 +485,33 @@ class _PhysicistsERIs(gccsd._PhysicistsERIs):
         self._spin_mo_cache = None
         # zccsdt.zccsd.amps
         self.ovvv_p = None          # <ma||ef> packed over e > f
+        self.oovv_p = None          # <mn||ef> packed over m > n and e > f
+        self.oovv_r = None          # <mn||ef> as [m, e, n, f]
+        self.ovov_r = None          # -<mb||je> as [m, e, j, b]
         self.W_plus = None          # packed symmetrized AO integral
         self.residual = None        # amps.Residual of these integrals
+
+    # with the layouts of zccsdt.zccsd.amps, oovv and ovov exist only on
+    # demand (for (T) and the functions of PySCF on the full arrays)
+    @property
+    def oovv(self):
+        if self._oovv is None and self.oovv_r is not None:
+            self._oovv = np.ascontiguousarray(np.asarray(self.oovv_r).transpose(0, 2, 1, 3))
+        return self._oovv
+
+    @oovv.setter
+    def oovv(self, x):
+        self._oovv = x
+
+    @property
+    def ovov(self):
+        if self._ovov is None and self.ovov_r is not None:
+            self._ovov = -np.asarray(self.ovov_r).transpose(0, 3, 2, 1)
+        return self._ovov
+
+    @ovov.setter
+    def ovov(self, x):
+        self._ovov = x
 
     def _common_init_(self, mycc, mo_coeff=None):
         if mo_coeff is None:
@@ -534,15 +576,18 @@ def _make_eris_direct(mycc, mo_coeff=None):
         # does not fit mycc.max_memory is a mapped array of a scratch file.
         from zccsdt.zccsd import ao2mo as slab
         Ca, Cb = mog[:nao], mog[nao:]
-        if mycc._fixed_layouts():       # zccsdt.zccsd.amps: packed ovvv, no ovvo
-            names, ops = ('oooo', 'ooov', 'oovv', 'ovov', 'ovvv_p'), ('W_same', 'W_plus')
+        if mycc._fixed_layouts():       # zccsdt.zccsd.amps: its layouts, no ovvo
+            names = ('oooo', 'ooov', 'oovv_p', 'oovv_r', 'ovov_r', 'ovvv_p')
+            ops = ('W_same', 'W_plus')
         else:
             names = slab.BLOCKS[:5 + (not mycc.ovvv_direct)]
             ops = ('ao_eri', 'W_same')
         blocks = slab.occupied_blocks(mol, Ca, Cb, nocc, max_memory=mycc.max_memory, names=names)
-        eris.oooo, eris.ooov, eris.oovv = blocks['oooo'], blocks['ooov'], blocks['oovv']
-        eris.ovov, eris.ovvo = blocks['ovov'], blocks.get('ovvo')
+        eris.oooo, eris.ooov, eris.oovv = blocks['oooo'], blocks['ooov'], blocks.get('oovv')
+        eris.ovov, eris.ovvo = blocks.get('ovov'), blocks.get('ovvo')
         eris.ovvv, eris.ovvv_p = blocks.get('ovvv'), blocks.get('ovvv_p')
+        eris.oovv_p, eris.oovv_r, eris.ovov_r = (blocks.get(k) for k in
+                                                 ('oovv_p', 'oovv_r', 'ovov_r'))
         eris.ao_chol = None
         log.info('MO integrals %s', blocks.describe())
         # the AO operators of the ladder (amplitude independent): the packed

@@ -1205,39 +1205,97 @@ the AO integrals, as copied: 2.3 s, 22.6 s, 127 s on c329); `ZCCSD` 1.48 s,
 10.7 s and 92.9 s; CFOUR 0.32 s, 2.75 s, 26.7 s. Peak RSS for benzene 24-27
 GB: the copied iteration is not planned (large einsum temporaries).
 
-### The amplitude equations of `DirectZCCSD` on fixed layouts (`zccsd/amps.py`)
+### The amplitude equations of `DirectZCCSD` on packed amplitudes (`zccsd/amps.py`)
 
-The same equations as socutils' `update_amps` (the two agree to 1e-16 per
-element, `tests/test_zccsd.py`), evaluated differently:
+The same equations as socutils' `update_amps` (the two agree to 1e-12 per
+element for random complex amplitudes, `tests/test_zccsd.py`), evaluated
+differently:
 
-- pairs packed, i > j and a > b; tau formed once;
-- the two o^3 v^3 terms, W(mbej) += <mn||ef> t2 and the ring t2 W, as one
-  ZGEMM each on matrices [(i a), (j b)];
-- <ma||ef> stored packed over e > f (half of ovvv) and read once per
-  iteration, one occupied index at a time, for its five terms;
+- T2, tau and the residual are packed, [(i>j), (a>b)], from the first guess
+  to the converged amplitudes: the iterations are PySCF's (Jacobi step, DIIS
+  on [t1, packed t2], the same convergence test; the iterates agree to
+  1e-13), without ever unpacking T2. Every layout a term needs comes from an
+  OpenMP kernel (`csrc/zccsd_kernels.c`, numpy equivalents in
+  `zccsd/kernels.py`), not from fancy indexing;
+- the two o^3 v^3 terms, W(mbej) += <mn||ef> t2 and the ring t2 W, are one
+  ZGEMM each on matrices [(i a), (j b)], in which t2 and <mn||ef> are
+  symmetric: rows and columns of t2 are generated from the packed
+  amplitudes, the two-index intermediates that contract <mn||ef> with t2
+  are partial traces of the first product;
+- <ma||ef> is stored packed over e > f (half of ovvv): one GEMM with tau,
+  and the t1 terms of one occupied index at a time from rows unpacked in
+  the cache;
+- W(mnij) and the occupied-occupied Fock intermediate act on the packed
+  pairs as one matrix;
 - the AO ladder over the pairs i > j, the alpha-beta block of the
   back-transformed tau split into its symmetric and antisymmetric parts:
   two packed real operators of 2 nao^4 bytes each instead of the
-  nao^2 x nao^2 matrix, and half the multiply-adds.
+  nao^2 x nao^2 matrix, and half the multiply-adds;
+- the integrals arrive in the layouts of the terms (`zccsd/ao2mo.py`:
+  <mn||ef> and <mb||je> as [m, e, n, f], <mn||ef> on packed pairs).
 
-First version (numpy and one C kernel), 8 cores of c318, one job
-(31550503): CFOUR first, then `DirectZCCSD` with these equations and with
-socutils' `update_amps` on the same stored integrals. Seconds per iteration:
+Seconds per iteration, 8 cores, each row block one job on one node with
+CFOUR first (CFOUR varies by 15% between nodes of the same CPU):
 
 | | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
 |---|---|---|---|
-| CFOUR `xx2cccsd` | 0.26 | 2.07 | 22.95 |
+| job 31550503 (c318): CFOUR `xx2cccsd` | 0.26 | 2.07 | 22.95 |
 | socutils' `update_amps`, ovvv stored | | 7.03 | 75.0 |
-| `zccsd/amps.py`, first version | 0.31 | 2.18 | 36.6 |
-| peak memory of the iterations (GB): CFOUR / socutils / amps | 0.7 / / 0.7 | 2.2 / 7.9 / 2.9 | 11.0 / 23.7 / 18.6 |
+| fixed layouts, numpy gathers (57d39be) | 0.31 | 2.18 | 36.6 |
+| job 31552287 (c098): CFOUR `xx2cccsd` | 0.32 | 2.72 | 26.76 |
+| packed amplitudes, kernels, one pool of threads | 0.10 | 0.77 | 18.9 |
+| peak memory of the iterations (GB): CFOUR / zccsdt | 0.7 / 0.6 | 2.2 / 2.5 | 11.0 / 10.4 |
 
-Where the 36.6 s of benzene go: the two o^3 v^3 ZGEMMs 13.9 s (7.6e12
-flops at 550 Gflop/s: the rate of the machine; CFOUR spends 6.0 s + 6.1 s
-in the same two terms with real DGEMMs), the <ma||ef> terms 6.2 s (half of
-it a transposed add in numpy), the remaining T2 terms 5.0 s and the ladder
-4.3 s (CFOUR 3.1 s), both mostly index gathers on one thread, layouts of
-t2 2.9 s, unpacking 1.1 s, DIIS, energy and vector conversions of PySCF's
-driver 2.3 s. About 15 s are shuffles that a threaded kernel does in 1-2 s.
+Where the time goes (job 31552287, seconds per iteration):
+
+| C6H6/cc-pVDZ | CFOUR | zccsdt |
+|---|---|---|
+| the two o^3 v^3 products (CFOUR: I7 and the ring) | 12.84 | 12.51 |
+| other intermediates; the terms with <ma||ef> | 3.43 | 3.39 (GEMM with tau 1.62, t1 terms 1.19, small ring terms 0.58) |
+| pp ladder in the AO basis | 3.39 | 1.82 (real GEMMs 1.02, transformations 0.66, packing 0.14) |
+| hh ladder, T1/T2 terms, layouts, DIIS, update | 7.10 | 1.16 (t2 terms 0.46, intermediates 0.28, DIIS and energy 0.20) |
+| sum | 26.76 | 18.88 |
+
+- The two o^3 v^3 products run at the rate of the machine in both programs
+  (7.6e12 flops in 12.5 s: 610 Gflop/s; CFOUR does four real DGEMMs for each
+  at the same rate). They are two thirds of zccsdt's iteration.
+- For H2O/cc-pVQZ (o = 10, v = 220) the terms with <ma||ef> (0.24 s), the
+  ring products (0.29 s) and the ladder (0.14 s) are 0.67 of 0.77 s; CFOUR
+  spends 1.06 s in its intermediates and 1.14 s outside its timers.
+
+**One pool of threads.** The kernels are OpenMP; numpy's BLAS (OpenBLAS
+with its own pthreads here) keeps its threads spinning for about 0.1 s
+after every call, on the cores the next OpenMP region wants. With the
+products of the step in numpy, H2O/cc-pVTZ took 0.20-0.37 s per iteration
+and H2O/cc-pVQZ 1.06-1.48 s depending on which library did which product
+and on `OMP_WAIT_POLICY` (job 31552066). All products of the step now go
+through `zccsdt.blas`, i.e. the BLAS of the kernel library (MKL on GNU
+OpenMP when `libzc_ccsdt_t3_mkl.so` is built): kernels and BLAS share one
+pool, numpy's BLAS is not called with work for its threads, and the wait
+policy no longer matters (0.104 / 0.771 / 18.9 s with `PASSIVE`, 0.103 /
+0.760 / 18.8 s without).
+
+**Memory.** Nothing but three packed T2 and smaller arrays is assumed to
+fit. `amps.plan_step` slices the step from what `max_memory` leaves: pass 1
+over slabs of the first occupied index (the rows of W(mbej): the integrals
+<mn||ef>, <mb||je>, <ma||ef> are each read once, by rows, from memory or
+from the scratch file of the integral step), pass 2 over blocks of the
+columns; W(mbej) (o^2 v^2 elements) is in memory only if the smallest
+blocks still fit next to it, else a mapped scratch array; the DIIS vectors
+are in memory if they take no more than a third of what is left. Smaller
+blocks mean that rows of t2 are generated more often. Benzene/cc-pVDZ, the
+same job:
+
+| `max_memory` | integrals in scratch files | plan of the step | s / iteration | peak anonymous memory |
+|---|---|---|---|---|
+| 24000 MB | none | one slab, one block; W and DIIS in memory | 18.9 | 10.4 GB |
+| 8000 MB | ovvv_p | slabs of 11, blocks of 32 of 42 occupied; W in memory, DIIS in a file | 19.9 | 7.6 GB |
+| 4000 MB | <mn||ef>, <mb||je>, ovvv_p | slabs of 2, blocks of 6; W and DIIS in files | 23.9 | 3.6 GB |
+
+With 4000 MB the iteration is still faster than CFOUR's in 11 GB. H2O/
+cc-pVQZ with 4000 MB runs as with 24000 MB (0.78 s, 2.7 GB). Below the
+working set of one occupied index (three packed T2 plus about 5 o v^2
+elements and one slab of <ma||ef>) `plan_step` raises `MemoryError`.
 
 ## Correctness references
 

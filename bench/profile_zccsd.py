@@ -4,8 +4,9 @@
 
 usage: python bench/profile_zccsd.py MOLECULE BASIS VARIANT [NITER] [T_ALGS]
   MOLECULE: h2o | n2 | c6h6 | ... (the geometries of bench/profile_iter.py)
-  VARIANT:  direct (DirectZCCSD: AO ladder, the amplitude equations of
-            zccsdt.zccsd.amps) | mo (ZCCSD: packed <ab||ef>), both with the
+  VARIANT:  direct (DirectZCCSD: AO ladder, the amplitude equations and the
+            iterations of zccsdt.zccsd.amps) | mo (ZCCSD: packed <ab||ef>),
+            both with the
             integrals of zccsdt.zccsd.ao2mo; the routes of socutils:
             direct-soc (its update_amps, ovvv stored), direct-ao (ovvv terms
             from the AO integrals) and mo-nrr (all MO integrals through
@@ -160,14 +161,20 @@ def main():
     # one pass of the CC loop = update_amps + DIIS + energy: timed start to
     # start; the timers are read at the start of every pass
     starts, snaps = [], []
-    update = mycc.update_amps
 
-    def update_amps(t1, t2, eris):
-        starts.append(time.perf_counter())
-        snaps.append(timing.snapshot())
-        with timing.timer('update_amps'):
-            return update(t1, t2, eris)
-    mycc.update_amps = update_amps
+    def marked(update):
+        @wraps(update)
+        def update_amps(*args, **kwargs):
+            starts.append(time.perf_counter())
+            snaps.append(timing.snapshot())
+            with timing.timer('update_amps'):
+                return update(*args, **kwargs)
+        return update_amps
+    if base == 'direct' and mycc._fixed_layouts():      # the iterations of zccsdt.zccsd.amps
+        from zccsdt.zccsd import amps
+        amps.Residual.update_packed = marked(amps.Residual.update_packed)
+    else:
+        mycc.update_amps = marked(mycc.update_amps)
     if niter == 0:
         return
     mycc.max_cycle, mycc.conv_tol, mycc.conv_tol_normt = niter, 1e-14, 1e-14
@@ -192,9 +199,14 @@ def main():
         tree(times, ('update_amps',), 0, mean)
         inline = times[('update_amps',)][0] - sum(
             w for _, w, _, _ in timing.children(times, ('update_amps',)))
-        print('  %-30s %9.3f s %7.1f %%' % ('(T1/T2 einsums in update_amps)', inline,
-                                           100 * inline / mean))
+        print('  %-30s %9.3f s %7.1f %%' % ('(not under a timer)', inline, 100 * inline / mean))
+        for name, w, c, n in timing.children(times, ()):
+            if name != 'update_amps':                   # DIIS and energy of amps.kernel
+                print('  %-30s %9.3f s %7.1f %%  (%g calls)' % (name, w, 100 * w / mean, n))
+                tree(times, (name,), 1, mean)
     print('peak anonymous memory in the iterations %.2f GB' % (watch.anon / 1e6))
+    if getattr(eris, 'residual', None) is not None:
+        print('memory plan of the step: ' + eris.residual.describe())
 
     for alg in algs:
         watch = MemWatch()

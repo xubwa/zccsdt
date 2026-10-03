@@ -217,8 +217,14 @@ def occupied_blocks(mol, Ca, Cb, nocc, with_ovvv=True, max_memory=None, plan=Non
                     names=None):
     '''The antisymmetrized blocks <pq||rs> with a first occupied index: an
     Arrays dict with oooo, ooov, oovv, ovov, ovvo and (``with_ovvv``) ovvv,
-    or with the blocks in ``names``, which may also ask for 'ovvv_p':
-    <ia||bc> packed over b > c (numpy.tril_indices(nvir, -1)), half of ovvv.
+    or with the blocks in ``names``, which may also ask for the layouts of
+    zccsdt.zccsd.amps (pairs in numpy.tril_indices(n, -1) order):
+
+    'ovvv_p'  <ia||bc> packed over b > c, [i, a, (b>c)]: half of ovvv;
+    'oovv_p'  <ij||ab> packed over i > j and a > b, [(i>j), (a>b)];
+    'oovv_r'  <ij||ab> as [i, a, j, b];
+    'ovov_r'  -<ib||ja> as [i, a, j, b].
+
     ``max_memory`` (MB) decides which of them are mapped scratch arrays and
     how the passes are sliced (``plan``: an explicit Plan for the latter).'''
     nmo = Ca.shape[1]
@@ -227,9 +233,10 @@ def occupied_blocks(mol, Ca, Cb, nocc, with_ovvv=True, max_memory=None, plan=Non
     if names is None:
         names = BLOCKS[:5 + bool(with_ovvv)]
     bv, cv = np.tril_indices(nvir, -1)
-    shapes = {k: [dim[c] for c in k] for k in names if k != 'ovvv_p'}
-    if 'ovvv_p' in names:
-        shapes['ovvv_p'] = (nocc, nvir, bv.size)
+    special = {'ovvv_p': (nocc, nvir, bv.size),
+               'oovv_p': (nocc * (nocc - 1) // 2, bv.size),
+               'oovv_r': (nocc, nvir, nocc, nvir), 'ovov_r': (nocc, nvir, nocc, nvir)}
+    shapes = {k: special[k] if k in special else [dim[c] for c in k] for k in names}
     budget = memory.budget(max_memory)
     need = plan_slabs(mol, nocc, nmo).need if plan is None else plan.need
     out, used = _allocate(shapes, np.complex128, _store_bytes(budget, need), 'the MO integrals')
@@ -253,6 +260,16 @@ def occupied_blocks(mol, Ca, Cb, nocc, with_ovvv=True, max_memory=None, plan=Non
                 np.subtract(t, t.transpose(0, 2, 1), out=out['ovvv'][i])
             if 'ovvv_p' in names:
                 np.subtract(t[:, bv, cv], t[:, cv, bv], out=out['ovvv_p'][i])
+        if 'oovv_r' in names:                           # <ij||ab> = (ia|jb) - (ib|ja) as [a, j, b]
+            t = gi[v, o, v]
+            np.subtract(t, t.transpose(2, 1, 0), out=out['oovv_r'][i])
+        if 'ovov_r' in names:                           # -<ib||ja> = (ia|bj) - (ij|ba) as [a, j, b]
+            np.subtract(gi[v, v, o].transpose(0, 2, 1), gi[o, v, v].transpose(2, 0, 1),
+                        out=out['ovov_r'][i])
+        if 'oovv_p' in names and i:                     # the pairs (i, j < i)
+            t = gi[v, :i, v].transpose(1, 0, 2)         # [j, a, b] = (ia|jb)
+            np.subtract(t[:, bv, cv], t[:, cv, bv],
+                        out=out['oovv_p'][i * (i - 1) // 2:i * (i + 1) // 2])
 
     with ThreadPoolExecutor(min(_threads(), plan.nket)) as pool:
         for i0, i1, g in slabs(mol, Ca, Cb, (0, nocc), None, plan):
