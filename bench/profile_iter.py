@@ -1,9 +1,10 @@
-'''Per-term timing of CCSDT iterations.
+'''Per-term timing of CCSDT (or CCSD) iterations.
 
 usage: python bench/profile_iter.py MOLECULE BASIS KIND [NITER] [FROZEN]
-  MOLECULE: h2o | n2 | h2s | nh2 | o2     KIND: ghf | x2c | uhf
+  MOLECULE: h2o | n2 | h2s | nh2 | o2 | c6h6     KIND: ghf | x2c | uhf
   (uhf: U-form integrals straight from a UHF reference, UCCSDT)
-environment: ZC_PACKED=1 builds the integrals block-wise with packed vvvv
+environment: ZC_METHOD=ccsd times CCSD iterations instead (default ccsdt);
+             ZC_PACKED=1 builds the integrals block-wise with packed vvvv
              (needed for large bases); ZC_MEM_MB sets the batch buffer budget;
              ZC_SPIN=1 (ghf only) uses alpha-first orbitals and the spin-blocked
              T3 engine (UCCSDT); ZC_FLIP=1 adds closed-shell spin flip (RCCSDT);
@@ -30,6 +31,10 @@ GEOM = {
     'h2s': 'S 0 0 0; H 0 0.9618 0.9272; H 0 -0.9618 0.9272',
     'nh2': 'N 0 0 0; H 0 0.8036 0.6347; H 0 -0.8036 0.6347',
     'o2': 'O 0 0 0; O 0 0 1.2075',
+    'c6h6': '''C 1.397 0 0; C 0.6985 1.209837 0; C -0.6985 1.209837 0; C -1.397 0 0;
+               C -0.6985 -1.209837 0; C 0.6985 -1.209837 0; H 2.481 0 0;
+               H 1.2405 2.148609 0; H -1.2405 2.148609 0; H -2.481 0 0;
+               H -1.2405 -2.148609 0; H 1.2405 -2.148609 0''',
 }
 SPIN = {'nh2': 1, 'o2': 2}       # 2S of the open-shell molecules
 
@@ -98,10 +103,11 @@ def main():
     # one warm-up iteration (engine setup, caches, buffers), then the timed
     # ones with the same memory plan: the plan of a fresh run (a second call
     # would plan again, with what the first one left allocated)
-    r0 = solver.kernel(eris, 'ccsdt', solver.Options(max_cycle=1, **kw))
+    method = os.environ.get('ZC_METHOD', 'ccsdt')
+    r0 = solver.kernel(eris, method, solver.Options(max_cycle=1, **kw))
     timing.reset()
     kw['plan'] = r0.plan
-    r = solver.kernel(eris, 'ccsdt', solver.Options(max_cycle=niter, **kw),
+    r = solver.kernel(eris, method, solver.Options(max_cycle=niter, **kw),
                       t1=r0.t1, t2=r0.t2, t3=r0.t3)
     watch.stop()
     per = len(r.timings)

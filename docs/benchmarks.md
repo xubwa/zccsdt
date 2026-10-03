@@ -997,6 +997,89 @@ remainder is about 3.7 s.
 | packed W_vvvo and CCSD ladder, MKL for Python GEMMs | 3.8 | |
 | pair-antisymmetrize kernel, segment DIIS, merged drive GEMM, T1-dressed CCSD | 3.2-3.6 | N2 complex: 25 -> 16.9 s |
 
+## Two-component CCSD(T): CFOUR `xx2cccsd`, 8 cores
+
+CFOUR's spinor CCSD(T) (`x2cccsd/`, described in `docs/cfour_notes.md`,
+Section 2) is the reference for a spinor CCSD(T) in zccsdt, which does not
+exist yet. zccsdt's CCSD (`solver.kernel(eris, 'ccsd')`, the CCSD part of
+its CCSDT code) is measured next to it.
+
+**Setup.**
+
+- One Slurm job, `bench/cfour/slurm_x2ccc.sh` (job 31533171, 2026-10-02):
+  8 cores of a 2 x Xeon Gold 6248R node, CFOUR first and then zccsdt, one
+  molecule after the other.
+- CFOUR (cfour-x2cso 35b1f40e3): `RELATIVISTIC=X2C1E`, `X2CKEY=SOATMX`,
+  `ABCDTYPE=AOBASIS`, all electrons, C1, `CC_CONV=7` (largest element of
+  the amplitude step). Times per residual evaluation from its own timers
+  (`bench/cfour/x2ccc_summary.py`), the first evaluation left out; peak RSS
+  from `/usr/bin/time`.
+- zccsdt (bd8a2a8): X2C-1e of PySCF (`x2c.UHF`) -- the same orbital
+  counts, not the same Hamiltonian, so the energies are not compared.
+  `bench/profile_iter.py` with `ZC_METHOD=ccsd ZC_PACKED=1`, mean of 3
+  iterations after a warm-up iteration.
+
+Orbital counts (spinors): H2O/cc-pVTZ o = 10, v = 106 (N = 58 scalar AO
+functions); H2O/cc-pVQZ o = 10, v = 220 (N = 115); benzene/cc-pVDZ o = 42,
+v = 186 (N = 114).
+
+### Where CFOUR's time goes (seconds per CCSD iteration)
+
+| Term | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| W(mbej) T2 term: one (ov)^3 ZGEMM (I7) | 0.019 | 0.154 | 6.36 |
+| ring: one (ov)^3 ZGEMM | 0.022 | 0.167 | 6.49 |
+| pppp ladder in the AO basis | 0.032 | 0.357 | 3.40 |
+| <ab\|\|ci> x T1 terms I8 + I22 (slab reads, small GEMMs) | 0.112 | 0.869 | 2.55 |
+| other timed intermediates, hhhh ladder | 0.014 | 0.061 | 1.12 |
+| not timed: other T1/T2 terms (three more passes over the slabs), DIIS, update | 0.127 | 1.155 | 7.01 |
+| **iteration** | **0.33** | **2.76** | **26.9** |
+| residual evaluations to `CC_CONV=7` | 11 | 11 | 13 |
+| **(T)** | **2.1** | **23.7** | **1500** |
+| peak RSS, xx2cccsd (xx2cvtran) | 0.70 (0.81) GB | 2.2 (3.7) GB | 11.1 (13.7) GB |
+
+- The two (ov)^3 ZGEMMs run at 510-600 GFLOPS, close to the peak of the 8
+  cores. They are half of the iteration for benzene but 12% for
+  H2O/cc-pVQZ.
+- With few occupied spinors the time goes to the terms that read the PPPH
+  files, 5 o v^3 / 2 complex numbers per iteration: I22 (matrix-vector
+  products) runs at 2 GFLOPS, I8 at 19-59 GFLOPS; together with the three
+  untimed passes about 2 of the 2.76 s for H2O/cc-pVQZ.
+- The AO ladder runs at 225 GFLOPS (H2O/cc-pVQZ) and 350 GFLOPS (benzene),
+  its transformations included.
+- **(T)**: its ZGEMMs alone, at 550-600 GFLOPS, would take 6 s
+  (H2O/cc-pVQZ) and 280 s (benzene) of the 23.7 s and 1500 s. The rest is
+  the PPPH slabs read for every triplet (31 GB and 1.8 TB in all) and the
+  energy loop over a>b>c, whose W(ba, c) access has a stride of v(v+1)/2
+  elements. For benzene (T) takes 4.3 times as long as the whole CCSD.
+
+### zccsdt's CCSD on the same molecules
+
+| | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| CFOUR iteration | 0.33 s | 2.76 s | 26.9 s |
+| zccsdt iteration | 1.67 s | 23.1 s | -- |
+| of which T1 dressing (`t1_dress`) | 1.16 s | 19.4 s | |
+| of which residual (`ccsd`) | 0.41 s | 3.1 s | |
+| zccsdt peak RSS | 3.2 GB | 27.3 GB | OOM-killed at the 30 GB limit while building the integrals |
+| zccsdt integrals (SCF not included) | 14.6 s | 251 s | |
+
+- zccsdt's CCSD is the CCSD part of its CCSDT code: every iteration
+  rebuilds the T1-dressed packed <ab||cd> (`dressed_vvvv_pp`), a copy of
+  the v^4/4 array plus an intermediate of v^4/2, limited by memory
+  bandwidth. Next to the o^3 v^5 terms of CCSDT this is small; on its own
+  it makes the CCSD iteration 5-8 times slower than CFOUR's. The residual
+  alone is also slower than CFOUR's whole iteration.
+- `solver.kernel(eris, 'ccsd')` has no memory plan (the bare and the
+  dressed <ab||cd> are both kept). For benzene/cc-pVDZ the block-wise
+  integrals (`eris._blocks_by_ao2mo`) went past the 30 GB limit although
+  their floor check (the o v^3 block and its buffers, about 9 GB, against
+  a 24 GB budget) passed: the memory model of the spinor integrals misses
+  something when there are many occupied orbitals (not investigated yet).
+- A spinor CCSD(T) in zccsdt therefore needs a CCSD iteration of its own
+  (ladder on bare integrals or in the AO basis, no dressed <ab||cd>, a
+  memory plan) and a (T) that does not read integral slabs per triplet.
+
 ## Correctness references
 
 | Reference | Agreement | Test |

@@ -58,24 +58,109 @@ packing; MPI distributes ijk hunks.
 
 ## 2. X2C spinor CC (`x2cccsd/`, `libx2ccc/`, `x2cvtran/`)
 
-- Levels: CCSD and CCSD(T) (plus Lambda/EOM/PNO variants). **There is no
-  spinor or complex iterative CCSDT.** `ccsdso/eccsdt.f` is in fact a CCSD(T)
+Read in detail on 2026-10-02 (cfour-x2cso at 35b1f40e3): the spinor CCSD and
+CCSD(T) of Liu, Shen, Asthana and Cheng, J. Chem. Phys. 148, 034106 (2018),
+equations (A1)-(A8) (Gauss-Stanton intermediates).
+
+- Levels: CCSD and CCSD(T), plus Lambda, EOM, densities and gradients, and
+  Cholesky (`x2ccccd/`) and PNO (`x2cccpno/`) variants. **There is no spinor
+  or complex iterative CCSDT.** `ccsdso/eccsdt.f` is in fact a CCSD(T)
   routine of the older, Kramers-blocked `ccsdso` code.
-- Amplitudes: `t1(nv,no)`, `t2(nv(nv+1)/2, no(no+1)/2)` complex, triangle
-  packed (diagonal included), all in core.
-- Integrals: antisymmetrized <pq||rs> blocks written as unformatted sequential
-  Fortran files `moinhhhh`, `moinpphh`, `moinphhp`, `moinhhpp`, `moinhhhp`,
-  `PPPH000k` (one per occupied index), and `moinpppp` only when
-  `ABCDTYPE` is not `AOBASIS`. Complex stored as interleaved re/im. Only the
-  4-fold complex symmetry (pq|rs) = (rs|pq) = (qp|sr)* is assumed.
-- Orbital energies / coefficients / Fock: `scf2ceig`, `scf2ccmo`, `scf2cfck`
-  (plain files and JOBARC records) written by `xsox2chf`.
-- Contractions: ring term by unpacking T2 to (a,i,b,j) and one (nv*no)^3 ZGEMM;
-  hhhh and pppp ladders by packed ZGEMM; AO-driven pppp ladder (default
-  `ABCDTYPE=AOBASIS`) splits complex tau into re/im and uses two real DGEMMs
-  with the real AO integrals. OpenMP for reordering loops, threaded MKL.
-- (T): loop over i<j<k, W(a<=b, c) blocks via six ZGEMMs.
-- Run sequence (no xcfour driver): `xjoda; xx2camf|xsox2catm; xsox2chf;
-  xx2cvtran; xx2cccsd`. Threads from `OMP_NUM_THREADS` / `MKL_NUM_THREADS`.
-  Per-iteration output line `CCSD cycle ...` plus per-term timings.
+- Run sequence (no xcfour driver): `xjoda; xsox2catm; xsox2chf; xx2cvtran;
+  xx2cccsd` (X2CAMF: `xx2camf` first). `xsox2chf` reads the basis from ZMAT
+  itself, so `BASIS=SPECIAL` with one line per atom. Threads from
+  `OMP_NUM_THREADS` / `MKL_NUM_THREADS`. `bench/cfour/slurm_x2ccc.sh` runs
+  the chain; `bench/cfour/x2ccc_summary.py` sums up the timers that
+  `xx2cccsd` prints for every iteration.
 - Build: ifort, `-i8`, MKL ILP64 `mkl_intel_thread`, `-qopenmp`.
+
+### Representation and storage
+- Kramers-unrestricted spinors, complex arithmetic. No Kramers symmetry and
+  no savings from the double group: its irreps (`dg_cosym`) only zero
+  symmetry-forbidden amplitudes (`pgsymmasksd0`), and only with `%ipgmask`
+  in ZMAT, which the EOM programs read and `xx2cccsd` does not.
+- Amplitudes: `t1(nv,no)`, `t2(nv(nv+1)/2, no(no+1)/2)` complex, triangle
+  packed with the (zero) diagonal included, in core. DIIS (`CC_EXPORDER`,
+  default 5 vectors) keeps the amplitudes and the Jacobi step of each
+  iteration in core; once the space is full all vectors are shifted by one.
+- MO integrals: antisymmetrized <pq||rs> blocks written by `xx2cvtran` as
+  unformatted sequential Fortran files and read into core at the start:
+  `moinhhhh`, `moinpphh`, `moinhhhp` (packed pairs), `moinphhp`, `moinhhpp`
+  (full o^2 v^2). <ab||ci> (a<=b) stays on disk, one file per occupied
+  index (`PPPH000k`), and is read back slab by slab by every term that
+  needs it. <ab||cd> exists only when `ABCDTYPE` is not `AOBASIS`
+  (`moinpppp`, v^4/4 complex, in core). Complex numbers as interleaved
+  re/im; only the 4-fold complex symmetry (pq|rs) = (rs|pq) = (qp|sr)* is
+  assumed.
+- AO integrals: the scalar (spin-free) two-electron integrals are real.
+  `xx2cccsd` keeps a screened list (packed indices and value) and, by
+  default (`flagspa` 0), two dense copies of the 4-fold packed matrix
+  (N(N+1)/2)^2 for the ladder, 2 N^4 bytes each (N: scalar AO functions).
+  With `%flagspa 1` the ladder runs over the list instead, the target rows
+  distributed over the OpenMP threads (`loading`, `balancing`,
+  `sparse_t2aa_lbal`).
+- Transformation (`x2cvtran`, AO-ladder case): the sparse AO list is
+  transformed with the real and imaginary parts of the occupied spinor
+  coefficients, then to all spinors, alpha and beta components summed,
+  into `vmo(nmo,nmo,nmo,no)` -- every integral with at least one occupied
+  index, nmo^3 o complex numbers in core -- and sorted into the blocks above.
+- Memory: one work array partitioned up front (`eomccini`), among others
+  six scratch arrays of max(o^4, o^2 v^2, v^3, N^3, N^2 o^2/4) complex
+  numbers each. No memory planning and no out-of-core path apart from the
+  PPPH files.
+
+### One CCSD iteration (`hbarso`)
+Costs in complex multiply-adds, o and v counting spinors:
+
+| Term | Routine (timer) | How | Cost |
+|---|---|---|---|
+| W(mbej) += T2 <mn\|\|ef> | `socccon1` (I7) | T2 unpacked to (a,i,b,j), one ZGEMM | o^3 v^3 |
+| ring P(ij)P(ab) t_im^ae W(mbej) | `t2rngso` (Ring Diagram) | T2 unpacked, one ZGEMM, antisymmetrized, repacked | o^3 v^3 |
+| -1/2 P(ab) t_m^a tau_ij^ef <mb\|\|ef> | `socccon5oc` | per m: one ZGEMM over packed ef | o^3 v^3 / 4 |
+| pppp ladder | `t2abcdaoso` (PPPP ladder) | in the AO basis, see below | 1.5 N^4 o^2 real + 3 o^2 (N v^2 + N^2 v) |
+| hhhh ladder; W(mnij) | `t2ijklso`; `socccon2` (I5) | packed ZGEMM | o^4 v^2 / 8 each |
+| other terms with <ab\|\|ci> | `socccon6oc`, `soccct17oc`, `soccct15eoc` (I8), `soccct11oc` (I22) | per occupied index: read the slab, then ZGEMMs; I8 one (v x o x v) ZGEMM per (m, b), I22 matrix-vector products | o^2 v^3 / 2 to o^2 v^3 |
+| F(ae), F(mi), Fock terms | `socccon3/4`, `t2ftaaso2`, `t2ftiiso2` | ZGEMM | o^2 v^3 / 2, o^3 v^2 / 2 |
+
+- **AO-driven pppp ladder** (default with `ABCDTYPE=AOBASIS`): for every
+  pair i<=j, tau_ij is back-transformed to AO pairs with the alpha and beta
+  components of the virtual spinors (`vtransub1`, two ZGEMMs per pair):
+  alpha-alpha and beta-beta (antisymmetric, packed mu>=nu) and alpha-beta
+  (full). The complex tau is split into real and imaginary parts and
+  multiplied by the real AO integrals with DGEMMs (alpha-alpha and
+  beta-beta: (N(N+1)/2)^2 x o^2/2 each, `rmulcpmat`; alpha-beta: one slab
+  per AO index, `rmulcpmatoc`), and the result is transformed back. v^4 is
+  never stored. Against the packed MO ladder (o^2 v^4 / 8 complex) the
+  floating-point work is about 1/3 for H2O/cc-pVQZ (o = 10, v = 220,
+  N = 115) and about 1/2 for benzene/cc-pVDZ (o = 42, v = 186, N = 114),
+  the transformations included (about 48/N of the DGEMM work when v ~ 2N).
+- **I/O**: five terms read all PPPH files in every iteration (5 o v^3 / 2
+  complex numbers, single-threaded `rfile`); every iteration also writes
+  t1 and t2 to files (restart).
+- **Update and convergence**: Jacobi step r = R / D, t <- t + r; DIIS
+  extrapolates t and r; converged when max |r| (`r1max`, `r2max`) <
+  10^-`CC_CONV`. The energy change is not tested.
+- **Parallelism**: OpenMP in the reordering loops, threaded MKL in the
+  GEMMs; the GEMMs of the I8 / I22 terms and the slab reads are small or
+  serial.
+
+### (T) (`t3drvsooc`)
+- Loop over i>j>k. For each triplet W(b<=c, a) is built by 3 ZGEMMs of
+  (v(v+1)/2 x v x v) with the PPPH slabs of i, j and k and 3 of
+  (v(v+1)/2 x v x o) with <jk||ma>; the disconnected part by ZAXPYs; the
+  energy by an OpenMP reduction over a>b>c (a precomputed list of triples).
+  Work: o^3 v^4 / 4 complex multiply-adds.
+- The three PPPH slabs (v^3/2 complex numbers each) are read from disk for
+  every triplet: o^3 v^3 / 4 complex numbers, 4 o^3 v^3 bytes, read in
+  all -- from the page cache at best, serially between the threaded GEMMs.
+- Memory: two W arrays of v^2 (v+1)/2, T2 unpacked twice, <jk||ma>
+  conjugated: O(o^2 v^2), nothing of size o v^3 in core.
+
+Measured profile (per term, three molecules, against zccsdt's CCSD):
+`docs/benchmarks.md`, "Two-component CCSD(T): CFOUR `xx2cccsd`".
+
+### Cholesky variant (`x2ccccd/`, `x2cvtrancd/`)
+The same equations; the <ab||ci> terms are built from Cholesky vectors
+(`ivab`, `ivia`, `ivai`) instead of the PPPH files, `moinhhpp` and
+`moinphhp` are read from disk in every iteration instead of being kept,
+and the pppp ladder can also run on the Cholesky vectors (`t2abcdcd*`).
