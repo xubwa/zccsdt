@@ -1080,6 +1080,53 @@ v = 186 (N = 114).
   (ladder on bare integrals or in the AO basis, no dressed <ab||cd>, a
   memory plan) and a (T) that does not read integral slabs per triplet.
 
+### socutils' CCSD and (T), copied into zccsdt (`zccsdt.zccsd`)
+
+The user's own spinor CCSD and (T) (`ZCCSD`, `DirectZCCSD`, `gccsd_t` from
+socutils, copied unchanged apart from imports and the occ_loop fix), the
+starting point of zccsdt's CCSD(T). One job, everything one after the other
+on one node (c028, 2 x Xeon Gold 6248R, 8 cores; job 31541638): CFOUR as
+above, then `bench/profile_zccsd.py` (`bench/slurm_zccsd.sh`), mean of
+iterations 2-4 (2-3 for benzene). The copied code is not changed for the
+timing: its functions are wrapped by `zccsdt.timing` timers. (T) runs the
+occ_loop on the amplitudes of the last iteration; for benzene it was stopped
+after 1200 s (645 of 11480 triples) and extrapolated (`ZC_T_BUDGET`). CFOUR's
+benzene (T) is the 1500 s of job 31533171 (c146, whose CCSD iteration took
+26.93 s against 26.90 s on c028).
+
+| Seconds, peak memory | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| CFOUR iteration | 0.32 | 2.74 | 26.9 |
+| `DirectZCCSD` iteration (AO ladder, <ma\|\|ef> terms AO-direct) | 2.40 (7.5x) | 23.5 (8.6x) | 130.7 (4.9x) |
+| `ZCCSD` iteration (<ab\|\|cd> in a scratch file) | 1.99 (6.2x) | 17.9 (6.5x) | 106.9 (4.0x) |
+| CFOUR (T) | 2.1 | 23.7 | 1500 |
+| occ_loop (T), ovvv rebuilt from AO integrals first | 32.9 (16x) | 396 (17x) | about 21400 (14x) |
+| integrals: CFOUR `xx2cvtran` / `DirectZCCSD` / `ZCCSD` | 0.5 / 1.1 / 13.5 | 3.4 / 10.1 / 253 | 11.9 / 29.7 / 230 |
+| peak RSS: CFOUR / `DirectZCCSD` / `ZCCSD` (GB) | 0.8 / 1.4 / 3.5 | 3.7 / 9.4 / 16.1 | 13.7 / 22.8 / 16.5 |
+
+- **`DirectZCCSD`**: the five <ma||ef> terms evaluated from the AO
+  integrals (`_ovvv_fvv`, `_ovvv_ladder`, `_ovvv_t1`, `_ovvv_t2`,
+  `_ovvv_wovvo`) take 19.1 of the 23.5 s for H2O/cc-pVQZ (81%) and 58 of
+  the 131 s for benzene (44%); stored, <ma||ef> is only 1.7 GB and 4.3 GB.
+  The AO ladder itself (`_ladder_lc`) takes 0.92 s and 12.6 s against
+  CFOUR's 0.36 s and 3.4 s: it runs over all pairs (i, j), not i <= j.
+- **`ZCCSD`**: `update_t2_vvvv_sym` (the packed MO ladder and its two tau
+  terms) 6.6 s and 27.2 s (37% and 25%), the T1/T2 einsums inside
+  `update_amps` 28-36%, W(mbej) 15-18%; `make_tau` is recomputed four times
+  per iteration (9.3 s for benzene). Its integrals (all nmo^4 MO integrals
+  through a scratch file of 43-45 GB) take 230-253 s.
+- **Threads**: from 2 threads on a busy login node to 8 threads on c028
+  (H2O/cc-pVTZ) CFOUR became 4.2 times faster, `DirectZCCSD` and `ZCCSD`
+  1.7 times: much of the copied code is single-threaded numpy work
+  (transposes and elementwise operations around the einsums), so with 2
+  threads it looked only 2.5-3 times slower than CFOUR.
+- **(T)**: the occ_loop spends 1.9 s (benzene) to 3.2 s (H2O/cc-pVQZ) per
+  triple, most of it in single-threaded numpy passes over v^3 arrays; the
+  vir_loop is slower still (136 s for H2O/cc-pVTZ on c543, 72 times CFOUR).
+- On these molecules the copied code is not faster than zccsdt's own CCSD
+  for H2O (1.67 s and 23.1 s on c146), but it runs benzene, where the
+  integrals of zccsdt's CCSD did not fit 30 GB.
+
 ## Correctness references
 
 | Reference | Agreement | Test |

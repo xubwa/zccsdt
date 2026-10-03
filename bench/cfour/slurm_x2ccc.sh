@@ -13,7 +13,8 @@
 #   MOL: h2o | n2 | c6h6   BASIS: CFOUR name (PVDZ, PVTZ, PVQZ); zccsdt uses cc-pVXZ
 # CFOUR: RELATIVISTIC=X2C1E, X2CKEY=SOATMX, ABCDTYPE=AOBASIS, all electrons,
 #   C1, run as xjoda; xsox2catm; xsox2chf; xx2cvtran; xx2cccsd (no xcfour driver)
-#   CFOUR_MEM_GB: MEMORY_SIZE (default 24); CFOUR_MAXCYC (default 50);
+#   CFOUR_CALC: CCSD(T) (default) or CCSD; CFOUR_MEM_GB: MEMORY_SIZE (default 24);
+#   CFOUR_MAXCYC (default 50);
 #   CFOUR_CONV: CC_CONV, max residual element (default 7)
 # zccsdt: X2C-1e from PySCF (same orbital counts, not the same Hamiltonian),
 #   bench/profile_iter.py with ZC_METHOD=ccsd; ZC_NITER timed iterations
@@ -62,10 +63,10 @@ for job in "$@"; do
   # BASIS=SPECIAL with one line per atom: xsox2chf reads the basis from ZMAT
   basislines=$(echo "$geom" | awk -v b=$basis '{print $1 ":" b}')
   cat > ZMAT <<ZEOF
-$mol X2C-CCSD(T) $basis
+$mol X2C-${CFOUR_CALC:-CCSD(T)} $basis
 $geom
 
-*CFOUR(CALC=CCSD(T),BASIS=SPECIAL
+*CFOUR(CALC=${CFOUR_CALC:-CCSD(T)},BASIS=SPECIAL
 SYM=OFF,COORDINATES=CARTESIAN,UNITS=ANGSTROM,CHARGE=0,MULT=1
 RELATIVISTIC=X2C1E,X2CKEY=SOATMX,ABCDTYPE=AOBASIS
 SCF_CONV=10,SCF_MAXCYC=200
@@ -93,7 +94,7 @@ ZEOF
     echo "=== zccsdt CCSD $mol/$pybasis x2c  $(date)"
     (cd $root && ZC_METHOD=ccsd ZC_PACKED=1 PYTHONPATH=src:$PYTHONPATH OMP_WAIT_POLICY=PASSIVE \
        /usr/bin/time -f "zccsdt wall %e s  max RSS %M KB" \
-       python bench/profile_iter.py $mol $pybasis x2c ${ZC_NITER:-3}) 2>&1 | grep -v "^cycle"
+       python -u bench/profile_iter.py $mol $pybasis x2c ${ZC_NITER:-3}) 2>&1 | grep --line-buffered -v "^cycle"
   fi
 done
 echo "done $(date)"
