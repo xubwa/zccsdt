@@ -1297,6 +1297,71 @@ cc-pVQZ with 4000 MB runs as with 24000 MB (0.78 s, 2.7 GB). Below the
 working set of one occupied index (three packed T2 plus about 5 o v^2
 elements and one slab of <ma||ef>) `plan_step` raises `MemoryError`.
 
+**Three real GEMMs for a complex product.** A complex product A B is
+A_r B_r, A_i B_i and (A_r + A_i)(B_r + B_i): three real GEMMs instead of the
+four a ZGEMM amounts to. For a 7812 x 7812 product on 8 cores MKL takes
+5.97 s as ZGEMM and 1.52 s per DGEMM (OpenBLAS: 6.2 s and 1.93 s; its own
+`zgemm3m` 8.2 s, MKL's is its ZGEMM; job 31552066). `amps` splits the
+operands (t2 comes from the kernel in parts) and combines the three results
+with threaded kernels. Job 31552593 (c182), seconds per iteration:
+
+| | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| CFOUR | 0.32 | 2.74 | 26.82 |
+| one ZGEMM per product | 0.102 | 0.767 | 18.72 (two products 12.52) |
+| three real GEMMs | 0.106 | 0.785 | 16.54 (two products 10.05, splitting 0.31 more) |
+| peak memory (GB), ZGEMM / three GEMMs | 0.60 / 0.64 | 2.5 / 2.7 | 10.4 / 12.8 |
+
+The passes over the (o v)^2 arrays cost about as much as the GEMMs save
+near o v = 2300, so the three real GEMMs are the default from o v = 3000
+on (`amps.THREE_M_MIN`), and only while the blocks of columns that fit
+with the real parts cover a quarter of the occupied space: with
+`max_memory` 4000 MB for benzene (blocks of 3) they took 27.1 s per
+iteration against 23.9 s for ZGEMM in blocks of 6.
+
+The <ma||ef> t1 terms now come from the packed rows directly, like a packed
+symmetric matrix-vector product (no row is unpacked).
+
+With both, job 31553091 (c255): 0.085 s, 0.634 s and 15.2 s per iteration
+against CFOUR's 0.26 s, 2.09 s and 23.12 s. Of the 15.2 s for benzene the
+six real GEMMs of the o^3 v^3 terms are 9.4 s, the terms with <ma||ef> 2.4 s
+(GEMM with tau 1.5 s, t1 terms 0.9 s), the ladder 1.7 s; of the 0.63 s for
+H2O/cc-pVQZ the two ZGEMMs 0.28 s, <ma||ef> 0.16 s, the ladder 0.13 s.
+Benzene with `max_memory` 8000 MB: 17.3 s per iteration, 7.6 GB.
+
+### (T) in batches of virtual pairs (`zccsd/triples.py`)
+
+The copied loops (`gccsd_t`) spend their time in numpy passes over v^3 or
+o^3 elements on one thread: 33 s, 396 s and about 21000 s for the three
+molecules against CFOUR's 2 s, 24 s and 1500 s. `triples.kernel` keeps
+everything on packed pairs. With
+
+    x_{a,(bc)}[i, (jk)] = sum_e <bc||ei> t2[j,k,a,e] - sum_m t2[i,m,b,c] <ma||jk>,
+
+an o x o(o-1)/2 matrix for a virtual a and a pair b > c, the connected
+triples of a > b > c are Z = x_{a,(bc)} - x_{b,(ac)} + x_{c,(ab)} and
+w[i>j>k] = Z[i,(jk)] - Z[j,(ik)] + Z[k,(ij)]. The x of a batch (one a, a
+range of b, all c < b) are GEMMs on contiguous blocks of <bc||ei> (the
+stored <ie||bc>, transposed once), of t2 and of <ma||jk>; each x is made
+once (o^3 v^4 / 4 multiply-adds for the particle term in all). An OpenMP
+kernel assembles Z for one (b, c) per thread in its cache and adds up the
+energy. Same energies as the copied loops and PySCF's `gccsd_t` to 1e-12,
+also for a non-canonical reference.
+
+First version (ZGEMM, separate products for the particle and the hole
+term), job 31553091 (c255), CFOUR's CCSD(T) first on the same node:
+
+| (T), seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| CFOUR | 1.6 | 17.5 | 1154 |
+| `triples.kernel` | 1.0 | 12.3 | 589 |
+| of which GEMMs / kernel | 0.7 / 0.1 | 10.8 / 1.3 | 516 / 68 |
+
+The flops of benzene (2.2e14) would take 355 s at the rate of the machine;
+the rest is memory traffic: the x of all batches are 1.9 TB, written by the
+particle product, read and written again by the hole product (a rank-42
+update) and read by the kernel.
+
 ## Correctness references
 
 | Reference | Agreement | Test |

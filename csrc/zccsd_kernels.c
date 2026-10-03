@@ -55,6 +55,37 @@ double zc_diff_norm2(const zc *x, const zc *y, int64_t n)
     return s;
 }
 
+/* The parts of a complex m x n matrix x (leading dimension ld) that a
+ * product by three real multiplications takes: xr = Re x, xi = Im x,
+ * xs = Re x + Im x, contiguous m x n arrays. */
+void zc_split3(const zc *x, int64_t m, int64_t n, int64_t ld, double *xr, double *xi,
+               double *xs)
+{
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < m; i++) {
+        const zc *row = x + i * ld;
+        double *r = xr + i * n, *q = xi + i * n, *t = xs + i * n;
+        for (int64_t j = 0; j < n; j++) {
+            r[j] = creal(row[j]);
+            q[j] = cimag(row[j]);
+            t[j] = r[j] + q[j];
+        }
+    }
+}
+
+/* The complex product from its three real ones, p1 = Ar Br, p2 = Ai Bi,
+ * p3 = (Ar + Ai) (Br + Bi):  c = alpha ((p1 - p2) + i (p3 - p1 - p2)),
+ * added to c with acc. */
+void zc_combine3(const double *p1, const double *p2, const double *p3, int64_t n,
+                 double alpha, int acc, zc *c)
+{
+    #pragma omp parallel for schedule(static)
+    for (int64_t k = 0; k < n; k++) {
+        const zc val = alpha * ((p1[k] - p2[k]) + (p3[k] - p1[k] - p2[k]) * I);
+        c[k] = acc ? c[k] + val : val;
+    }
+}
+
 /* ---------------------------------------------------------------- amplitudes */
 
 /* R[(i>j), (a>b)] += fac (x[i,a] y[j,b] - x[i,b] y[j,a] - x[j,a] y[i,b] + x[j,b] y[i,a]):
@@ -106,6 +137,46 @@ void zc_ring_cols(const zc *t2p, int64_t no, int64_t nv, int64_t j0, int64_t j1,
                 row[f] = 0.0;
                 for (int64_t b = f + 1; b < nv; b++)
                     row[b] = -sgn * r[b * (b - 1) / 2 + f];
+            }
+        }
+}
+
+/* zc_ring_cols in the three real parts of zc_split3. */
+void zc_ring_cols3(const zc *t2p, int64_t no, int64_t nv, int64_t j0, int64_t j1,
+                   double *tr, double *ti, double *ts)
+{
+    const int64_t npv = nv * (nv - 1) / 2, nc = (j1 - j0) * nv;
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int64_t n = 0; n < no; n++)
+        for (int64_t j = j0; j < j1; j++) {
+            const int64_t off = n * nv * nc + (j - j0) * nv;
+            double *br = tr + off, *bi = ti + off, *bs = ts + off;
+            if (n == j) {
+                for (int64_t f = 0; f < nv; f++) {
+                    memset(br + f * nc, 0, sizeof(double) * nv);
+                    memset(bi + f * nc, 0, sizeof(double) * nv);
+                    memset(bs + f * nc, 0, sizeof(double) * nv);
+                }
+                continue;
+            }
+            const int64_t hi = n > j ? n : j, lo = n > j ? j : n;
+            const double sgn = n > j ? 1.0 : -1.0;
+            const zc *r = t2p + (hi * (hi - 1) / 2 + lo) * npv;
+            for (int64_t f = 0; f < nv; f++) {
+                double *rr = br + f * nc, *ri = bi + f * nc, *rs = bs + f * nc;
+                const zc *rf = r + f * (f - 1) / 2;
+                for (int64_t b = 0; b < f; b++) {
+                    rr[b] = sgn * creal(rf[b]);
+                    ri[b] = sgn * cimag(rf[b]);
+                    rs[b] = rr[b] + ri[b];
+                }
+                rr[f] = ri[f] = rs[f] = 0.0;
+                for (int64_t b = f + 1; b < nv; b++) {
+                    const zc val = r[b * (b - 1) / 2 + f];
+                    rr[b] = -sgn * creal(val);
+                    ri[b] = -sgn * cimag(val);
+                    rs[b] = rr[b] + ri[b];
+                }
             }
         }
 }
@@ -350,64 +421,76 @@ void zc_add_rows(zc *R, int64_t ncol, const int64_t *rows, const double *signs,
  *     fv[b, e]      = A[b, e, m]
  *     x1[j, b]      = sum_e t1[m, e] A[b, e, j]
  *
- * A few rows b per task: each row is unpacked to its antisymmetric (e, f)
- * matrix (real and imaginary parts apart, in the cache of the thread) and
- * multiplied with t1 by dot products; the results of the task go to W in
- * runs of consecutive b.  No array of nv^3 elements is made. */
+ * A few rows b per task.  A row is the lower triangle L[e, f] (e > f) of an
+ * antisymmetric matrix; its product with t1 is taken from the packed row
+ * itself, like a packed symmetric matrix-vector product: for every f the
+ * segment L[f, e < f] gives the dot product A[f, j] += sum_e L[f, e] t1[j, e]
+ * and the update A[e, j] -= L[f, e] t1[j, f] in one pass over contiguous
+ * real and imaginary parts.  The results of the task go to W in runs of
+ * consecutive b.  Nothing of nv^2 elements is unpacked. */
 void zc_ovvv_t1(const zc *Om, const zc *t1, int64_t nv, int64_t no, int64_t m,
                 zc *Wm, zc *fv, zc *x1)
 {
-    enum { CH = 8 };
     const int64_t npv = nv * (nv - 1) / 2, n1 = no * nv;
-    double *tr = malloc(sizeof(double) * no * nv);
-    double *ti = malloc(sizeof(double) * no * nv);
-    for (int64_t x = 0; x < no * nv; x++) {
+    int64_t ch = (1 << 19) / (16 * n1);             /* rows per task: a buffer of 512 kB */
+    ch = ch < 1 ? 1 : ch > 8 ? 8 : ch;
+    double *tr = malloc(sizeof(double) * n1);
+    double *ti = malloc(sizeof(double) * n1);
+    for (int64_t x = 0; x < n1; x++) {
         tr[x] = creal(t1[x]);
         ti[x] = cimag(t1[x]);
     }
     #pragma omp parallel
     {
-        double *ur = malloc(sizeof(double) * nv * nv);
-        double *ui = malloc(sizeof(double) * nv * nv);
-        zc *buf = malloc(sizeof(zc) * nv * no * CH);
+        double *lr = malloc(sizeof(double) * npv);
+        double *li = malloc(sizeof(double) * npv);
+        double *ar = malloc(sizeof(double) * n1);   /* A[j][e] of the row b */
+        double *ai = malloc(sizeof(double) * n1);
+        zc *buf = malloc(sizeof(zc) * n1 * ch);
         #pragma omp for schedule(dynamic, 1)
-        for (int64_t b0 = 0; b0 < nv; b0 += CH) {
-            const int64_t c = (b0 + CH < nv ? b0 + CH : nv) - b0;
+        for (int64_t b0 = 0; b0 < nv; b0 += ch) {
+            const int64_t c = (b0 + ch < nv ? b0 + ch : nv) - b0;
             for (int64_t b = b0; b < b0 + c; b++) {
                 const zc *row = Om + b * npv;
-                for (int64_t e = 0; e < nv; e++) {
-                    double *xr = ur + e * nv, *xi = ui + e * nv;
-                    const zc *re = row + e * (e - 1) / 2;
-                    for (int64_t f = 0; f < e; f++) {
-                        xr[f] = creal(re[f]);
-                        xi[f] = cimag(re[f]);
-                    }
-                    xr[e] = xi[e] = 0.0;
-                    for (int64_t f = e + 1; f < nv; f++) {
-                        const zc val = row[f * (f - 1) / 2 + e];
-                        xr[f] = -creal(val);
-                        xi[f] = -cimag(val);
-                    }
+                for (int64_t q = 0; q < npv; q++) {
+                    lr[q] = creal(row[q]);
+                    li[q] = cimag(row[q]);
                 }
-                for (int64_t j = 0; j < no; j++)
-                    x1[j * nv + b] = 0.0;
-                for (int64_t e = 0; e < nv; e++) {
-                    const double *xr = ur + e * nv, *xi = ui + e * nv;
-                    zc *out = buf + e * no * c + (b - b0);
-                    const zc tme = t1[m * nv + e];
+                memset(ar, 0, sizeof(double) * n1);
+                memset(ai, 0, sizeof(double) * n1);
+                for (int64_t f = 1; f < nv; f++) {
+                    const double *pr = lr + f * (f - 1) / 2, *pi = li + f * (f - 1) / 2;
                     for (int64_t j = 0; j < no; j++) {
                         const double *yr = tr + j * nv, *yi = ti + j * nv;
+                        double *zr = ar + j * nv, *zi = ai + j * nv;
+                        const double tfr = yr[f], tfi = yi[f];
                         double sr = 0.0, si = 0.0;
                         #pragma omp simd reduction(+:sr, si)
-                        for (int64_t f = 0; f < nv; f++) {
-                            sr += xr[f] * yr[f] - xi[f] * yi[f];
-                            si += xr[f] * yi[f] + xi[f] * yr[f];
+                        for (int64_t e = 0; e < f; e++) {
+                            sr += pr[e] * yr[e] - pi[e] * yi[e];
+                            si += pr[e] * yi[e] + pi[e] * yr[e];
+                            zr[e] -= pr[e] * tfr - pi[e] * tfi;
+                            zi[e] -= pr[e] * tfi + pi[e] * tfr;
                         }
-                        out[j * c] = sr + si * I;
-                        x1[j * nv + b] += tme * out[j * c];
+                        zr[f] += sr;
+                        zi[f] += si;
                     }
-                    fv[b * nv + e] = out[m * c];
                 }
+                const double *mr = tr + m * nv, *mi = ti + m * nv;
+                for (int64_t j = 0; j < no; j++) {
+                    const double *zr = ar + j * nv, *zi = ai + j * nv;
+                    double sr = 0.0, si = 0.0;
+                    #pragma omp simd reduction(+:sr, si)
+                    for (int64_t e = 0; e < nv; e++) {
+                        sr += mr[e] * zr[e] - mi[e] * zi[e];
+                        si += mr[e] * zi[e] + mi[e] * zr[e];
+                    }
+                    x1[j * nv + b] = sr + si * I;
+                    for (int64_t e = 0; e < nv; e++)
+                        buf[(e * no + j) * c + (b - b0)] = zr[e] + zi[e] * I;
+                }
+                for (int64_t e = 0; e < nv; e++)
+                    fv[b * nv + e] = ar[m * nv + e] + ai[m * nv + e] * I;
             }
             for (int64_t e = 0; e < nv; e++)
                 for (int64_t j = 0; j < no; j++) {
@@ -417,8 +500,10 @@ void zc_ovvv_t1(const zc *Om, const zc *t1, int64_t nv, int64_t no, int64_t m,
                         w[x] += s[x];
                 }
         }
-        free(ur);
-        free(ui);
+        free(lr);
+        free(li);
+        free(ar);
+        free(ai);
         free(buf);
     }
     free(tr);

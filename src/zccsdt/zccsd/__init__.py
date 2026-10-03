@@ -8,6 +8,9 @@ says what was changed):
   <ma||ef> stored, or its terms from the AO integrals (ovvv_direct);
   ladder='chol' needs socutils.
 - gccsd_t.kernel: (T) over virtual (vir_loop) or occupied (occ_loop) triples.
+- triples.kernel: (T) of DirectZCCSD in batches of virtual pairs, GEMMs on
+  the packed <ie||bc> and a kernel that assembles the triples of one pair
+  in the cache (csrc/zccsd_t.c).
 - nrr_fast: the spinor AO->MO transformation of socutils (lib/ao2mo), both
   passes in C with the s4 symmetry of the AO integrals (csrc/nrr_ao2mo_opt.c,
   built into lib/libnrr_opt.so against the installed PySCF by

@@ -144,14 +144,24 @@ def test_amps_equal_socutils(x2c_h2o, monkeypatch):
         assert abs(t1n - t1o).max() < 1e-12 and abs(t2n - t2o).max() < 1e-12
     res = e_new.residual
     npo = nocc * (nocc - 1) // 2
+    # three real GEMMs for each o^3 v^3 product instead of one ZGEMM (the
+    # default from o v = amps.THREE_M_MIN on)
+    assert not res.plan.three_m
+    res.plan.three_m = True
+    t1b, t2b = res.update(t1, t2, shift)
+    assert abs(t1b - t1o).max() < 1e-12 and abs(t2b - t2o).max() < 1e-12
+    from zccsdt.zccsd import amps
+    assert amps.plan_step(40, 100, 70, 10 ** 12).three_m
+    assert not amps.plan_step(40, 100, 70, 10 ** 12, three_m=False).three_m
     # blocks of columns of the ring terms and of pairs; the numpy kernels
     res.plan.jblocks = [(0, 1), (1, 4), (4, nocc)]
     res.plan.mblocks = [(0, 2), (2, 3), (3, nocc)]
     res.plan.pblocks = [(0, 3), (3, npo)]
     res.plan.lblocks = [(0, 5), (5, 6), (6, npo)]
     res.plan.krows = 7
-    t1b, t2b = res.update(t1, t2, shift)
-    assert abs(t1b - t1o).max() < 1e-12 and abs(t2b - t2o).max() < 1e-12
+    for res.plan.three_m in (False, True):
+        t1b, t2b = res.update(t1, t2, shift)
+        assert abs(t1b - t1o).max() < 1e-12 and abs(t2b - t2o).max() < 1e-12
     monkeypatch.setattr(K, 'USE_C', False)
     t1b, t2b = res.update(t1, t2, shift)
     assert abs(t1b - t1o).max() < 1e-12 and abs(t2b - t2o).max() < 1e-12
@@ -216,6 +226,7 @@ def test_amps_within_memory(x2c_h2o, monkeypatch, tmp_path):
     need = amps.plan_step(o, v, nao, None, mapped).need
     plan = amps.plan_step(o, v, nao, int(1.01 * need), mapped)
     assert plan.w_mapped and not plan.diis_incore and plan.work <= 1.01 * need
+    assert not plan.three_m
     assert len(plan.jblocks) == len(plan.mblocks) == o
     with pytest.raises(MemoryError, match='three packed T2'):
         amps.plan_step(o, v, nao, int(0.9 * need), mapped)
@@ -264,13 +275,19 @@ def test_kernels_equal_numpy():
 
     def same(x, y):
         x, y = (x, y) if isinstance(x, tuple) else ((x,), (y,))
-        assert max(abs(a - b).max() for a, b in zip(x, y)) < 1e-12
+        assert max(np.abs(a - b).max() for a, b in zip(x, y)) < 1e-12
 
     t1, u, t2p, R = rnd(o, v), rnd(o, v), rnd(npo, npv), rnd(npo, npv)
     try:
         for f, args in ((K.outer_pp, (t1, u, 0.7, R)), (K.unpack_t2, (t2p, o, v)),
                         (K.pack_t2, (K.unpack_t2(t2p, o, v),)),
                         (K.ring_cols, (t2p, o, v, 0, o)), (K.ring_cols, (t2p, o, v, 1, 3)),
+                        (K.ring_cols3, (t2p, o, v, 1, 3)), (K.split3, (rnd(4, 9),)),
+                        (K.split3, (rnd(4, 9)[:, 2:7],)),
+                        (K.combine3, tuple(rng.standard_normal((3, 4, 5))) + (0.5, rnd(4, 5), True)),
+                        (K.combine3, tuple(rng.standard_normal((3, 4, 5))) + (0.5,)),
+                        (K.copy, (t2p, None, True)), (K.dotu, (t2p, R)),
+                        (K.diff_norm2, (t2p, R)),
                         (K.asym_pack2, (rnd(npo, v, v), -1.1, R, 'pab')),
                         (K.asym_pack2, (rnd(v, npo, v), -1.1, R, 'apb')),
                         (K.unpack_tril, (t2p, v, 'pab')), (K.unpack_tril, (t2p, v, 'apb')),
@@ -296,6 +313,8 @@ def test_kernels_equal_numpy():
         same(K.pack_t2(K.unpack_t2(t2p, o, v)), t2p)
         T = K.ring_cols(t2p, o, v)
         same(T, T.T)
+        A, B = rnd(4, 6), rnd(6, 5)                 # a complex product from three real ones
+        same(K.combine3(*[a @ b for a, b in zip(K.split3(A), K.split3(B))]), A @ B)
         same(T.reshape(o, v, o, v), K.unpack_t2(t2p, o, v).transpose(0, 2, 1, 3))
         # the antisymmetrizer by blocks of columns adds up to the formula
         x = rnd(n1, n1)
@@ -315,24 +334,57 @@ def test_kernels_equal_numpy():
         K.USE_C = True
 
 
-def test_t_loops_complex(x2c_h2o, monkeypatch, tmp_path):
+def test_t_complex(x2c_h2o, monkeypatch, tmp_path):
+    '''(T) in batches of virtual pairs (zccsdt.zccsd.triples) against the
+    loops copied from socutils and PySCF's gccsd_t, for complex integrals:
+    in one batch per virtual, in the smallest batches, with the numpy
+    kernel, and with <bc||ei> in a scratch file.'''
+    from zccsdt import memory
+    from zccsdt.zccsd import kernels as K, triples
     monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
     mycc = _run(DirectZCCSD, x2c_h2o)
-    e_t = mycc.ccsd_t()                              # rebuilds ovvv, vir_loop
+    e_t = mycc.ccsd_t()                              # triples.kernel
     eris = mycc.eris
-    assert eris.ovvv is not None
-    np.testing.assert_allclose(get_ovvv(eris), eris.ovvv)
+    assert eris.ovvv is None
+    eris.ovvv = get_ovvv(eris)                       # for the loops on the full arrays
+    e_vir = gccsd_t.kernel(mycc, eris, mycc.t1, mycc.t2, 0)
     e_occ = gccsd_t.kernel(mycc, eris, mycc.t1, mycc.t2, 0, alg='occ_loop')
     e_ref = pyscf_gccsd_t.kernel(mycc, eris, mycc.t1, mycc.t2, verbose=0)
-    assert abs(e_t - e_occ) < 1e-12                 # socutils' occ_loop is wrong here
-    assert abs(e_t.real - np.real(e_ref)) < 1e-12 and abs(e_t.imag) < 1e-12
-    # ZCCSD (integrals out of core) gives the same (T)
+    assert abs(e_vir - e_occ) < 1e-12               # socutils' occ_loop is wrong here
+    assert abs(e_vir.real - np.real(e_ref)) < 1e-12 and abs(e_vir.imag) < 1e-12
+    assert isinstance(e_t, float) and abs(e_t - e_vir.real) < 1e-12
+    eris.ovvv = None
+    o, v = mycc.t1.shape
+    floor = 16 * o * K.npair(o) * 3 * v
+    io, jo = np.tril_indices(o, -1)
+    bv, cv = np.tril_indices(v, -1)
+    t2p = np.ascontiguousarray(mycc.t2[io, jo][:, bv, cv])
+    # the smallest batches, packed t2; the numpy kernel
+    monkeypatch.setattr(triples, 'BATCH_BYTES', floor)
+    assert len(triples._batches(v - 1, o, floor)) > 2
+    assert abs(triples.kernel(mycc, eris, mycc.t1, t2p, 0) - e_t) < 1e-12
+    monkeypatch.setattr(K, 'USE_C', False)
+    assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0) - e_t) < 1e-12
+    monkeypatch.setattr(K, 'USE_C', True)
+    # short of memory: <bc||ei> in a scratch file; below one batch, MemoryError
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, max_memory=1.5 * floor / 1e6)
+               - e_t) < 1e-12
+    with pytest.raises(MemoryError, match='one virtual orbital'):
+        triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, max_memory=0.5 * floor / 1e6)
+    monkeypatch.undo()
+    monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    # ZCCSD (integrals out of core, the copied loops) gives the same (T)
     z = _run(ZCCSD, x2c_h2o)
     assert abs(z.ccsd_t(alg='occ_loop') - e_t) < 1e-10
+    assert abs(triples.kernel(z, z.eris, z.t1, z.t2, 0) - e_t) < 1e-10
 
 
-def test_t_loops_noncanonical():
-    '''ROHF orbitals in spin-orbital form: f_ai != 0.'''
+def test_t_noncanonical():
+    '''ROHF orbitals in spin-orbital form: f_ai != 0 (real integrals of
+    PySCF's GCCSD).'''
+    from zccsdt.zccsd import triples
     mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='6-31g', spin=1, verbose=0)
     ghf = scf.addons.convert_to_ghf(scf.ROHF(mol).run(conv_tol=1e-11))
     gcc = cc.GCCSD(ghf, frozen=2).run(conv_tol=1e-11, conv_tol_normt=1e-8)
@@ -343,3 +395,4 @@ def test_t_loops_noncanonical():
     for alg in ('vir_loop', 'occ_loop'):
         e = gccsd_t.kernel(gcc, eris, gcc.t1, gcc.t2, 0, alg=alg)
         assert abs(e - e_ref) < 1e-11, alg
+    assert abs(triples.kernel(gcc, eris, gcc.t1, gcc.t2, 0) - e_ref) < 1e-11

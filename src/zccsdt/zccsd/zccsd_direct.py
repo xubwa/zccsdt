@@ -385,12 +385,17 @@ class DirectZCCSD(_zccsd.ZCCSD):
         evaluated from the AO integrals in every iteration, as in socutils.
     socutils_amps : bool
         False (default, ``ladder='ao'`` with stored <ma||ef>): the amplitude
-        equations of zccsdt.zccsd.amps.  True: update_amps of this module,
-        as copied from socutils (einsums on the full arrays).
+        equations and the iterations of zccsdt.zccsd.amps (packed T2, sliced
+        within max_memory).  True: update_amps of this module, as copied
+        from socutils (einsums on the full arrays), on PySCF's driver.
+    three_m : bool or None
+        zccsdt.zccsd.amps: the two o^3 v^3 products as three real GEMMs each
+        instead of one ZGEMM (None, the default: if the memory is there).
     '''
 
     ovvv_direct = False
     socutils_amps = False
+    three_m = None
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -409,7 +414,8 @@ class DirectZCCSD(_zccsd.ZCCSD):
             return update_amps(self, t1, t2, eris)
         if eris.residual is None:
             from zccsdt.zccsd import amps
-            eris.residual = amps.Residual(eris, self.max_memory, self.diis_space)
+            eris.residual = amps.Residual(eris, self.max_memory, self.diis_space,
+                                          three_m=self.three_m)
         return eris.residual.update(t1, t2, self.level_shift)
 
     def ccsd(self, t1=None, t2=None, eris=None, mbpt2=None):
@@ -438,9 +444,13 @@ class DirectZCCSD(_zccsd.ZCCSD):
     def ccsd_t(self, t1=None, t2=None, eris=None):
         '''CCSD(T) correction.
 
-        (T) contracts the connected <bc||ei> slice with a small t2 block for
-        every (b,c) virtual pair, so its integrals enter slice by slice rather
-        than as one batched contraction.  That access pattern cannot be made
+        With the amplitude equations of zccsdt.zccsd.amps: zccsdt.zccsd.triples
+        (batches of virtual pairs on the packed <ie||bc>, within max_memory).
+
+        Else the loops copied from socutils (gccsd_t).  (T) contracts the
+        connected <bc||ei> slice with a small t2 block for every (b,c)
+        virtual pair, so its integrals enter slice by slice rather than as
+        one batched contraction.  That access pattern cannot be made
         AO-direct efficiently: rebuilding each <bc||ei> from the AO integrals
         costs O(nao^4) per (b,c), i.e. O(v^2 nao^4) overall, which exceeds the
         O(o^3 v^4) (T) work itself.  (T) never needs vvvv though -- only ovvv
@@ -448,11 +458,14 @@ class DirectZCCSD(_zccsd.ZCCSD):
         integrals.  For a genuinely storage-free (T), use the Cholesky path
         (chol_zccsd_t), which rebuilds each slice cheaply from low-rank factors.
         '''
-        from zccsdt.zccsd import gccsd_t
         if t1 is None: t1 = self.t1
         if t2 is None: t2 = self.t2
         if eris is None:
             eris = self.eris if self.eris is not None else self.ao2mo()
+        if self._fixed_layouts():
+            from zccsdt.zccsd import triples
+            return triples.kernel(self, eris, t1, t2, self.verbose)
+        from zccsdt.zccsd import gccsd_t
         if eris.ovvv is None:
             eris.ovvv = get_ovvv(eris)              # from the packed array or the AO integrals
         return gccsd_t.kernel(self, eris, t1, t2, self.verbose)

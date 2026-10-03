@@ -13,12 +13,15 @@ usage: python bench/profile_zccsd.py MOLECULE BASIS VARIANT [NITER] [T_ALGS]
             nrr_outcore and HDF5)
   NITER:    CCSD iterations (default 4); the first is left out of the means;
             0: the integrals only
-  T_ALGS:   (T) loops to time, comma separated (default occ_loop; none)
+  T_ALGS:   (T) codes to time, comma separated: batch (zccsdt.zccsd.triples,
+            the default for direct), occ_loop and vir_loop (the loops copied
+            from socutils, the default for the other variants: occ_loop), none
 X2C-1e spinors from PySCF (x2c.UHF), all electrons.  The copied code is not
 changed: its functions are wrapped by zccsdt.timing timers here.
 environment: ZC_MAXMEM: max_memory of the CC object in MB (default 24000): the
              integrals are planned within it (what does not fit is mapped from
              a scratch file, the passes are sliced);
+             ZC_THREE_M: 0 or 1: DirectZCCSD.three_m (default: by memory);
              ZC_T_BUDGET: seconds for each (T) loop; when they are used up the
              loop is stopped and its time extrapolated from the triples done;
              PYSCF_TMPDIR: scratch files of ZCCSD (put it on a local disk).
@@ -92,7 +95,8 @@ def tree(times, parent, depth, total):
 def main():
     mol_name, basis, variant = sys.argv[1:4]
     niter = int(sys.argv[4]) if len(sys.argv) > 4 else 4
-    algs = sys.argv[5].split(',') if len(sys.argv) > 5 else ['occ_loop']
+    algs = (sys.argv[5].split(',') if len(sys.argv) > 5
+            else ['batch' if variant == 'direct' else 'occ_loop'])
     algs = [a for a in algs if a != 'none']
     maxmem = float(os.environ.get('ZC_MAXMEM', 24000))
 
@@ -113,6 +117,8 @@ def main():
         mycc = zd.DirectZCCSD(mf)
         mycc.ovvv_direct = route == 'ao'
         mycc.socutils_amps = route == 'soc'
+        if 'ZC_THREE_M' in os.environ:          # 0: one ZGEMM per o^3 v^3 product
+            mycc.three_m = bool(int(os.environ['ZC_THREE_M']))
     else:
         for name in ('cc_Fvv', 'cc_Wovvo', 'update_t2_vvvv_sym', '_make_vvvv_tril'):
             wrap(imd, name)
@@ -212,6 +218,19 @@ def main():
         watch = MemWatch()
         watch.start()
         t0 = time.perf_counter()
+        if alg == 'batch':
+            from zccsdt.zccsd import triples
+            timing.reset()
+            mycc.verbose = 4                        # where <bc||ei> is, the batches
+            e_t = triples.kernel(mycc, eris, mycc.t1, mycc.t2)
+            mycc.verbose = 0
+            sec = time.perf_counter() - t0
+            watch.stop()
+            print('(T) batch: %.1f s (E(T) %.12f on the amplitudes of iteration %d; peak '
+                  'anonymous %.2f GB)' % (sec, e_t, niter, watch.anon / 1e6))
+            print('  ' + '  '.join('%s %.1f s' % (k[2:], t) for k, t, _ in timing.report()
+                                   if k.startswith('t.')))
+            continue
         if eris.ovvv is None:
             eris.ovvv = zd.get_ovvv(eris)
             print('(T): ovvv rebuilt from the AO integrals in %.1f s'

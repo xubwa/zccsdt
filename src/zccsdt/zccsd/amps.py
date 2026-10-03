@@ -18,7 +18,10 @@ term is evaluated differs:
   blocks of the columns (j b): the product with t2, antisymmetrized into the
   packed residual block by block.  The rows and columns of t2 are generated
   from the packed amplitudes; the two-index intermediates that contract
-  <mn||ef> with t2 are partial traces of the first product;
+  <mn||ef> with t2 are partial traces of the first product.  Each complex
+  product is three real GEMMs instead of four (A_r B_r, A_i B_i and
+  (A_r + A_i) (B_r + B_i): the "3M" scheme) when the memory for the real
+  parts is there;
 - the five terms with <ma||ef> use the array packed over e > f (half of
   ovvv): one GEMM with tau for a slab, and the t1 terms of one occupied
   index at a time, unpacked in the cache;
@@ -63,6 +66,10 @@ from zccsdt.timing import timer
 from zccsdt.zccsd import kernels as K
 
 PAIR_WORK = 2 << 30         # bytes of the arrays of a block of pairs, at most
+# Three real GEMMs for a complex product from this dimension o v on: they save
+# 2 (o v)^3 multiply-adds per product and cost passes over (o v)^2 elements;
+# on 8 cores the two break even near o v = 2300 (H2O/cc-pVQZ: 2200)
+THREE_M_MIN = 3000
 
 
 def _blocks(n, size):
@@ -74,6 +81,13 @@ def _size(nbytes):
     return '%.2f GB' % (nbytes / 1e9) if nbytes >= 1e9 else '%.1f MB' % (nbytes / 1e6)
 
 
+def _gemm3(A3, B3, alpha=1.0, C=None, acc=False):
+    '''C (+)= alpha A B for complex matrices given as their parts
+    (K.split3): three real GEMMs.'''
+    P = [blas.gemm(a, b) for a, b in zip(A3, B3)]
+    return K.combine3(*P, alpha, C, acc)
+
+
 @dataclass
 class Plan:
     '''How one step is sliced (plan_step); blocks are lists of (start, stop).'''
@@ -83,19 +97,24 @@ class Plan:
     lblocks: list       # blocks of pairs of the ladder
     krows: int          # rows of an AO operator of the ladder at a time (0: all)
     w_mapped: bool      # W(mbej) is a mapped array of a scratch file
+    three_m: bool       # the o^3 v^3 products by three real GEMMs each
     diis_incore: bool   # the DIIS vectors are in memory
     work: int           # bytes of the largest working set of this plan
     need: int           # bytes of the smallest one
     budget: object      # bytes there were (None: unknown, everything in memory)
 
 
-def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore=None):
+def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore=None,
+              three_m=None):
     '''The Plan of one step within ``budget`` bytes (None: unlimited).
     ``mapped``: the integrals that are mapped arrays, of 'V' (<mn||ef>), 'E'
     (<mb||je>), 'ovvv_p', 'W_same', 'W_plus'; their rows are read through the
     mapping and count as memory while they are used.  ``diis_incore``: keep
     the DIIS vectors in memory (None: if they take no more than a third of
-    what is left).  MemoryError if the budget is below Plan.need.'''
+    what is left).  ``three_m``: three real GEMMs for a complex product
+    (None: if o v >= THREE_M_MIN and the blocks of columns that fit with
+    their parts cover a quarter of the occupied space).  MemoryError if the
+    budget is below Plan.need.'''
     o, v, nao = int(nocc), int(nvir), int(nao)
     n1, npo, npv, n2 = o * v, K.npair(o), K.npair(v), 2 * nao
     budget = None if budget is None else int(budget)
@@ -108,47 +127,72 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
     lad = max(16 * n2 * (n2 + v), 24 * n2 * n2, 16 * v * (n2 + v))      # the ladder of one pair
     kop = 8 * nao * (nao + 1) // 2 * (('W_same' in mapped) or ('W_plus' in mapped))
 
-    def rows_work(nm, nj, w_mapped):
-        '''Pass 1: the columns of t2, the mapped rows and the product block.'''
-        return nj * col + nm * (row + col * w_mapped + (nj < o) * nj * 16 * v * v)
+    def rows_work(nm, nj, w_mapped, m3):
+        '''Pass 1: the columns of t2, the mapped rows (with 3M: the parts of
+        <mn||ef>) and the product block.'''
+        block = nj * 16 * v * v * (1.5 * m3 + (nj < o))
+        return int((1 + 0.5 * m3) * nj * col
+                   + nm * (row + 1.5 * m3 * col + col * w_mapped + block))
 
-    floor = max(3 * col, rows_work(1, 1, True), pair, lad + kop)
-    need = fixed + floor
+    def cols_work(nj, w_mapped, m3):
+        '''Pass 2: a block of columns of the product, the same number of
+        rows of t2 and, through the mapping, the columns of W; with 3M the
+        parts of W and the three real products.'''
+        if not m3:
+            return (2 + w_mapped) * nj * col
+        return int((4 + w_mapped) * nj * col + 1.5 * nj * nj * 16 * v * v)
+
+    def blocks_floor(w_mapped, m3):
+        return max(cols_work(1, w_mapped, m3), rows_work(1, 1, w_mapped, m3), pair, lad + kop)
+
+    need = fixed + blocks_floor(True, False)
+    if three_m is None and n1 < THREE_M_MIN:
+        three_m = False
     if budget is None:
+        m3 = three_m is not False
         return Plan([(0, o)], [(0, o)], _blocks(npo, PAIR_WORK // pair),
-                    _blocks(npo, PAIR_WORK // lad), 0, False,
+                    _blocks(npo, PAIR_WORK // lad), 0, False, m3,
                     True if diis_incore is None else diis_incore,
-                    fixed + 3 * o * col + (2 * diis_space * P if diis_incore is not False else 0),
-                    need, None)
+                    fixed + o * col + cols_work(o, False, m3)
+                    + (2 * diis_space * P if diis_incore is not False else 0), need, None)
     if budget < need:
         raise MemoryError(
             'the CCSD equations need %s (three packed T2 and the blocks of one occupied '
             'orbital: %d occupied and %d virtual spinors), %s are left of max_memory'
             % (_size(need), o, v, _size(budget)))
-    rem = budget - fixed
-    # W(mbej) in memory if the smallest blocks still fit next to it
-    w_mapped = bool(o * col + max(2 * col, rows_work(1, 1, False), pair, lad + kop) > rem)
-    if not w_mapped:
-        rem -= o * col
-    if diis_incore is None:
-        diis_incore = bool(2 * diis_space * P <= rem // 3)
-    if diis_incore:
-        rem = max(rem - 2 * diis_space * P, floor)
-    # pass 2 holds a block of columns of the product and the same number of rows
-    # of t2 (and, through the mapping, the columns of W)
-    nj = max(1, min(o, rem // ((3 if w_mapped else 2) * col)))
-    while nj > 1 and rows_work(1, nj, w_mapped) > rem:
-        nj -= 1
-    per_m = rows_work(1, nj, w_mapped) - nj * col
-    nm = o if per_m == 0 else max(1, min(o, (rem - nj * col) // per_m))
+    def blocks(m3):
+        '''(w_mapped, diis_incore, bytes left for the blocks, nj, nm).'''
+        rem = budget - fixed
+        # W(mbej) in memory if the smallest blocks still fit next to it
+        w_mapped = bool(o * col + blocks_floor(False, m3) > rem)
+        if not w_mapped:
+            rem -= o * col
+        incore = bool(2 * diis_space * P <= rem // 3) if diis_incore is None else diis_incore
+        if incore:
+            rem = max(rem - 2 * diis_space * P, blocks_floor(True, m3))
+        nj = o
+        while nj > 1 and max(cols_work(nj, w_mapped, m3), rows_work(1, nj, w_mapped, m3)) > rem:
+            nj -= 1
+        nm = o
+        while nm > 1 and rows_work(nm, nj, w_mapped, m3) > rem:
+            nm -= 1
+        return w_mapped, incore, rem, nj, nm
+
+    # three real products for a complex one if their blocks of columns still
+    # cover a quarter of the occupied space: with smaller blocks the passes
+    # over the parts cost more than the GEMMs save
+    m3 = bool(three_m)
+    if three_m is None and blocks_floor(True, True) <= budget - fixed:
+        m3 = 4 * blocks(True)[3] >= o
+    w_mapped, diis_incore, rem, nj, nm = blocks(m3)
     lrem = min(rem, PAIR_WORK)
     krows = 0 if not kop else max(1, lrem // 2 // kop)
     npb = max(1, min(npo, lrem // pair))
     nlb = max(1, min(npo, (lrem - krows * kop) // lad))
-    work = (budget - rem) + max(rows_work(nm, nj, w_mapped), (3 if w_mapped else 2) * nj * col,
+    work = (budget - rem) + max(rows_work(nm, nj, w_mapped, m3), cols_work(nj, w_mapped, m3),
                                 npb * pair, nlb * lad + krows * kop)
     return Plan(_blocks(o, nm), _blocks(o, nj), _blocks(npo, npb), _blocks(npo, nlb), krows,
-                w_mapped, diis_incore, work, need, budget)
+                w_mapped, m3, diis_incore, work, need, budget)
 
 
 class Residual:
@@ -161,7 +205,8 @@ class Residual:
     node and the job leave) and the DIIS settings go into the Plan (``plan``:
     one given explicitly).'''
 
-    def __init__(self, eris, max_memory=None, diis_space=6, diis_incore=None, plan=None):
+    def __init__(self, eris, max_memory=None, diis_space=6, diis_incore=None, plan=None,
+                 three_m=None):
         o = self.nocc = eris.nocc
         fock = np.asarray(eris.fock)
         v = self.nvir = fock.shape[0] - o
@@ -234,7 +279,7 @@ class Residual:
             names = ('V', 'E', 'ovvv_p', 'W_same', 'W_plus')
             mapped = [n for n in names if scratch.is_mapped(getattr(self, n))]
             plan = plan_step(o, v, self.nao, memory.budget(max_memory), mapped, diis_space,
-                             diis_incore)
+                             diis_incore, three_m)
         self.plan = plan
         self._scratch = None        # the file of W(mbej) when it is mapped
         self._w = None
@@ -244,11 +289,13 @@ class Residual:
         p, o = self.plan, self.nocc
         nb = lambda b: max(b1 - b0 for b0, b1 in b)                     # noqa: E731
         text = ('packed T2 %s; working set %s%s; W(mbej) %s; passes over %d and %d of %d '
-                'occupied spinors; %d and %d pairs per block'
+                'occupied spinors, %s; %d and %d pairs per block'
                 % (_size(16 * K.npair(o) * K.npair(self.nvir)), _size(p.work),
                    '' if p.budget is None else ' of %s' % _size(p.budget),
                    'in a scratch file' if p.w_mapped else 'in memory',
-                   nb(p.mblocks), nb(p.jblocks), o, nb(p.pblocks), nb(p.lblocks)))
+                   nb(p.mblocks), nb(p.jblocks), o,
+                   'three real GEMMs per product' if p.three_m else 'ZGEMM',
+                   nb(p.pblocks), nb(p.lblocks)))
         if p.krows:
             text += '; %d rows of an AO operator at a time' % p.krows
         return text + '; DIIS vectors in %s' % ('memory' if p.diis_incore else 'a scratch file')
@@ -366,7 +413,8 @@ class Residual:
         s.fvv_a = np.zeros((v, v), dtype=np.complex128)     # sum_mf <ma||fe> t1[m,f]
         fv = np.empty((v, v), dtype=np.complex128)
         x1 = np.empty((o, v), dtype=np.complex128)
-        T = None
+        T = None                # the columns of t2, or their three real parts
+        m3 = plan.three_m
         for m0, m1 in plan.mblocks:
             nm = m1 - m0
             nr, rows = nm * v, slice(m0 * v, m1 * v)
@@ -409,11 +457,14 @@ class Residual:
             with timer('amps.ring'):
                 # + 1/2 sum_nf <mn||ef> t2[n,j,f,b]: the o^3 v^3 term of W; its
                 # partial traces are the <mn||ef> t2 terms of Foo and Fvv
+                if m3:
+                    with timer('ring.layout'):
+                        Vb = K.split3(Vb)
                 for j0, j1 in plan.jblocks:
                     nj = j1 - j0
                     with timer('ring.layout'):
-                        if T is None or not single:
-                            T = K.ring_cols(t2p, o, v, j0, j1)          # [(n f), (j b)]
+                        if T is None or not single:                     # [(n f), (j b)]
+                            T = (K.ring_cols3 if m3 else K.ring_cols)(t2p, o, v, j0, j1)
                     W4 = Wb.reshape(nm, v, o, v)[:, :, j0:j1]           # [m, e, j, b]
                     both = range(max(m0, j0), min(m1, j1))              # m as a row and a column
                     if single:
@@ -421,13 +472,17 @@ class Residual:
                             tro = np.einsum('meje->mj', W4)
                             trv = sum(W4[m - m0, :, m - j0] for m in both)
                         with timer('ring.gemm'):
-                            blas.gemm(Vb, T, C=Wb, alpha=0.5, beta=1.0)
+                            if m3:
+                                _gemm3(Vb, T, 0.5, Wb, acc=True)
+                            else:
+                                blas.gemm(Vb, T, C=Wb, alpha=0.5, beta=1.0)
                         with timer('ring.layout'):
                             s.foo_t[m0:m1, j0:j1] += np.einsum('meje->mj', W4) - tro
                             s.fvv_t += sum(W4[m - m0, :, m - j0] for m in both) - trv
                     else:
                         with timer('ring.gemm'):
-                            X4 = blas.gemm(Vb, T, alpha=0.5).reshape(nm, v, nj, v)
+                            X4 = _gemm3(Vb, T, 0.5) if m3 else blas.gemm(Vb, T, alpha=0.5)
+                            X4 = X4.reshape(nm, v, nj, v)
                         with timer('ring.layout'):
                             s.foo_t[m0:m1, j0:j1] += np.einsum('meje->mj', X4)
                             for m in both:
@@ -435,31 +490,44 @@ class Residual:
                             W4 += X4
                             del X4
             scratch.written(Wb)
-            for a in (Vb, Eb, Wb):
+            for a in (V[rows], Eb, Wb):
                 scratch.unmap(a)
+            del Vb
         s.T = T if single else None                         # all of t2: kept for pass 2
 
-    def _pass_columns(self, s, W):
+    def _pass_columns(self, s):
         '''Pass 2, over blocks of the columns (j b): the ring term
         sum_me t2[i,m,a,e] W[(m e), (j b)] and the t1 t1 <mb||ej> term,
         antisymmetrized into the packed residual.'''
         o, v = self.nocc, self.nvir
-        n1, jblocks = o * v, self.plan.jblocks
+        n1, plan = o * v, self.plan
+        m3, jblocks = plan.three_m, plan.jblocks
         for j0, j1 in jblocks:
             nj = j1 - j0
             cols = slice(j0 * v, j1 * v)
-            WJ = W if nj == o else W[:, cols]
+            WJ = s.W if nj == o else s.W[:, cols]
+            if m3:
+                with timer('ring.layout'):
+                    W3 = K.split3(WJ)
+                scratch.unmap(s.W)
+                if nj == o and not plan.w_mapped:           # the complex W is not needed again
+                    s.W = None
+                del WJ
             with timer('ring.gemm'):
-                if s.T is not None:
-                    r4 = blas.gemm(s.T, WJ)                             # [(i a), (j b)]
+                if s.T is not None:                                     # [(i a), (j b)]
+                    r4 = _gemm3(s.T, W3) if m3 else blas.gemm(s.T, WJ)
                     s.T = None
                 else:
                     r4 = np.empty((n1, nj * v), dtype=np.complex128)
                     for i0, i1 in jblocks:                              # rows of t2: it is symmetric
                         with timer('ring.layout'):
-                            Ti = K.ring_cols(s.t2p, o, v, i0, i1)
-                        blas.gemm(Ti.T, WJ, C=r4[i0 * v:i1 * v])
+                            Ti = (K.ring_cols3 if m3 else K.ring_cols)(s.t2p, o, v, i0, i1)
+                        if m3:
+                            _gemm3([x.T for x in Ti], W3, C=r4[i0 * v:i1 * v])
+                        else:
+                            blas.gemm(Ti.T, WJ, C=r4[i0 * v:i1 * v])
                         del Ti
+            W3 = WJ = None
             with timer('ring.small'):
                 # - t1[m,a] t1[i,e] <mb||ej> (E is <mb||ej> in the ring layout)
                 r43 = r4.reshape(o, v, nj * v)
@@ -467,8 +535,10 @@ class Residual:
                     blas.gemm(s.t1T, s.Kt[:, i, cols], C=r43[i], alpha=-1.0, beta=1.0)
             with timer('ring.pack'):
                 K.asym_pack_cols(r4, o, v, j0, j1, 1.0, s.R)
-            del r4, WJ
-            scratch.unmap(W)
+            del r4
+            if s.W is not None:
+                scratch.unmap(s.W)
+        s.W = None
 
     # -- one step -------------------------------------------------------------
     def update_packed(self, t1, t2p, level_shift=0.0):
@@ -495,11 +565,10 @@ class Residual:
             del tmp, tp
             R = s.R = K.copy(self.oovv_p, conj=True)
 
-        W = self._w_array()
-        self._pass_rows(s, W)
+        s.W = self._w_array()
+        self._pass_rows(s, s.W)
         with timer('amps.ring'):
-            self._pass_columns(s, W)
-        del W
+            self._pass_columns(s)
         r1, Nq = s.r1, s.Nq
         del s.Kt
 
@@ -570,7 +639,8 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
     name = mycc.__class__.__name__
     if getattr(eris, 'residual', None) is None:
         eris.residual = Residual(eris, mycc.max_memory, mycc.diis_space,
-                                 True if mycc.incore_complete else None)
+                                 True if mycc.incore_complete else None,
+                                 three_m=getattr(mycc, 'three_m', None))
     res = eris.residual
     log.info('CCSD equations: %s', res.describe())
     o, v = res.nocc, res.nvir

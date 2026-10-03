@@ -22,6 +22,9 @@ _SIGNATURES = {
     'zc_copy': [_P, _I, ctypes.c_int, _P],
     'zc_dotu': [_P, _P, _I, _P],
     'zc_diff_norm2': [_P, _P, _I],
+    'zc_split3': [_P, _I, _I, _I, _P, _P, _P],
+    'zc_combine3': [_P, _P, _P, _I, _D, ctypes.c_int, _P],
+    'zc_ring_cols3': [_P, _I, _I, _I, _I, _P, _P, _P],
     'zc_outer_pp': [_P, _P, _I, _I, _D, _P],
     'zc_ring_cols': [_P, _I, _I, _I, _I, _P],
     'zc_asym_pack_cols': [_P, _I, _I, _I, _I, _D, _P],
@@ -106,6 +109,37 @@ def diff_norm2(x, y):
     return float(np.vdot(d, d).real)
 
 
+def split3(x):
+    '''(Re x, Im x, Re x + Im x) of a complex matrix (C-contiguous or a
+    row-major submatrix), contiguous real arrays: the operands of a complex
+    product by three real ones (combine3).'''
+    m, n = x.shape
+    out = tuple(np.empty((m, n)) for _ in range(3))
+    if USE_C and x.dtype == np.complex128 and x.strides[1] == 16 and x.strides[0] % 16 == 0:
+        _lib.zc_split3(x.ctypes.data, m, n, x.strides[0] // 16,
+                       *(_c(a, np.float64) for a in out))
+        return out
+    out[0][:], out[1][:] = x.real, x.imag
+    np.add(out[0], out[1], out=out[2])
+    return out
+
+
+def combine3(p1, p2, p3, alpha=1.0, C=None, acc=False):
+    '''C (+)= alpha A B from p1 = Ar Br, p2 = Ai Bi, p3 = (Ar + Ai)(Br + Bi).'''
+    if C is None:
+        C, acc = np.empty(p1.shape, dtype=np.complex128), False
+    if USE_C:
+        _lib.zc_combine3(_c(p1, np.float64), _c(p2, np.float64), _c(p3, np.float64), p1.size,
+                         alpha, int(acc), _c(C))
+        return C
+    val = alpha * ((p1 - p2) + 1j * (p3 - p1 - p2))
+    if acc:
+        C += val
+    else:
+        C[:] = val
+    return C
+
+
 # ------------------------------------------------------------------ amplitudes
 
 def outer_pp(x, y, fac, R):
@@ -164,6 +198,16 @@ def ring_cols(t2p, o, v, j0=0, j1=None, out=None):
     t2 = unpack_t2(t2p, o, v)
     out[:] = t2[:, j0:j1].transpose(0, 2, 1, 3).reshape(o * v, (j1 - j0) * v)
     return out
+
+
+def ring_cols3(t2p, o, v, j0=0, j1=None):
+    '''ring_cols as the three real arrays of split3.'''
+    j1 = o if j1 is None else j1
+    if USE_C:
+        out = tuple(np.empty((o * v, (j1 - j0) * v)) for _ in range(3))
+        _lib.zc_ring_cols3(_c(t2p), o, v, j0, j1, *(_c(a, np.float64) for a in out))
+        return out
+    return split3(ring_cols(t2p, o, v, j0, j1))
 
 
 def asym_pack_cols(x, o, v, j0, j1, alpha, R):
