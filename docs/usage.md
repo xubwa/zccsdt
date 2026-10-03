@@ -182,7 +182,21 @@ PySCF's settings apply (`conv_tol`, `conv_tol_normt`, `max_cycle`,
 
 At `verbose >= 4` the log says where the integrals are (memory or scratch
 file), how the step is sliced, which BLAS does the matrix products and
-whether Kramers pairs are used. For speed the kernel libraries must be the
-MKL build (`cmake -S csrc -B build -DZC_MKL_DIR=<MKL lib directory>`): the
-OpenMP kernels and MKL then share one pool of threads. A warning is logged
-when the products run on another BLAS.
+whether Kramers pairs are used.
+
+**Libraries.** The compiled parts are built with `cmake -S csrc -B build &&
+cmake --build build`:
+
+- `libnrr_opt.so`, the kernels of the integral transformation, is needed
+  (an `ImportError` says how to build it). It links the libraries of the
+  PySCF it was built against, with whatever BLAS they use.
+- The matrix products go through `zccsdt.blas.gemm`: the MKL build of the
+  kernel library if it is there (`-DZC_MKL_DIR=<MKL lib directory>`; MKL on
+  GNU OpenMP, one pool of threads with the kernels), else its default build
+  (OpenBLAS, or `-DZC_BLAS_LIB=<a CBLAS library>`), else SciPy's BLAS.
+  `ZCCSDT_T3_LIB=<path>` picks one. All three give the same results; with
+  OpenBLAS H2O/cc-pVQZ takes the same time and benzene/cc-pVDZ 1.4 times
+  as long per CCSD iteration and 1.2 times in (T) (docs/benchmarks.md). A
+  warning is logged when the products do not run on MKL.
+- Without `libzc_zccsd.so` (the OpenMP kernels of the CCSD step and of (T))
+  numpy does the same on one thread: for tests and small molecules.

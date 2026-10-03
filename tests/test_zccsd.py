@@ -11,8 +11,13 @@ from zccsdt import eris as E
 from zccsdt.cc import solver
 from zccsdt.cc import gintermediates as imd
 from zccsdt.zccsd import DirectZCCSD, ZCCSD, ao2mo, gccsd_t
+from zccsdt.zccsd import kernels as _kernels
 from zccsdt.zccsd.zccsd_direct import get_ovvv
 from zccsdt.scratch import is_mapped as scratch_is_mapped
+
+# the C kernels (libzc_zccsd.so) are there; without them the numpy kernels do
+# everything and "the C kernels" below are the numpy kernels again
+HAVE_C = _kernels.USE_C
 
 
 @pytest.fixture(scope='module')
@@ -166,7 +171,7 @@ def test_amps_equal_socutils(x2c_h2o, monkeypatch):
     monkeypatch.setattr(K, 'USE_C', False)
     t1b, t2b = res.update(t1, t2, shift)
     assert abs(t1b - t1o).max() < 1e-12 and abs(t2b - t2o).max() < 1e-12
-    monkeypatch.setattr(K, 'USE_C', True)
+    monkeypatch.setattr(K, 'USE_C', HAVE_C)
     # energy and first amplitudes on packed pairs
     io, jo = np.tril_indices(nocc, -1)
     t2p = t2[io, jo][:, b, c]
@@ -282,7 +287,7 @@ def test_kernels_equal_numpy():
             K.USE_C = use
             a = [x.copy() if isinstance(x, np.ndarray) else x for x in args]
             out.append((f(*a, **kw), a))
-        K.USE_C = True
+        K.USE_C = HAVE_C
         return out
 
     def same(x, y):
@@ -361,7 +366,7 @@ def test_kernels_equal_numpy():
         (_, a), (_, b) = both(K.ovvv_t1, rnd(v, npv), t1, 3, rnd(v, n1), rnd(v, v), rnd(o, v))
         same(tuple(a[3:]), tuple(b[3:]))
     finally:
-        K.USE_C = True
+        K.USE_C = HAVE_C
 
 
 def test_t_complex(x2c_h2o, monkeypatch, tmp_path):
@@ -406,7 +411,7 @@ def test_t_complex(x2c_h2o, monkeypatch, tmp_path):
     monkeypatch.setattr(K, 'USE_C', False)
     for m3 in (True, False):
         assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=m3) - e_t) < 1e-12
-    monkeypatch.setattr(K, 'USE_C', True)
+    monkeypatch.setattr(K, 'USE_C', HAVE_C)
     # the least memory: <bc||ei> and the layouts of t2 in a scratch file, written
     # and read in blocks; below it, MemoryError
     monkeypatch.setattr(memory, 'resident', lambda: 0)
@@ -414,10 +419,10 @@ def test_t_complex(x2c_h2o, monkeypatch, tmp_path):
     for m3 in (True, False):
         need = sum(triples.memory_need(o, v, m3))
         for use_c in (True, False):
-            monkeypatch.setattr(K, 'USE_C', use_c)
+            monkeypatch.setattr(K, 'USE_C', use_c and HAVE_C)
             assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=m3,
                                       max_memory=1.01 * need / 1e6) - e_t) < 1e-12
-        monkeypatch.setattr(K, 'USE_C', True)
+        monkeypatch.setattr(K, 'USE_C', HAVE_C)
         with pytest.raises(MemoryError, match='one virtual orbital'):
             triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=m3,
                            max_memory=0.9 * need / 1e6)
@@ -518,11 +523,11 @@ def test_kramers_pairs():
     for k, b in blocks.items():
         setattr(step.plan, k, b)
     for m3, use_c in ((False, True), (True, True), (True, False)):
-        step.plan.three_m, K.USE_C = m3, use_c
+        step.plan.three_m, K.USE_C = m3, use_c and HAVE_C
         try:
             t1k, t2k = step.update_packed(t1, t2p)
         finally:
-            K.USE_C = True
+            K.USE_C = HAVE_C
         assert abs(t1k - t1r).max() < 1e-12 and abs(t2k - t2r).max() < 1e-12
     for k, b in whole.items():
         setattr(step.plan, k, b)

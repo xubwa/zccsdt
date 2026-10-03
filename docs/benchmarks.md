@@ -1598,6 +1598,36 @@ where the 2 GB of the comparison with CFOUR gave 234-235 s. For H2O/cc-pVQZ
 it makes no difference in time (4.7 s with 4 GB, 4.5 s with 2 GB; job
 31558357) and costs 2 GB of memory.
 
+**Without MKL.** The matrix products go through one library: MKL on GNU
+OpenMP (all numbers above), the build of the same kernel library on
+OpenBLAS (0.3.33 with its own threads), or SciPy's BLAS if there is no
+kernel library; without `libzc_zccsd.so` numpy does the work of the OpenMP
+kernels on one thread. The energies are the same in all four
+(`tests/test_zccsd.py` passes in each; here SciPy's BLAS is MKL as well,
+and PySCF's own libraries are linked with MKL: a process without any MKL
+was not tested). MKL against OpenBLAS, the same code on the same node (job
+31564346, c022, 8 cores):
+
+| seconds | H2O/cc-pVQZ: MKL | OpenBLAS | C6H6/cc-pVDZ: MKL | OpenBLAS |
+|---|---|---|---|---|
+| CCSD iteration | 0.423 | 0.421 | 9.47 | 12.96 |
+| of which the two o^3 v^3 products | 0.149 | 0.149 | 5.13 | 7.22 |
+| (T) | 5.3 | 5.2 | 227.9 | 277.2 |
+| of which GEMMs / kernel | 3.7 / 1.3 | 3.7 / 1.3 | 179.9 / 47.0 | 222.4 / 53.6 |
+
+For H2O the BLAS makes no difference; for benzene OpenBLAS is 1.4 times
+slower per iteration (its DGEMM: 1.4 times in the six real products; the
+other terms 1.3-1.5 times) and 1.2 times in (T).
+
+The MKL of the environment changed from 2026.0 to 2026.1 at 14:23 on
+2026-10-03: the runs of jobs 31554690, 31554768 and 31556042 and the first
+four of the batch scan (ZGEMM, 0.5 to 4 GB) used 2026.0, the last four of
+the scan (ZGEMM 8 GB, the three real GEMMs), job 31558357 and this one
+2026.1. No difference shows where the two can be compared: benzene's (T)
+with three real GEMMs and batches of 2 GB took 235.0 s with 2026.0 (c081)
+and 234.1 s with 2026.1 (c236), with ZGEMM 228.7 s (4 GB, 2026.0) and
+228.8 s (8 GB, 2026.1) in the scan.
+
 What is not done:
 
 - the integral transformation does not use Kramers pairs (the CCSD step

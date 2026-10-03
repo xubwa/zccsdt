@@ -785,9 +785,10 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
     kind, text = blas.backend()
     log.info('Matrix products: %s', text)
     if kind != 'mkl':
-        log.warn('The matrix products of the CCSD do not run on MKL in the OpenMP pool of the '
-                 'kernels (%s): a BLAS with threads of its own competes with the kernels for '
-                 'the cores.  Build csrc with -DZC_MKL_DIR=<MKL lib directory>.', text)
+        log.warn('The matrix products of the CCSD run on %s, not on MKL in the OpenMP pool of '
+                 'the kernels: the results are the same, large calculations are slower '
+                 '(benzene/cc-pVDZ with OpenBLAS: 1.4 times per iteration).  For MKL build csrc '
+                 'with -DZC_MKL_DIR=<MKL lib directory>.', text)
 
     def energy(t1, t2p):
         with timer('amps.energy'):
