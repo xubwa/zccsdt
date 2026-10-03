@@ -14,14 +14,20 @@ usage: python bench/profile_zccsd.py MOLECULE BASIS VARIANT [NITER] [T_ALGS]
   NITER:    CCSD iterations (default 4); the first is left out of the means;
             0: the integrals only
   T_ALGS:   (T) codes to time, comma separated: batch (zccsdt.zccsd.triples,
-            the default for direct), occ_loop and vir_loop (the loops copied
-            from socutils, the default for the other variants: occ_loop), none
+            the default for direct; batch-z: with one ZGEMM per product
+            instead of three real GEMMs), occ_loop and vir_loop (the loops
+            copied from socutils, the default for the other variants:
+            occ_loop), none
 X2C-1e spinors from PySCF (x2c.UHF), all electrons.  The copied code is not
 changed: its functions are wrapped by zccsdt.timing timers here.
 environment: ZC_MAXMEM: max_memory of the CC object in MB (default 24000): the
              integrals are planned within it (what does not fit is mapped from
              a scratch file, the passes are sliced);
              ZC_THREE_M: 0 or 1: DirectZCCSD.three_m (default: by memory);
+             ZC_KRAMERS: 0 or 1: DirectZCCSD.kramers (default: Kramers pairs if
+             the reference is time-reversal symmetric); ZC_T_FULL=1: with
+             Kramers pairs, (T) on all triples as well;
+             ZC_T_BATCH_GB: triples.BATCH_BYTES in GB;
              ZC_T_BUDGET: seconds for each (T) loop; when they are used up the
              loop is stopped and its time extrapolated from the triples done;
              PYSCF_TMPDIR: scratch files of ZCCSD (put it on a local disk).
@@ -119,6 +125,8 @@ def main():
         mycc.socutils_amps = route == 'soc'
         if 'ZC_THREE_M' in os.environ:          # 0: one ZGEMM per o^3 v^3 product
             mycc.three_m = bool(int(os.environ['ZC_THREE_M']))
+        if 'ZC_KRAMERS' in os.environ:          # 0: the spinors of the SCF as they are
+            mycc.kramers = bool(int(os.environ['ZC_KRAMERS']))
     else:
         for name in ('cc_Fvv', 'cc_Wovvo', 'update_t2_vvvv_sym', '_make_vvvv_tril'):
             wrap(imd, name)
@@ -136,6 +144,8 @@ def main():
     print('%s/%s %s  nocc=%d nvir=%d nao=%d  SCF %.1f s  E(SCF) %.10f  threads %s'
           % (mol_name, basis, type(mycc).__name__, nocc, nvir, mol.nao_nr(), t_scf, mf.e_tot,
              lib.num_threads()))
+    from zccsdt import blas
+    print('matrix products of zccsdt.zccsd.amps and triples: ' + blas.backend()[1])
 
     watch = MemWatch()
     watch.start()
@@ -218,18 +228,30 @@ def main():
         watch = MemWatch()
         watch.start()
         t0 = time.perf_counter()
-        if alg == 'batch':
+        if alg in ('batch', 'batch-z'):
             from zccsdt.zccsd import triples
+            if 'ZC_T_BATCH_GB' in os.environ:       # the arrays of a batch of (T), at most
+                triples.BATCH_BYTES = int(float(os.environ['ZC_T_BATCH_GB']) * 2 ** 30)
             timing.reset()
             mycc.verbose = 4                        # where <bc||ei> is, the batches
-            e_t = triples.kernel(mycc, eris, mycc.t1, mycc.t2)
+            if getattr(eris, 'residual', None) is not None:     # as DirectZCCSD.ccsd_t does
+                eris.residual.close()
+                eris.residual = None
+            e_t = triples.kernel(mycc, eris, mycc.t1, mycc.t2,
+                                 three_m=None if alg == 'batch' else False)
             mycc.verbose = 0
             sec = time.perf_counter() - t0
             watch.stop()
-            print('(T) batch: %.1f s (E(T) %.12f on the amplitudes of iteration %d; peak '
-                  'anonymous %.2f GB)' % (sec, e_t, niter, watch.anon / 1e6))
+            print('(T) %s: %.1f s (E(T) %.12f on the amplitudes of iteration %d; peak '
+                  'anonymous %.2f GB)' % (alg, sec, e_t, niter, watch.anon / 1e6))
             print('  ' + '  '.join('%s %.1f s' % (k[2:], t) for k, t, _ in timing.report()
                                    if k.startswith('t.')))
+            if eris.kramers and os.environ.get('ZC_T_FULL'):    # all triples as well
+                t0 = time.perf_counter()
+                e_all = triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=alg == 'batch',
+                                       kramers=False)
+                print('(T) %s on all triples: %.1f s, E(T) %.12f' % (alg, time.perf_counter() - t0,
+                                                                    e_all))
             continue
         if eris.ovvv is None:
             eris.ovvv = zd.get_ovvv(eris)

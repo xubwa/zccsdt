@@ -389,13 +389,30 @@ class DirectZCCSD(_zccsd.ZCCSD):
         within max_memory).  True: update_amps of this module, as copied
         from socutils (einsums on the full arrays), on PySCF's driver.
     three_m : bool or None
-        zccsdt.zccsd.amps: the two o^3 v^3 products as three real GEMMs each
-        instead of one ZGEMM (None, the default: if the memory is there).
+        Three real GEMMs for a complex product instead of four.  None (the
+        default): in zccsdt.zccsd.amps for the two o^3 v^3 products when
+        they are large and the memory is there, in (T) when the real parts
+        of its operands and a whole batch fit in memory; False: ZGEMM.
+    kramers : bool or None
+        zccsdt.zccsd.amps / triples only.  None (the default): if the
+        reference is time-reversal symmetric (a closed shell without a
+        magnetic field), the spinors are rotated within their degenerate
+        levels into Kramers pairs (zccsdt.zccsd.kramers), ordered
+        [unbarred, barred] among the occupied and among the virtual ones,
+        and the symmetry t[Kp Kq, Kr Ks] = +-t[pq, rs]* is used: (T) does
+        half of the virtual triples.  The amplitudes t1 and t2 then refer to
+        these spinors, eris.mo_coeff, not to mf.mo_coeff.  False: the
+        spinors of the reference as they are.  True: as None, but an error
+        if the reference is not symmetric.
     '''
 
     ovvv_direct = False
     socutils_amps = False
     three_m = None
+    kramers = None
+
+    _keys = {'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
+             'kramers', 'with_mmf', 'feri', 'ao2mo_outcore'}
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -464,7 +481,10 @@ class DirectZCCSD(_zccsd.ZCCSD):
             eris = self.eris if self.eris is not None else self.ao2mo()
         if self._fixed_layouts():
             from zccsdt.zccsd import triples
-            return triples.kernel(self, eris, t1, t2, self.verbose)
+            if getattr(eris, 'residual', None) is not None:
+                eris.residual.close()               # the layouts of the CCSD step are
+                eris.residual = None                # made again when they are needed
+            return triples.kernel(self, eris, t1, t2, self.verbose, three_m=self.three_m)
         from zccsdt.zccsd import gccsd_t
         if eris.ovvv is None:
             eris.ovvv = get_ovvv(eris)              # from the packed array or the AO integrals
@@ -497,6 +517,7 @@ class _PhysicistsERIs(gccsd._PhysicistsERIs):
         self.ao_tril = None         # (mu>nu) pair indices
         self._spin_mo_cache = None
         # zccsdt.zccsd.amps
+        self.kramers = False        # the spinors are Kramers pairs, [unbarred, barred]
         self.ovvv_p = None          # <ma||ef> packed over e > f
         self.oovv_p = None          # <mn||ef> packed over m > n and e > f
         self.oovv_r = None          # <mn||ef> as [m, e, n, f]
@@ -588,6 +609,8 @@ def _make_eris_direct(mycc, mo_coeff=None):
         # are evaluated AO-direct from eris.E4 during the iterations.  What
         # does not fit mycc.max_memory is a mapped array of a scratch file.
         from zccsdt.zccsd import ao2mo as slab
+        if mycc._fixed_layouts() and mycc.kramers is not False:
+            mog = _kramers_pairs(mycc, eris, log)
         Ca, Cb = mog[:nao], mog[nao:]
         if mycc._fixed_layouts():       # zccsdt.zccsd.amps: its layouts, no ovvo
             names = ('oooo', 'ooov', 'oovv_p', 'oovv_r', 'ovov_r', 'ovvv_p')
@@ -619,6 +642,37 @@ def _make_eris_direct(mycc, mo_coeff=None):
 
     log.timer('CCSD integral transformation (vvvv/ovvv-free)', *cput0)
     return eris
+
+
+def _kramers_pairs(mycc, eris, log):
+    '''Rotate the spinors of ``eris`` within their degenerate levels into
+    Kramers pairs, [unbarred, barred] among the occupied and among the
+    virtual ones, if the reference is time-reversal symmetric; the
+    coefficients in the (spin, AO) basis that the integrals are made from.'''
+    from zccsdt.zccsd import kramers
+    nocc, mog, e = eris.nocc, eris.mo_ao_spin, eris.mo_energy
+    s2 = np.kron(np.eye(2), mycc.mol.intor('int1e_ovlp'))
+    occ = kramers.pair(mog[:, :nocc], s2, e[:nocc])
+    vir = kramers.pair(mog[:, nocc:], s2, e[nocc:])
+    if occ is None or vir is None:
+        if mycc.kramers:
+            raise RuntimeError('DirectZCCSD.kramers = True, but the spinors are not closed '
+                               'under time reversal level by level')
+        log.info('No Kramers pairs: the spinors are not degenerate in pairs that are closed '
+                 'under time reversal (an open shell, a magnetic field, or an SCF that is '
+                 'not converged: the energies of partners must agree to 1e-7)')
+        return mog
+    paired = np.hstack((occ[0], vir[0]))
+    u = mog.conj().T @ s2 @ paired                  # block diagonal within the levels
+    eris.mo_ao_spin = paired
+    eris.mo_coeff = eris.mo_coeff @ u
+    eris.fock = u.conj().T @ eris.fock @ u
+    eris.mo_energy = eris.fock.diagonal().real
+    eris.kramers = True
+    off = eris.fock - np.diag(eris.fock.diagonal())
+    log.info('Spinors rotated into Kramers pairs, [unbarred, barred] (largest off-diagonal '
+             'Fock element %.1e)', abs(off).max())
+    return paired
 
 
 def _eris_from_cholmo(eris, chol_mo, nocc):

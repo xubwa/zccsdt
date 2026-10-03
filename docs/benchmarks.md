@@ -1000,9 +1000,11 @@ remainder is about 3.7 s.
 ## Two-component CCSD(T): CFOUR `xx2cccsd`, 8 cores
 
 CFOUR's spinor CCSD(T) (`x2cccsd/`, described in `docs/cfour_notes.md`,
-Section 2) is the reference for a spinor CCSD(T) in zccsdt, which does not
-exist yet. zccsdt's CCSD (`solver.kernel(eris, 'ccsd')`, the CCSD part of
-its CCSDT code) is measured next to it.
+Section 2) is the reference for zccsdt's spinor CCSD(T),
+`zccsdt.zccsd.DirectZCCSD`. The subsections follow its history: zccsdt's
+CCSD as the CCSD part of its CCSDT code, socutils' CCSD and (T) copied into
+zccsdt, their integrals, the amplitude equations and (T) rewritten, Kramers
+pairs; the last subsection is where it stands.
 
 **Setup.**
 
@@ -1361,6 +1363,251 @@ The flops of benzene (2.2e14) would take 355 s at the rate of the machine;
 the rest is memory traffic: the x of all batches are 1.9 TB, written by the
 particle product, read and written again by the hole product (a rank-42
 update) and read by the kernel.
+
+**One product per x, ranges of a, arrays that are reused.** What changed
+after the first version:
+
+- The particle and the hole term are one product over the joint index
+  (e | m): with A[(b>c), i, (e|m)] = (<bc||ei> | t2[i,m,b,c]) and
+  B[a, (j>k), (e|m)] = (t2[j,k,a,e] | -<ma||jk>) every x is one GEMM result,
+  written once.
+- A batch is a range of a with all b < a where that fits (two GEMMs: all
+  pairs below the range against the a of the range, the pairs (a, x)
+  against all y), else one a and a range of b (three GEMMs). H2O runs in
+  ranges of a, benzene mostly in ranges of b.
+- The x of all batches are written into the same arrays, allocated once
+  for the largest batch. An array allocated per batch is mapped and zeroed
+  by the system page by page while the GEMM writes it. For the shapes of
+  one benzene batch (one a, 22 b; job 31554522, c152, 8 cores, seconds):
+
+  | product, rows x columns (x 228) | ZGEMM, new array | ZGEMM, reused | 3 DGEMM, new arrays | 3 DGEMM, reused |
+  |---|---|---|---|---|
+  | x_{a,(bc)}: 101178 x 861 | 0.344 | 0.279 | 0.357 | 0.268 |
+  | x_{y,(ax)}: 5082 x 18942 | 0.331 | 0.326 | 0.274 | 0.220 |
+  | x_{y,(ax)}: 924 x 85239 | 0.285 | 0.232 | 0.244 | 0.197 |
+  | sum | 0.960 | 0.837 | 0.875 | 0.685 |
+
+  The reused real products run at 450-600 Gflop/s.
+- The kernel keeps one o x o(o-1)/2 array per thread (Z; 0.58 MB for
+  benzene, in the L2 cache), reads Z[k, (ij)] from it with a stride and
+  forms the disconnected part inside the loop over i > j > k from three
+  columns of t1 and three rows of <bc||jk>. A version that vectorized the
+  loop over transposed copies of Z and of the disconnected part (four
+  arrays, 2.3 MB per thread) was slower than the first one, which kept two:
+  108 s for benzene with ZGEMM (job 31553298, c208) against 68 s (job
+  31553091, c255, a node on which CFOUR is 1.3 times faster).
+- The tasks of the threads are the pairs (b, c), not the b: a batch with
+  one or two b (small batches under a memory limit) left most threads idle
+  (job 31553298: 330 s in the kernel for benzene with `max_memory` 8000 MB),
+  and with dynamic scheduling over b the long last b ended alone. On
+  random arrays of benzene's dimensions one pair takes 0.4 ms of a thread
+  (0.5 ms before): half of it to read the three x from memory (1.7 MB),
+  half for the 11480 triples i > j > k.
+- Three real GEMMs per product (`three_m`), the three real results going
+  to the kernel as they are (it reads 24 instead of 16 bytes per element).
+  With new arrays per batch they did not pay for benzene (job 31553298,
+  c208: 695 s, of which GEMMs 537 s and kernel 146 s, against 660 s, 544 s
+  and 108 s with ZGEMM; H2O/cc-pVQZ 13.3 s against 14.6 s).
+  With the arrays reused the real GEMMs are a quarter faster where the
+  batches are ranges of a (H2O/cc-pVQZ: 3.6 s instead of 4.9 s) and 4%
+  faster for the batches of benzene (185 s instead of 193 s), where the
+  kernel loses more than that (48.5 s instead of 34.6 s). Default: the real
+  parts where both operands and a whole batch fit in memory with them (an
+  operand in a scratch file or small batches cost more than the GEMMs
+  save), else ZGEMM.
+- Kramers pairs (next section): the triples (a, b, c) and (Ka, Kb, Kc)
+  contribute complex-conjugate energies, so only the triples with b in the
+  unbarred half are done and the sum is doubled. If the amplitudes do not
+  have the symmetry (`kramers.symmetric`), all triples are done.
+
+Seconds, 8 cores, CFOUR's CCSD(T) first on the same node; (T) on the
+amplitudes of the fourth CCSD iteration, the same energy to 1e-12 in all
+variants:
+
+| (T), seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| job 31554690 (c081): CFOUR | 2.1 | 23.9 | 1499 |
+| all triples, three real GEMMs | 0.9 | 10.0 | 464.9 |
+| all triples, ZGEMM | 1.3 | 12.5 | 483.2 |
+| Kramers pairs, three real GEMMs | 0.6 | 6.3 | 235.0 |
+| of which GEMMs / kernel | 0.4 / 0.1 | 4.8 / 1.2 | 185.4 / 48.5 |
+| Kramers pairs, ZGEMM | 0.5 | 6.4 | 228.5 |
+| of which GEMMs / kernel | 0.4 / 0.1 | 5.3 / 1.0 | 193.0 / 34.6 |
+| peak memory (GB): CFOUR / three real GEMMs / ZGEMM | 0.7 / 2.2 / 1.7 | 2.2 / 5.7 / 5.2 | 11.1 / 14.0 / 12.5 |
+| job 31556042 (c415): CFOUR | 2.0 | 23.6 | |
+| Kramers pairs, the barred a in ranges, three real GEMMs | 0.5 | 5.1 | |
+| the same with ZGEMM | 0.5 | 6.0 | |
+
+- With Kramers pairs the ZGEMMs of benzene do 1.04e14 flops in 193 s: 540
+  Gflop/s on a node whose CFOUR runs are the slower ones, the rate of the
+  machine. What is left of (T) for benzene is the kernel (15-20%).
+- For barred a the pairs (b, c) are the same for every a, those below the
+  barred half: a range of a shares one product for its x_{a,(bc)}. With one
+  a per batch the 5995 pairs of H2O/cc-pVQZ were read from A once for every
+  a: 6.3 s, and 5.1 s with ranges (GEMMs 4.8 s and 3.6 s; the last rows of
+  the table, both versions in the same job). The batches of benzene do not
+  hold a range of a.
+- zccsdt's (T) takes more memory than CFOUR's for small molecules: the
+  batches are sized by `max_memory` (2 GB of x at most in these runs), not
+  by the molecule. Benzene's (T) is as fast with `max_memory` 8000 MB (the
+  larger operand in a scratch file) as with 24000 MB: the table of the last
+  subsection.
+
+### Kramers pairs (`zccsd/kramers.py`)
+
+A closed-shell X2C reference without a magnetic field is symmetric under
+time reversal K, K (a, b) = (-b*, a*) on the two components of a spinor: the
+spinors come in degenerate pairs (p, Kp), and in a basis of such pairs every
+tensor of the theory obeys
+
+    X[Kp, Kq, ...] = s_p s_q ... conj(X[p, q, ...]),
+
+s = +1 for the first member of a pair ("unbarred"), -1 for the second. The
+spinors of an SCF are pairs only up to a phase, and not even that in a level
+that is degenerate for another reason as well (a four-fold level of a
+molecule with spatial symmetry). `kramers.pair` rotates the spinors within
+each degenerate level into exact pairs and orders them [unbarred, barred]
+among the occupied and among the virtual spinors, so that K is a shift by
+half the dimension; the Fock matrix stays diagonal to the convergence of
+the SCF (1e-7 here). `DirectZCCSD` does this when the reference allows it
+(`kramers = None`; an open shell or a reference that is not symmetric is
+detected level by level and runs without). The amplitudes then refer to the
+paired spinors, `mycc.eris.mo_coeff`. CFOUR's `xx2cccsd` does not use the
+symmetry.
+
+Half of every expensive term is computed, the other half is its image:
+
+- pass 1 computes the rows (m e) of W(mbej) with unbarred m (the product
+  <mn||ef> t2, the t1 terms, the terms with <ma||ef>: the integrals with
+  barred m are not read) and fills the rows of the partners in one pass
+  over W;
+- pass 2 computes the rows (i a) of t2 W with unbarred i; a block of
+  columns is a range of unbarred j and their partners, so that the
+  antisymmetrizer finds both;
+- the AO ladder is done for one pair (i > j) of each two partners (ij),
+  (Ki Kj);
+- (T) does the virtual triples with b in the unbarred half.
+
+The integral transformation is not halved. The step agrees with the general
+one to 1e-12 per element for symmetric amplitudes (also in slabs and
+blocks), and (T) on half of the triples with (T) on all of them to 1e-12
+(`tests/test_zccsd.py`, on a molecule with a four-fold level).
+
+Seconds per CCSD iteration, 8 cores, CFOUR first on the same node:
+
+| | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| job 31554690 (c081): CFOUR `xx2cccsd` | 0.33 | 2.76 | 26.89 |
+| the spinors of the SCF (`kramers = False`) | 0.099 | 0.710 | 16.56 |
+| Kramers pairs | 0.067 | 0.428 | 9.95 |
+| job 31554768 (c228): CFOUR `xx2cccsd` | 0.26 | 2.06 | 22.98 |
+| Kramers pairs, intermediates completed by half-block copies | 0.055 | 0.368 | 8.36 |
+| peak memory of the iterations (GB): CFOUR / zccsdt | 0.7 / 0.6 | 2.2 / 2.4 | 11.1 / 11.1 |
+
+Where the time goes (job 31554768, seconds per iteration):
+
+| C6H6/cc-pVDZ | CFOUR | zccsdt, Kramers pairs |
+|---|---|---|
+| the two o^3 v^3 products (CFOUR: I7 and the ring) | 12.16 | 4.69 |
+| other intermediates; the terms with <ma\|\|ef> | 2.53 | 1.97 (GEMM with tau 0.76, t1 terms 0.48, small ring terms 0.24, layouts 0.25, W(mnij) 0.24) |
+| pp ladder in the AO basis | 3.14 | 0.97 (real GEMMs 0.50, transformations 0.33, packing 0.10) |
+| hh ladder, T1/T2 terms, DIIS, update | 5.16 | 0.73 (t2 terms 0.40, completion by K 0.12, DIIS and energy 0.10) |
+| sum | 22.98 | 8.36 |
+
+The six real GEMMs of the two o^3 v^3 terms (half of the rows each) run at
+610 Gflop/s and are 56% of the step; for H2O/cc-pVQZ the two ZGEMMs
+(0.14 s), the terms with <ma||ef> (0.09 s) and the ladder (0.08 s) are 0.30
+of 0.37 s.
+
+The three- and four-index intermediates that pass 1 makes for unbarred m
+only (t1 <mb||je>, the <ma||ef> tau array) are completed by half-block
+copies: K on a single spinor index is a swap of the two halves with a sign.
+The first version did it with index arrays, one pass and one temporary per
+axis, single threaded: 0.48 s of 8.74 s for benzene, outside every timer;
+0.12 s now (`amps.kramers`; the same job: 8.74 s before, 8.36 s after).
+
+What is left of a step is not in one place. A step of benzene allocates
+about 10 GB of work arrays that the system maps and zeroes page by page;
+with a malloc that keeps freed memory (`MALLOC_MMAP_MAX_=0`,
+`MALLOC_TRIM_THRESHOLD_` large) the iteration took 8.20 s instead of 8.73 s
+(14.50 s instead of 14.96 s without Kramers pairs; job 31554542, c094), at
+1.8 GB more memory. zccsdt does not change the allocator of the process and
+does not keep its work arrays between steps, which would have to come out of
+the memory plan: these 3-6% are left.
+
+### CCSD(T) against CFOUR: where it stands
+
+One job (31554690, c081, 8 cores), CFOUR's CCSD(T) and then zccsdt's on
+the same node; zccsdt with its defaults (Kramers pairs, three real GEMMs
+where the plan says so) and `max_memory` 24000 MB:
+
+| seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| CCSD iteration: CFOUR | 0.33 | 2.76 | 26.89 |
+| CCSD iteration: zccsdt | 0.067 (4.9x) | 0.428 (6.4x) | 9.95 (2.7x) |
+| (T): CFOUR | 2.1 | 23.9 | 1499 |
+| (T): zccsdt | 0.6 (3.5x) | 6.3 (3.8x) | 235 (6.4x) |
+| integrals: CFOUR `xx2cvtran` | 0.49 | 3.38 | 11.9 |
+| integrals: zccsdt | 0.7 | 5.7 | 12.0 |
+
+- With the later changes (the intermediates completed by half-block
+  copies, the barred a of (T) in ranges, batches of 4 GB) the same
+  comparison gives 0.055 / 0.368 / 8.36 s per iteration against 0.26 / 2.06
+  / 22.98 s (job 31554768, c228: 4.7x, 5.6x, 2.75x), and (T) for H2O in 0.5
+  / 5.1 s against 2.0 / 23.6 s (job 31556042, c415: 4x, 4.6x) and in 0.5 /
+  4.7 s against 1.7 / 17.3 s (job 31558357, c451: 3.4x, 3.7x). The nodes
+  differ more for CFOUR than for zccsdt, so the factors are larger on the
+  nodes where CFOUR is slow (c081, c415) than where it is fast (c228, c451).
+- Without Kramers pairs (`kramers = False`, or a reference that has none)
+  the factors are 3.3x, 3.9x and 1.6x per iteration and 2.3x, 2.4x and 3.2x
+  for (T).
+- The integral step of zccsdt includes the AO integrals (libcint) and the
+  two AO operators of the ladder, 3.3 of the 5.7 s for H2O/cc-pVQZ;
+  `xx2cvtran` reads AO integrals made before. The transformation itself
+  (ket, bra, sort: 2.5 s for H2O/cc-pVQZ here) is that of the section on the
+  integrals, a little faster than CFOUR's (2.6 s).
+
+**Memory.** Benzene/cc-pVDZ with Kramers pairs, the same job. Everything
+is planned from `max_memory`: slabs and blocks of the CCSD step, the DIIS
+vectors, the operands and batches of (T).
+
+| `max_memory` | in scratch files | CCSD: plan of the step | s / iteration | peak memory | (T) | peak memory |
+|---|---|---|---|---|---|---|
+| 24000 MB | nothing | one slab, one block, three real GEMMs | 9.95 | 11.9 GB | 235.0 s (three real GEMMs) | 14.0 GB |
+| 8000 MB | ovvv_p; DIIS vectors; the operand A of (T) | slabs of 9, blocks of 14 of 42 occupied, three real GEMMs | 11.76 | 7.4 GB | 230.5 s (ZGEMM, batches of 1.9 GB) | 7.6 GB |
+| 4000 MB | <mn\|\|ef>, <mb\|\|je>, ovvv_p; W(mbej); DIIS vectors; both operands of (T) | slabs of 2, blocks of 6, ZGEMM | 13.94 | 3.6 GB | 259.4 s (ZGEMM, batches of 0.45 GB) | 3.8 GB |
+
+With 4000 MB (PySCF's default `max_memory`) the iteration is 1.4 times
+slower than with 24000 MB and (T) 1.1 times; both stay well ahead of CFOUR
+in 11 GB. (Peak memory is anonymous memory; the mapped scratch arrays are
+page cache.)
+
+The size of the batches of (T) (benzene with Kramers pairs, `max_memory`
+24000 MB, job 31556395 on c236, a node as fast as c081):
+
+| x of a batch, at most | 0.5 GB | 1 GB | 2 GB | 4 GB | 8 GB |
+|---|---|---|---|---|---|
+| ZGEMM, seconds | 252.6 | 233.5 | 228.2 | 228.7 | 228.8 |
+| three real GEMMs, seconds | | | 234.1 | 223.5 | 223.9 |
+| peak memory (GB), ZGEMM / three real GEMMs | 10.9 | 11.4 | 12.5 / 14.0 | 14.6 / 16.0 | 18.4 / 20.2 |
+
+The real parts hold two thirds of the elements in the same bytes and reach
+the plateau later. The tables above were measured with 2 GB; the default
+(`triples.BATCH_BYTES`) is 4 GB since this scan, i.e. 223.5 s for benzene
+where the 2 GB of the comparison with CFOUR gave 234-235 s. For H2O/cc-pVQZ
+it makes no difference in time (4.7 s with 4 GB, 4.5 s with 2 GB; job
+31558357) and costs 2 GB of memory.
+
+What is not done:
+
+- the integral transformation does not use Kramers pairs (the CCSD step
+  does not read the rows of <mn||ef>, <mb||je> and <ma||ef> with a barred
+  first index; (T) reads all of <ma||ef>);
+- the page faults of the work arrays of a CCSD step (3-6%, above);
+- for a few occupied spinors the kernel of (T) is a fifth to a quarter of
+  (T): its pieces of the x arrays are short (o(o-1)/2 elements) and come
+  from memory one cache miss at a time, and the loops over k < j are a few
+  elements long.
 
 ## Correctness references
 

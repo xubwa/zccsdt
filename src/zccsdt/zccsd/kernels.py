@@ -27,7 +27,10 @@ _SIGNATURES = {
     'zc_ring_cols3': [_P, _I, _I, _I, _I, _P, _P, _P],
     'zc_outer_pp': [_P, _P, _I, _I, _D, _P],
     'zc_ring_cols': [_P, _I, _I, _I, _I, _P],
-    'zc_asym_pack_cols': [_P, _I, _I, _I, _I, _D, _P],
+    'zc_asym_pack_cols': [_P, _I, _I, _I, _I, _I, _D, _P],
+    'zc_kfill_ring': [_P, _I, _I, _I, _I, _I, _I],
+    'zc_kfill_packed': [_P, _I, _I, _P, _P, _P, _P, _P],
+    'zc_add_rows_k': [_P, _I, _P, _P, _P, _P, _I, _P, _P],
     'zc_asym_pack2': [_P, _I, _I, _I, _I, _D, _P],
     'zc_pack_tril_add': [_P, _I, _I, _I, _I, _D, _P],
     'zc_unpack_tril': [_P, _I, _I, _I, _I, _P],
@@ -210,16 +213,18 @@ def ring_cols3(t2p, o, v, j0=0, j1=None):
     return split3(ring_cols(t2p, o, v, j0, j1))
 
 
-def asym_pack_cols(x, o, v, j0, j1, alpha, R):
+def asym_pack_cols(x, o, v, j0, j1, alpha, R, offset=0):
     '''R[(i>j),(a>b)] += alpha (x[i,a,j,b] - x[j,a,i,b] - x[i,b,j,a] + x[j,b,i,a])
-    from the columns j0 <= j < j1 of x in the ring layout: the terms whose
-    third index lies in the range.'''
+    from the columns j0 <= j < j1 of x in the ring layout - the terms whose
+    third index lies in the range.  x has o v rows; its columns from
+    ``offset`` on are (j - j0, b).'''
+    nc = (j1 - j0) * v
     if USE_C:
-        _lib.zc_asym_pack_cols(_c(x), o, v, j0, j1, alpha, _c(R))
+        _lib.zc_asym_pack_cols(_c(x) + 16 * int(offset), x.shape[1], o, v, j0, j1, alpha, _c(R))
         return R
     (io, jo), (av, bv) = tril(o), tril(v)
     full = np.zeros((o, v, o, v), dtype=np.complex128)
-    full[:, :, j0:j1] = x.reshape(o, v, j1 - j0, v)
+    full[:, :, j0:j1] = x[:, offset:offset + nc].reshape(o, v, j1 - j0, v)
     i, j = io[:, None], jo[:, None]
     R += alpha * (full[i, av, j, bv] - full[j, av, i, bv] - full[i, bv, j, av] + full[j, bv, i, av])
     return R
@@ -379,3 +384,57 @@ def ladder_unpack(GA, GS, n, nao, order='xpy'):
     ba[:] = -ab.transpose(0, 2, 1)
     G[:] = g if order == 'pxy' else g.transpose(1, 0, 2)
     return G
+
+
+# --------------------------------------------------------------- Kramers pairs
+
+def _half_maps(n):
+    '''(partner, sign) of the time reversal on n spinors [unbarred, barred]:
+    K p = sign[p] partner[p].'''
+    h = n // 2
+    return np.r_[np.arange(h, n), np.arange(h)], np.r_[np.ones(h), -np.ones(h)]
+
+
+def kfill_ring(X, o, v, i0, i1, nj):
+    '''The rows (i, a) with barred i of X in the ring layout from those with
+    unbarred i, i0 <= i < i1: X[(i + o/2, Ka), (K jj, Kb)] = s_a s_jj s_b
+    conj(X[(i, a), (jj, b)]); the columns are (jj, b) for nj unbarred occupied
+    jj followed by their nj partners.'''
+    if USE_C:
+        _lib.zc_kfill_ring(_c(X), o, v, i0, i1, nj, X.shape[1])
+        return X
+    ho = o // 2
+    (kv, sv), (kj, sj) = _half_maps(v), _half_maps(2 * nj)
+    X4 = X.reshape(o, v, 2 * nj, v)
+    src = X4[i0:i1] * (sv[:, None, None] * sj[:, None] * sv)
+    dst = np.empty_like(src)
+    dst[:, kv[:, None, None], kj[:, None], kv] = src.conj()
+    X4[i0 + ho:i1 + ho] = dst
+    return X
+
+
+def kfill_packed(L, drow, srow, kpv, sgv, R):
+    '''R[drow[p], q] += srow[p] sgv[q] conj(L[p, kpv[q]]); drow < 0 skipped.'''
+    drow = np.ascontiguousarray(drow, dtype=np.int64)
+    srow = np.ascontiguousarray(srow, dtype=np.float64)
+    if USE_C:
+        _lib.zc_kfill_packed(_c(L), L.shape[0], L.shape[1], _c(drow, np.int64),
+                             _c(srow, np.float64), _c(kpv, np.int64), _c(sgv, np.float64), _c(R))
+        return R
+    k = drow >= 0
+    R[drow[k]] += srow[k, None] * sgv * L[k][:, kpv].conj()
+    return R
+
+
+def add_rows_k(R, rows, signs, Z, zrow, kpv, sgv):
+    '''R[rows[k], q] += signs[k] sgv[q] Z[zrow[k], kpv[q]]; rows < 0 skipped.'''
+    rows = np.ascontiguousarray(rows, dtype=np.int64)
+    signs = np.ascontiguousarray(signs, dtype=np.float64)
+    zrow = np.ascontiguousarray(zrow, dtype=np.int64)
+    if USE_C:
+        _lib.zc_add_rows_k(_c(R), R.shape[1], _c(rows, np.int64), _c(signs, np.float64), _c(Z),
+                           _c(zrow, np.int64), rows.size, _c(kpv, np.int64), _c(sgv, np.float64))
+        return R
+    k = rows >= 0
+    R[rows[k]] += signs[k, None] * sgv * Z[zrow[k]][:, kpv]
+    return R

@@ -182,14 +182,15 @@ void zc_ring_cols3(const zc *t2p, int64_t no, int64_t nv, int64_t j0, int64_t j1
 }
 
 /* R[(i>j), (a>b)] += alpha (x[i,a,j,b] - x[j,a,i,b] - x[i,b,j,a] + x[j,b,i,a])
- * from the columns j0 <= j < j1 of x in the ring layout (x: no nv rows,
- * (j1 - j0) nv columns): every pair takes the terms whose third index lies
- * in the range, so that the calls for all ranges add up to the full
- * antisymmetrization P(ij) P(ab). */
-void zc_asym_pack_cols(const zc *x, int64_t no, int64_t nv, int64_t j0, int64_t j1,
-                       double alpha, zc *R)
+ * from the columns j0 <= j < j1 of x in the ring layout: x has no nv rows of
+ * nc elements, and the column (j, b) is its element (j - j0) nv + b (a
+ * pointer into a wider matrix selects other columns of it).  Every pair
+ * takes the terms whose third index lies in the range, so that the calls
+ * for all ranges add up to the full antisymmetrization P(ij) P(ab). */
+void zc_asym_pack_cols(const zc *x, int64_t nc, int64_t no, int64_t nv, int64_t j0,
+                       int64_t j1, double alpha, zc *R)
 {
-    const int64_t npv = nv * (nv - 1) / 2, nc = (j1 - j0) * nv;
+    const int64_t npv = nv * (nv - 1) / 2;
     #pragma omp parallel
     {
         zc *D = malloc(sizeof(zc) * nv * nv);
@@ -603,5 +604,77 @@ void zc_ladder_unpack(const double *GA, const double *GS, int64_t np, int64_t na
                 memcpy(G + p * sp + r * sx, g + r * n2, sizeof(zc) * n2);
         }
         free(g);
+    }
+}
+
+/* ------------------------------------------------------------ Kramers pairs
+ *
+ * Spinors in time-reversal pairs, ordered [unbarred, barred] among the
+ * occupied and among the virtual ones (zccsdt/zccsd/kramers.py): K maps the
+ * index p of the first half to p + n/2 with the sign +1 and back with -1,
+ * and every tensor obeys X[Kp, Kq, ...] = s_p s_q ... conj(X[p, q, ...]). */
+
+/* The rows (i, a) with barred i of a matrix in the ring layout from those
+ * with unbarred i, i0 <= i < i1: X has ld elements per row, its columns are
+ * (jj, b) for 2 nj occupied jj - nj unbarred ones and then their partners -
+ * and all virtual b:
+ *   X[(i + no/2, Ka), (K jj, Kb)] = s_a s_jj s_b conj(X[(i, a), (jj, b)]). */
+void zc_kfill_ring(zc *X, int64_t no, int64_t nv, int64_t i0, int64_t i1, int64_t nj,
+                   int64_t ld)
+{
+    const int64_t ho = no / 2, hv = nv / 2;
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int64_t i = i0; i < i1; i++)
+        for (int64_t a = 0; a < nv; a++) {
+            const zc *src = X + (i * nv + a) * ld;
+            const int64_t ka = a < hv ? a + hv : a - hv;
+            const double sa = a < hv ? 1.0 : -1.0;
+            zc *dst = X + ((i + ho) * nv + ka) * ld;
+            for (int64_t jj = 0; jj < 2 * nj; jj++) {
+                const zc *s0 = src + jj * nv;
+                zc *d0 = dst + (jj < nj ? jj + nj : jj - nj) * nv;
+                const double sj = jj < nj ? sa : -sa;
+                for (int64_t b = 0; b < hv; b++)
+                    d0[b + hv] = sj * conj(s0[b]);
+                for (int64_t b = hv; b < nv; b++)
+                    d0[b - hv] = -sj * conj(s0[b]);
+            }
+        }
+}
+
+/* R[drow[p], q] += srow[p] sgv[q] conj(L[p, kpv[q]]) for np rows of npv
+ * elements: the time-reversed image of rows of a packed array (kpv, sgv:
+ * partner and sign of the virtual pairs); drow[p] < 0 is skipped. */
+void zc_kfill_packed(const zc *L, int64_t np, int64_t npv, const int64_t *drow,
+                     const double *srow, const int64_t *kpv, const double *sgv, zc *R)
+{
+    #pragma omp parallel for schedule(static)
+    for (int64_t p = 0; p < np; p++) {
+        if (drow[p] < 0)
+            continue;
+        zc *r = R + drow[p] * npv;
+        const zc *l = L + p * npv;
+        const double sp = srow[p];
+        for (int64_t q = 0; q < npv; q++)
+            r[q] += sp * sgv[q] * conj(l[kpv[q]]);
+    }
+}
+
+/* R[rows[k], q] += signs[k] sgv[q] Z[zrow[k], kpv[q]] for n rows: zc_add_rows
+ * for the time-reversed image of the rows of Z (not conjugated); rows < 0
+ * are skipped. */
+void zc_add_rows_k(zc *R, int64_t npv, const int64_t *rows, const double *signs,
+                   const zc *Z, const int64_t *zrow, int64_t n, const int64_t *kpv,
+                   const double *sgv)
+{
+    #pragma omp parallel for schedule(static)
+    for (int64_t k = 0; k < n; k++) {
+        if (rows[k] < 0)
+            continue;
+        zc *r = R + rows[k] * npv;
+        const zc *z = Z + zrow[k] * npv;
+        const double sk = signs[k];
+        for (int64_t q = 0; q < npv; q++)
+            r[q] += sk * sgv[q] * z[kpv[q]];
     }
 }

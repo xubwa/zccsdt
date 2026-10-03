@@ -36,6 +36,15 @@ term is evaluated differs:
   packed symmetrized integrals.  Two operators of 2 nao^4 bytes replace the
   nao^2 x nao^2 matrix, and the real GEMMs do o^2 nao^4 multiply-adds.
 
+Kramers pairs.  For spinors in time-reversal pairs, ordered [unbarred,
+barred] among the occupied and among the virtual ones (zccsdt.zccsd.kramers;
+``eris.kramers``), every tensor obeys X[Kp, Kq, ...] = +-conj(X[p, q, ...]),
+and so does every term of the equations.  The expensive terms are then
+evaluated for half of their output and completed by this relation: the rows
+(m e) of W(mbej) and of the ring product with unbarred m, the <ma||ef> terms
+for unbarred m (the integrals with barred m are never read), the ladder for
+one pair (i>j) of each two partners.  The cheap terms run as before.
+
 Memory.  Nothing but three packed T2 (the amplitudes, tau, the residual) and
 arrays smaller than those is assumed to fit: plan_step sizes the slabs and
 blocks from what ``max_memory`` leaves, keeps W(mbej) (o^2 v^2 elements) in
@@ -51,7 +60,9 @@ convergence test and log lines) with T2 packed from the first guess to the
 converged amplitudes.
 
 Timers (zccsdt.timing): 'amps.imds', 'amps.ovvv', 'amps.ring', 'amps.t2',
-'amps.ladder', 'amps.t1' with sub-timers; 'amps.diis', 'amps.energy'.
+'amps.ladder', 'amps.t1' with sub-timers, 'amps.kramers' (the two- and
+three-index intermediates completed by time reversal); 'amps.diis',
+'amps.energy'.
 '''
 
 from dataclasses import dataclass
@@ -105,7 +116,7 @@ class Plan:
 
 
 def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore=None,
-              three_m=None):
+              three_m=None, kramers=False):
     '''The Plan of one step within ``budget`` bytes (None: unlimited).
     ``mapped``: the integrals that are mapped arrays, of 'V' (<mn||ef>), 'E'
     (<mb||je>), 'ovvv_p', 'W_same', 'W_plus'; their rows are read through the
@@ -113,8 +124,10 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
     the DIIS vectors in memory (None: if they take no more than a third of
     what is left).  ``three_m``: three real GEMMs for a complex product
     (None: if o v >= THREE_M_MIN and the blocks of columns that fit with
-    their parts cover a quarter of the occupied space).  MemoryError if the
-    budget is below Plan.need.'''
+    their parts cover a quarter of the occupied space).  ``kramers``: the
+    step uses Kramers pairs (a block of columns then holds an occupied
+    spinor and its partner: two at least).  MemoryError if the budget is
+    below Plan.need.'''
     o, v, nao = int(nocc), int(nvir), int(nao)
     n1, npo, npv, n2 = o * v, K.npair(o), K.npair(v), 2 * nao
     budget = None if budget is None else int(budget)
@@ -142,8 +155,11 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
             return (2 + w_mapped) * nj * col
         return int((4 + w_mapped) * nj * col + 1.5 * nj * nj * 16 * v * v)
 
+    jmin = 2 if kramers else 1                      # the smallest block of columns
+
     def blocks_floor(w_mapped, m3):
-        return max(cols_work(1, w_mapped, m3), rows_work(1, 1, w_mapped, m3), pair, lad + kop)
+        return max(cols_work(jmin, w_mapped, m3), rows_work(1, jmin, w_mapped, m3), pair,
+                   lad + kop)
 
     need = fixed + blocks_floor(True, False)
     if three_m is None and n1 < THREE_M_MIN:
@@ -171,7 +187,8 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
         if incore:
             rem = max(rem - 2 * diis_space * P, blocks_floor(True, m3))
         nj = o
-        while nj > 1 and max(cols_work(nj, w_mapped, m3), rows_work(1, nj, w_mapped, m3)) > rem:
+        while nj > jmin and max(cols_work(nj, w_mapped, m3),
+                                rows_work(1, nj, w_mapped, m3)) > rem:
             nj -= 1
         nm = o
         while nm > 1 and rows_work(nm, nj, w_mapped, m3) > rem:
@@ -207,7 +224,7 @@ class Residual:
 
     def __init__(self, eris, max_memory=None, diis_space=6, diis_incore=None, plan=None,
                  three_m=None):
-        o = self.nocc = eris.nocc
+        o = self.nocc = int(eris.nocc)
         fock = np.asarray(eris.fock)
         v = self.nvir = fock.shape[0] - o
         n1 = o * v
@@ -275,14 +292,31 @@ class Residual:
             self._g.append((rows[mask], cols[mask], np.broadcast_to(f0, (npo, o))[mask],
                             np.broadcast_to(x, (npo, o))[mask], sign))
 
-        if plan is None:
-            names = ('V', 'E', 'ovvv_p', 'W_same', 'W_plus')
-            mapped = [n for n in names if scratch.is_mapped(getattr(self, n))]
-            plan = plan_step(o, v, self.nao, memory.budget(max_memory), mapped, diis_space,
-                             diis_incore, three_m)
-        self.plan = plan
+        # Kramers pairs: partners and signs of the pairs, one pair of each two partners
+        self.paired = bool(getattr(eris, 'kramers', False)) and o % 2 == 0 and v % 2 == 0
+        self.kramers = self.paired          # use the symmetry of the pairs
+        if self.paired:
+            from zccsdt.zccsd import kramers
+            self.kpo, self.sgo = kramers.pair_maps(o)
+            self.kpv, self.sgv = (np.ascontiguousarray(x) for x in kramers.pair_maps(v))
+            self.ko, self.so = kramers.partner_signs(o)
+            pairs = np.arange(npo)
+            self.kpairs = pairs[self.kpo >= pairs]
         self._scratch = None        # the file of W(mbej) when it is mapped
         self._w = None
+        self.plan = plan
+        if plan is None:
+            self.replan(max_memory, diis_space, diis_incore, three_m)
+
+    def replan(self, max_memory=None, diis_space=6, diis_incore=None, three_m=None):
+        '''A new Plan for the memory there is now (see plan_step).'''
+        names = ('V', 'E', 'ovvv_p', 'W_same', 'W_plus')
+        mapped = [n for n in names if scratch.is_mapped(getattr(self, n))]
+        self.close()
+        self.kramers = self.paired
+        self.plan = plan_step(self.nocc, self.nvir, self.nao, memory.budget(max_memory), mapped,
+                              diis_space, diis_incore, three_m, self.paired)
+        return self.plan
 
     def describe(self):
         '''One line on the memory plan of a step.'''
@@ -296,6 +330,8 @@ class Residual:
                    nb(p.mblocks), nb(p.jblocks), o,
                    'three real GEMMs per product' if p.three_m else 'ZGEMM',
                    nb(p.pblocks), nb(p.lblocks)))
+        if self.kramers:
+            text += '; Kramers pairs: half of the rows, of <ma||ef> and of the pairs of the ladder'
         if p.krows:
             text += '; %d rows of an AO operator at a time' % p.krows
         return text + '; DIIS vectors in %s' % ('memory' if p.diis_incore else 'a scratch file')
@@ -355,14 +391,23 @@ class Residual:
         return out
 
     def ladder(self, taup, R):
-        '''R[(i>j), (a>b)] += sum_ef (ae|bf) tau_ij^ef = 1/2 sum_ef <ab||ef> tau_ij^ef.'''
+        '''R[(i>j), (a>b)] += sum_ef (ae|bf) tau_ij^ef = 1/2 sum_ef <ab||ef> tau_ij^ef.
+        With Kramers pairs: for one pair (i>j) of each two partners, the
+        other by time reversal.'''
         v, nao = self.nvir, self.nao
         n2, C2, C2c = 2 * nao, self.C2, self.C2c
         for p0, p1 in self.plan.lblocks:
-            n = p1 - p0
+            if self.kramers:                        # the pairs of the block: rows of tau
+                idx = self.kpairs[p0:p1]
+                if not idx.size:
+                    break
+                n, rows = idx.size, np.ascontiguousarray(taup[idx])
+                out = np.zeros((n, taup.shape[1]), dtype=np.complex128)
+            else:
+                n, rows, out = p1 - p0, taup[p0:p1], R[p0:p1]
             with timer('ladder.ao'):
                 # X[x, p, y] = sum_ef C2[x, e] tau[p, e, f] C2[y, f], x and y over (spin, AO)
-                tf = K.unpack_tril(taup[p0:p1], v, 'apb')               # [e, p, f]
+                tf = K.unpack_tril(rows, v, 'apb')                      # [e, p, f]
                 H = blas.gemm(C2, tf.reshape(v, n * v))
                 del tf
                 X = blas.gemm(H.reshape(n2 * n, v), C2.T)               # [x, p, y]
@@ -385,8 +430,13 @@ class Residual:
                 L = blas.gemm(H.reshape(v * n, n2), C2c)                # [a, p, b]
                 del H
             with timer('ladder.pack'):
-                K.pack_tril_add(L.reshape(v, n, v), 1.0, R[p0:p1], 'apb')
+                K.pack_tril_add(L.reshape(v, n, v), 1.0, out, 'apb')
                 del L
+                if self.kramers:
+                    K.add_rows(R, idx, np.ones(n), out)
+                    K.kfill_packed(out, np.where(self.kpo[idx] != idx, self.kpo[idx], -1),
+                                   self.sgo[idx], self.kpv, self.sgv, R)
+            del out, rows
         return R
 
     # -- the two passes over the ring layout -----------------------------------
@@ -415,7 +465,11 @@ class Residual:
         x1 = np.empty((o, v), dtype=np.complex128)
         T = None                # the columns of t2, or their three real parts
         m3 = plan.three_m
-        for m0, m1 in plan.mblocks:
+        mblocks = plan.mblocks
+        if self.kramers:        # the unbarred m only; the rest by time reversal
+            ho = o // 2
+            mblocks = _blocks(ho, max(m1 - m0 for m0, m1 in mblocks))
+        for m0, m1 in mblocks:
             nm = m1 - m0
             nr, rows = nm * v, slice(m0 * v, m1 * v)
             Vb, Eb, Wb = V[rows], E[rows], W[rows]
@@ -444,7 +498,12 @@ class Residual:
                         Om = O[m - m0]
                         prow, sgn = self.pair_rows[m]
                         # sum_e t1[i,e] <ab||em> as conj(sum_e t1*[i,e] <me||ab>)
-                        K.add_rows(R, prow, sgn, blas.gemm(t1c, Om), conj=True)
+                        Z = blas.gemm(t1c, Om)
+                        K.add_rows(R, prow, sgn, Z, conj=True)
+                        if self.kramers:            # the same term of the partner of m
+                            brow, bsgn = self.pair_rows[m + ho]
+                            K.add_rows_k(R, brow, -bsgn * self.so, Z, self.ko, self.kpv, self.sgv)
+                        del Z
                         # sum_f <mb||ef> t1[j,f] into W(mbej), Fvv and the T1 equation
                         K.ovvv_t1(Om, t1, m, Wb[(m - m0) * v:(m - m0 + 1) * v], fv, x1)
                         s.fvv_a += fv
@@ -489,37 +548,75 @@ class Residual:
                                 s.fvv_t += X4[m - m0, :, m - j0]
                             W4 += X4
                             del X4
+            if self.kramers:                # the rows of the partners of these m
+                with timer('amps.ring'), timer('ring.layout'):
+                    K.kfill_ring(W, o, v, m0, m1, ho)
+                brows = W[(m0 + ho) * v:(m1 + ho) * v]
+                scratch.written(brows)
+                scratch.unmap(brows)
             scratch.written(Wb)
             for a in (V[rows], Eb, Wb):
                 scratch.unmap(a)
             del Vb
         s.T = T if single else None                         # all of t2: kept for pass 2
+        if self.kramers:
+            # what was summed over the unbarred m, or made for them, completed
+            from zccsdt.zccsd.kramers import fill_barred, image
+            with timer('amps.kramers'):
+                fill_barred(s.g)
+                fill_barred(s.Kt.reshape(o, o, o, v))
+                fill_barred(s.Nq, pairs=(2,))
+                fill_barred(s.foo_t)
+                for x in (s.X1, s.r1, s.fvv_t, s.fvv_a):
+                    x += image(x)
 
     def _pass_columns(self, s):
         '''Pass 2, over blocks of the columns (j b): the ring term
         sum_me t2[i,m,a,e] W[(m e), (j b)] and the t1 t1 <mb||ej> term,
-        antisymmetrized into the packed residual.'''
+        antisymmetrized into the packed residual.  With Kramers pairs a
+        block is a range of unbarred j and their partners, and the rows
+        (i a) with barred i come from those with unbarred i.'''
         o, v = self.nocc, self.nvir
         n1, plan = o * v, self.plan
-        m3, jblocks = plan.three_m, plan.jblocks
+        m3, jblocks, iblocks = plan.three_m, plan.jblocks, plan.jblocks
+        ho = o // 2
+        if self.kramers:
+            size = max(j1 - j0 for j0, j1 in jblocks)
+            jblocks = _blocks(ho, max(1, size // 2))
+            iblocks = _blocks(ho, size)
+        nrow = ho * v if self.kramers else n1       # the rows that are multiplied
         for j0, j1 in jblocks:
             nj = j1 - j0
-            cols = slice(j0 * v, j1 * v)
-            WJ = s.W if nj == o else s.W[:, cols]
+            if self.kramers:                        # the columns of j0:j1 and of their partners
+                ncol, whole = 2 * nj * v, nj == ho
+                parts = (slice(j0 * v, j1 * v), slice((j0 + ho) * v, (j1 + ho) * v))
+            else:
+                ncol, whole = nj * v, nj == o
+                parts = (slice(j0 * v, j1 * v),)
+            if whole:
+                WJ = s.W
+            elif len(parts) == 1:
+                WJ = s.W[:, parts[0]]
+            else:
+                WJ = np.empty((n1, ncol), dtype=np.complex128)
+                WJ[:, :nj * v], WJ[:, nj * v:] = s.W[:, parts[0]], s.W[:, parts[1]]
             if m3:
                 with timer('ring.layout'):
                     W3 = K.split3(WJ)
                 scratch.unmap(s.W)
-                if nj == o and not plan.w_mapped:           # the complex W is not needed again
+                if whole and not plan.w_mapped:             # the complex W is not needed again
                     s.W = None
                 del WJ
             with timer('ring.gemm'):
-                if s.T is not None:                                     # [(i a), (j b)]
-                    r4 = _gemm3(s.T, W3) if m3 else blas.gemm(s.T, WJ)
+                r4 = np.empty((n1, ncol), dtype=np.complex128)          # [(i a), (j b)]
+                if s.T is not None:
+                    if m3:
+                        _gemm3([x[:nrow] for x in s.T], W3, C=r4[:nrow])
+                    else:
+                        blas.gemm(s.T[:nrow], WJ, C=r4[:nrow])
                     s.T = None
                 else:
-                    r4 = np.empty((n1, nj * v), dtype=np.complex128)
-                    for i0, i1 in jblocks:                              # rows of t2: it is symmetric
+                    for i0, i1 in iblocks:                              # rows of t2: it is symmetric
                         with timer('ring.layout'):
                             Ti = (K.ring_cols3 if m3 else K.ring_cols)(s.t2p, o, v, i0, i1)
                         if m3:
@@ -530,19 +627,39 @@ class Residual:
             W3 = WJ = None
             with timer('ring.small'):
                 # - t1[m,a] t1[i,e] <mb||ej> (E is <mb||ej> in the ring layout)
-                r43 = r4.reshape(o, v, nj * v)
-                for i in range(o):
-                    blas.gemm(s.t1T, s.Kt[:, i, cols], C=r43[i], alpha=-1.0, beta=1.0)
+                r43 = r4.reshape(o, v, ncol)
+                if whole:
+                    KJ = s.Kt
+                elif len(parts) == 1:
+                    KJ = s.Kt[:, :, parts[0]]
+                else:
+                    KJ = np.concatenate([s.Kt[:, :, c] for c in parts], axis=2)
+                for i in range(nrow // v):
+                    blas.gemm(s.t1T, KJ[:, i], C=r43[i], alpha=-1.0, beta=1.0)
+                del KJ
             with timer('ring.pack'):
-                K.asym_pack_cols(r4, o, v, j0, j1, 1.0, s.R)
+                if self.kramers:
+                    K.kfill_ring(r4, o, v, 0, ho, nj)
+                    K.asym_pack_cols(r4, o, v, j0, j1, 1.0, s.R)
+                    K.asym_pack_cols(r4, o, v, j0 + ho, j1 + ho, 1.0, s.R, offset=nj * v)
+                else:
+                    K.asym_pack_cols(r4, o, v, j0, j1, 1.0, s.R)
             del r4
             if s.W is not None:
                 scratch.unmap(s.W)
         s.W = None
 
+    def symmetric(self, t1, t2p, tol=1e-6):
+        '''Do the amplitudes obey the time-reversal symmetry of the Kramers
+        pairs (kramers.symmetric: all of t1 and a few rows of t2p)?'''
+        from zccsdt.zccsd.kramers import symmetric
+        return symmetric(t1, t2p, tol)
+
     # -- one step -------------------------------------------------------------
     def update_packed(self, t1, t2p, level_shift=0.0):
-        '''(t1new, t2pnew) from t1[i,a] and t2p[(i>j),(a>b)].'''
+        '''(t1new, t2pnew) from t1[i,a] and t2p[(i>j),(a>b)].  With Kramers
+        pairs the amplitudes must obey their symmetry (symmetric()): those
+        that do not are passed through the equations without it.'''
         o, v = self.nocc, self.nvir
         npo = K.npair(o)
         io, jo = K.tril(o)
@@ -552,6 +669,12 @@ class Residual:
         t2p = np.ascontiguousarray(t2p, dtype=np.complex128)
         t1T = np.ascontiguousarray(t1.T)
         s = SimpleNamespace(t1=t1, t1T=t1T, t2p=t2p)
+        if self.kramers and not self.symmetric(t1, t2p):
+            self.kramers = False
+            try:
+                return self.update_packed(t1, t2p, level_shift)
+            finally:
+                self.kramers = True
 
         with timer('amps.imds'):
             taup = s.taup = K.outer_pp(t1, t1, 0.5, K.copy(t2p))
@@ -637,12 +760,13 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
     amplitudes are 't1new' and 't2pnew' (packed).'''
     log = logger.new_logger(mycc, verbose)
     name = mycc.__class__.__name__
+    settings = (mycc.max_memory, mycc.diis_space, True if mycc.incore_complete else None,
+                getattr(mycc, 'three_m', None))
     if getattr(eris, 'residual', None) is None:
-        eris.residual = Residual(eris, mycc.max_memory, mycc.diis_space,
-                                 True if mycc.incore_complete else None,
-                                 three_m=getattr(mycc, 'three_m', None))
+        eris.residual = Residual(eris, *settings[:3], three_m=settings[3])
+    else:                               # the memory may have changed since the last run
+        eris.residual.replan(*settings)
     res = eris.residual
-    log.info('CCSD equations: %s', res.describe())
     o, v = res.nocc, res.nvir
     if t1 is None and t2 is None:
         mycc.emp2, t1, t2p = res.init_amps()
@@ -652,6 +776,18 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
         t1 = guess[1] if t1 is None else np.ascontiguousarray(t1, dtype=np.complex128)
         t2p = (guess[2] if t2 is None
                else K.pack_t2(np.ascontiguousarray(t2, dtype=np.complex128)))
+
+    if res.kramers and not res.symmetric(t1, t2p):
+        log.warn('The amplitudes given do not have the time-reversal symmetry of the '
+                 'Kramers pairs: the equations are solved without it')
+        res.kramers = False
+    log.info('CCSD equations: %s', res.describe())
+    kind, text = blas.backend()
+    log.info('Matrix products: %s', text)
+    if kind != 'mkl':
+        log.warn('The matrix products of the CCSD do not run on MKL in the OpenMP pool of the '
+                 'kernels (%s): a BLAS with threads of its own competes with the kernels for '
+                 'the cores.  Build csrc with -DZC_MKL_DIR=<MKL lib directory>.', text)
 
     def energy(t1, t2p):
         with timer('amps.energy'):

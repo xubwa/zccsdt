@@ -137,3 +137,52 @@ For H2O/cc-pVTZ with one frozen core orbital (4 threads; abridged):
 
 The functions underneath (`zccsdt.sa.rccsdt.kernel`, `zccsdt.cc.solver.kernel`)
 keep their own interface for scripts and the benchmarks.
+
+## Spinor CCSD(T): `zccsdt.zccsd.DirectZCCSD`
+
+The two-component CCSD(T) that started from socutils' `DirectZCCSD` (pp
+ladder in the scalar AO basis, no `<vv||vv>`). It is a PySCF CCSD object:
+
+```python
+from pyscf import gto, x2c
+from zccsdt.zccsd import DirectZCCSD
+
+mol = gto.M(atom='O 0 0 0; H 0 .757 .587; H 0 -.757 .587', basis='cc-pvtz',
+            verbose=4, max_memory=24000)
+mf = x2c.UHF(mol).run()         # any spinor SCF of PySCF or socutils
+
+mycc = DirectZCCSD(mf, frozen=2)
+mycc.kernel()                   # -> e_corr, t1, t2
+e_t = mycc.ccsd_t()             # (T)
+```
+
+PySCF's settings apply (`conv_tol`, `conv_tol_normt`, `max_cycle`,
+`diis_space`, `diis_file`, `incore_complete`, `level_shift`,
+`iterative_damping`, `frozen`, `verbose`). In addition:
+
+- `max_memory` is PySCF's: MB for the whole process, **4000 by default**
+  (from the `Mole` object). The integrals, the CCSD step and (T) are sliced
+  to stay within it; what does not fit goes to scratch files (`ZCCSDT_TMPDIR`,
+  else PySCF's TMPDIR). A calculation that has the memory should be given
+  it: benzene/cc-pVDZ takes 10 s per iteration with 24000 MB and 14 s with
+  4000 MB.
+- `kramers` (default `None`): for a time-reversal symmetric reference (a
+  closed shell without a magnetic field) the spinors are rotated within
+  their degenerate levels into Kramers pairs and the symmetry of the
+  amplitudes halves the expensive terms of CCSD and the triples of (T).
+  **`t1` and `t2` then refer to the paired spinors `mycc.eris.mo_coeff`,
+  not to `mf.mo_coeff`**; the energies do not depend on it. `False`: the
+  spinors of the SCF as they are. `True`: an error if the reference has no
+  Kramers pairs (with `None` it runs without them and says so in the log).
+- `three_m` (default `None`): three real GEMMs instead of a ZGEMM for the
+  large complex products where that pays and the memory is there; `False`:
+  ZGEMM.
+- `socutils_amps = True`, `ovvv_direct = True`, `ladder = 'chol'`: the
+  routes copied from socutils (einsums on full arrays, PySCF's driver).
+
+At `verbose >= 4` the log says where the integrals are (memory or scratch
+file), how the step is sliced, which BLAS does the matrix products and
+whether Kramers pairs are used. For speed the kernel libraries must be the
+MKL build (`cmake -S csrc -B build -DZC_MKL_DIR=<MKL lib directory>`): the
+OpenMP kernels and MKL then share one pool of threads. A warning is logged
+when the products run on another BLAS.

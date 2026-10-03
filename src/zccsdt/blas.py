@@ -8,6 +8,7 @@ temporary of the output size plus an extra pass over memory.
 '''
 
 import ctypes
+import os
 
 import numpy as np
 from scipy.linalg import blas as _blas
@@ -21,6 +22,25 @@ def _clib():
     if t3kern.USE_C and hasattr(t3kern._lib, 'zc_gemm_d'):
         return t3kern._lib
     return None
+
+
+def backend():
+    '''(kind, description) of the BLAS behind gemm: 'mkl' (MKL in the OpenMP
+    pool of the kernels), 'other' (the BLAS another build of the kernel
+    library was linked with) or 'scipy' (no kernel library: SciPy's BLAS).'''
+    lib = _clib()
+    if lib is None:
+        return 'scipy', "SciPy's BLAS (the kernel library libzc_ccsdt_t3 is not built)"
+    name = os.path.basename(lib._name)
+    try:
+        buf = ctypes.create_string_buffer(256)
+        lib.MKL_Get_Version_String(buf, ctypes.c_int(256))
+        version = buf.value.decode().strip()
+        version = version[version.find('Version'):].split(' for ')[0] or 'MKL'
+        nthreads = lib.MKL_Get_Max_Threads()
+        return 'mkl', 'MKL %s on GNU OpenMP, %d threads (%s)' % (version, nthreads, name)
+    except AttributeError:
+        return 'other', 'the BLAS of %s' % name
 
 
 def _ld(a):

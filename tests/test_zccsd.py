@@ -126,6 +126,7 @@ def test_amps_equal_socutils(x2c_h2o, monkeypatch):
     new = DirectZCCSD(x2c_h2o, frozen=2)
     old = DirectZCCSD(x2c_h2o, frozen=2)
     old.socutils_amps = True
+    new.kramers = False                             # the same spinors for both
     new.verbose = old.verbose = 0
     e_new, e_old = new.ao2mo(), old.ao2mo()
     assert e_new.ovvv is None and e_new.ovvo is None and e_new.ao_eri is None
@@ -207,6 +208,13 @@ def test_amps_within_memory(x2c_h2o, monkeypatch, tmp_path):
     t1 = 0.05 * (rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v)))
     t2p = 0.02 * (rng.standard_normal((K.npair(o), K.npair(v)))
                   + 1j * rng.standard_normal((K.npair(o), K.npair(v))))
+    # the spinors are Kramers pairs here: amplitudes with their symmetry, so that
+    # the step uses it (half of the rows, completed by time reversal)
+    from zccsdt.zccsd import kramers
+    assert e_ref.kramers and res.kramers
+    t1 = 0.5 * (t1 + kramers.image(t1))
+    t2p = np.ascontiguousarray(0.5 * (t2p + kramers.image(t2p, pairs=(0, 1))))
+    assert res.symmetric(t1, t2p)
     t1r, t2r = res.update_packed(t1, t2p)
 
     # the least memory for the integrals, then for the step
@@ -223,13 +231,15 @@ def test_amps_within_memory(x2c_h2o, monkeypatch, tmp_path):
                              ('W_same', eris.W_same), ('W_plus', eris.W_plus))
               if scratch_is_mapped(a)]
     assert {'V', 'E', 'ovvv_p'} <= set(mapped)
-    need = amps.plan_step(o, v, nao, None, mapped).need
-    plan = amps.plan_step(o, v, nao, int(1.01 * need), mapped)
+    assert eris.kramers
+    need = amps.plan_step(o, v, nao, None, mapped, kramers=True).need
+    assert need > amps.plan_step(o, v, nao, None, mapped).need
+    plan = amps.plan_step(o, v, nao, int(1.01 * need), mapped, kramers=True)
     assert plan.w_mapped and not plan.diis_incore and plan.work <= 1.01 * need
     assert not plan.three_m
-    assert len(plan.jblocks) == len(plan.mblocks) == o
+    assert len(plan.jblocks) == o // 2 and len(plan.mblocks) == o
     with pytest.raises(MemoryError, match='three packed T2'):
-        amps.plan_step(o, v, nao, int(0.9 * need), mapped)
+        amps.plan_step(o, v, nao, int(0.9 * need), mapped, kramers=True)
     low_res = amps.Residual(eris, plan=plan)
     for _ in range(2):                              # the mapped W is used again
         t1n, t2n = low_res.update_packed(t1, t2p)
@@ -237,10 +247,12 @@ def test_amps_within_memory(x2c_h2o, monkeypatch, tmp_path):
     assert 'scratch file' in low_res.describe()
     low_res.close()
     # more memory: larger blocks, W in memory
-    mid = amps.plan_step(o, v, nao, int(1.5 * need), mapped)
+    mid = amps.plan_step(o, v, nao, int(1.5 * need), mapped, kramers=True)
     assert not mid.w_mapped and 1 < len(mid.jblocks) < o
-    t1n, t2n = amps.Residual(eris, plan=mid).update_packed(t1, t2p)
-    assert abs(t1n - t1r).max() < 1e-12 and abs(t2n - t2r).max() < 1e-12
+    step = amps.Residual(eris, plan=mid)
+    for step.kramers in (True, False):              # with and without the symmetry
+        t1n, t2n = step.update_packed(t1, t2p)
+        assert abs(t1n - t1r).max() < 1e-12 and abs(t2n - t2r).max() < 1e-12
     # the whole calculation within max_memory
     cc.max_memory = max(low, 1.01 * need / 1e6)
     cc.kernel(eris=eris)
@@ -327,6 +339,24 @@ def test_kernels_equal_numpy():
         (io, jo), (av, bv) = K.tril(o), K.tril(v)
         i, j, x4 = io[:, None], jo[:, None], x.reshape(o, v, o, v)
         same(tot, x4[i, av, j, bv] - x4[j, av, i, bv] - x4[i, bv, j, av] + x4[j, bv, i, av])
+        # the fills by time reversal (pairs [unbarred, barred]); a block of columns
+        from zccsdt.zccsd import kramers
+        kpv, sgv = (np.ascontiguousarray(x) for x in kramers.pair_maps(v + 1))
+        o6, v8 = 6, 8
+        (a, _), (b, _) = both(K.kfill_ring, rnd(o6 * v8, o6 * v8), o6, v8, 0, 3, 3)
+        same(a, b)
+        (a, _), (b, _) = both(K.kfill_ring, rnd(o6 * v8, 4 * v8), o6, v8, 1, 3, 2)
+        same(a, b)
+        kp8, sg8 = (np.ascontiguousarray(x) for x in kramers.pair_maps(v8))
+        L = rnd(4, K.npair(v8))
+        (a, _), (b, _) = both(K.kfill_packed, L, np.array([2, -1, 0, 5]), np.array([1., 1, -1, 1]),
+                              kp8, sg8, rnd(7, K.npair(v8)))
+        same(a, b)
+        (a, _), (b, _) = both(K.add_rows_k, rnd(7, K.npair(v8)), np.array([2, -1, 0, 5]),
+                              np.array([1., 0, -1, 1]), L, np.array([3, 0, 1, 2]), kp8, sg8)
+        same(a, b)
+        (a, _), (b, _) = both(K.asym_pack_cols, rnd(n1, 3 * v + 5), o, v, 1, 3, 0.3, R, 4)
+        same(a, b)
         # <mb||ef> t1: outputs in the arguments
         (_, a), (_, b) = both(K.ovvv_t1, rnd(v, npv), t1, 3, rnd(v, n1), rnd(v, v), rnd(o, v))
         same(tuple(a[3:]), tuple(b[3:]))
@@ -356,23 +386,41 @@ def test_t_complex(x2c_h2o, monkeypatch, tmp_path):
     assert isinstance(e_t, float) and abs(e_t - e_vir.real) < 1e-12
     eris.ovvv = None
     o, v = mycc.t1.shape
-    floor = 16 * o * K.npair(o) * 3 * v
+    floor = triples.memory_need(o, v, False)[1]
     io, jo = np.tril_indices(o, -1)
     bv, cv = np.tril_indices(v, -1)
     t2p = np.ascontiguousarray(mycc.t2[io, jo][:, bv, cv])
+    # one ZGEMM per product instead of three real GEMMs
+    assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=False) - e_t) < 1e-12
+    # ranges of a few a with all b < a
+    monkeypatch.setattr(triples, 'BATCH_BYTES', 2 * floor * v)
+    assert 3 < triples._a_range(2, v, o, 2 * floor * v) < v
+    for m3 in (True, False):
+        assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=m3) - e_t) < 1e-12
     # the smallest batches, packed t2; the numpy kernel
     monkeypatch.setattr(triples, 'BATCH_BYTES', floor)
+    assert triples._a_range(v - 1, v, o, floor) == v - 1
     assert len(triples._batches(v - 1, o, floor)) > 2
-    assert abs(triples.kernel(mycc, eris, mycc.t1, t2p, 0) - e_t) < 1e-12
+    for m3 in (True, False):
+        assert abs(triples.kernel(mycc, eris, mycc.t1, t2p, 0, three_m=m3) - e_t) < 1e-12
     monkeypatch.setattr(K, 'USE_C', False)
-    assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0) - e_t) < 1e-12
+    for m3 in (True, False):
+        assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=m3) - e_t) < 1e-12
     monkeypatch.setattr(K, 'USE_C', True)
-    # short of memory: <bc||ei> in a scratch file; below one batch, MemoryError
+    # the least memory: <bc||ei> and the layouts of t2 in a scratch file, written
+    # and read in blocks; below it, MemoryError
     monkeypatch.setattr(memory, 'resident', lambda: 0)
-    assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, max_memory=1.5 * floor / 1e6)
-               - e_t) < 1e-12
-    with pytest.raises(MemoryError, match='one virtual orbital'):
-        triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, max_memory=0.5 * floor / 1e6)
+    monkeypatch.setattr(triples, 'BATCH_BYTES', 4 << 30)
+    for m3 in (True, False):
+        need = sum(triples.memory_need(o, v, m3))
+        for use_c in (True, False):
+            monkeypatch.setattr(K, 'USE_C', use_c)
+            assert abs(triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=m3,
+                                      max_memory=1.01 * need / 1e6) - e_t) < 1e-12
+        monkeypatch.setattr(K, 'USE_C', True)
+        with pytest.raises(MemoryError, match='one virtual orbital'):
+            triples.kernel(mycc, eris, mycc.t1, mycc.t2, 0, three_m=m3,
+                           max_memory=0.9 * need / 1e6)
     monkeypatch.undo()
     monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
     # ZCCSD (integrals out of core, the copied loops) gives the same (T)
@@ -396,3 +444,110 @@ def test_t_noncanonical():
         e = gccsd_t.kernel(gcc, eris, gcc.t1, gcc.t2, 0, alg=alg)
         assert abs(e - e_ref) < 1e-11, alg
     assert abs(triples.kernel(gcc, eris, gcc.t1, gcc.t2, 0) - e_ref) < 1e-11
+
+
+def test_kramers_pairs():
+    '''Kramers pairs from a time-reversal symmetric reference (also with
+    levels that are degenerate by spatial symmetry); CCSD and (T) on them
+    against the spinors of the SCF; (T) on half of the virtual triples.'''
+    from zccsdt.zccsd import kramers, triples
+    ch4 = gto.M(atom='C 0 0 0; H 0.629 0.629 0.629; H -0.629 -0.629 0.629; '
+                     'H -0.629 0.629 -0.629; H 0.629 -0.629 -0.629', basis='6-31g', verbose=0)
+    mf = x2c.UHF(ch4).run(conv_tol=1e-12)
+    nocc, e = ch4.nelectron, mf.mo_energy
+    # the t2 shell splits into a pair and a four-fold level of the double group
+    assert np.sum(abs(np.diff(e[:nocc])) < 1e-7) == nocc // 2 + 1
+    c = np.vstack(ch4.sph2spinor_coeff()) @ mf.mo_coeff
+    s2 = np.kron(np.eye(2), ch4.intor('int1e_ovlp'))
+    for lo, hi in ((0, nocc), (nocc, e.size)):
+        cp, order = kramers.pair(c[:, lo:hi], s2, e[lo:hi])
+        h = (hi - lo) // 2
+        assert abs(cp.conj().T @ s2 @ cp - np.eye(hi - lo)).max() < 1e-12
+        assert abs(cp[:, h:] - kramers.time_reverse(cp[:, :h])).max() == 0
+        u = c[:, lo:hi].conj().T @ s2 @ cp                      # within the levels
+        assert abs(u.conj().T @ u - np.eye(hi - lo)).max() < 1e-10
+        f = u.conj().T @ np.diag(e[lo:hi]) @ u
+        assert abs(f - np.diag(e[lo:hi][order])).max() < 1e-9
+    # an odd number of spinors, a reference without the symmetry
+    assert kramers.pair(c[:, :3], s2, e[:3]) is None
+    oh = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='6-31g', spin=1, verbose=0)
+    mfo = x2c.UHF(oh).run(conv_tol=1e-11)
+    co = np.vstack(oh.sph2spinor_coeff()) @ mfo.mo_coeff
+    assert kramers.pair(co[:, oh.nelectron:], np.kron(np.eye(2), oh.intor('int1e_ovlp')),
+                        mfo.mo_energy[oh.nelectron:]) is None
+
+    res = {}
+    for kr in (False, None):
+        mycc = DirectZCCSD(mf, frozen=2)
+        mycc.kramers = kr
+        mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-11, 1e-9
+        mycc.kernel()
+        assert mycc.converged and mycc.eris.kramers is (kr is None)
+        res[kr] = mycc, mycc.ccsd_t()
+    (plain, et0), (paired, et1) = res[False], res[None]
+    assert abs(plain.e_corr - paired.e_corr) < 1e-9 and abs(et0 - et1) < 1e-10
+    # the amplitudes obey t[Kp Kq, Kr Ks] = +- conj(t[pq, rs]); the Fock matrix is diagonal
+    assert kramers.symmetry_error(paired.t1) < 1e-8 and kramers.symmetry_error(paired.t2) < 1e-8
+    assert kramers.symmetry_error(plain.t2) > 1e-4
+    f = paired.eris.fock
+    assert abs(f - np.diag(f.diagonal())).max() < 1e-7
+    # the CCSD step: half of the expensive terms completed by time reversal
+    # against the step that computes all of them, for symmetric amplitudes
+    from zccsdt.zccsd import amps, kernels as K
+    o, v = paired.t1.shape
+    npo, npv = K.npair(o), K.npair(v)
+    rng = np.random.default_rng(5)
+    t1 = 0.05 * (rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v)))
+    t1 = 0.5 * (t1 + kramers.image(t1))
+    t2p = 0.02 * (rng.standard_normal((npo, npv)) + 1j * rng.standard_normal((npo, npv)))
+    t2p = np.ascontiguousarray(0.5 * (t2p + kramers.image(t2p, pairs=(0, 1))))
+    step = amps.Residual(paired.eris, paired.max_memory)
+    assert step.kramers and not amps.Residual(plain.eris, plain.max_memory).kramers
+    step.kramers = False
+    t1r, t2r = step.update_packed(t1, t2p)
+    assert kramers.symmetry_error(t1r) < 1e-8
+    assert abs(kramers.image(t2r, pairs=(0, 1)) - t2r).max() < 1e-8
+    step.kramers = True
+    blocks = dict(mblocks=[(0, 1), (1, 3), (3, o)], jblocks=[(0, 3), (3, 4), (4, o)],
+                  lblocks=[(0, 2), (2, 7), (7, npo)], pblocks=[(0, 5), (5, npo)])
+    for m3 in (False, True):
+        step.plan.three_m = m3
+        t1k, t2k = step.update_packed(t1, t2p)
+        assert abs(t1k - t1r).max() < 1e-12 and abs(t2k - t2r).max() < 1e-12
+    whole = {k: getattr(step.plan, k) for k in blocks}
+    for k, b in blocks.items():
+        setattr(step.plan, k, b)
+    for m3, use_c in ((False, True), (True, True), (True, False)):
+        step.plan.three_m, K.USE_C = m3, use_c
+        try:
+            t1k, t2k = step.update_packed(t1, t2p)
+        finally:
+            K.USE_C = True
+        assert abs(t1k - t1r).max() < 1e-12 and abs(t2k - t2r).max() < 1e-12
+    for k, b in whole.items():
+        setattr(step.plan, k, b)
+    # (T): half of the virtual triples, doubled, against all of them
+    for m3 in (True, False):
+        full = triples.kernel(paired, paired.eris, verbose=0, three_m=m3, kramers=False)
+        assert abs(full - et1) < 1e-12
+        for nbytes in (triples.memory_need(o, v, m3)[1], 2 * triples.memory_need(o, v, m3)[1] * v):
+            triples.BATCH_BYTES, old = nbytes, triples.BATCH_BYTES
+            try:
+                assert abs(triples.kernel(paired, paired.eris, verbose=0, three_m=m3) - et1) < 1e-12
+            finally:
+                triples.BATCH_BYTES = old
+    # amplitudes without the symmetry: all triples, unless told otherwise
+    assert kramers.symmetric(paired.t1, paired.t2) and kramers.symmetric(paired.t1, K.pack_t2(
+        np.ascontiguousarray(paired.t2)))
+    t2a = paired.t2 + 1e-3 * rng.standard_normal(paired.t2.shape)
+    assert not kramers.symmetric(paired.t1, t2a)
+    full = triples.kernel(paired, paired.eris, paired.t1, t2a, 0, kramers=False)
+    assert abs(triples.kernel(paired, paired.eris, paired.t1, t2a, 0) - full) < 1e-12
+    assert abs(triples.kernel(paired, paired.eris, paired.t1, t2a, 0, kramers=True) - full) > 1e-7
+    # kramers = True insists on the symmetry
+    bad = DirectZCCSD(mfo)
+    bad.kramers, bad.verbose = True, 0
+    with pytest.raises(RuntimeError, match='time reversal'):
+        bad.ao2mo()
+    bad.kramers = None
+    assert bad.ao2mo().kramers is False
