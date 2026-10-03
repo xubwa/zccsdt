@@ -191,8 +191,9 @@ cmake --build build`:
   (an `ImportError` says how to build it). It links the libraries of the
   PySCF it was built against, with whatever BLAS they use.
 - The matrix products go through `zccsdt.blas.gemm`: the MKL build of the
-  kernel library if it is there (`-DZC_MKL_DIR=<MKL lib directory>`; MKL on
-  GNU OpenMP, one pool of threads with the kernels), else its default build
+  kernel library if it is there (`-DZC_MKL_DIR=<MKL lib directory>`; one
+  pool of threads with the kernels as long as the process holds one OpenMP
+  runtime, which the log names), else its default build
   (OpenBLAS, or `-DZC_BLAS_LIB=<a CBLAS library>`), else SciPy's BLAS.
   `ZCCSDT_T3_LIB=<path>` picks one. All three give the same results; with
   OpenBLAS H2O/cc-pVQZ takes the same time and benzene/cc-pVDZ 1.4 times

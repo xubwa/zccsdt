@@ -24,13 +24,32 @@ def _clib():
     return None
 
 
+def openmp_runtimes():
+    '''File names of the OpenMP runtime libraries loaded in this process
+    (from /proc/self/maps; [] where that does not exist).  One runtime means
+    one pool of threads for the OpenMP kernels and an OpenMP BLAS - also when
+    it is LLVM's libomp serving the GNU interface, as in conda environments
+    where libgomp.so.1 is a link to libomp.so.  With two runtimes the kernels
+    and the BLAS may each keep a pool busy.'''
+    try:
+        with open('/proc/self/maps') as f:
+            paths = {line.split()[-1] for line in f if '/' in line}
+    except OSError:
+        return []
+    stems = ('libgomp', 'libomp', 'libiomp5')
+    return sorted({os.path.basename(os.path.realpath(p)) for p in paths
+                   if os.path.basename(p).split('.so')[0] in stems})
+
+
 def backend():
-    '''(kind, description) of the BLAS behind gemm: 'mkl' (MKL in the OpenMP
-    pool of the kernels), 'other' (the BLAS another build of the kernel
+    '''(kind, description) of the BLAS behind gemm: 'mkl' (the MKL build of
+    the kernel library), 'other' (the BLAS another build of the kernel
     library was linked with) or 'scipy' (no kernel library: SciPy's BLAS).'''
+    runtimes = ', '.join(openmp_runtimes())
+    omp = '; OpenMP runtime: %s' % runtimes if runtimes else ''
     lib = _clib()
     if lib is None:
-        return 'scipy', "SciPy's BLAS (the kernel library libzc_ccsdt_t3 is not built)"
+        return 'scipy', "SciPy's BLAS (the kernel library libzc_ccsdt_t3 is not built%s)" % omp
     name = os.path.basename(lib._name)
     try:
         buf = ctypes.create_string_buffer(256)
@@ -38,9 +57,9 @@ def backend():
         version = buf.value.decode().strip()
         version = version[version.find('Version'):].split(' for ')[0] or 'MKL'
         nthreads = lib.MKL_Get_Max_Threads()
-        return 'mkl', 'MKL %s on GNU OpenMP, %d threads (%s)' % (version, nthreads, name)
+        return 'mkl', 'MKL %s, %d threads (%s%s)' % (version, nthreads, name, omp)
     except AttributeError:
-        return 'other', 'the BLAS of %s' % name
+        return 'other', 'the BLAS of %s%s' % (name, omp and ' (%s)' % omp[2:])
 
 
 def _ld(a):

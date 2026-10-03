@@ -1598,8 +1598,8 @@ where the 2 GB of the comparison with CFOUR gave 234-235 s. For H2O/cc-pVQZ
 it makes no difference in time (4.7 s with 4 GB, 4.5 s with 2 GB; job
 31558357) and costs 2 GB of memory.
 
-**Without MKL.** The matrix products go through one library: MKL on GNU
-OpenMP (all numbers above), the build of the same kernel library on
+**Without MKL.** The matrix products go through one library: the MKL build
+of the kernel library (all numbers above), the build of the same library on
 OpenBLAS (0.3.33 with its own threads), or SciPy's BLAS if there is no
 kernel library; without `libzc_zccsd.so` numpy does the work of the OpenMP
 kernels on one thread. The energies are the same in all four
@@ -1626,7 +1626,16 @@ the scan (ZGEMM 8 GB, the three real GEMMs), job 31558357 and this one
 2026.1. No difference shows where the two can be compared: benzene's (T)
 with three real GEMMs and batches of 2 GB took 235.0 s with 2026.0 (c081)
 and 234.1 s with 2026.1 (c236), with ZGEMM 228.7 s (4 GB, 2026.0) and
-228.8 s (8 GB, 2026.1) in the scan.
+228.8 s (8 GB, 2026.1) in the scan, and the CCSD iterations of the eight
+runs of the scan 9.36-9.38 s before and 9.36-9.37 s after.
+
+The change (`libblas=*=*mkl`) also put numpy and SciPy on MKL, so that a
+`DirectZCCSD` run now holds no OpenBLAS at all: MKL 2026.1 for numpy,
+SciPy, PySCF's libraries and the kernel library, and one OpenMP runtime,
+conda's `libomp.so`, for MKL, PySCF and the OpenMP kernels (it serves the
+GNU interface as well: `libgomp.so.1` of the environment is a link to it).
+One runtime is one pool of threads; `blas.backend()` names the runtimes
+that are loaded, and a second one is a warning in the log.
 
 What is not done:
 

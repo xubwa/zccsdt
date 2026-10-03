@@ -789,6 +789,11 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
                  'the kernels: the results are the same, large calculations are slower '
                  '(benzene/cc-pVDZ with OpenBLAS: 1.4 times per iteration).  For MKL build csrc '
                  'with -DZC_MKL_DIR=<MKL lib directory>.', text)
+    if len(blas.openmp_runtimes()) > 1:
+        log.warn('More than one OpenMP runtime is loaded (%s): the kernels and the BLAS may '
+                 'run on separate pools of threads that compete for the cores.  With MKL, '
+                 'MKL_THREADING_LAYER=GNU in the environment puts them on one.',
+                 ', '.join(blas.openmp_runtimes()))
 
     def energy(t1, t2p):
         with timer('amps.energy'):
