@@ -6,8 +6,9 @@
 # the imports of socutils.cc, get_ovvv (for (T)) moved here from
 # eom_zccsd_direct.py, the EOM entry points left out.
 # Changed since: the integrals of ladder='ao' come from zccsdt.zccsd.ao2mo
-# (slabs of the first occupied index from the packed AO integrals) and ovvv
-# is stored by default (DirectZCCSD.ovvv_direct = True: evaluated from the
+# (slabs of the first occupied index, transformed by socutils' nrr_fast,
+# within max_memory: what does not fit is mapped from a scratch file) and
+# ovvv is stored by default (DirectZCCSD.ovvv_direct = True: evaluated from the
 # AO integrals in every term, as in socutils).
 #
 # Two-component (spinor) CCSD that never builds or stores the ``vvvv`` block.
@@ -505,32 +506,30 @@ def _make_eris_direct(mycc, mo_coeff=None):
                    einsum('cmn,mp,nq->cpq', Lc, mob.conj(), mob))
         _eris_from_cholmo(eris, chol_mo, nocc)
     else:
-        # Exact integrals from the packed scalar AO integrals (zccsdt.zccsd.ao2mo):
-        # the blocks with a first occupied index, slab by slab; vvvv is never
+        # Exact integrals from the scalar AO integrals (zccsdt.zccsd.ao2mo): the
+        # blocks with a first occupied index, slab by slab; vvvv is never
         # formed.  ovvv is stored unless ovvv_direct, in which case its terms
-        # are evaluated AO-direct from eris.E4 during the iterations.
+        # are evaluated AO-direct from eris.E4 during the iterations.  What
+        # does not fit mycc.max_memory is a mapped array of a scratch file.
         from zccsdt.zccsd import ao2mo as slab
-        eri4 = slab.ao_eri_s4(mol)
         Ca, Cb = mog[:nao], mog[nao:]
-        nvir = mog.shape[1] - nocc
-        ovvv = scr = None
-        if not mycc.ovvv_direct and not slab.fits_in_memory(16 * nocc * nvir**3):
-            from zccsdt.scratch import Scratch
-            scr = eris._scratch = Scratch(prefix='zccsd_ovvv_', what='the <ia||bc> integrals')
-            ovvv = scr.create('ovvv', (nocc, nvir, nvir, nvir), np.complex128)
-        blocks = slab.occupied_blocks(eri4, Ca, Cb, nocc, with_ovvv=not mycc.ovvv_direct,
-                                      ovvv=ovvv)
+        blocks = slab.occupied_blocks(mol, Ca, Cb, nocc, with_ovvv=not mycc.ovvv_direct,
+                                      max_memory=mycc.max_memory)
         eris.oooo, eris.ooov, eris.oovv = blocks['oooo'], blocks['ooov'], blocks['oovv']
         eris.ovov, eris.ovvo = blocks['ovov'], blocks['ovvo']
         eris.ovvv = blocks.get('ovvv')
         eris.ao_chol = None
+        log.info('MO integrals %s', blocks.describe())
         # ladder operator [(nu,sigma),(mu,lambda)] for a single GEMM and the
         # packed antisymmetrized same-spin AO integral <mu nu||si rho> on the
         # (mu>nu, si>rho) triangles (Liu-Cheng ladder); amplitude independent
-        eris.ao_eri, eris.W_same, eris.ao_tril = slab.ladder_operators(eri4, nao)
-        # 4-index AO integrals: only for the AO-direct ovvv terms
-        eris.E4 = ao2mo_restore(1, eri4, nao) if mycc.ovvv_direct else None
-        eri4 = None
+        ops = slab.ladder_operators(mol, mycc.max_memory)
+        eris.ao_eri, eris.W_same, eris.ao_tril = ops['ao_eri'], ops['W_same'], ops.idx
+        log.info('AO operators of the ladder %s', ops.describe())
+        eris._scratch = (blocks.scratch, ops.scratch)       # keeps the scratch files open
+        # 4-index AO integrals, in memory: only for the AO-direct ovvv terms
+        eris.E4 = (ao2mo_restore(1, mol.intor('int2e', aosym='s8'), nao)
+                   if mycc.ovvv_direct else None)
 
     log.timer('CCSD integral transformation (vvvv/ovvv-free)', *cput0)
     return eris

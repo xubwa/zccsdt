@@ -8,11 +8,14 @@ usage: python bench/profile_zccsd.py MOLECULE BASIS VARIANT [NITER] [T_ALGS]
             <ab||ef>), both with the integrals of zccsdt.zccsd.ao2mo; the
             routes of socutils: direct-ao (ovvv terms from the AO integrals)
             and mo-nrr (all MO integrals through nrr_outcore and HDF5)
-  NITER:    CCSD iterations (default 4); the first is left out of the means
+  NITER:    CCSD iterations (default 4); the first is left out of the means;
+            0: the integrals only
   T_ALGS:   (T) loops to time, comma separated (default occ_loop; none)
 X2C-1e spinors from PySCF (x2c.UHF), all electrons.  The copied code is not
 changed: its functions are wrapped by zccsdt.timing timers here.
-environment: ZC_MAXMEM: max_memory of the CC object in MB (default 24000);
+environment: ZC_MAXMEM: max_memory of the CC object in MB (default 24000): the
+             integrals are planned within it (what does not fit is mapped from
+             a scratch file, the passes are sliced);
              ZC_T_BUDGET: seconds for each (T) loop; when they are used up the
              loop is stopped and its time extrapolated from the triples done;
              PYSCF_TMPDIR: scratch files of ZCCSD (put it on a local disk).
@@ -111,6 +114,11 @@ def main():
             wrap(imd, name)
         mycc = zccsd.ZCCSD(mf)
         mycc.ao2mo_outcore = route == 'nrr'
+        if route == 'nrr':              # the stages of the nrr_outcore route
+            from pyscf.ao2mo import _ao2mo, nrr_outcore
+            for mod, name in ((nrr_outcore, 'general'), (nrr_outcore, 'half_e1'),
+                              (nrr_outcore, 'r_e1'), (_ao2mo, 'r_e2')):
+                wrap(mod, name, 'nrr.' + name)
     mycc.max_memory = maxmem
     mycc.verbose = 0
     nocc = mycc.nocc
@@ -123,14 +131,28 @@ def main():
     watch.start()
     timing.reset()
     t0 = time.perf_counter()
+    mycc.verbose = 4                # the memory plan of the integrals (log.info)
     eris = mycc.ao2mo()
+    mycc.verbose = 0
     t_ints = time.perf_counter() - t0
     watch.stop()
-    print('integrals %.1f s (peak anonymous %.2f GB)' % (t_ints, watch.anon / 1e6))
+    print('integrals %.1f s (peak anonymous %.2f GB, max_memory %.0f MB)'
+          % (t_ints, watch.anon / 1e6, maxmem))
     stages = [(k, t) for k, t, _ in timing.report() if k.startswith('ao2mo.')]
     if stages:
         print('  ' + '  '.join('%s %.2f s' % (k[6:], t) for k, t in stages)
               + '  other %.2f s' % (t_ints - sum(t for _, t in stages)))
+    nrr = {k[4:]: t for k, t, _ in timing.report() if k.startswith('nrr.')}
+    if nrr:
+        # pass 1: AO integrals and first half in C (r_e1), then the swap file;
+        # pass 2: the swap file read back, second half in C (r_e2), all MO
+        # integrals written; then _make_eris_outcore reads them back to
+        # antisymmetrize into the blocks (HDF5)
+        print('  nrr pass 1: integrals + first half %.1f s, swap file %.1f s;  pass 2: second '
+              'half %.1f s, read swap + write MO integrals %.1f s;  blocks from the MO file '
+              '(and Fock matrix) %.1f s'
+              % (nrr['r_e1'], nrr['half_e1'] - nrr['r_e1'], nrr['r_e2'],
+                 nrr['general'] - nrr['half_e1'] - nrr['r_e2'], t_ints - nrr['general']))
 
     # one pass of the CC loop = update_amps + DIIS + energy: timed start to
     # start; the timers are read at the start of every pass
@@ -143,6 +165,8 @@ def main():
         with timing.timer('update_amps'):
             return update(t1, t2, eris)
     mycc.update_amps = update_amps
+    if niter == 0:
+        return
     mycc.max_cycle, mycc.conv_tol, mycc.conv_tol_normt = niter, 1e-14, 1e-14
     watch = MemWatch()
     watch.start()

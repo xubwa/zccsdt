@@ -5,8 +5,9 @@
 # author, as the starting point of the spinor CCSD(T) of zccsdt.  Only the
 # imports of socutils.cc changed.
 # Changed since: for a two-component reference the integrals come from
-# zccsdt.zccsd.ao2mo (_make_eris_slab: in memory, from the packed scalar AO
-# integrals, <ab||ef> packed directly); ZCCSD.ao2mo_outcore = True, an
+# zccsdt.zccsd.ao2mo (_make_eris_slab: slabs transformed by socutils'
+# nrr_fast within max_memory, <ab||ef> packed directly, what does not fit
+# mapped from a scratch file); ZCCSD.ao2mo_outcore = True, an
 # erifile or a four-component reference keep the route of socutils through
 # nrr_outcore and HDF5 (_make_eris_outcore).  Two debugging prints removed.
 #
@@ -223,13 +224,13 @@ class _PhysicistsERIs(gccsd._PhysicistsERIs):
         return self 
 
 def _make_eris_slab(mycc, mo_coeff=None):
-    '''Integrals of a two-component reference from the packed scalar AO
-    integrals (zccsdt.zccsd.ao2mo), without a scratch file of all MO
-    integrals: the blocks with a first occupied index, and <ab||ef> packed on
-    (a>b, e>f) as update_t2_vvvv_sym takes it.  The full vvvv block is not
-    made (eris.vvvv is None: the ladder algorithms 'old' and 'new' need the
-    route through _make_eris_outcore).  ovvv and the packed vvvv go to a
-    scratch file when they would take more than half of the free memory.'''
+    '''Integrals of a two-component reference from the scalar AO integrals
+    (zccsdt.zccsd.ao2mo), without a scratch file of all MO integrals: the
+    blocks with a first occupied index, and <ab||ef> packed on (a>b, e>f) as
+    update_t2_vvvv_sym takes it.  The full vvvv block is not made (eris.vvvv
+    is None: the ladder algorithms 'old' and 'new' need the route through
+    _make_eris_outcore).  The blocks that do not fit mycc.max_memory are
+    mapped arrays of a scratch file.'''
     from zccsdt.zccsd import ao2mo as slab
     cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.Logger(mycc.stdout, mycc.verbose)
@@ -238,25 +239,16 @@ def _make_eris_slab(mycc, mo_coeff=None):
     assert(eris.mo_coeff.dtype == complex)
     mol = mycc.mol
     nocc = eris.nocc
-    nvir = eris.mo_coeff.shape[1] - nocc
     Ca, Cb = slab.spin_components(mol, eris.mo_coeff)
-    eri4 = slab.ao_eri_s4(mol)
 
-    ovvv = None
-    if not slab.fits_in_memory(16 * nocc * nvir**3):
-        from zccsdt.scratch import Scratch
-        eris._scratch = Scratch(prefix='zccsd_ovvv_', what='the <ia||bc> integrals')
-        ovvv = eris._scratch.create('ovvv', (nocc, nvir, nvir, nvir), np.complex128)
-    for key, block in slab.occupied_blocks(eri4, Ca, Cb, nocc, ovvv=ovvv).items():
+    blocks = slab.occupied_blocks(mol, Ca, Cb, nocc, max_memory=mycc.max_memory)
+    for key, block in blocks.items():
         setattr(eris, key, block)
-
-    npair = nvir * (nvir - 1) // 2
-    vvvv_tril = None
-    if not slab.fits_in_memory(16 * npair * npair):
-        # keep the scratch file alive for the lifetime of eris
-        eris._vvvv_tril_file = lib.H5TmpFile()
-        vvvv_tril = eris._vvvv_tril_file.create_dataset('vvvv_tril', (npair, npair), 'c16')
-    eris.vvvv_tril, eris.vvvv_tril_idx = slab.packed_vvvv(eri4, Ca, Cb, nocc, out=vvvv_tril)
+    log.info('MO integrals %s', blocks.describe())
+    vvvv = slab.packed_vvvv(mol, Ca, Cb, nocc, max_memory=mycc.max_memory)
+    eris.vvvv_tril, eris.vvvv_tril_idx = vvvv['vvvv_tril'], vvvv.idx
+    log.info('packed <ab||ef> %s', vvvv.describe())
+    eris._scratch = (blocks.scratch, vvvv.scratch)          # keeps the scratch files open
     log.timer('CCSD integral transformation', *cput0)
     return eris
 

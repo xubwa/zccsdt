@@ -1127,59 +1127,83 @@ benzene (T) is the 1500 s of job 31533171 (c146, whose CCSD iteration took
   for H2O (1.67 s and 23.1 s on c146), but it runs benzene, where the
   integrals of zccsdt's CCSD did not fit 30 GB.
 
-### Integrals of the copied CCSD: slabs from the packed AO integrals
+### Integrals of the copied CCSD: socutils' `nrr_fast` in slabs, within `max_memory`
 
-`zccsdt.zccsd.ao2mo` replaces the integral transformation of the copied code
-(socutils: all nmo^4 MO integrals through `nrr_outcore` and HDF5 for `ZCCSD`,
-einsums on the 4-index AO array for `DirectZCCSD`). The scalar AO integrals
-are computed once with 8-fold symmetry and kept packed (2 N^4 bytes); slabs
-of the first MO index are transformed (two quarter transformations by real
-GEMMs, the second half by PySCF's `_ao2mo.r_e2`) and antisymmetrized into the
-blocks at once. `DirectZCCSD` gets the blocks with a first occupied index,
-ovvv included and now stored by default; `ZCCSD` gets these and <ab||ef>
-packed on (a>b, e>f), in memory, without the full vvvv block.
+The integral step of the copied code was its slowest part. `ZCCSD`
+transformed all nmo^4 MO integrals with PySCF's `nrr_outcore` and read them
+back to antisymmetrize and to pack <ab||ef>; `DirectZCCSD` used einsums on
+the 4-index AO array. `zccsdt.zccsd.ao2mo` replaces both:
 
-One job, one after the other on one node (c329, 2 x Xeon Gold 6248R, 8 cores;
-job 31547944): CFOUR (`CALC=CCSD`, 4 cycles), the new routes (3 iterations),
-then the routes of socutils that the code keeps (`mo-nrr`, `direct-ao`; 1
-iteration). Times without the SCF.
+- **Kernels**: socutils' own optimized transformation `nrr_fast`
+  (`lib/ao2mo` there; copied to `csrc/nrr_ao2mo_opt.c` and
+  `zccsd/nrr_fast.py`): the bra pass on PySCF's s4 AO fill, the ket pass on
+  the shell-block packing, the cheaper index order, all in C. (A first
+  version, 41735e2, had kernels of its own -- real GEMMs on AO integrals
+  packed in memory -- which were 5-20% slower and are gone.)
+- **Organization**: only the integrals a CCSD needs, (ip|qr) with i
+  occupied and, for `ZCCSD`, (ae|bf); the first MO index in batches; every
+  slab antisymmetrized into its blocks (or packed <ab||ef> rows) at once.
+  The half-transformed integrals stay in memory and nothing is read back.
+- **Memory**: nothing that is computed is assumed to fit. `max_memory` (MB
+  for the process, PySCF's meaning) sizes the batches of the first index and
+  the ranges of AO shell pairs of the bra pass; the blocks stay in memory
+  only up to a third of the budget, the smallest first, the others are
+  mapped arrays of a scratch file filled slab by slab; below the working set
+  of one orbital and one shell pair, `MemoryError`. Smaller batches compute
+  the AO integrals more often; they do not write intermediates.
 
-| Integrals, seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+All numbers: 8 cores of one 2 x Xeon Gold 6248R node, everything of a table
+one after the other in one job, CFOUR's chain up to `xx2cvtran` first
+(`bench/slurm_ao2mo.sh`, `bench/profile_ao2mo.py`, `bench/profile_zccsd.py`).
+
+**One block, four transformations** (job 31549591, c515; the in-memory run
+of the stock kernels from job 31549669, c208, where the other three rows
+were the same within 2%). (ip|qr) is what `xx2cvtran` makes:
+
+| Seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
 |---|---|---|---|
-| CFOUR `xx2cvtran` (reads the AO integrals; no <ab\|\|cd>) | 0.50 | 3.35 | 11.8 |
-| `DirectZCCSD`, ovvv included | 0.7 | 5.5 | 14.3 |
-| - AO integrals (s8) | 0.06 | 0.37 | 0.49 |
-| - first half / second half | 0.06 / 0.19 | 0.66 / 1.09 | 2.36 / 4.31 |
-| - antisymmetrized blocks | 0.09 | 0.53 | 4.16 |
-| - AO operators of the ladder | 0.03 | 0.79 | 0.77 |
-| - other (Fock matrix by PySCF's direct spinor J/K) | 0.26 | 2.08 | 2.21 |
-| `DirectZCCSD` as copied, without ovvv (c028) | 1.1 | 10.1 | 29.7 |
-| `ZCCSD`, packed <ab\|\|ef> included | 2.2 | 38.8 | 34.1 |
-| `ZCCSD` through `nrr_outcore` | 13.2 | 245 | 222 |
+| CFOUR `xx2cvtran`: transformation (+ sorting) | 0.27 (+ 0.03) | 2.48 (+ 0.13) | 8.51 (+ 0.87) |
+| PySCF `nrr_outcore` (no AO symmetry, HDF5) | 0.9 | 8.0 | 28.5 |
+| its C kernels driven in memory (no AO symmetry) | 0.4 | 3.8 | 11.5 |
+| socutils `nrr_fast` | 0.2 | 2.1 | 6.7 |
+| zccsdt slabs (`nrr_fast` kernels) | 0.2 | 2.0 | 6.2 |
 
-- The transformation proper (the two halves and the blocks) takes 0.34 s,
-  2.3 s and 10.8 s against 0.50 s, 3.35 s and 11.8 s of `xx2cvtran`.
-- `ZCCSD`: 6-6.5 times faster; the route through `nrr_outcore` packs
-  <ab||ef> in its first iteration on top (about 2 s, 50 s and 24 s on c028).
-- Reserves: the antisymmetrization of ovvv is a Python loop over (i, a)
-  (4.2 s for benzene); the gather of the AO rows is repeated for every slab
-  and the first half writes strided (12 of the 39 s of `ZCCSD` for
-  H2O/cc-pVQZ); the Fock matrix could come from the packed AO integrals.
+- `nrr_fast` is 1.2-1.3 times faster than CFOUR's transformation and about
+  4 times faster than stock `nrr_outcore`: 2.1-2.5 times from not going
+  through HDF5 and 1.75-2 times from the s4 symmetry of the AO integrals and
+  the index order (first pass 2.4 times, second pass 1.4-1.6 times).
+- For (ae|bf) the slabs bound the memory: H2O/cc-pVQZ 27.6 s and 13.3 GB
+  with 24000 MB, 28.1 s and 6.6 GB with 8000 MB, against 28.2 s and 15.8 GB
+  for one call of `nrr_fast`; benzene 15.9 s / 9.8 GB, 16.7 s / 5.6 GB,
+  15.4 s / 11.2 GB.
 
-| CCSD iteration, seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
-|---|---|---|---|
-| CFOUR | 0.32 | 2.75 | 26.7 |
-| `DirectZCCSD`, ovvv stored | 1.39 (4.3x) | 9.39 (3.4x) | 93.1 (3.5x) |
-| `DirectZCCSD`, ovvv terms from the AO integrals (1 iteration) | 2.32 | 22.6 | 126.6 |
-| `ZCCSD`, packed <ab\|\|ef> in memory | 1.40 (4.4x) | 10.4 (3.8x) | 91.9 (3.4x) |
-| peak RSS, `DirectZCCSD` / `ZCCSD` (GB) | 1.3 / 3.4 | 8.1 / 15.4 | 23.8 / 26.7 |
+**The integral step of the two classes** (the same job; AO integrals, the
+Fock matrix by PySCF's direct spinor J/K (2 s), the antisymmetrized blocks
+and the AO operators of the ladder or the packed <ab||ef> included):
 
-- With ovvv stored the copied iteration is 1.4-2.4 times faster, but its
-  five ovvv terms are still half of the iteration for H2O/cc-pVQZ (5.0 of
-  9.4 s): einsums that transpose or conjugate the whole 1.7 GB array.
-- The integrals now live in memory (scratch files only when a block would
-  take more than half of the free memory), and the copied iteration makes
-  large temporaries: 24-27 GB for benzene under the 30 GB limit of the job.
+| Seconds, peak anonymous memory | H2O/cc-pVQZ `DirectZCCSD` | H2O/cc-pVQZ `ZCCSD` | C6H6/cc-pVDZ `DirectZCCSD` | C6H6/cc-pVDZ `ZCCSD` |
+|---|---|---|---|---|
+| `max_memory` 24000 MB | 5.8, 5.5 GB | 34.9, 14.5 GB | 11.9, 10.8 GB | 26.6, 19.4 GB |
+| 8000 MB | 6.0, 4.6 GB | 37.3, 7.6 GB | 13.9, 4.8 GB | 30.2, 7.5 GB |
+| 4000 MB | 7.4, 2.1 GB | 39.6, 3.7 GB | 17.6, 2.6 GB | 36.7, 3.7 GB |
+| `ZCCSD` through `nrr_outcore` (c195) | | 201 + 48 | | 195 + 16 |
+
+- The peak stays below `max_memory`; with 4000 MB ovvv, ovov, ovvo and the
+  packed <ab||ef> are in scratch files and a slab holds 2 to 8 orbitals.
+- The old route of `ZCCSD` (the `ao2mo_outcore` switch; + the packing of
+  <ab||ef> in its first iteration) spent 26 s of its 200 s in the C kernels:
+  7 s + 18 s in the two passes, 13 s writing the half-transformed file, 58 s
+  reading it and writing all MO integrals, 100-104 s reading them back into
+  antisymmetrized blocks (job 31548804).
+- Reserves: the Fock matrix could come from the AO integrals of the bra
+  pass; a small budget repeats the AO integrals for every batch.
+
+**The copied iteration on these integrals** (socutils' `update_amps`,
+`max_memory` 24000 MB, c515): `DirectZCCSD` with ovvv stored 1.38 s, 9.66 s
+and 94.3 s per iteration for the three molecules (with the ovvv terms from
+the AO integrals, as copied: 2.3 s, 22.6 s, 127 s on c329); `ZCCSD` 1.48 s,
+10.7 s and 92.9 s; CFOUR 0.32 s, 2.75 s, 26.7 s. Peak RSS for benzene 24-27
+GB: the copied iteration is not planned (large einsum temporaries).
 
 ## Correctness references
 

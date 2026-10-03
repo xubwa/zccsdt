@@ -48,3 +48,38 @@ if(ZC_MKL_DIR)
     BUILD_RPATH ${ZC_MKL_DIR} INSTALL_RPATH ${ZC_MKL_DIR}
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
 endif()
+
+# Spinor AO->MO kernels of socutils (lib/ao2mo/nrr_ao2mo_opt.c): the e1 pass
+# on PySCF's s4 AO fill and the e2 pass, for zccsdt.zccsd.nrr_fast.  The
+# library reuses AO2MOfill_nr_s4, AO2MOmmm_r_iltj, NPdunpack_tril ... of the
+# PySCF that the configuring Python imports and links against its libraries
+# (and, through them, its BLAS): rebuild after changing PySCF.  C99 keeps the
+# K&R-style `(*fmmm)()` declarations valid (gcc >= 14 defaults to C23).
+find_program(ZC_PYTHON NAMES python3 python)
+execute_process(
+  COMMAND ${ZC_PYTHON} -c
+          "from pyscf import lib; import os; print(os.path.dirname(os.path.abspath(lib.__file__)))"
+  OUTPUT_VARIABLE ZC_PYSCF_LIB OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE ZC_PYSCF_RC ERROR_QUIET)
+if(ZC_PYSCF_RC EQUAL 0 AND ZC_PYSCF_LIB)
+  find_library(ZC_AO2MO_LIB     NAMES ao2mo     PATHS ${ZC_PYSCF_LIB} NO_DEFAULT_PATH)
+  find_library(ZC_NP_HELPER_LIB NAMES np_helper PATHS ${ZC_PYSCF_LIB} NO_DEFAULT_PATH)
+  find_library(ZC_CVHF_LIB      NAMES cvhf      PATHS ${ZC_PYSCF_LIB} NO_DEFAULT_PATH)
+  find_library(ZC_CINT_LIB      NAMES cint      PATHS ${ZC_PYSCF_LIB}/deps/lib NO_DEFAULT_PATH)
+endif()
+if(ZC_AO2MO_LIB AND ZC_NP_HELPER_LIB AND ZC_CVHF_LIB AND ZC_CINT_LIB)
+  message(STATUS "nrr_opt: linking against PySCF at ${ZC_PYSCF_LIB}")
+  add_library(nrr_opt SHARED nrr_ao2mo_opt.c)
+  target_include_directories(nrr_opt PRIVATE ${ZC_PYSCF_LIB} ${ZC_PYSCF_LIB}/ao2mo
+                             ${ZC_PYSCF_LIB}/deps/include)
+  target_compile_options(nrr_opt PRIVATE -O3)
+  target_link_libraries(nrr_opt PRIVATE ${ZC_AO2MO_LIB} ${ZC_NP_HELPER_LIB} ${ZC_CVHF_LIB}
+                        ${ZC_CINT_LIB} OpenMP::OpenMP_C m)
+  set_target_properties(nrr_opt PROPERTIES
+    BUILD_RPATH "${ZC_PYSCF_LIB};${ZC_PYSCF_LIB}/deps/lib"
+    INSTALL_RPATH "${ZC_PYSCF_LIB};${ZC_PYSCF_LIB}/deps/lib"
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
+else()
+  message(WARNING "nrr_opt: PySCF libraries not found through ${ZC_PYTHON}; "
+                  "libnrr_opt.so (integrals of zccsdt.zccsd) is not built")
+endif()

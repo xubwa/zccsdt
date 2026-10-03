@@ -14,7 +14,8 @@
 # CFOUR: RELATIVISTIC=X2C1E, X2CKEY=SOATMX, ABCDTYPE=AOBASIS, all electrons,
 #   C1, run as xjoda; xsox2catm; xsox2chf; xx2cvtran; xx2cccsd (no xcfour driver)
 #   CFOUR_CALC: CCSD(T) (default) or CCSD; CFOUR_MEM_GB: MEMORY_SIZE (default 24);
-#   CFOUR_MAXCYC (default 50);
+#   CFOUR_MAXCYC (default 50); CFOUR_PROGS: the programs to run (default: all
+#   five; 'xjoda xsox2catm xsox2chf xx2cvtran' stops after the integrals);
 #   CFOUR_CONV: CC_CONV, max residual element (default 7)
 # zccsdt: X2C-1e from PySCF (same orbital counts, not the same Hamiltonian),
 #   bench/profile_iter.py with ZC_METHOD=ccsd; ZC_NITER timed iterations
@@ -77,7 +78,7 @@ $basislines
 
 ZEOF
   echo "=== CFOUR $mol/$basis  $(date)  run dir $run (kept: $keep)"
-  for p in xjoda xsox2catm xsox2chf xx2cvtran xx2cccsd; do
+  for p in ${CFOUR_PROGS:-xjoda xsox2catm xsox2chf xx2cvtran xx2cccsd}; do
     /usr/bin/time -f "$p wall %e s  user %U s  max RSS %M KB" $cfour/$p > $p.out 2> $p.time
     status=$?
     tail -n 1 $p.time
@@ -87,7 +88,9 @@ ZEOF
     fi
   done
   cp ZMAT $keep/
-  python $root/bench/cfour/x2ccc_summary.py $keep/xx2cccsd.out
+  grep -E "Integral transformation Elapsed|MO Integral sorting Elapsed|AO Integral Elapsed" \
+    $keep/xx2cvtran.out | sed 's/^ */  xx2cvtran: /; s/  */ /g'
+  [ -f $keep/xx2cccsd.out ] && python $root/bench/cfour/x2ccc_summary.py $keep/xx2cccsd.out
   cd / && rm -rf $run
   if [ "${ZC_NITER:-3}" != 0 ]; then
     pybasis=cc-$(echo $basis | tr 'A-Z' 'a-z')

@@ -1,4 +1,5 @@
-'''Spinor MO integrals from the scalar AO integrals, slab by slab.
+'''Spinor MO integrals of a CCSD from the scalar AO integrals, slab by slab,
+within a memory budget.
 
 For two-component spinors and the bare Coulomb operator (X2C-1e, X2CAMF,
 GHF) the integrals are, with the alpha and beta components C^s of the MOs
@@ -6,34 +7,53 @@ in the scalar AO basis,
 
     (pq|rs) = sum_{s,s'} sum C^s*[mu,p] C^s[nu,q] (mu nu|la si) C^s'*[la,r] C^s'[si,s]:
 
-the AO integrals are real, have 8-fold symmetry and carry no spin.  They are
-computed once, packed over mu >= nu and la >= si (2 nao^4 bytes), and the
-transformation runs over slabs of the first MO index:
+the AO integrals are real, have 8-fold symmetry and carry no spin.
 
-- quarter 1 and 2 give Y[p, q, (la si)], contracting the unpacked index of
-  the AO integrals with real GEMMs (real and imaginary part of both spin
-  components at once);
-- the second half unpacks Y to symmetric matrices and transforms them with
-  PySCF's kernel ``_ao2mo.r_e2`` (one pair of ZGEMMs per row, OpenMP over the
-  rows), once per spin component.
+The transformation itself is nrr_fast of socutils (zccsdt.zccsd.nrr_fast):
+the bra pass on PySCF's s4 AO fill and the ket pass, both in C.  This module
+organizes it for a CCSD:
 
-Only the integrals that are asked for are made: (ip|qr) with i occupied for
-the blocks of a CCSD with an AO-driven ladder (occupied_blocks), (ae|bf) for
-the packed <ab||ef> of a ladder in the MO basis (packed_vvvv).  Nothing goes
-through a scratch file; a slab is antisymmetrized into its place as soon as
-it is made.  Timers (zccsdt.timing): 'ao2mo.ao', 'ao2mo.half1',
-'ao2mo.half2', 'ao2mo.sort', 'ao2mo.ladder'.
+- only the integrals that are needed are made: (ip|qr) with i occupied for
+  the blocks of a CCSD with an AO-driven ladder (occupied_blocks), (ae|bf)
+  for the packed <ab||ef> of a ladder in the MO basis (packed_vvvv);
+- every slab is antisymmetrized into its blocks at once, so that no file of
+  half-sorted integrals is written and read back.
+
+Nothing is assumed to fit into memory but the working set of one orbital
+(``max_memory`` in MB for the whole process as in PySCF; None: 80% of what
+the node and the memory limit of the job leave):
+
+- the passes run over batches of the first MO index and, within a bra pass,
+  over ranges of the AO shell pairs (la si), sized by plan_slabs: the AO
+  integrals of a range, the half-transformed integrals of a batch and one
+  slab of MO integrals are what is in memory.  Smaller batches mean that
+  the AO integrals are computed more often, not that anything is written;
+- the integrals that are produced stay in memory only while they take no
+  more than a third of the budget together, the smallest blocks first; the
+  others are mapped arrays of a scratch file (zccsdt.scratch), filled slab
+  by slab;
+- a budget below the working set of one orbital and one shell pair raises
+  MemoryError with what is needed.
+
+ladder_operators builds the two AO operators of the AO-driven ladder in shell
+batches, under the same rules.  Timers (zccsdt.timing): 'ao2mo.bra',
+'ao2mo.ket', 'ao2mo.sort', 'ao2mo.ladder'.
 '''
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 import numpy as np
-from pyscf import ao2mo, lib
-from pyscf.ao2mo import _ao2mo
+from pyscf import lib
+from pyscf.ao2mo import outcore
 
+from zccsdt import memory, scratch
 from zccsdt.timing import timer
+from zccsdt.zccsd import nrr_fast
 
-SLAB_BYTES = 4 << 30        # default memory of one slab and its buffers
+SLAB_BYTES = 4 << 30        # the largest slab of MO integrals
+WORK_BYTES = 16 << 30       # what the passes use at most, however much there is
+STORE_SHARE = 1 / 3         # share of the budget for the integrals kept in memory
 BLOCKS = ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv')
 
 
@@ -49,193 +69,266 @@ def spin_components(mol, mo_coeff, motype='j-spinor'):
     return np.asarray(mo_coeff[:nao]), np.asarray(mo_coeff[nao:])
 
 
-def ao_eri_s4(mol):
-    '''(mu nu|la si) packed over mu >= nu and la >= si: (npair, npair), real.'''
-    with timer('ao2mo.ao'):
-        return ao2mo.restore(4, mol.intor('int2e', aosym='s8'), mol.nao_nr())
-
-
-def _pair_index(nao):
-    idx = np.empty((nao, nao), dtype=np.int64)
-    a, b = np.tril_indices(nao)
-    idx[a, b] = idx[b, a] = np.arange(a.size)
-    return idx
-
-
 def _threads():
     return max(1, lib.num_threads())
 
 
-def _first_half(eri4, idx, Ca, Cb, i0, i1, q0, q1):
-    '''Y[i, q, K] = sum_s sum_{mu nu} conj(C^s[mu,i]) C^s[nu,q] (mu nu|K) for
-    i0 <= i < i1 and q0 <= q < q1, K = (la >= si) packed.'''
-    nao = Ca.shape[0]
-    npair = eri4.shape[1]
-    bi = i1 - i0
-    # quarter 1: X^s[i, nu, K] = sum_mu conj(C^s[mu,i]) (mu nu|K); the rows
-    # (mu nu) of one nu are gathered from the packed integrals
-    A = np.vstack([Ca[:, i0:i1].real.T, -Ca[:, i0:i1].imag.T,
-                   Cb[:, i0:i1].real.T, -Cb[:, i0:i1].imag.T])
-    A = np.ascontiguousarray(A)                                  # (4 bi, nao)
-    X = np.empty((2, bi, nao, npair), dtype=np.complex128)
-    step = max(1, int(2.5e8 // (nao * npair * 8)))
-    for n0 in range(0, nao, step):
-        n1 = min(n0 + step, nao)
-        R = np.matmul(A, eri4[idx[n0:n1]])                       # (nnu, 4 bi, npair)
-        R = R.reshape(n1 - n0, 2, 2, bi, npair)                  # nu, spin, re/im, i, K
-        for s in (0, 1):
-            X[s, :, n0:n1].real = R[:, s, 0].transpose(1, 0, 2)
-            X[s, :, n0:n1].imag = R[:, s, 1].transpose(1, 0, 2)
-    # quarter 2: Y[i, q, K] = sum_s sum_nu C^s[nu,q] X^s[i, nu, K]
-    Y = np.matmul(np.ascontiguousarray(Ca[:, q0:q1].T), X[0])
-    Y += np.matmul(np.ascontiguousarray(Cb[:, q0:q1].T), X[1])
-    return Y
+def _size(nbytes):
+    return '%.2f GB' % (nbytes / 1e9) if nbytes >= 1e9 else '%.1f MB' % (nbytes / 1e6)
 
 
-def _add(a, b, pool, nthreads):
-    '''a += b for large arrays, split over the threads of ``pool``.'''
-    n = len(a)
-    k = max(1, min(n, nthreads))
-    edges = [n * j // k for j in range(k + 1)]
-
-    def part(j):
-        np.add(a[edges[j]:edges[j + 1]], b[edges[j]:edges[j + 1]],
-               out=a[edges[j]:edges[j + 1]])
-    list(pool.map(part, range(k)))
+def _store_bytes(budget, need):
+    '''Bytes of the budget for the integrals that stay in memory: a share of
+    it, and never what the smallest passes need (None: no limit known).'''
+    if budget is None:
+        return None
+    return int(max(0, min(STORE_SHARE * budget, budget - need)))
 
 
-def _second_half(Y, CaF, CbF, q0, q1, out, pool, nthreads):
-    '''out[x, r, s] = sum_s' C^s'[:, r]^+ unpack(Y[x]) C^s'[:, s] for the rows
-    x of Y (packed symmetric matrices), r and s in q0:q1.'''
-    nrow, nao = len(Y), CaF.shape[0]
-    nq = q1 - q0
-    tao = np.zeros(nao, dtype=np.int32)                  # not used without symmetry
-    step = max(1, int(min(2.5e8 // (nao * nao * 16), 5e8 // (nq * nq * 16))))
-    buf = np.empty((min(step, nrow), nq * nq), dtype=np.complex128)
-    for r0 in range(0, nrow, step):
-        r1 = min(r0 + step, nrow)
-        M = lib.unpack_tril(Y[r0:r1], lib.SYMMETRIC).reshape(r1 - r0, nao * nao)
-        _ao2mo.r_e2(M, CaF, (q0, q1, q0, q1), tao, None, 's1', out=out[r0:r1])
-        _ao2mo.r_e2(M, CbF, (q0, q1, q0, q1), tao, None, 's1', out=buf[:r1 - r0])
-        _add(out[r0:r1], buf[:r1 - r0], pool, nthreads)
+@dataclass
+class Plan:
+    '''Sizes of the passes of one transformation (plan_slabs).'''
+    nbra: int           # first-index orbitals per bra pass
+    nket: int           # first-index orbitals per slab of the ket pass
+    nkl: int            # AO pairs (la si) per range of a bra pass, at most
+    work: int           # bytes of the passes with these sizes
+    need: int           # bytes of the smallest passes: one orbital, one shell pair
+    budget: object      # bytes that were given (None: no limit known)
 
 
-def slabs(eri4, Ca, Cb, first, rest=None, slab_bytes=SLAB_BYTES):
+def plan_slabs(mol, nfirst, nq, budget=None, sort_arrays=1):
+    '''Plan for the integrals (iq|rs) of ``nfirst`` first orbitals and
+    ``nq`` orbitals in each of the other three places, within ``budget``
+    bytes (None: WORK_BYTES).  ``sort_arrays``: arrays of one orbital (nq^3)
+    that each thread needs to sort a slab into its place.'''
+    nao = mol.nao_nr()
+    npair = nao * (nao + 1) // 2
+    ao_loc = mol.ao_loc_nr()
+    pmax = int((ao_loc[1:] - ao_loc[:-1]).max()) ** 2        # AO pairs of a shell pair, at most
+    nthr = _threads()
+
+    def work(nbra, nket, nkl):
+        return (16 * npair * nq * nbra                       # half transform of a batch
+                + (8 * nao * nao + 48 * nq * nbra) * nkl     # AO integrals of a range, their half transform
+                + 16 * nq ** 3 * (nket + sort_arrays * min(nthr, nket)))    # slab and its sorting
+
+    need = work(1, 1, pmax)
+    if budget is not None and need > budget:
+        raise MemoryError('the integral transformation needs %s for one orbital at a time '
+                          '(%d AO functions, %d MOs per index), %s are left of max_memory'
+                          % (_size(need), nao, nq, _size(budget)))
+    w = WORK_BYTES if budget is None else min(int(budget), WORK_BYTES)
+    nket = int(max(1, min(nfirst, w // 3 // (16 * nq ** 3 * (1 + sort_arrays)),
+                          max(1, SLAB_BYTES // (16 * nq ** 3)))))
+    nbra = int(max(1, min(nfirst, w // 3 // (16 * npair * nq))))
+    nket = min(nket, nbra)
+    while work(nbra, nket, pmax) > w and nbra > 1:
+        nbra = max(1, nbra // 2)
+        nket = min(nket, nbra)
+    rest = w - work(nbra, nket, 0)
+    nkl = int(max(pmax, min(npair, rest // (8 * nao * nao + 48 * nq * nbra))))
+    return Plan(nbra, nket, nkl, work(nbra, nket, nkl), need, budget)
+
+
+def slabs(mol, Ca, Cb, first, rest=None, plan=None):
     '''Generator of (i0, i1, g): g[i - i0, q, r, s] = (iq|rs) in chemists'
     notation for the first index i in first = (start, stop) and the other
     three in rest = (start, stop) (default: all MOs).  ``g`` is a buffer that
     the next slab overwrites.'''
     nao, nmo = Ca.shape
-    rest = (0, nmo) if rest is None else rest
-    q0, q1 = rest
+    q0, q1 = (0, nmo) if rest is None else rest
     nq = q1 - q0
-    npair = eri4.shape[1]
-    idx = _pair_index(nao)
-    CaF = np.asarray(Ca, dtype=np.complex128, order='F')
-    CbF = np.asarray(Cb, dtype=np.complex128, order='F')
-    per_i = 16 * (2 * nao * npair + nq * npair + nq ** 3)
-    batch = int(max(1, min(first[1] - first[0], slab_bytes // per_i)))
-    g = np.empty((batch * nq, nq * nq), dtype=np.complex128)
-    nthreads = _threads()
-    with ThreadPoolExecutor(nthreads) as pool:
-        for i0 in range(first[0], first[1], batch):
-            i1 = min(i0 + batch, first[1])
-            with timer('ao2mo.half1'):
-                Y = _first_half(eri4, idx, Ca, Cb, i0, i1, q0, q1)
-            with timer('ao2mo.half2'):
-                n = (i1 - i0) * nq
-                _second_half(Y.reshape(n, npair), CaF, CbF, q0, q1, g[:n], pool, nthreads)
-            del Y
+    npair = nao * (nao + 1) // 2
+    if plan is None:
+        plan = plan_slabs(mol, first[1] - first[0], nq)
+    Cqa = np.asarray(Ca[:, q0:q1], dtype=np.complex128, order='F')
+    Cqb = np.asarray(Cb[:, q0:q1], dtype=np.complex128, order='F')
+    ranges = outcore.guess_shell_ranges(mol, True, plan.nkl)
+    g = np.empty((plan.nket * nq, nq * nq), dtype=np.complex128)
+    for b0 in range(first[0], first[1], plan.nbra):
+        b1 = min(b0 + plan.nbra, first[1])
+        bi = b1 - b0
+        with timer('ao2mo.bra'):
+            moa, mob = np.hstack((Ca[:, b0:b1], Cqa)), np.hstack((Cb[:, b0:b1], Cqb))
+            if len(ranges) == 1:
+                vin = lib.transpose(nrr_fast._e1_full(mol, moa, mob, (0, bi, bi, bi + nq)))
+            else:                   # the AO integrals of one range of shell pairs at a time
+                vin = np.empty((bi * nq, npair), dtype=np.complex128)
+                k0 = 0
+                for r in ranges:
+                    vin[:, k0:k0 + r[2]] = lib.transpose(
+                        nrr_fast._e1_full(mol, moa, mob, (0, bi, bi, bi + nq), klrange=r[:3]))
+                    k0 += r[2]
+        for i0 in range(b0, b1, plan.nket):
+            i1 = min(i0 + plan.nket, b1)
+            n = (i1 - i0) * nq
+            with timer('ao2mo.ket'):
+                nrr_fast._e2(mol, vin[(i0 - b0) * nq:(i1 - b0) * nq], Cqa, Cqb,
+                             (0, nq, 0, nq), out=g[:n])
             yield i0, i1, g[:n].reshape(i1 - i0, nq, nq, nq)
+        del vin
 
 
-def occupied_blocks(eri4, Ca, Cb, nocc, with_ovvv=True, ovvv=None, slab_bytes=SLAB_BYTES):
-    '''The antisymmetrized blocks <pq||rs> with a first occupied index, as a
-    dict: oooo, ooov, oovv, ovov, ovvo and (``with_ovvv``) ovvv, written to
-    the array ``ovvv`` if one is given (e.g. a mapped scratch array).'''
+class Arrays(dict):
+    '''The arrays of a transformation by name.  ``scratch`` keeps the file of
+    the mapped ones open (None: all are in memory); ``plan`` is the Plan of
+    the passes.'''
+    scratch = None
+    plan = None
+
+    def on_disk(self):
+        return [k for k, a in self.items() if scratch.is_mapped(a)]
+
+    def describe(self):
+        '''One line on where the arrays are and how the passes were sliced.'''
+        gb = lambda keys: ', '.join('%s %s' % (k, _size(self[k].nbytes)) for k in keys)  # noqa: E731
+        disk = self.on_disk()
+        text = 'in memory: ' + (gb([k for k in self if k not in disk]) or 'nothing')
+        if disk:
+            text += '; in a scratch file: ' + gb(disk)
+        p = self.plan
+        if p is not None:
+            text += ('; passes of %d and %d orbitals, %d AO pairs per range (%s)'
+                     % (p.nbra, p.nket, p.nkl, _size(p.work)))
+        return text
+
+
+def _allocate(shapes, dtype, mem_bytes, what):
+    '''Arrays for ``shapes`` (a dict): the smallest in memory as long as they
+    take no more than ``mem_bytes`` together (None: all of them), the others
+    as mapped arrays of a scratch file.'''
+    size = {k: np.dtype(dtype).itemsize * int(np.prod(s, dtype=np.int64))
+            for k, s in shapes.items()}
+    out, used = Arrays(), 0
+    for k in sorted(shapes, key=size.get):
+        if mem_bytes is None or used + size[k] <= mem_bytes:
+            out[k] = np.empty(shapes[k], dtype=dtype)
+            used += size[k]
+        else:
+            if out.scratch is None:
+                out.scratch = scratch.Scratch(prefix='zccsd_', what=what,
+                                              hint=' or give the calculation more memory '
+                                                   '(max_memory)')
+            out[k] = out.scratch.create(k, shapes[k], dtype)
+    return out, used
+
+
+def occupied_blocks(mol, Ca, Cb, nocc, with_ovvv=True, max_memory=None, plan=None):
+    '''The antisymmetrized blocks <pq||rs> with a first occupied index: an
+    Arrays dict with oooo, ooov, oovv, ovov, ovvo and (``with_ovvv``) ovvv.
+    ``max_memory`` (MB) decides which of them are mapped scratch arrays and
+    how the passes are sliced (``plan``: an explicit Plan for the latter).'''
     nmo = Ca.shape[1]
     nvir = nmo - nocc
     dim = {'o': nocc, 'v': nvir}
-    out = {k: np.empty([dim[c] for c in k], dtype=np.complex128) for k in BLOCKS[:5]}
-    if with_ovvv:
-        out['ovvv'] = np.empty((nocc, nvir, nvir, nvir), np.complex128) if ovvv is None else ovvv
+    budget = memory.budget(max_memory)
+    need = plan_slabs(mol, nocc, nmo).need if plan is None else plan.need
+    out, used = _allocate({k: [dim[c] for c in k] for k in BLOCKS[:5 + bool(with_ovvv)]},
+                          np.complex128, _store_bytes(budget, need), 'the MO integrals')
+    if plan is None:
+        plan = plan_slabs(mol, nocc, nmo, None if budget is None else budget - used)
+    out.plan = plan
     o, v = slice(0, nocc), slice(nocc, nmo)
 
-    def sort_ovvv(i, gi):
-        # <ia||bc> = (ib|ac) - (ic|ab): one a at a time, in the cache
-        gv = gi[v, v, v]
-        row = out['ovvv'][i]
-        for a in range(nvir):
-            P = np.ascontiguousarray(gv[:, a, :])
-            np.subtract(P, P.T, out=row[a])
+    def sort(i, gi):
+        # gi[q, r, s] = (iq|rs); <iq||rs> = (ir|qs) - (is|qr), one orbital per thread
+        sub = np.subtract
+        sub(gi[o, o, o].transpose(1, 0, 2), gi[o, o, o].transpose(1, 2, 0), out=out['oooo'][i])
+        sub(gi[o, o, v].transpose(1, 0, 2), gi[v, o, o].transpose(1, 2, 0), out=out['ooov'][i])
+        sub(gi[v, o, v].transpose(1, 0, 2), gi[v, o, v].transpose(1, 2, 0), out=out['oovv'][i])
+        sub(gi[o, v, v].transpose(1, 0, 2), gi[v, v, o].transpose(1, 2, 0), out=out['ovov'][i])
+        sub(gi[v, v, o].transpose(1, 0, 2), gi[o, v, v].transpose(1, 2, 0), out=out['ovvo'][i])
+        if with_ovvv:                                   # <ia||bc> = (ib|ac) - (ic|ab)
+            t = np.ascontiguousarray(gi[v, v, v].transpose(1, 0, 2))    # [a, b, c] = (ib|ac)
+            sub(t, t.transpose(0, 2, 1), out=out['ovvv'][i])
 
-    with ThreadPoolExecutor(_threads()) as pool:
-        for i0, i1, g in slabs(eri4, Ca, Cb, (0, nocc), None, slab_bytes):
+    with ThreadPoolExecutor(min(_threads(), plan.nket)) as pool:
+        for i0, i1, g in slabs(mol, Ca, Cb, (0, nocc), None, plan):
             with timer('ao2mo.sort'):
-                s = slice(i0, i1)
-                # <pq||rs> = (pr|qs) - (ps|qr), the first index in the slab
-                out['oooo'][s] = g[:, o, o, o].transpose(0, 2, 1, 3) - g[:, o, o, o].transpose(0, 2, 3, 1)
-                out['ooov'][s] = g[:, o, o, v].transpose(0, 2, 1, 3) - g[:, v, o, o].transpose(0, 2, 3, 1)
-                out['oovv'][s] = g[:, v, o, v].transpose(0, 2, 1, 3) - g[:, v, o, v].transpose(0, 2, 3, 1)
-                out['ovov'][s] = g[:, o, v, v].transpose(0, 2, 1, 3) - g[:, v, v, o].transpose(0, 2, 3, 1)
-                out['ovvo'][s] = g[:, v, v, o].transpose(0, 2, 1, 3) - g[:, o, v, v].transpose(0, 2, 3, 1)
-                if with_ovvv:
-                    list(pool.map(lambda i: sort_ovvv(i, g[i - i0]), range(i0, i1)))
+                list(pool.map(lambda i: sort(i, g[i - i0]), range(i0, i1)))
     return out
 
 
-def ladder_operators(eri4, nao):
-    '''The two AO operators of the AO-driven pp ladder (DirectZCCSD), from the
-    packed integrals: (mu nu|la si) as a matrix [(nu si), (mu la)], and the
-    antisymmetrized same-spin integral (mu si|nu rho) - (mu rho|nu si) packed
-    over mu > nu and si > rho.  Returns (ao_eri, W_same, (pi, pj)).'''
-    idx = _pair_index(nao)
-    ao_eri = np.empty((nao, nao, nao, nao))
-    pi, pj = np.tril_indices(nao, -1)
-    W = np.empty((pi.size, pi.size))
-    rows = [slice(pi.size * j // nao, pi.size * (j + 1) // nao) for j in range(nao)]
-
-    def fill(nu):
-        # [nu, si, mu, la] = (mu nu|la si)
-        ao_eri[nu] = eri4[idx[nu][None, :, None], idx[:, None, :]]
-        r = rows[nu]
-        mu, n2 = pi[r, None], pj[r, None]
-        W[r] = eri4[idx[mu, pi[None, :]], idx[n2, pj[None, :]]]
-        W[r] -= eri4[idx[mu, pj[None, :]], idx[n2, pi[None, :]]]
-
-    with timer('ao2mo.ladder'), ThreadPoolExecutor(_threads()) as pool:
-        list(pool.map(fill, range(nao)))
-    return ao_eri.reshape(nao * nao, nao * nao), W, (pi, pj)
-
-
-def fits_in_memory(nbytes, share=0.5):
-    '''Whether an array of ``nbytes`` takes less than ``share`` of the
-    memory that is available (the node and the limit of the job).'''
-    from zccsdt import memory
-    avail = memory.available()
-    return avail is None or nbytes < share * avail
-
-
-def packed_vvvv(eri4, Ca, Cb, nocc, out=None, slab_bytes=SLAB_BYTES):
+def packed_vvvv(mol, Ca, Cb, nocc, max_memory=None, plan=None):
     '''<ab||ef> packed over a > b and e > f, rows and columns in the order of
-    numpy.tril_indices(nvir, -1), written to ``out`` ((npair, npair); a new
-    array by default).  Returns (out, (ti, tj)).'''
+    numpy.tril_indices(nvir, -1): an Arrays dict with 'vvvv_tril' (in memory
+    or a mapped scratch array, by ``max_memory`` in MB) and the pair indices
+    as its attribute ``idx`` = (ti, tj).'''
     nmo = Ca.shape[1]
     nvir = nmo - nocc
     ti, tj = np.tril_indices(nvir, -1)
     npair = ti.size
-    if out is None:
-        out = np.empty((npair, npair), dtype=np.complex128)
+    budget = memory.budget(max_memory)
+    need = plan_slabs(mol, nvir, nvir, sort_arrays=0).need if plan is None else plan.need
+    out, used = _allocate({'vvvv_tril': (npair, npair)}, np.complex128,
+                          _store_bytes(budget, need), 'the packed <ab||cd> integrals')
+    if plan is None:
+        plan = plan_slabs(mol, nvir, nvir, None if budget is None else budget - used,
+                          sort_arrays=0)
+    out.plan, out.idx = plan, (ti, tj)
+    vv = out['vvvv_tril']
 
     def sort_a(a, ga):
-        # ga[e, b, f] = (ae|bf); <ab||ef> = (ae|bf) - (af|be) for b < a
+        # ga[e, b, f] = (ae|bf); <ab||ef> = (ae|bf) - (af|be) for b < a: one
+        # (e, f) matrix at a time, in the cache
         for b in range(a):
             P = np.ascontiguousarray(ga[:, b, :])
             P -= P.T.copy()
-            out[a * (a - 1) // 2 + b] = P[ti, tj]
+            vv[a * (a - 1) // 2 + b] = P[ti, tj]
 
-    with ThreadPoolExecutor(_threads()) as pool:
-        for a0, a1, g in slabs(eri4, Ca, Cb, (nocc, nmo), (nocc, nmo), slab_bytes):
+    with ThreadPoolExecutor(min(_threads(), plan.nket)) as pool:
+        for a0, a1, g in slabs(mol, Ca, Cb, (nocc, nmo), (nocc, nmo), plan):
             with timer('ao2mo.sort'):
                 list(pool.map(lambda a: sort_a(a - nocc, g[a - a0]), range(a0, a1)))
-    return out, (ti, tj)
+    return out
+
+
+def ladder_operators(mol, max_memory=None):
+    '''The two AO operators of the AO-driven pp ladder (DirectZCCSD): an
+    Arrays dict with 'ao_eri', (mu nu|la si) as a matrix [(nu si), (mu la)],
+    and 'W_same', the antisymmetrized same-spin integral (mu si|nu rho) -
+    (mu rho|nu si) packed over mu > nu and si > rho; the pair indices are its
+    attribute ``idx`` = (pi, pj).  Built from the AO integrals of batches of
+    shells in the first place, (nu mu|si la) = (mu nu|la si); in memory or
+    mapped by ``max_memory`` (MB).'''
+    nao, nbas, ao_loc = mol.nao_nr(), mol.nbas, mol.ao_loc_nr()
+    pi, pj = np.tril_indices(nao, -1)
+    budget = memory.budget(max_memory)
+    # a batch of AO functions: its integrals and the two gathers of W
+    per_ao = 8 * nao ** 3 + 16 * nao * pi.size
+    need = 2 * int((ao_loc[1:] - ao_loc[:-1]).max()) * per_ao           # one shell
+    if budget is not None and need > budget:
+        raise MemoryError('the AO operators of the ladder need %s for one shell at a time '
+                          '(%d AO functions), %s are left of max_memory'
+                          % (_size(need), nao, _size(budget)))
+    out, used = _allocate({'ao_eri': (nao, nao, nao, nao), 'W_same': (pi.size, pi.size)},
+                          np.float64, _store_bytes(budget, need),
+                          'the AO operators of the ladder')
+    out.idx = (pi, pj)
+    ao4, W = out['ao_eri'], out['W_same']
+    w = WORK_BYTES if budget is None else min(budget - used, WORK_BYTES)
+    nthr = _threads()
+    with timer('ao2mo.ladder'), ThreadPoolExecutor(nthr) as pool:
+        sh0 = 0
+        while sh0 < nbas:
+            sh1 = sh0 + 1
+            while sh1 < nbas and (ao_loc[sh1 + 1] - ao_loc[sh0]) * per_ao <= w // 2:
+                sh1 += 1
+            m0, m1 = int(ao_loc[sh0]), int(ao_loc[sh1])
+            E = mol.intor('int2e', shls_slice=(sh0, sh1, 0, nbas, 0, nbas, 0, nbas))
+            E = E.reshape(m1 - m0, nao, nao, nao)             # [nu, mu, si, la] = (nu mu|si la)
+            ao4[m0:m1] = E.transpose(0, 2, 1, 3)              # [nu, si, mu, la]
+            # rows of W with mu in the batch: (mu si|nu rho) - (mu rho|nu si)
+            r0, r1 = m0 * (m0 - 1) // 2, m1 * (m1 - 1) // 2
+            edges = [r0 + (r1 - r0) * j // nthr for j in range(nthr + 1)]
+
+            def rows(j):
+                a, b = edges[j], edges[j + 1]
+                if b > a:
+                    mu, nu = pi[a:b, None] - m0, pj[a:b, None]
+                    W[a:b] = E[mu, pi[None, :], nu, pj[None, :]]
+                    W[a:b] -= E[mu, pj[None, :], nu, pi[None, :]]
+            list(pool.map(rows, range(nthr)))
+            sh0 = sh1
+    out['ao_eri'] = ao4.reshape(nao * nao, nao * nao)
+    return out
