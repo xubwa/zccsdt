@@ -71,3 +71,32 @@ def test_relaxed_density_is_energy_derivative(mol, kr):
     derivative = (ep - em) / (2 * eps)
     assert abs(derivative - np.einsum('pq,qp', Vmo, relaxed).real) < 2e-7
     assert abs(derivative - np.einsum('pq,qp', Vmo, unrelaxed).real) > 1e-3
+    # the same through DirectZCCSD.make_rdm1 and dip_moment: the field r_z times
+    # eps lowers the energy by eps times the electronic part of the dipole
+    assert abs(mycc.make_rdm1(l1=l1, l2=l2) - dm1).max() < 1e-12
+    assert abs(mycc.make_rdm1(l1=l1, l2=l2, relaxed=True) - relaxed).max() < 1e-9
+    nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())[2]
+    dip = mycc.dip_moment(l1=l1, l2=l2, relaxed=True, unit='AU')
+    assert abs(dip[2] - (nuclear - derivative)) < 2e-7 and abs(dip[:2]).max() < 1e-7
+    plain = mycc.dip_moment(l1=l1, l2=l2, unit='AU')
+    assert 1e-3 < abs(plain[2] - dip[2]) < 1e-2
+    assert abs(mycc.dip_moment(l1=l1, l2=l2)[2] - plain[2] * 2.541746) < 1e-5
+
+
+def test_density_with_frozen_spinors_in_the_ao_basis(mol):
+    '''make_rdm1(ao_repr=True) with frozen spinors and Kramers pairs: the
+    number of electrons, and the expectation value of a one-particle
+    operator as in the basis of the active spinors plus the frozen ones.'''
+    mf = scf(mol)
+    mycc = DirectZCCSD(mf, frozen=2)
+    mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-10, 1e-8
+    mycc.kernel()
+    dm1 = mycc.make_rdm1()
+    dm_ao = mycc.make_rdm1(l1=mycc.l1, l2=mycc.l2, ao_repr=True)
+    S = mf.get_ovlp()
+    assert abs(np.trace(dm_ao @ S) - mol.nelectron) < 1e-9
+    C = mycc.eris.mo_coeff
+    V = mol.intor('int1e_r_spinor')[2]
+    frozen = mf.mo_coeff[:, :2]
+    expect = np.einsum('pq,qp', C.conj().T @ V @ C, dm1) + np.trace(frozen.conj().T @ V @ frozen)
+    assert abs(np.einsum('pq,qp', V, dm_ao) - expect) < 1e-10

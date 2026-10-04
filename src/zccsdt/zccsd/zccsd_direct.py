@@ -485,6 +485,19 @@ class DirectZCCSD(_zccsd.ZCCSD):
             verbose=self.verbose, sources=sources)
         return self.l1, self.l2
 
+    def make_rdm1(self, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False,
+                  with_t=False, relaxed=False):
+        '''The one-particle density of t and lambda (zccsdt.zccsd.rdm): in
+        the basis of the spinors eris.mo_coeff, or in the 2c AO basis.'''
+        from zccsdt.zccsd import rdm
+        return rdm.make_rdm1(self, t1, t2, l1, l2, eris, ao_repr, with_t, relaxed)
+
+    def dip_moment(self, t1=None, t2=None, l1=None, l2=None, eris=None, with_t=False,
+                   relaxed=False, unit='Debye'):
+        '''The electric dipole moment from make_rdm1 (zccsdt.zccsd.rdm).'''
+        from zccsdt.zccsd import rdm
+        return rdm.dip_moment(self, t1, t2, l1, l2, eris, with_t, relaxed, unit)
+
     def ao2mo(self, mo_coeff=None):
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
