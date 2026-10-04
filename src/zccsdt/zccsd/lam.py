@@ -81,7 +81,7 @@ def reserve_bytes(nocc, nvir):
     its size), four matrices on the pairs, what the terms on the rows of
     <ma||ef> take for one occupied index (three arrays of o v^2 elements,
     the rows that are unpacked, two arrays of o v(v-1)/2 elements), and
-    the third array of the product L T for one occupied index (_q_block).'''
+    the third array of the product L T for one occupied index (_q_blocks).'''
     o, v = int(nocc), int(nvir)
     npo, npv = K.npair(o), K.npair(v)
     kept = 16 * (3 * o * v * npo + 4 * npo * npo + 2 * o ** 4)
@@ -89,19 +89,25 @@ def reserve_bytes(nocc, nvir):
     return kept + rows + 16 * o * v * v
 
 
-def _q_block(plan, o, v):
-    '''Occupied indices in a block of columns of the product L T.  The
-    blocks of the plan of the amplitude step hold two arrays of the size of
-    a block of columns (four with the real parts of three real GEMMs, which
-    is what this product takes as well); with ZGEMM this product has three:
-    its blocks are two thirds of those, more where the plan leaves memory.'''
+def _q_blocks(plan, o, v):
+    '''(nm, ni): occupied indices in a block of columns of the product L T
+    and in a block of its rows (of lambda2).  With three real GEMMs the
+    product takes what a block of columns of the plan of the amplitude step
+    takes: ni is that block, nm no more than it and than a slab of
+    <ma||ef>.  With ZGEMM it holds three arrays - the product and the
+    columns of t2 (nm) and the rows of lambda2 (ni) - where the plan has two
+    blocks, one more in reserve_bytes and what its budget leaves: nm a
+    quarter and ni half of that, which makes the fewest products.'''
     col = 16 * o * v * v
     size = max(j1 - j0 for j0, j1 in plan.jblocks)
     msize = min(size, max(m1 - m0 for m0, m1 in plan.mblocks))
-    if plan.three_m or plan.budget is None:
-        return msize
-    slack = max(0, plan.budget - plan.work) + col       # one block is in reserve_bytes
-    return int(min(msize, max(1, (2 * size * col + slack) // (3 * col))))
+    if plan.three_m:
+        return msize, size
+    if plan.budget is None:
+        return msize, o
+    room = 2 * size + 1 + max(0, plan.budget - plan.work) // col
+    nm = int(min(msize, max(1, room // 4)))
+    return nm, int(min(o, max(1, room - 2 * nm)))
 
 
 def working_set(plan, nocc, nvir):
@@ -110,7 +116,10 @@ def working_set(plan, nocc, nvir):
     the product L T take of the memory that the plan leaves.'''
     o, v = int(nocc), int(nvir)
     size = max(j1 - j0 for j0, j1 in plan.jblocks)
-    more = 0 if plan.three_m else max(0, 3 * _q_block(plan, o, v) - 2 * size - 1)
+    more = 0
+    if not plan.three_m and plan.budget is not None:
+        nm, ni = _q_blocks(plan, o, v)
+        more = max(0, 2 * nm + ni - 2 * size - 1)
     return plan.work + reserve_bytes(o, v) + more * 16 * o * v * v
 
 
@@ -244,8 +253,8 @@ class Lambda:
         kr = bool(self.paired and res.symmetric(l1, l2p))
         ho = o // 2
         size = max(j1 - j0 for j0, j1 in plan.jblocks)
-        msize = _q_block(plan, o, v)
-        qblocks = amps._blocks(o, msize)        # rows of lambda2 for the product with t2
+        msize, qsize = _q_blocks(plan, o, v)
+        qblocks = amps._blocks(o, qsize)        # rows of lambda2 for the product with t2
         if kr:
             mblocks = amps._blocks(ho, msize)
             jblocks, iblocks = amps._blocks(ho, max(1, size // 2)), amps._blocks(ho, size)
