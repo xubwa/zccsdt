@@ -423,12 +423,15 @@ class Residual:
         return np.sum(self.fov * t1) + K.dotu(self.oovv_p, taup)
 
     # -- the pp ladder in the AO basis --------------------------------------
-    def ladder(self, taup, R):
+    def ladder(self, taup, R, left=False):
         '''R[(i>j), (a>b)] += sum_ef (ae|bf) tau_ij^ef = 1/2 sum_ef <ab||ef> tau_ij^ef.
         With Kramers pairs: for one pair (i>j) of each two partners, the
-        other by time reversal.'''
+        other by time reversal.  ``left``: 1/2 sum_ef tau_ij^ef <ef||ab>, the
+        ladder of the Lambda equations (the integral is the complex
+        conjugate: the two sets of coefficients change places).'''
         v, nao = self.nvir, self.nao
-        n2, C2, C2c = 2 * nao, self.C2, self.C2c
+        n2 = 2 * nao
+        C2, C2c = (self.C2c, self.C2) if left else (self.C2, self.C2c)
         for p0, p1 in self.plan.lblocks:
             if self.kramers:                        # the pairs of the block: rows of tau
                 idx = self.kpairs[p0:p1]
@@ -472,15 +475,24 @@ class Residual:
         return R
 
     # -- the two passes over the ring layout -----------------------------------
-    def _pass_rows(self, s, W):
+    def _pass_rows(self, s, W, ring=0.5):
         '''Pass 1, over slabs of the first occupied index m: the rows (m e)
         of W(mbej) - the bare integral, its t1 terms, the <ma||ef> t1 term
         and the product <mn||ef> t2 - and everything else that reads
-        <mn||ef>, <mb||je> and <ma||ef>.'''
+        <mn||ef>, <mb||je> and <ma||ef>.
+
+        ``ring``: the factor of the product <mn||ef> t2 in W, 1/2 in the
+        amplitude equations; with 1 W is the element <mb|Hbar|ej> of the
+        similarity-transformed Hamiltonian, which the Lambda equations need
+        (zccsdt.zccsd.lam).  They also ask for s.KW[m, i, (j b)] = sum_e
+        t1[i,e] (<mb||ej> + ring sum_nf <mn||ef> t2[n,j,f,b]), and give no
+        residual (s.R is None).'''
         o, v = self.nocc, self.nvir
         n1, npo, npv = o * v, K.npair(o), K.npair(v)
         plan, V, E = self.plan, self.V, self.E
         t1, t1T, t1c, t2p, taup, R = s.t1, s.t1T, s.t1.conj(), s.t2p, s.taup, s.R
+        KW = getattr(s, 'KW', None)
+        trace = 0.5 / ring          # the partial traces are those of 1/2 V T
         single = len(plan.jblocks) == 1
         s.g = np.empty((o, v), dtype=np.complex128)         # sum_nf <mn||ef> t1[n,f]
         # Kt[m, i, (j b)] = sum_e t1[i,e] E[(m e), (j b)]
@@ -529,13 +541,15 @@ class Residual:
                     for m in range(m0, m1):
                         Om = O[m - m0]
                         prow, sgn = self.pair_rows[m]
-                        # sum_e t1[i,e] <ab||em> as conj(sum_e t1*[i,e] <me||ab>)
-                        Z = blas.gemm(t1c, Om)
-                        K.add_rows(R, prow, sgn, Z, conj=True)
-                        if self.kramers:            # the same term of the partner of m
-                            brow, bsgn = self.pair_rows[m + ho]
-                            K.add_rows_k(R, brow, -bsgn * self.so, Z, self.ko, self.kpv, self.sgv)
-                        del Z
+                        if R is not None:
+                            # sum_e t1[i,e] <ab||em> as conj(sum_e t1*[i,e] <me||ab>)
+                            Z = blas.gemm(t1c, Om)
+                            K.add_rows(R, prow, sgn, Z, conj=True)
+                            if self.kramers:        # the same term of the partner of m
+                                brow, bsgn = self.pair_rows[m + ho]
+                                K.add_rows_k(R, brow, -bsgn * self.so, Z, self.ko, self.kpv,
+                                             self.sgv)
+                            del Z
                         # sum_f <mb||ef> t1[j,f] into W(mbej), Fvv and the T1 equation
                         K.ovvv_t1(Om, t1, m, Wb[(m - m0) * v:(m - m0 + 1) * v], fv, x1)
                         s.fvv_a += fv
@@ -548,6 +562,9 @@ class Residual:
             with timer('amps.ring'):
                 # + 1/2 sum_nf <mn||ef> t2[n,j,f,b]: the o^3 v^3 term of W; its
                 # partial traces are the <mn||ef> t2 terms of Foo and Fvv
+                if KW is not None:      # t1 W before the product, for its part of KW
+                    for m in range(m0, m1):
+                        blas.gemm(t1, Wb[(m - m0) * v:(m - m0 + 1) * v], C=KW[m])
                 if m3:
                     with timer('ring.layout'):
                         Vb = K.split3(Vb)
@@ -564,22 +581,25 @@ class Residual:
                             trv = sum(W4[m - m0, :, m - j0] for m in both)
                         with timer('ring.gemm'):
                             if m3:
-                                _gemm3(Vb, T, 0.5, Wb, acc=True)
+                                _gemm3(Vb, T, ring, Wb, acc=True)
                             else:
-                                blas.gemm(Vb, T, C=Wb, alpha=0.5, beta=1.0)
+                                blas.gemm(Vb, T, C=Wb, alpha=ring, beta=1.0)
                         with timer('ring.layout'):
-                            s.foo_t[m0:m1, j0:j1] += np.einsum('meje->mj', W4) - tro
-                            s.fvv_t += sum(W4[m - m0, :, m - j0] for m in both) - trv
+                            s.foo_t[m0:m1, j0:j1] += trace * (np.einsum('meje->mj', W4) - tro)
+                            s.fvv_t += trace * (sum(W4[m - m0, :, m - j0] for m in both) - trv)
                     else:
                         with timer('ring.gemm'):
-                            X4 = _gemm3(Vb, T, 0.5) if m3 else blas.gemm(Vb, T, alpha=0.5)
+                            X4 = _gemm3(Vb, T, ring) if m3 else blas.gemm(Vb, T, alpha=ring)
                             X4 = X4.reshape(nm, v, nj, v)
                         with timer('ring.layout'):
-                            s.foo_t[m0:m1, j0:j1] += np.einsum('meje->mj', X4)
+                            s.foo_t[m0:m1, j0:j1] += trace * np.einsum('meje->mj', X4)
                             for m in both:
-                                s.fvv_t += X4[m - m0, :, m - j0]
+                                s.fvv_t += trace * X4[m - m0, :, m - j0]
                             W4 += X4
                             del X4
+                if KW is not None:      # sum_e t1[i,e] (<mb||ej> + the product)
+                    for m in range(m0, m1):
+                        KW[m] = s.Kt[m] + blas.gemm(t1, Wb[(m - m0) * v:(m - m0 + 1) * v]) - KW[m]
             if self.kramers:                # the rows of the partners of these m
                 with timer('amps.ring'), timer('ring.layout'):
                     K.kfill_ring(W, o, v, m0, m1, ho)
@@ -597,6 +617,8 @@ class Residual:
             with timer('amps.kramers'):
                 fill_barred(s.g)
                 fill_barred(s.Kt.reshape(o, o, o, v))
+                if KW is not None:
+                    fill_barred(KW.reshape(o, o, o, v))
                 fill_barred(s.Nq, pairs=(2,))
                 fill_barred(s.foo_t)
                 for x in (s.X1, s.r1, s.fvv_t, s.fvv_a):
@@ -691,6 +713,32 @@ class Residual:
         return symmetric(t1, t2p, tol)
 
     # -- one step -------------------------------------------------------------
+    def _imds_pairs(self, s):
+        '''s.taup, and (foo_x, Wp): sum_ne <mn||ie> t1[n,e] and W(mnij) on
+        packed pairs [(m>n), (i>j)] with the tau <mn||ef> term of the ladder,
+        i.e. <mn|Hbar|ij>.'''
+        o, v = self.nocc, self.nvir
+        io, jo = K.tril(o)
+        taup = s.taup = K.outer_pp(s.t1, s.t1, 0.5, K.copy(s.t2p))
+        # tmp[m, n, i, j] = sum_e <mn||ie> t1[j, e]
+        tmp = blas.gemm(self.ooov.reshape(o ** 3, v), s.t1T).reshape(o, o, o, o)
+        foo_x = np.einsum('mnin->mi', tmp)
+        tp = tmp[io, jo]
+        Wp = self.oooo_p + tp[:, io, jo] - tp[:, jo, io]
+        blas.gemm(self.oovv_p, taup.T, C=Wp, beta=1.0)
+        return foo_x, Wp
+
+    def _fock(self, s, foo_x):
+        '''(Fov, Ft, tF, Foo, Fvv) after pass 1: the one-particle
+        intermediates with their diagonals, Ft = Fov t1^T and tF = t1^T Fov.
+        Foo + Ft / 2 and Fvv - tF / 2 are the occupied and the virtual block
+        of the similarity-transformed Hamiltonian.'''
+        Fov = self.fov + s.g
+        Ft, tF = blas.gemm(Fov, s.t1.T), blas.gemm(s.t1T, Fov)          # o x o, v x v
+        Foo = self.foo + 0.5 * Ft + foo_x + s.foo_t
+        Fvv = self.fvv - 0.5 * tF - s.fvv_t.T - s.fvv_a
+        return Fov, Ft, tF, Foo, Fvv
+
     def update_packed(self, t1, t2p, level_shift=0.0):
         '''(t1new, t2pnew) from t1[i,a] and t2p[(i>j),(a>b)].  With Kramers
         pairs the amplitudes must obey their symmetry (symmetric()): those
@@ -712,15 +760,8 @@ class Residual:
                 self.kramers = True
 
         with timer('amps.imds'):
-            taup = s.taup = K.outer_pp(t1, t1, 0.5, K.copy(t2p))
-            # tmp[m, n, i, j] = sum_e <mn||ie> t1[j, e]
-            tmp = blas.gemm(self.ooov.reshape(o ** 3, v), t1T).reshape(o, o, o, o)
-            foo_x = np.einsum('mnin->mi', tmp)
-            # W(mnij) on packed pairs, with the tau <mn||ef> term of the ladder
-            tp = tmp[io, jo]
-            Wp = self.oooo_p + tp[:, io, jo] - tp[:, jo, io]
-            blas.gemm(self.oovv_p, taup.T, C=Wp, beta=1.0)
-            del tmp, tp
+            foo_x, Wp = self._imds_pairs(s)
+            taup = s.taup
             R = s.R = K.copy(self.oovv_p, conj=True)
 
         s.W = self._w_array()
@@ -731,10 +772,7 @@ class Residual:
         del s.Kt
 
         with timer('amps.t2'):
-            Fov = fov + s.g
-            Ft, tF = blas.gemm(Fov, t1.T), blas.gemm(t1T, Fov)          # o x o, v x v
-            Foo = self.foo + 0.5 * Ft + foo_x + s.foo_t
-            Fvv = self.fvv - 0.5 * tF - s.fvv_t.T - s.fvv_a
+            Fov, Ft, tF, Foo, Fvv = self._fock(s, foo_x)
             Foo[np.diag_indices(o)] -= eo
             Fvv[np.diag_indices(v)] -= ev
             F2o = Foo + 0.5 * Ft

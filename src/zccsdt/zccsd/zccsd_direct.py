@@ -462,6 +462,22 @@ class DirectZCCSD(_zccsd.ZCCSD):
         self._finalize()
         return self.e_corr, self.t1, self.t2
 
+    def solve_lambda(self, t1=None, t2=None, l1=None, l2=None, eris=None):
+        '''The Lambda equations for the amplitudes t1, t2 (default: those of
+        the last CCSD): self.l1[i,a] and self.l2[i,j,a,b] as in PySCF's
+        GCCSD, self.converged_lambda.  With zccsdt.zccsd.amps they are solved
+        in zccsdt.zccsd.lam, on the integrals and within the memory plan of
+        the CCSD; like t1 and t2 they refer to the spinors eris.mo_coeff.'''
+        if not self._fixed_layouts():
+            return _zccsd.ZCCSD.solve_lambda(self, t1, t2, l1, l2, eris)
+        from zccsdt.zccsd import lam
+        if eris is None:
+            eris = self.eris if self.eris is not None else self.ao2mo(self.mo_coeff)
+        self.converged_lambda, self.l1, self.l2 = lam.kernel(
+            self, eris, t1, t2, l1, l2, max_cycle=self.max_cycle, tol=self.conv_tol_normt,
+            verbose=self.verbose)
+        return self.l1, self.l2
+
     def ao2mo(self, mo_coeff=None):
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
