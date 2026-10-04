@@ -122,11 +122,13 @@ def test_socutils_routes_kept(x2c_h2o, monkeypatch, tmp_path):
             assert mycc.eris.residual is None and mycc.eris.ovvv is not None
 
 
-def test_amps_equal_socutils(x2c_h2o, monkeypatch):
+def test_amps_equal_socutils(x2c_h2o, monkeypatch, tmp_path):
     '''The amplitude equations on packed amplitudes (zccsdt.zccsd.amps)
     against update_amps as copied from socutils, for amplitudes with a large
-    T1: in one block, in blocks of columns and pairs, and with the numpy
-    equivalents of the kernels.'''
+    T1: in one block, in blocks of columns and pairs, with the AO operators
+    of the ladder kept, made from the AO integrals and read from a file, and
+    with the numpy equivalents of the kernels.'''
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
     from zccsdt.zccsd import kernels as K, zccsd_direct as zd
     new = DirectZCCSD(x2c_h2o, frozen=2)
     old = DirectZCCSD(x2c_h2o, frozen=2)
@@ -164,7 +166,6 @@ def test_amps_equal_socutils(x2c_h2o, monkeypatch):
     res.plan.mblocks = [(0, 2), (2, 3), (3, nocc)]
     res.plan.pblocks = [(0, 3), (3, npo)]
     res.plan.lblocks = [(0, 5), (5, 6), (6, npo)]
-    res.plan.krows = 7
     for res.plan.three_m in (False, True):
         t1b, t2b = res.update(t1, t2, shift)
         assert abs(t1b - t1o).max() < 1e-12 and abs(t2b - t2o).max() < 1e-12
@@ -172,6 +173,28 @@ def test_amps_equal_socutils(x2c_h2o, monkeypatch):
     t1b, t2b = res.update(t1, t2, shift)
     assert abs(t1b - t1o).max() < 1e-12 and abs(t2b - t2o).max() < 1e-12
     monkeypatch.setattr(K, 'USE_C', HAVE_C)
+    # the AO operators of the ladder: made from the AO integrals in every block
+    # of pairs (units of several shells, of one shell against a few), or read
+    # from a scratch file
+    from zccsdt.zccsd import aoladder
+    kept, floor = res.aolad, aoladder.unit_floor(new.mol)
+    assert kept.mode == 'memory' and res.plan.ladder_work == 0
+    assert kept.nblocks == 1 and kept.nbytes == aoladder.stored_bytes(new.mol)
+    assert aoladder.stored_bytes(new.mol, 4) < 0.75 * kept.nbytes
+    assert aoladder.blocks_that_fit(new.mol, kept.nbytes - 1) is None      # too few rows for parts
+    for mode, work, nb in (('direct', None, 1), ('direct', 10 * floor, 1), ('direct', floor, 1),
+                           ('memory', floor, 4), ('file', 2 * floor, 3)):
+        res.aolad = aoladder.AOLadder(new.mol, mode, work, nb)
+        assert mode == 'direct' or len(res.aolad.plus) == nb
+        for use_c in (HAVE_C, False):
+            monkeypatch.setattr(K, 'USE_C', use_c)
+            passes = res.aolad.passes
+            t1b, t2b = res.update(t1, t2, shift)
+            assert abs(t1b - t1o).max() < 1e-12 and abs(t2b - t2o).max() < 1e-12
+            assert res.aolad.passes == passes + len(res.plan.lblocks)
+        res.aolad.close()
+    monkeypatch.setattr(K, 'USE_C', HAVE_C)
+    res.aolad = kept
     # energy and first amplitudes on packed pairs
     io, jo = np.tril_indices(nocc, -1)
     t2p = t2[io, jo][:, b, c]
@@ -193,7 +216,8 @@ def test_amps_equal_socutils(x2c_h2o, monkeypatch):
 def test_amps_within_memory(x2c_h2o, monkeypatch, tmp_path):
     '''The amplitude equations with the least memory that works: the
     integrals in scratch files, W(mbej) mapped, one occupied orbital per slab
-    and block, the AO operators by rows; the same step and the same CCSD
+    and block, the AO operators of the ladder made from the AO integrals of
+    one shell against one shell at a time; the same step and the same CCSD
     energy as in memory; MemoryError below that.'''
     from zccsdt import memory
     from zccsdt.zccsd import amps, kernels as K
@@ -208,7 +232,8 @@ def test_amps_within_memory(x2c_h2o, monkeypatch, tmp_path):
     o, v, nao = e_ref.nocc, e_ref.fock.shape[0] - e_ref.nocc, mol.nao_nr()
     res = amps.Residual(e_ref, ref.max_memory)
     assert not res.plan.w_mapped and res.plan.diis_incore
-    assert res.plan.jblocks == res.plan.mblocks == [(0, o)] and res.plan.krows == 0
+    assert res.plan.jblocks == res.plan.mblocks == [(0, o)]
+    assert e_ref.aoladder.mode == 'memory' and res.plan.ladder_work == 0
     rng = np.random.default_rng(3)
     t1 = 0.05 * (rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v)))
     t2p = 0.02 * (rng.standard_normal((K.npair(o), K.npair(v)))
@@ -230,29 +255,47 @@ def test_amps_within_memory(x2c_h2o, monkeypatch, tmp_path):
             cc.verbose, cc.conv_tol, cc.conv_tol_normt, cc.max_memory = 0, 1e-11, 1e-8, low
             eris = cc.ao2mo()
             break
-        except MemoryError:                         # the AO operators need more
+        except MemoryError:
             low *= 1.2
-    mapped = [k for k, a in (('V', eris.oovv_r), ('E', eris.ovov_r), ('ovvv_p', eris.ovvv_p),
-                             ('W_same', eris.W_same), ('W_plus', eris.W_plus))
+    # the AO operators of the ladder: kept where they fit into the share of the
+    # memory for stored integrals (these are tiny), else made from the AO
+    # integrals in every iteration
+    assert eris.aoladder.mode == 'memory'
+    monkeypatch.setattr(ao2mo, 'STORE_SHARE', 1e-6)
+    eris = cc.ao2mo()
+    monkeypatch.undo()
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    mapped = [k for k, a in (('V', eris.oovv_r), ('E', eris.ovov_r), ('ovvv_p', eris.ovvv_p))
               if scratch_is_mapped(a)]
-    assert {'V', 'E', 'ovvv_p'} <= set(mapped)
-    assert eris.kramers
-    need = amps.plan_step(o, v, nao, None, mapped, kramers=True).need
-    assert need > amps.plan_step(o, v, nao, None, mapped).need
-    plan = amps.plan_step(o, v, nao, int(1.01 * need), mapped, kramers=True)
+    assert set(mapped) == {'V', 'E', 'ovvv_p'}
+    from zccsdt.zccsd import aoladder
+    lad = eris.aoladder
+    assert eris.kramers and lad.mode == 'direct' and lad.nbytes == 0
+    units = lad.unit_range()
+    assert units[0] == aoladder.unit_floor(mol) <= units[1]
+    need = amps.plan_step(o, v, nao, None, mapped, kramers=True, ladder_units=units).need
+    assert need > amps.plan_step(o, v, nao, None, mapped, ladder_units=units).need
+    assert need >= amps.plan_step(o, v, nao, None, mapped, kramers=True).need
+    plan = amps.plan_step(o, v, nao, int(1.01 * need), mapped, kramers=True, ladder_units=units)
     assert plan.w_mapped and not plan.diis_incore and plan.work <= 1.01 * need
-    assert not plan.three_m
+    assert not plan.three_m and units[0] <= plan.ladder_work <= units[1]
     assert len(plan.jblocks) == o // 2 and len(plan.mblocks) == o
     with pytest.raises(MemoryError, match='three packed T2'):
-        amps.plan_step(o, v, nao, int(0.9 * need), mapped, kramers=True)
+        amps.plan_step(o, v, nao, int(0.9 * need), mapped, kramers=True, ladder_units=units)
     low_res = amps.Residual(eris, plan=plan)
+    assert lad.work <= plan.ladder_work and len(lad.units) > 1
+    assert sum(u.rows(*c)[0] for u in lad.units for c in u.chunks) == nao * (nao - 1) // 2
     for _ in range(2):                              # the mapped W is used again
         t1n, t2n = low_res.update_packed(t1, t2p)
         assert abs(t1n - t1r).max() < 1e-12 and abs(t2n - t2r).max() < 1e-12
-    assert 'scratch file' in low_res.describe()
+    text = low_res.describe()
+    assert 'scratch file' in text and 'AO integrals of the ladder' in text
+    assert lad.passes > 2 and lad._buf is None      # once per block of pairs; nothing is kept
     low_res.close()
     # more memory: larger blocks, W in memory
-    mid = amps.plan_step(o, v, nao, int(1.5 * need), mapped, kramers=True)
+    mid = amps.plan_step(o, v, nao, int(1.5 * need), mapped, kramers=True, ladder_units=units)
     assert not mid.w_mapped and 1 < len(mid.jblocks) < o
     step = amps.Residual(eris, plan=mid)
     for step.kramers in (True, False):              # with and without the symmetry
@@ -265,6 +308,94 @@ def test_amps_within_memory(x2c_h2o, monkeypatch, tmp_path):
     assert cc.converged and abs(cc.e_corr - ref.e_corr) < 1e-9
     assert eris.residual.plan.w_mapped
     assert abs(cc.t2 - ref.t2).max() < 1e-7
+    # (T) drops the kept AO operators of the ladder; the next CCSD makes them again
+    assert e_ref.aoladder.nbytes > 0
+    e_t = ref.ccsd_t()
+    assert e_ref.aoladder.nbytes == 0 and abs(cc.ccsd_t() - e_t) < 1e-10
+    ref.kernel(eris=e_ref)
+    assert e_ref.aoladder.nbytes > 0 and abs(cc.e_corr - ref.e_corr) < 1e-9
+    cc.ao_ladder = 'disk'
+    with pytest.raises(ValueError, match='ao_ladder'):
+        cc.ao2mo()
+    # kept operators give way when the step does not fit next to them: a mode
+    # that was not asked for becomes 'direct', 'memory' that was asked for is
+    # an error that says so
+    floor = aoladder.unit_floor(mol)
+    need = amps.plan_step(o, v, nao, None, kramers=True,
+                          ladder_units=(floor, aoladder.unit_bytes(mol))).need
+    for asked in (None, 'memory'):
+        cc = DirectZCCSD(x2c_h2o, frozen=2)
+        cc.verbose, cc.max_memory, cc.ao_ladder = 0, 4000, asked
+        eris = cc.ao2mo()
+        lad = eris.aoladder
+        kept = lad.nbytes
+        assert lad.mode == 'memory' and lad.auto == (asked is None) and kept > 0
+        monkeypatch.setattr(memory, 'resident', lambda: lad.nbytes)
+        tight = (need + kept // 4 + 1000) / 1e6     # MB: the step, not the step and the operators
+        assert tight * 1e6 - kept < amps.plan_step(o, v, nao, None, kramers=True).need
+        if asked:
+            with pytest.raises(MemoryError, match="ao_ladder = 'direct'"):
+                amps.Residual(eris, tight)
+            assert lad.mode == 'memory' and lad.nbytes == kept
+            continue
+        step = amps.Residual(eris, tight)
+        assert lad.mode == 'direct' and lad.nbytes == 0 and step.plan.ladder_work >= floor
+        assert 'did not fit next to the operators' in step.describe()
+        t1n, t2n = step.update_packed(t1, t2p)
+        assert abs(t1n - t1r).max() < 1e-12 and abs(t2n - t2r).max() < 1e-12
+        step.close()
+
+
+def test_amps_peak_within_plan(monkeypatch):
+    '''The arrays that one step allocates stay within the working set of
+    its memory plan (tracemalloc follows numpy's allocations): slabs and
+    blocks of several sizes, ZGEMM and three real GEMMs, with and without
+    Kramers pairs, the AO operators of the ladder kept and integral-direct.
+    A copy of a block that the plan does not know shows here.'''
+    import tracemalloc
+    from zccsdt import memory
+    from zccsdt.zccsd import amps, kernels as K, kramers
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
+    mf = x2c.UHF(mol).run(conv_tol=1e-10)
+    rng = np.random.default_rng(1)
+    blocked = 0
+    for mode, kr in (('memory', None), ('direct', None), ('memory', False)):
+        cc = DirectZCCSD(mf)
+        cc.verbose, cc.kramers, cc.ao_ladder, cc.max_memory = 0, kr, mode, 100000
+        eris = cc.ao2mo()
+        o, v, nao = eris.nocc, eris.fock.shape[0] - eris.nocc, mol.nao_nr()
+        npo, npv = K.npair(o), K.npair(v)
+        t1 = 0.05 * (rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v)))
+        t2p = 0.02 * (rng.standard_normal((npo, npv)) + 1j * rng.standard_normal((npo, npv)))
+        if eris.kramers:
+            t1 = 0.5 * (t1 + kramers.image(t1))
+            t2p = np.ascontiguousarray(0.5 * (t2p + kramers.image(t2p, pairs=(0, 1))))
+        units = eris.aoladder.unit_range()
+        need = amps.plan_step(o, v, nao, None, (), kramers=eris.kramers, ladder_units=units).need
+        ref = None
+        for factor in (1.0, 1.3, 2.0, 4.0):
+            for m3 in (False, True):
+                try:
+                    plan = amps.plan_step(o, v, nao, int(factor * need), (), diis_incore=False,
+                                          three_m=m3, kramers=eris.kramers, ladder_units=units)
+                except MemoryError:                 # the real parts need more than the floor
+                    assert m3 and factor == 1.0
+                    continue
+                res = amps.Residual(eris, plan=plan)
+                res.update_packed(t1, t2p)          # what is made once is there
+                tracemalloc.start()
+                base = tracemalloc.get_traced_memory()[0]
+                new = res.update_packed(t1, t2p)
+                peak = tracemalloc.get_traced_memory()[1] - base
+                tracemalloc.stop()
+                res.close()
+                assert peak <= plan.work, (mode, kr, factor, m3, peak, plan.work)
+                blocked += len(plan.jblocks) > 1
+                if ref is None:
+                    ref = new
+                assert abs(new[0] - ref[0]).max() < 1e-12 and abs(new[1] - ref[1]).max() < 1e-12
+    assert blocked > 6
 
 
 def test_kernels_equal_numpy():
@@ -544,11 +675,13 @@ def test_kramers_pairs():
     # amplitudes without the symmetry: all triples, unless told otherwise
     assert kramers.symmetric(paired.t1, paired.t2) and kramers.symmetric(paired.t1, K.pack_t2(
         np.ascontiguousarray(paired.t2)))
-    t2a = paired.t2 + 1e-3 * rng.standard_normal(paired.t2.shape)
+    t2a = paired.t2 + 3e-2 * rng.standard_normal(paired.t2.shape)
     assert not kramers.symmetric(paired.t1, t2a)
     full = triples.kernel(paired, paired.eris, paired.t1, t2a, 0, kramers=False)
-    assert abs(triples.kernel(paired, paired.eris, paired.t1, t2a, 0) - full) < 1e-12
-    assert abs(triples.kernel(paired, paired.eris, paired.t1, t2a, 0, kramers=True) - full) > 1e-7
+    assert abs(triples.kernel(paired, paired.eris, paired.t1, t2a, 0) - full) < 1e-12 * abs(full)
+    # (the pairs are rotated within their levels as the SCF left them, so the
+    # error of the half sum varies from run to run: only its presence is tested)
+    assert abs(triples.kernel(paired, paired.eris, paired.t1, t2a, 0, kramers=True) - full) > 1e-8
     # kramers = True insists on the symmetry
     bad = DirectZCCSD(mfo)
     bad.kramers, bad.verbose = True, 0

@@ -1233,7 +1233,8 @@ differently:
 - the AO ladder over the pairs i > j, the alpha-beta block of the
   back-transformed tau split into its symmetric and antisymmetric parts:
   two packed real operators of 2 nao^4 bytes each instead of the
-  nao^2 x nao^2 matrix, and half the multiply-adds;
+  nao^2 x nao^2 matrix, and half the multiply-adds (kept, or made from the
+  AO integrals in every iteration: the section on the AO operators below);
 - the integrals arrive in the layouts of the terms (`zccsd/ao2mo.py`:
   <mn||ef> and <mb||je> as [m, e, n, f], <mn||ef> on packed pairs).
 
@@ -1536,6 +1537,122 @@ with a malloc that keeps freed memory (`MALLOC_MMAP_MAX_=0`,
 does not keep its work arrays between steps, which would have to come out of
 the memory plan: these 3-6% are left.
 
+### The AO operators of the ladder: kept or integral-direct (`zccsd/aoladder.py`)
+
+The pp ladder contracts the AO amplitudes of every pair (i>j) with two real
+matrices on pairs of AO functions, the antisymmetrized integrals W_same and
+the symmetrized W_plus: 2 N^4 bytes each as square matrices for N scalar AO
+functions (0.7 GB together at N = 115, 19 GB at N = 264, 250 GB at
+N = 500). They were made from all N^4 integrals and kept in memory or, when
+`max_memory` did not allow that, in a scratch file that was read by rows in
+every iteration, once for every block of pairs. Two measurements decided
+what to do when they do not fit:
+
+- reading them from the node-local NVMe disk (a 63.7 GB operator, N = 423,
+  30 GB of memory, 8 cores; job 31573334, c051): 1.42 GB/s as the code did
+  it (GEMM on mapped rows), 1.76 GB/s with `MADV_SEQUENTIAL`, 1.86 GB/s
+  with `read()`; written at 0.97 GB/s;
+- computing them with libcint in blocks of the first index (job 31575083,
+  c105, 8 cores): 1.0e8 integrals/s for C6H6/cc-pVDZ, 2.6e8 for
+  C6H6/cc-pVTZ and H2O/unc-cc-pV5Z, 3.1e8 for H2O/cc-pVQZ, 4.5e8 and 5.6e8
+  for HI in uncontracted ANO-RCC and cc-pVTZ-DK.
+
+Both operators are symmetric matrices, so the triangles are enough: with
+T = W[U, :c1] for rows U of a batch of shells (the rows c0 <= r < c1),
+G[:, :c1] += A[:, U] T and G[:, U] += A[:, :c0] T[:, :c0]^T make A W once.
+The rows of a batch need only the integrals (f x|t y) with f in the batch
+and x, t, y up to its end, and libcint computes them with the symmetry in
+(t, y): N^4/8 integrals for a pass over both operators (0.13-0.14 N^4 in
+the runs below, for batches of several functions) instead of N^4. A kernel
+turns a block of them into rows of both operators (`zc_ladder_rows`: with
+M[x, y] = (f x|t y), M - M^T on x > y and M + M^T on x >= y). At the rates
+above that is less time than reading even the triangles from the disk, it
+scales with the cores, and nothing of size N^4 is stored. So
+(`DirectZCCSD.ao_ladder`; `None` chooses between the first two):
+
+- `'memory'`, if they fit into the share of `max_memory` for stored
+  integrals (a third): the rows are kept in parts of about equal numbers of
+  rows. One part is the square matrices, one GEMM each as before; more
+  parts tend to the triangles and half the memory. The fewest parts that
+  fit are used (1, 2, 4, ... up to 32). If the CCSD step then does not fit
+  next to them, they are dropped and the ladder is direct (with
+  `ao_ladder = 'memory'` that is a `MemoryError`).
+- `'direct'`, if not even the triangles fit: the integrals are computed in
+  every iteration, a batch of shells at a time, turned into rows about a
+  thousand at a time (fewer for a small basis) and multiplied. A block of
+  pairs of the ladder is then as large as the memory allows next to a unit
+  of integrals, since the integrals are gone through once per block. A
+  shell that is too much for the memory at once comes with ranges of the
+  third index; below one shell against one shell, `MemoryError`.
+- `'file'`: the triangles in a scratch file, on request.
+
+All modes give the same step to 1e-12 per element (`tests/test_zccsd.py`,
+also with the units at their smallest and with the numpy kernels).
+
+Seconds, 8 cores, `max_memory` 24000 MB, one job (31577428, c282), the code
+before last in the same job:
+
+| | H2O/cc-pVQZ | C6H6/cc-pVDZ | H2O/cc-pV5Z | C6H6/cc-pVTZ |
+|---|---|---|---|---|
+| N; occupied, virtual spinors | 115; 10, 220 | 114; 42, 186 | 201; 10, 392 | 264; 42, 486 |
+| the two square matrices | 0.70 GB | 0.68 GB | 6.53 GB | 19.43 GB |
+| **before**: the operators | in memory | in memory | W_same in memory, W_plus in a file | in a file |
+| integral step, of which the operators | 5.1, 0.94 | 10.0, 1.97 | 51.7, 11.60 | 378.0, 38.16 |
+| iteration, of which the ladder | 0.365, 0.077 | 8.320, 0.968 | 2.117, 0.615 | 213.4, 45.2 |
+| **now**, as `None` chooses | memory, 1 part | memory, 1 part | memory, 2 parts (4.91 GB) | direct |
+| integral step, of which the operators | 4.6, 0.41 | 8.6, 0.55 | 43.7, 3.35 | 335.2, - |
+| iteration, of which the ladder | 0.380, 0.080 | 8.390, 1.017 | 1.921, 0.589 | 185.7, 23.8 |
+| **`'direct'`**: iteration, of which the ladder | 0.530, 0.236 | 8.823, 1.451 | 3.593, 2.260 | (the row above) |
+| integrals per iteration, in units | 2.46e7 in 16 | 2.30e7 in 23 | 2.22e8 in 22 | 6.33e8 in 44 |
+| of the ladder: libcint / rows / GEMMs | 0.110 / 0.028 / 0.055 | 0.276 / 0.030 / 0.629 | 1.370 / 0.239 / 0.478 | 2.50 / 0.71 / 15.8 |
+| **more parts in memory**: iteration | 6 parts (0.41 GB): 0.382 | 6 parts (0.39 GB): 8.424 | 17 parts (3.48 GB): 2.004 | |
+| **`'file'`**: iteration, of which the ladder | | 6 parts: 8.446, 1.042 | | 32 parts (10.04 GB): 188.2, 25.3 |
+
+- **Benzene/cc-pVTZ**, where 19.4 GB of operators do not fit: 185.7 s per
+  iteration instead of 213.4 s, and an integral step of 335 s instead of
+  378 s. Before, the ladder read the 19.4 GB once for each of its four
+  blocks of pairs (40.3 s in the products on mapped rows). Now one block
+  holds all pairs and the integrals are gone through once: 2.5 s of libcint
+  for 6.33e8 integrals (2.5e8 per second, the rate measured above), 0.7 s
+  for the rows and 15.8 s in the products of 51 chunks of rows. With the
+  triangles in a file instead (`'file'`: 10.04 GB in 32 parts, written in
+  12 s) the products on mapped rows take 20.4 s where libcint, rows and
+  products of the direct ladder take 19.0 s, and the iteration 188.2 s:
+  computing is faster than reading, as the two rates said.
+- **When they fit, keeping them is faster**, most of all for few electrons
+  in a large basis: for H2O/cc-pV5Z the integrals of every iteration are
+  1.4 s of libcint next to an iteration of 1.9 s. That is why `None` keeps
+  them whenever it can, in parts if that is what fits: two parts (4.91 GB
+  instead of 6.53 GB) keep both operators of H2O/cc-pV5Z in memory where
+  one of the squares went to a file. For benzene/cc-pVDZ the direct ladder
+  costs 0.43 s of 8.4 s (libcint 0.28 s; the products in 24 thin chunks of
+  rows 0.63 s instead of 0.51 s).
+- **Making the kept operators** takes 0.41, 0.55 and 3.35 s where the
+  squares from all N^4 integrals took 0.94, 1.97 and 11.60 s.
+- The rows in more parts than needed (the triangles, half the memory) cost
+  0.4-4% of an iteration. In this job a single part still went through
+  the rule for the parts, a GEMM with beta = 1 into a zeroed array: 0.380
+  and 8.390 s per iteration against 0.365 and 8.320 s before, 0.05 s of
+  the difference for benzene in the ladder. One part is now multiplied as
+  it was before, one GEMM per square matrix into a new array (not measured
+  again yet).
+
+**The plan of the step, checked against the allocations.** The three
+benzene/cc-pVTZ runs above peaked at 26.8 GB of anonymous memory under
+`max_memory` 24000 MB, the code before as well: the step with Kramers pairs
+had two arrays that were not in its plan, a copy of the two column blocks
+of W(mbej) for the ZGEMM of pass 2 (a range of j and their partners) and
+the rows of tau and of the result that the ladder gathers for one pair of
+each two partners. The copy is gone
+(one GEMM per column block, into the two halves of the columns of the
+result: `blas.gemm` writes into a block of columns of a row-major array),
+the arrays of the ladder are counted, and
+`test_amps_peak_within_plan` holds the peak of the allocations of a step
+(tracemalloc) against the working set of the plan for a budget that forces
+slabs and blocks; it fails for the code before (59.5 MB against 54.2 MB
+planned). At the size of benzene/cc-pVTZ the corrected plan has not been
+run yet.
+
 ### CCSD(T) against CFOUR: where it stands
 
 One job (31554690, c081, 8 cores), CFOUR's CCSD(T) and then zccsdt's on
@@ -1566,7 +1683,11 @@ where the plan says so) and `max_memory` 24000 MB:
   two AO operators of the ladder, 3.3 of the 5.7 s for H2O/cc-pVQZ;
   `xx2cvtran` reads AO integrals made before. The transformation itself
   (ket, bra, sort: 2.5 s for H2O/cc-pVQZ here) is that of the section on the
-  integrals, a little faster than CFOUR's (2.6 s).
+  integrals, a little faster than CFOUR's (2.6 s). Since these runs the AO
+  operators come from an eighth of the integrals (the section above): on
+  one node the integral step of H2O/cc-pVQZ and benzene/cc-pVDZ takes 4.6 s
+  and 8.6 s where the code of this table took 5.1 s and 10.0 s (job
+  31577428).
 
 **A whole calculation, to convergence** (`bench/run_zccsd.py`; job 31572991,
 c418, 8 cores, CFOUR first; MKL 2026.1). CFOUR with `CC_CONV=7` (the largest
@@ -1670,6 +1791,10 @@ What is not done:
 - the integral transformation does not use Kramers pairs (the CCSD step
   does not read the rows of <mn||ef>, <mb||je> and <ma||ef> with a barred
   first index; (T) reads all of <ma||ef>);
+- the integral-direct ladder computes all N^4/8 integrals of a pass,
+  without screening, and a unit is at least one shell against one shell
+  (16 s^2 N^2 bytes for a shell of s functions: a generally contracted
+  shell is not split);
 - the page faults of the work arrays of a CCSD step (3-6%, above);
 - for a few occupied spinors the kernel of (T) is a fifth to a quarter of
   (T): its pieces of the x arrays are short (o(o-1)/2 elements) and come

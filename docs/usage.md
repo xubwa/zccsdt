@@ -177,6 +177,16 @@ PySCF's settings apply (`conv_tol`, `conv_tol_normt`, `max_cycle`,
 - `three_m` (default `None`): three real GEMMs instead of a ZGEMM for the
   large complex products where that pays and the memory is there; `False`:
   ZGEMM.
+- `ao_ladder` (default `None`): the two AO operators of the pp ladder, 2 N^4
+  bytes each for N scalar AO functions as square matrices and N^4 as
+  triangles (0.7 GB and 0.35 GB together at N = 115, 250 and 125 GB at
+  N = 500). `None`: kept in memory if they fit into the share of
+  `max_memory` for stored integrals and the CCSD step fits next to them,
+  as squares or in thinner parts of their rows; else `'direct'`: made from
+  the AO integrals in every iteration, about N^4/8 integrals for every
+  block of pairs (integral-direct; nothing of size N^4 is stored).
+  `'memory'` and `'direct'` force one or the other; `'file'` keeps the
+  triangles in a scratch file.
 - `socutils_amps = True`, `ovvv_direct = True`, `ladder = 'chol'`: the
   routes copied from socutils (einsums on full arrays, PySCF's driver).
 

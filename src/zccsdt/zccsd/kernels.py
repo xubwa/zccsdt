@@ -42,6 +42,7 @@ _SIGNATURES = {
     'zc_ovvv_t1': [_P, _P, _I, _I, _I, _P, _P, _P],
     'zc_ladder_pack': [_P, _I, _I, _I, _I, _P, _P],
     'zc_ladder_unpack': [_P, _P, _I, _I, _I, _I, _P],
+    'zc_ladder_rows': [_P, ctypes.c_int, _I, _I, _I, _I, _I, _P, _I, _P, _I],
 }
 
 
@@ -384,6 +385,52 @@ def ladder_unpack(GA, GS, n, nao, order='xpy'):
     ba[:] = -ab.transpose(0, 2, 1)
     G[:] = g if order == 'pxy' else g.transpose(1, 0, 2)
     return G
+
+
+def ladder_row_counts(nf, f0, nt, t0):
+    '''(rows of W_same, rows of W_plus) that a block of first indices f0 ..
+    f0 + nf - 1 and third indices t0 .. t0 + nt - 1 holds: the pairs with
+    third < first, third <= first.'''
+    f = np.arange(f0, f0 + nf)
+    return (int(np.clip(f - t0, 0, nt).sum()), int(np.clip(f + 1 - t0, 0, nt).sum()))
+
+
+def ladder_rows(E, f0, t0, same, plus):
+    '''Rows of the AO operators of the ladder from the AO integrals
+    E[f, x, t, y] = (f0 + f, x | t0 + t, y), x and y over the first m AO
+    functions: with M[x, y] = E[f, x, t, y],
+
+        same: M[x, y] - M[y, x] over x > y     for the pairs (f0 + f > t0 + t)
+        plus: M[x, y] + M[y, x] over x >= y    for the pairs (f0 + f >= t0 + t)
+
+    in the first m (m - 1) / 2 and m (m + 1) / 2 elements of the rows of
+    ``same`` and ``plus`` (row-major arrays or blocks of columns), the pairs
+    in the order (f, t).  A three-index E is E[f, x, (t >= y)], the integrals
+    with their symmetry in the last two indices for all t < m (t0 = 0).
+    Returns the numbers of rows written.'''
+    packed = E.ndim == 3
+    nf, m = E.shape[:2]
+    nt = m if packed else E.shape[2]
+    assert not packed or (t0 == 0 and E.shape[2] == m * (m + 1) // 2)
+    ns, npl = ladder_row_counts(nf, f0, nt, t0)
+    assert same.shape[0] >= ns and plus.shape[0] >= npl
+    assert same.shape[1] >= m * (m - 1) // 2 and plus.shape[1] >= m * (m + 1) // 2
+    if USE_C:
+        assert plus.strides[1] == 8 and (not ns or same.strides[1] == 8)
+        _lib.zc_ladder_rows(_c(E, np.float64), int(packed), nf, f0, nt, t0, m,
+                            same.ctypes.data, same.strides[0] // 8 if ns else 0,
+                            plus.ctypes.data, plus.strides[0] // 8)
+        return ns, npl
+    (pi, pj), (si, sj) = tril(m), tril(m, 0)
+    if packed:
+        idx = np.empty((m, m), dtype=np.int64)
+        idx[si, sj] = idx[sj, si] = np.arange(si.size)
+        E = E[:, :, idx]                                        # [f, x, t, y]
+    M = E.transpose(0, 2, 1, 3)                                 # [f, t, x, y]
+    f, t = np.arange(f0, f0 + nf)[:, None], np.arange(t0, t0 + nt)[None, :]
+    same[:ns, :pi.size] = (M[:, :, pi, pj] - M[:, :, pj, pi])[t < f]
+    plus[:npl, :si.size] = (M[:, :, si, sj] + M[:, :, sj, si])[t <= f]
+    return ns, npl
 
 
 # --------------------------------------------------------------- Kramers pairs

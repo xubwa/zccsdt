@@ -513,6 +513,76 @@ void zc_ovvv_t1(const zc *Om, const zc *t1, int64_t nv, int64_t no, int64_t m,
 
 /* ------------------------------------------------------------------ AO ladder */
 
+/* Rows of the two AO operators of the ladder from a block of AO integrals
+ *
+ *   E[f, x, t, y] = (f0 + f, x | t0 + t, y),   f < nf, t < nt, x and y < m
+ *
+ * (m covers the first and the third index: f0 + nf <= m, t0 + nt <= m).  With
+ * M[x, y] = E[f, x, t, y] for one pair of first and third index,
+ *
+ *   same: M[x, y] - M[y, x] over x > y    the row of the pair (f0 + f > t0 + t)
+ *   plus: M[x, y] + M[y, x] over x >= y   the row of the pair (f0 + f >= t0 + t)
+ *
+ * the antisymmetrized and the symmetrized integral on the pairs (x, y) in
+ * numpy.tril_indices order: m (m - 1) / 2 and m (m + 1) / 2 elements, the
+ * first elements of rows of lds and ldp elements.  The rows of the pairs
+ * that exist follow one another in the order (f, t).
+ *
+ * packed: the third index runs over all m functions (t0 = 0, nt = m) and the
+ * integrals come with their symmetry in the last two indices,
+ * E[f, x, (t >= y)] with m (m + 1) / 2 elements for every (f, x). */
+void zc_ladder_rows(const double *E, int packed, int64_t nf, int64_t f0, int64_t nt,
+                    int64_t t0, int64_t m, double *same, int64_t lds, double *plus,
+                    int64_t ldp)
+{
+    const int64_t mm = m * (m + 1) / 2;
+    int64_t *offs = malloc(sizeof(int64_t) * 2 * (nf + 1));
+    int64_t *offp = offs + nf + 1;
+    offs[0] = offp[0] = 0;
+    for (int64_t f = 0; f < nf; f++) {
+        int64_t ns = f0 + f - t0, np = f0 + f + 1 - t0;         /* t0 + t < f0 + f; <= */
+        ns = ns < 0 ? 0 : (ns > nt ? nt : ns);
+        np = np < 0 ? 0 : (np > nt ? nt : np);
+        offs[f + 1] = offs[f] + ns;
+        offp[f + 1] = offp[f] + np;
+    }
+    #pragma omp parallel
+    {
+        double *M = malloc(sizeof(double) * m * m);
+        #pragma omp for schedule(dynamic, 4)
+        for (int64_t u = 0; u < nf * nt; u++) {
+            const int64_t f = u / nt, t = u % nt;
+            if (t >= offp[f + 1] - offp[f])
+                continue;                                       /* t0 + t > f0 + f */
+            if (packed)
+                for (int64_t x = 0; x < m; x++) {
+                    const double *e = E + (f * m + x) * mm;
+                    double *mx = M + x * m;
+                    memcpy(mx, e + t * (t + 1) / 2, sizeof(double) * (t + 1));
+                    for (int64_t y = t + 1; y < m; y++)
+                        mx[y] = e[y * (y + 1) / 2 + t];
+                }
+            else
+                for (int64_t x = 0; x < m; x++)
+                    memcpy(M + x * m, E + ((f * m + x) * nt + t) * m, sizeof(double) * m);
+            double *p = plus + (offp[f] + t) * ldp;
+            double *a = t < offs[f + 1] - offs[f] ? same + (offs[f] + t) * lds : NULL;
+            int64_t q = 0, r = 0;
+            for (int64_t x = 0; x < m; x++) {
+                const double *mx = M + x * m;
+                if (a)
+                    for (int64_t y = 0; y < x; y++)
+                        a[q++] = mx[y] - M[y * m + x];
+                for (int64_t y = 0; y < x; y++)
+                    p[r++] = mx[y] + M[y * m + x];
+                p[r++] = 2.0 * mx[x];
+            }
+        }
+        free(M);
+    }
+    free(offs);
+}
+
 /* The back-transformed amplitudes X[p] of np pairs, matrices over (spin, AO)
  * with n2 = 2 nao functions, as the real rows the AO operators act on.  With
  * aa, bb, ab the spin blocks of X[p]:

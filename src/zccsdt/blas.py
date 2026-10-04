@@ -82,7 +82,8 @@ def _ld(a):
 
 def gemm(A, B, C=None, alpha=1.0, beta=0.0):
     '''C = alpha * A @ B + beta * C in place.  A and B may be C- or
-    F-contiguous 2-D views (transposes are free); C must be C-contiguous.'''
+    F-contiguous 2-D views or submatrices of such (transposes are free); C
+    must be C-contiguous or a block of columns of a C-contiguous array.'''
     dtype = np.result_type(A, B) if C is None else C.dtype
     if A.dtype != dtype or _ld(A) is None:
         A = np.ascontiguousarray(A, dtype=dtype)
@@ -91,9 +92,11 @@ def gemm(A, B, C=None, alpha=1.0, beta=0.0):
     if C is None:
         C = np.empty((A.shape[0], B.shape[1]), dtype=dtype)
         beta = 0.0
-    # C must be the caller's own C-contiguous buffer: a reshape of a
-    # non-contiguous array would be a silent copy and the result lost
-    assert C.flags.c_contiguous and C.shape == (A.shape[0], B.shape[1])
+    # C must be the caller's own buffer, row-major (C-contiguous or a block
+    # of the columns of such an array): a reshape of anything else would be
+    # a silent copy and the result lost
+    ldc = (0, C.shape[1]) if C.flags.c_contiguous else _ld(C)
+    assert ldc is not None and ldc[0] == 0 and C.shape == (A.shape[0], B.shape[1])
     m, k = A.shape
     n = B.shape[1]
     if k == 0 or m == 0 or n == 0:
@@ -109,7 +112,7 @@ def gemm(A, B, C=None, alpha=1.0, beta=0.0):
         i = ctypes.c_int64
         getattr(lib, 'zc_gemm_' + _SFX[np.dtype(dtype)])(
             ctypes.c_int(ta), ctypes.c_int(tb), i(m), i(n), i(k), p(al), p(A),
-            i(lda), p(B), i(ldb), p(be), p(C), i(n))
+            i(lda), p(B), i(ldb), p(be), p(C), i(ldc[1]))
         return C
     A = np.ascontiguousarray(A)
     B = np.ascontiguousarray(B)

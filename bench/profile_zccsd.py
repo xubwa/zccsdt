@@ -27,6 +27,10 @@ environment: ZC_MAXMEM: max_memory of the CC object in MB (default 24000): the
              ZC_KRAMERS: 0 or 1: DirectZCCSD.kramers (default: Kramers pairs if
              the reference is time-reversal symmetric); ZC_T_FULL=1: with
              Kramers pairs, (T) on all triples as well;
+             ZC_AO_LADDER: DirectZCCSD.ao_ladder (memory | direct | file;
+             default: memory if the AO operators of the ladder fit);
+             ZC_LADDER_PARTS: parts of the rows of the kept operators (default:
+             the fewest that fit, aoladder.blocks_that_fit);
              ZC_T_BATCH_GB: triples.BATCH_BYTES in GB;
              ZC_T_BUDGET: seconds for each (T) loop; when they are used up the
              loop is stopped and its time extrapolated from the triples done;
@@ -127,6 +131,11 @@ def main():
             mycc.three_m = bool(int(os.environ['ZC_THREE_M']))
         if 'ZC_KRAMERS' in os.environ:          # 0: the spinors of the SCF as they are
             mycc.kramers = bool(int(os.environ['ZC_KRAMERS']))
+        if os.environ.get('ZC_AO_LADDER'):        # memory | direct | file
+            mycc.ao_ladder = os.environ['ZC_AO_LADDER']
+        if 'ZC_LADDER_PARTS' in os.environ:     # parts of the kept rows instead of what fits
+            from zccsdt.zccsd import aoladder
+            aoladder.blocks_that_fit = lambda mol, room: int(os.environ['ZC_LADDER_PARTS'])
     else:
         for name in ('cc_Fvv', 'cc_Wovvo', 'update_t2_vvvv_sym', '_make_vvvv_tril'):
             wrap(imd, name)

@@ -21,6 +21,8 @@ says what was changed):
   DirectZCCSD.socutils_amps).
 - kernels: the OpenMP kernels of amps (csrc/zccsd_kernels.c, built into
   lib/libzc_zccsd.so) with their numpy equivalents.
+- aoladder: the two AO operators of the ladder of amps, kept as triangles
+  or made from the AO integrals in every iteration (integral-direct).
 - ao2mo: the integrals of both classes for a two-component reference on
   nrr_fast, within max_memory: slabs of the first MO index that are
   antisymmetrized into their blocks at once, the blocks that do not fit

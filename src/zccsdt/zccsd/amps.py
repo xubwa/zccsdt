@@ -33,8 +33,12 @@ term is evaluated differs:
   symmetric and antisymmetric parts in the two AO indices: the antisymmetric
   part joins alpha-alpha and beta-beta on the packed antisymmetrized
   integrals (mu si|nu rho) - (mu rho|nu si), the symmetric part takes the
-  packed symmetrized integrals.  Two operators of 2 nao^4 bytes replace the
-  nao^2 x nao^2 matrix, and the real GEMMs do o^2 nao^4 multiply-adds.
+  packed symmetrized integrals.  Two symmetric real operators replace the
+  nao^2 x nao^2 matrix, and the real GEMMs do o^2 nao^4 multiply-adds.  The
+  operators (zccsdt.zccsd.aoladder) are kept, as square matrices of 2 nao^4
+  bytes each or in parts of their rows down to the triangles, or made from
+  the AO integrals in every iteration when they do not fit (integral-direct:
+  about nao^4 / 8 integrals for every block of pairs).
 
 Kramers pairs.  For spinors in time-reversal pairs, ordered [unbarred,
 barred] among the occupied and among the virtual ones (zccsdt.zccsd.kramers;
@@ -52,7 +56,9 @@ memory only if the smallest blocks still fit next to it (else it is a mapped
 array of a scratch file, written by rows and read by columns), and takes the
 integrals that zccsdt.zccsd.ao2mo has put into scratch files by rows.
 Smaller blocks mean that rows of t2 are generated more often; MemoryError
-below the working set of one occupied index.
+below the working set of one occupied index.  With an integral-direct ladder
+a block of pairs is as large as the memory allows next to a unit of AO
+integrals: the integrals are gone through once per block.
 
 kernel() is the CCSD iteration on these amplitudes: the scheme of PySCF's
 driver (Jacobi step, damping, DIIS on the vector [t1, packed t2], the same
@@ -106,7 +112,7 @@ class Plan:
     jblocks: list       # blocks of the occupied index of the columns of the ring layout
     pblocks: list       # blocks of pairs of the terms on the virtual indices
     lblocks: list       # blocks of pairs of the ladder
-    krows: int          # rows of an AO operator of the ladder at a time (0: all)
+    ladder_work: int    # bytes of a unit of AO integrals of the ladder (0: operators in memory)
     w_mapped: bool      # W(mbej) is a mapped array of a scratch file
     three_m: bool       # the o^3 v^3 products by three real GEMMs each
     diis_incore: bool   # the DIIS vectors are in memory
@@ -116,18 +122,22 @@ class Plan:
 
 
 def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore=None,
-              three_m=None, kramers=False):
+              three_m=None, kramers=False, ladder_units=None):
     '''The Plan of one step within ``budget`` bytes (None: unlimited).
     ``mapped``: the integrals that are mapped arrays, of 'V' (<mn||ef>), 'E'
-    (<mb||je>), 'ovvv_p', 'W_same', 'W_plus'; their rows are read through the
-    mapping and count as memory while they are used.  ``diis_incore``: keep
-    the DIIS vectors in memory (None: if they take no more than a third of
-    what is left).  ``three_m``: three real GEMMs for a complex product
-    (None: if o v >= THREE_M_MIN and the blocks of columns that fit with
-    their parts cover a quarter of the occupied space).  ``kramers``: the
-    step uses Kramers pairs (a block of columns then holds an occupied
-    spinor and its partner: two at least).  MemoryError if the budget is
-    below Plan.need.'''
+    (<mb||je>), 'ovvv_p'; their rows are read through the mapping and count
+    as memory while they are used.  ``ladder_units``: None if the AO
+    operators of the ladder are in memory, else (least, most) bytes of a unit
+    of their AO integrals (aoladder: computed in every iteration, or read
+    from a scratch file); a block of pairs of the ladder is then as large as
+    the memory allows, since the units are gone through once per block.
+    ``diis_incore``: keep the DIIS vectors in memory (None: if they take no
+    more than a third of what is left).  ``three_m``: three real GEMMs for a
+    complex product (None: if o v >= THREE_M_MIN and the blocks of columns
+    that fit with their parts cover a quarter of the occupied space).
+    ``kramers``: the step uses Kramers pairs (a block of columns then holds
+    an occupied spinor and its partner: two at least).  MemoryError if the
+    budget is below Plan.need.'''
     o, v, nao = int(nocc), int(nvir), int(nao)
     n1, npo, npv, n2 = o * v, K.npair(o), K.npair(v), 2 * nao
     budget = None if budget is None else int(budget)
@@ -138,7 +148,9 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
     row = col * (('V' in mapped) + ('E' in mapped)) + 16 * v * npv * ('ovvv_p' in mapped)
     pair = 32 * v * v + 16 * o * v                  # virtual-side terms of one pair
     lad = max(16 * n2 * (n2 + v), 24 * n2 * n2, 16 * v * (n2 + v))      # the ladder of one pair
-    kop = 8 * nao * (nao + 1) // 2 * (('W_same' in mapped) or ('W_plus' in mapped))
+    if kramers:         # its rows of tau and of the result are arrays of their own
+        lad += 32 * npv
+    ufloor, umost = (0, 0) if ladder_units is None else (int(x) for x in ladder_units)
 
     def rows_work(nm, nj, w_mapped, m3):
         '''Pass 1: the columns of t2, the mapped rows (with 3M: the parts of
@@ -159,7 +171,7 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
 
     def blocks_floor(w_mapped, m3):
         return max(cols_work(jmin, w_mapped, m3), rows_work(1, jmin, w_mapped, m3), pair,
-                   lad + kop)
+                   lad + ufloor)
 
     need = fixed + blocks_floor(True, False)
     if three_m is None and n1 < THREE_M_MIN:
@@ -167,7 +179,7 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
     if budget is None:
         m3 = three_m is not False
         return Plan([(0, o)], [(0, o)], _blocks(npo, PAIR_WORK // pair),
-                    _blocks(npo, PAIR_WORK // lad), 0, False, m3,
+                    _blocks(npo, npo if umost else PAIR_WORK // lad), umost, False, m3,
                     True if diis_incore is None else diis_incore,
                     fixed + o * col + cols_work(o, False, m3)
                     + (2 * diis_space * P if diis_incore is not False else 0), need, None)
@@ -203,12 +215,15 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
         m3 = 4 * blocks(True)[3] >= o
     w_mapped, diis_incore, rem, nj, nm = blocks(m3)
     lrem = min(rem, PAIR_WORK)
-    krows = 0 if not kop else max(1, lrem // 2 // kop)
     npb = max(1, min(npo, lrem // pair))
-    nlb = max(1, min(npo, (lrem - krows * kop) // lad))
+    if umost:           # units of AO integrals next to the largest block of pairs that fits
+        uwork = min(umost, max(ufloor, min(rem // 4, rem - lad)))
+        nlb = max(1, min(npo, (rem - uwork) // lad))
+    else:
+        uwork, nlb = 0, max(1, min(npo, lrem // lad))
     work = (budget - rem) + max(rows_work(nm, nj, w_mapped, m3), cols_work(nj, w_mapped, m3),
-                                npb * pair, nlb * lad + krows * kop)
-    return Plan(_blocks(o, nm), _blocks(o, nj), _blocks(npo, npb), _blocks(npo, nlb), krows,
+                                npb * pair, nlb * lad + uwork)
+    return Plan(_blocks(o, nm), _blocks(o, nj), _blocks(npo, npb), _blocks(npo, nlb), uwork,
                 w_mapped, m3, diis_incore, work, need, budget)
 
 
@@ -265,7 +280,7 @@ class Residual:
         self.nao = eris.nao_sph
         self.C2 = np.ascontiguousarray(eris.mo_ao_spin[:, o:])          # (2 nao, nvir)
         self.C2c = self.C2.conj()
-        self.W_same, self.W_plus = eris.W_same, eris.W_plus
+        self.aolad = eris.aoladder          # the AO operators of the ladder (zccsd.aoladder)
 
         # the pairs (m, k), k = 0 .. o-1, that contain the occupied m: packed
         # row and the sign of t2[m, k] against it (k = m: no row)
@@ -305,18 +320,47 @@ class Residual:
         self._scratch = None        # the file of W(mbej) when it is mapped
         self._w = None
         self.plan = plan
+        self.gave_way = False       # the kept AO operators were dropped for the step
         if plan is None:
             self.replan(max_memory, diis_space, diis_incore, three_m)
+        else:
+            self._set_ladder()
 
     def replan(self, max_memory=None, diis_space=6, diis_incore=None, three_m=None):
         '''A new Plan for the memory there is now (see plan_step).'''
-        names = ('V', 'E', 'ovvv_p', 'W_same', 'W_plus')
+        names = ('V', 'E', 'ovvv_p')
         mapped = [n for n in names if scratch.is_mapped(getattr(self, n))]
         self.close()
+        lad = self.aolad
+        lad.keep()                  # the AO operators, if they were dropped (ccsd_t)
         self.kramers = self.paired
-        self.plan = plan_step(self.nocc, self.nvir, self.nao, memory.budget(max_memory), mapped,
-                              diis_space, diis_incore, three_m, self.paired)
+
+        def plan():
+            return plan_step(self.nocc, self.nvir, self.nao, memory.budget(max_memory), mapped,
+                             diis_space, diis_incore, three_m, self.paired, lad.unit_range())
+
+        try:
+            self.plan = plan()
+        except MemoryError as err:
+            # the AO operators of the ladder that are kept in memory may be what
+            # is missing: without them, their integrals in every iteration
+            if lad.mode != 'memory':
+                raise
+            if not lad.auto:
+                raise MemoryError(
+                    '%s; the AO operators of the ladder are kept in memory (%s), ao_ladder = '
+                    '\'direct\' computes them in every iteration' % (err, _size(lad.nbytes))
+                ) from None
+            lad.to_direct()
+            self.plan = plan()
+            self.gave_way = True
+        self._set_ladder()
         return self.plan
+
+    def _set_ladder(self):
+        '''The units of AO integrals of the ladder as the plan sizes them.'''
+        if self.plan.ladder_work and self.aolad.mode == 'direct':
+            self.aolad.set_work(self.plan.ladder_work)
 
     def describe(self):
         '''One line on the memory plan of a step.'''
@@ -332,8 +376,10 @@ class Residual:
                    nb(p.pblocks), nb(p.lblocks)))
         if self.kramers:
             text += '; Kramers pairs: half of the rows, of <ma||ef> and of the pairs of the ladder'
-        if p.krows:
-            text += '; %d rows of an AO operator at a time' % p.krows
+        if p.ladder_work:
+            text += '; the AO integrals of the ladder in units of %s' % _size(p.ladder_work)
+            if self.gave_way:
+                text += ' (the step did not fit next to the operators kept in memory)'
         return text + '; DIIS vectors in %s' % ('memory' if p.diis_incore else 'a scratch file')
 
     def close(self):
@@ -377,19 +423,6 @@ class Residual:
         return np.sum(self.fov * t1) + K.dotu(self.oovv_p, taup)
 
     # -- the pp ladder in the AO basis --------------------------------------
-    def _ao_operator(self, A, W):
-        '''A @ W for a real AO operator W: by blocks of its rows if the plan
-        says so (the operator is a mapped array).'''
-        krows = self.plan.krows
-        if not krows:
-            return blas.gemm(A, W)
-        out = np.zeros((A.shape[0], W.shape[1]))
-        for k0 in range(0, W.shape[0], krows):
-            Wk = W[k0:k0 + krows]
-            blas.gemm(A[:, k0:k0 + krows], Wk, C=out, beta=1.0)
-            scratch.unmap(Wk)
-        return out
-
     def ladder(self, taup, R):
         '''R[(i>j), (a>b)] += sum_ef (ae|bf) tau_ij^ef = 1/2 sum_ef <ab||ef> tau_ij^ef.
         With Kramers pairs: for one pair (i>j) of each two partners, the
@@ -415,11 +448,9 @@ class Residual:
             with timer('ladder.pack'):
                 AR, SR = K.ladder_pack(X, n, nao)
                 del X
-            with timer('ladder.gemm'):
-                # the real AO operators on real and imaginary parts at once
-                GA = self._ao_operator(AR, self.W_same)
-                GS = self._ao_operator(SR, self.W_plus)
-                del AR, SR
+            # the real AO operators on real and imaginary parts at once
+            GA, GS = self.aolad.apply(AR, SR)
+            del AR, SR
             with timer('ladder.pack'):
                 G = K.ladder_unpack(GA, GS, n, nao)                     # [x, p, y]
                 del GA, GS
@@ -437,6 +468,7 @@ class Residual:
                     K.kfill_packed(out, np.where(self.kpo[idx] != idx, self.kpo[idx], -1),
                                    self.sgo[idx], self.kpv, self.sgv, R)
             del out, rows
+        self.aolad.release()
         return R
 
     # -- the two passes over the ring layout -----------------------------------
@@ -593,50 +625,53 @@ class Residual:
             else:
                 ncol, whole = nj * v, nj == o
                 parts = (slice(j0 * v, j1 * v),)
-            if whole:
-                WJ = s.W
-            elif len(parts) == 1:
-                WJ = s.W[:, parts[0]]
-            else:
-                WJ = np.empty((n1, ncol), dtype=np.complex128)
-                WJ[:, :nj * v], WJ[:, nj * v:] = s.W[:, parts[0]], s.W[:, parts[1]]
+            # the columns of W: all of it, one block, or two blocks (j and their
+            # partners), which are multiplied one after the other into the two
+            # halves of the columns of r4 - no copy of them is made, except for
+            # the real parts of the three real GEMMs
+            cols = [slice(None)] if whole else list(parts)
+            WJ = W3 = None
             if m3:
                 with timer('ring.layout'):
+                    if len(cols) == 1:
+                        WJ = s.W[:, cols[0]]
+                    else:
+                        WJ = np.empty((n1, ncol), dtype=np.complex128)
+                        WJ[:, :nj * v], WJ[:, nj * v:] = s.W[:, cols[0]], s.W[:, cols[1]]
                     W3 = K.split3(WJ)
                 scratch.unmap(s.W)
                 if whole and not plan.w_mapped:             # the complex W is not needed again
                     s.W = None
                 del WJ
+            r4 = np.empty((n1, ncol), dtype=np.complex128)              # [(i a), (j b)]
+            width = ncol // len(cols)
+
+            def times(T, rows):
+                '''r4[rows] = T W[:, the columns of the block].'''
+                if m3:
+                    _gemm3(T, W3, C=r4[rows])
+                else:
+                    for k, c in enumerate(cols):
+                        blas.gemm(T, s.W[:, c], C=r4[rows, k * width:(k + 1) * width])
+
             with timer('ring.gemm'):
-                r4 = np.empty((n1, ncol), dtype=np.complex128)          # [(i a), (j b)]
                 if s.T is not None:
-                    if m3:
-                        _gemm3([x[:nrow] for x in s.T], W3, C=r4[:nrow])
-                    else:
-                        blas.gemm(s.T[:nrow], WJ, C=r4[:nrow])
+                    times([x[:nrow] for x in s.T] if m3 else s.T[:nrow], slice(0, nrow))
                     s.T = None
                 else:
                     for i0, i1 in iblocks:                              # rows of t2: it is symmetric
                         with timer('ring.layout'):
                             Ti = (K.ring_cols3 if m3 else K.ring_cols)(s.t2p, o, v, i0, i1)
-                        if m3:
-                            _gemm3([x.T for x in Ti], W3, C=r4[i0 * v:i1 * v])
-                        else:
-                            blas.gemm(Ti.T, WJ, C=r4[i0 * v:i1 * v])
+                        times([x.T for x in Ti] if m3 else Ti.T, slice(i0 * v, i1 * v))
                         del Ti
-            W3 = WJ = None
+            W3 = None
             with timer('ring.small'):
                 # - t1[m,a] t1[i,e] <mb||ej> (E is <mb||ej> in the ring layout)
                 r43 = r4.reshape(o, v, ncol)
-                if whole:
-                    KJ = s.Kt
-                elif len(parts) == 1:
-                    KJ = s.Kt[:, :, parts[0]]
-                else:
-                    KJ = np.concatenate([s.Kt[:, :, c] for c in parts], axis=2)
                 for i in range(nrow // v):
-                    blas.gemm(s.t1T, KJ[:, i], C=r43[i], alpha=-1.0, beta=1.0)
-                del KJ
+                    for k, c in enumerate(cols):
+                        blas.gemm(s.t1T, s.Kt[:, i, c], C=r43[i][:, k * width:(k + 1) * width],
+                                  alpha=-1.0, beta=1.0)
             with timer('ring.pack'):
                 if self.kramers:
                     K.kfill_ring(r4, o, v, 0, ho, nj)

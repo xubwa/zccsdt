@@ -404,15 +404,25 @@ class DirectZCCSD(_zccsd.ZCCSD):
         these spinors, eris.mo_coeff, not to mf.mo_coeff.  False: the
         spinors of the reference as they are.  True: as None, but an error
         if the reference is not symmetric.
+    ao_ladder : str or None
+        zccsdt.zccsd.amps only: where the two AO operators of the ladder
+        (2 N^4 bytes each as square matrices for N AO functions, N^4 as
+        triangles) come from.  'memory': kept; 'direct': made from the AO
+        integrals in every iteration (integral-direct, about N^4/8
+        integrals for every block of pairs); 'file': kept in a scratch
+        file.  None (the default): 'memory' if they fit into the share of
+        max_memory for stored integrals and the CCSD step fits next to
+        them, else 'direct'.
     '''
 
     ovvv_direct = False
     socutils_amps = False
     three_m = None
     kramers = None
+    ao_ladder = None
 
     _keys = {'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
-             'kramers', 'with_mmf', 'feri', 'ao2mo_outcore'}
+             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore'}
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -484,6 +494,8 @@ class DirectZCCSD(_zccsd.ZCCSD):
             if getattr(eris, 'residual', None) is not None:
                 eris.residual.close()               # the layouts of the CCSD step are
                 eris.residual = None                # made again when they are needed
+            if getattr(eris, 'aoladder', None) is not None:
+                eris.aoladder.close()               # (T) has no ladder: so are its operators
             return triples.kernel(self, eris, t1, t2, self.verbose, three_m=self.three_m)
         from zccsdt.zccsd import gccsd_t
         if eris.ovvv is None:
@@ -522,7 +534,7 @@ class _PhysicistsERIs(gccsd._PhysicistsERIs):
         self.oovv_p = None          # <mn||ef> packed over m > n and e > f
         self.oovv_r = None          # <mn||ef> as [m, e, n, f]
         self.ovov_r = None          # -<mb||je> as [m, e, j, b]
-        self.W_plus = None          # packed symmetrized AO integral
+        self.aoladder = None        # zccsd.aoladder.AOLadder: both AO operators (amps)
         self.residual = None        # amps.Residual of these integrals
 
     # with the layouts of zccsdt.zccsd.amps, oovv and ovov exist only on
@@ -614,10 +626,8 @@ def _make_eris_direct(mycc, mo_coeff=None):
         Ca, Cb = mog[:nao], mog[nao:]
         if mycc._fixed_layouts():       # zccsdt.zccsd.amps: its layouts, no ovvo
             names = ('oooo', 'ooov', 'oovv_p', 'oovv_r', 'ovov_r', 'ovvv_p')
-            ops = ('W_same', 'W_plus')
         else:
             names = slab.BLOCKS[:5 + (not mycc.ovvv_direct)]
-            ops = ('ao_eri', 'W_same')
         blocks = slab.occupied_blocks(mol, Ca, Cb, nocc, max_memory=mycc.max_memory, names=names)
         eris.oooo, eris.ooov, eris.oovv = blocks['oooo'], blocks['ooov'], blocks.get('oovv')
         eris.ovov, eris.ovvo = blocks.get('ovov'), blocks.get('ovvo')
@@ -631,11 +641,36 @@ def _make_eris_direct(mycc, mo_coeff=None):
         # si>rho) triangles (Liu-Cheng ladder) and, for the alpha-beta block,
         # the packed symmetrized integral (amps) or the full matrix
         # [(nu,sigma),(mu,lambda)] (socutils)
-        aops = slab.ladder_operators(mol, mycc.max_memory, names=ops)
-        eris.ao_eri, eris.W_same, eris.W_plus = aops.get('ao_eri'), aops['W_same'], aops.get('W_plus')
-        eris.ao_tril = aops.idx
-        log.info('AO operators of the ladder %s', aops.describe())
-        eris._scratch = (blocks.scratch, aops.scratch)      # keeps the scratch files open
+        if mycc._fixed_layouts():
+            # zccsdt.zccsd.aoladder: both operators in memory if they fit (as the
+            # square matrices, or in thinner parts of their rows down to the
+            # triangles), else made from the AO integrals in every iteration
+            from zccsdt import memory
+            from zccsdt.zccsd import aoladder
+            budget = memory.budget(mycc.max_memory)
+            floor = aoladder.unit_floor(mol)
+            nb = aoladder.blocks_that_fit(mol, slab._store_bytes(budget, floor))
+            mode = mycc.ao_ladder
+            if mode is None:
+                mode = 'direct' if nb is None else 'memory'
+            elif mode not in aoladder.MODES:
+                raise ValueError('DirectZCCSD.ao_ladder = %r: None or one of %s'
+                                 % (mode, ', '.join(aoladder.MODES)))
+            if nb is None or mode == 'file':
+                nb = aoladder.most_blocks(mol)
+            work = None
+            if budget is not None:      # the units while the kept rows are made
+                kept = aoladder.stored_bytes(mol, nb) if mode == 'memory' else 0
+                work = max(floor, (budget - kept) // 2)
+            eris.aoladder = aoladder.AOLadder(mol, mode, work, nb, auto=mycc.ao_ladder is None)
+            log.info('AO operators of the ladder %s', eris.aoladder.describe())
+            eris._scratch = (blocks.scratch, eris.aoladder)
+        else:
+            aops = slab.ladder_operators(mol, mycc.max_memory, names=('ao_eri', 'W_same'))
+            eris.ao_eri, eris.W_same = aops.get('ao_eri'), aops['W_same']
+            eris.ao_tril = aops.idx
+            log.info('AO operators of the ladder %s', aops.describe())
+            eris._scratch = (blocks.scratch, aops.scratch)  # keeps the scratch files open
         # 4-index AO integrals, in memory: only for the AO-direct ovvv terms
         eris.E4 = (ao2mo_restore(1, mol.intor('int2e', aosym='s8'), nao)
                    if mycc.ovvv_direct else None)

@@ -10,7 +10,8 @@ when the energy changes by less than 1e-9 and the norm of the change of
 of an amplitude, which is what CFOUR's CC_CONV=7 asks to be below 1e-7.
 environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              DirectZCCSD.kramers (default: Kramers pairs if the reference has
-             them); ZC_CONV: the threshold of the norm (default 1e-7).
+             them); ZC_CONV: the threshold of the norm (default 1e-7);
+             ZC_AO_LADDER: DirectZCCSD.ao_ladder (memory | direct | file).
 '''
 import os
 import resource
@@ -41,6 +42,8 @@ def main():
     mycc.conv_tol, mycc.conv_tol_normt = 0.01 * conv, conv
     if 'ZC_KRAMERS' in os.environ:
         mycc.kramers = bool(int(os.environ['ZC_KRAMERS']))
+    if os.environ.get('ZC_AO_LADDER'):
+        mycc.ao_ladder = os.environ['ZC_AO_LADDER']
     watch = MemWatch()
     watch.start()
     t0 = time.perf_counter()
