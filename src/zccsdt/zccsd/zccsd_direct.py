@@ -422,7 +422,8 @@ class DirectZCCSD(_zccsd.ZCCSD):
     ao_ladder = None
 
     _keys = {'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
-             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density', 'e_t'}
+             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density', 'e_t',
+             '_l_with_t'}
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -496,6 +497,7 @@ class DirectZCCSD(_zccsd.ZCCSD):
         self.converged_lambda, self.l1, self.l2 = lam.kernel(
             self, eris, t1, t2, l1, l2, max_cycle=self.max_cycle, tol=self.conv_tol_normt,
             verbose=self.verbose, sources=t_terms if with_t else None)
+        self._l_with_t = bool(with_t)       # which equations self.l1 and self.l2 solve
         return self.l1, self.l2
 
     def make_rdm1(self, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False,

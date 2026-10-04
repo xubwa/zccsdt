@@ -350,9 +350,10 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     '''(dm1 relaxed, dm1 unrelaxed, z[a,i]) for the CCSD of ``mycc`` in the
     basis of all spinors (full_space): the density of t and lambda from the
     packed amplitudes (zccsd.rdm), the orbital gradient of zccsd.orbgrad and
-    the Z-vector equations (solve).  lambda is solved for if it is not given.
-    Frozen occupied spinors: gradient_frozen for the gradient; the rotations
-    between them and the active occupied ones as in relaxed_rdm1_dense.'''
+    the Z-vector equations (solve).  lambda: the arguments, else mycc.l1 and
+    mycc.l2 for the amplitudes of mycc, else it is solved for.  Frozen
+    occupied spinors: gradient_frozen for the gradient; the rotations between
+    them and the active occupied ones as in relaxed_rdm1_dense.'''
     from pyscf.cc import gccsd_rdm
     from zccsdt.zccsd import orbgrad, rdm
     from zccsdt.zccsd import kernels as K
@@ -360,8 +361,13 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     if eris is None:
         eris = mycc.eris if mycc.eris is not None else mycc.ao2mo(mycc.mo_coeff)
     if l1 is None or l2 is None:
-        mycc.solve_lambda(t1, t2, eris=eris)
-        l1 = l2 = None                              # those of the CCSD object
+        # those of the CCSD object (as PySCF's make_rdm1 takes them), solved for
+        # if there are none, if they are not those of the amplitudes given, or
+        # if they are those of CCSD(T)
+        if (t1 is not None or t2 is not None or getattr(mycc, 'l1', None) is None
+                or getattr(mycc, 'l2', None) is None or getattr(mycc, '_l_with_t', False)):
+            mycc.solve_lambda(t1, t2, eris=eris)
+        l1 = l2 = None
     C, mo_e, o, frozen = full_space(mycc)
     oa, v = eris.nocc, C.shape[1] - o               # active occupied spinors
 
