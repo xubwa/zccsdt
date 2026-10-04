@@ -145,3 +145,76 @@ def by_triples(t1, t2, eris):
                     l2[:, :, q, p] -= y
                     dvo[s] += 0.5 * sign * np.einsum('ij,ijk->k', t2[:, :, p, q].conj(), w)
     return l1, l2 + tmp - tmp.transpose(0, 1, 3, 2), goo, gvv, dvo
+
+
+class Terms:
+    '''The (T) terms of by_triples from the triples as zccsd.triples.kernel
+    visits them in its batches: add() takes the connected triples w and
+    w + v of one virtual triple a > b > c, divided by the denominator and
+    packed over i > j > k; result() returns (l1, l2, goo, gvv, dvo) as
+    by_triples does.  With Kramers pairs the kernel visits the triples with
+    an unbarred b; time reversal maps them onto the others, and every sum is
+    completed by its image.
+
+    With numpy, one triple at a time: this fixes what the batches have to
+    deliver; the contractions as GEMMs on the batch and in the kernel are to
+    replace it.'''
+
+    def __init__(self, t2, eris):
+        self.ovvv, self.ooov, self.oovv, fock, o, v = _blocks(eris)
+        self.fov = fock[:o, o:]
+        self.t2 = t2
+        self.kramers = False
+        self.ijk = np.array([(i, j, k) for i in range(o) for j in range(i) for k in range(j)]).T
+        self.l1 = np.zeros((o, v), dtype=np.complex128)
+        self.tmp = np.zeros((o, o, v, v), dtype=np.complex128)
+        self.l2 = np.zeros((o, o, v, v), dtype=np.complex128)
+        self.goo = np.zeros(o, dtype=np.complex128)
+        self.gvv = np.zeros(v, dtype=np.complex128)
+        self.dvo = np.zeros((v, o), dtype=np.complex128)
+
+    def _full(self, x):
+        '''x[i,j,k], antisymmetric, from the elements with i > j > k.'''
+        o = self.goo.size
+        i, j, k = self.ijk
+        out = np.zeros((o, o, o), dtype=np.complex128)
+        out[i, j, k] = out[j, k, i] = out[k, i, j] = x
+        out[j, i, k] = out[i, k, j] = out[k, j, i] = -x
+        return out
+
+    def add(self, a, b, c, w, u):
+        w, u = self._full(w), self._full(u)
+        m = (w + u).conj()
+        self.goo += 0.5 * np.einsum('ikl,ikl->i', u.conj(), w)
+        x = np.einsum('ijk,ijk', u, w.conj()) / 6
+        for s, p, q, sign in ((a, b, c, 1.0), (b, a, c, -1.0), (c, a, b, 1.0)):
+            self.gvv[s] += x
+            self.l1[:, s] += 0.5 * sign * np.einsum('ijk,jk->i', w.conj(),
+                                                    self.oovv[:, :, p, q].conj())
+            self.tmp[:, :, s] -= sign * np.einsum('ijk,ke->ije', m, self.ovvv[:, :, p, q].conj())
+            y = 0.5 * np.einsum('imn,mnj->ij', m, self.ooov[:, :, :, s].conj())
+            y = sign * (np.einsum('k,ijk->ij', self.fov[:, s].conj(), w.conj()) - y + y.T)
+            self.l2[:, :, p, q] += y
+            self.l2[:, :, q, p] -= y
+            self.dvo[s] += 0.5 * sign * np.einsum('ij,ijk->k', self.t2[:, :, p, q].conj(), w)
+
+    def result(self):
+        l2 = self.l2 + self.tmp - self.tmp.transpose(0, 1, 3, 2)
+        out = [self.l1, l2, self.goo, self.gvv, self.dvo]
+        if self.kramers:
+            from zccsdt.zccsd.kramers import image, partner_signs
+            for n, x in enumerate(out):
+                if x.ndim == 1:         # the diagonal of a matrix
+                    out[n] = x + x[partner_signs(x.size)[0]].conj()
+                else:
+                    out[n] = x + image(x)
+        return tuple(out)
+
+
+def in_batches(mycc, eris, t1, t2):
+    '''(E(T), (l1, l2, goo, gvv, dvo)): the (T) energy and the terms of
+    by_triples from the batches of zccsd.triples.kernel (Terms).'''
+    from zccsdt.zccsd import triples as _triples
+    terms = Terms(t2, eris)
+    e = _triples.kernel(mycc, eris, t1, t2, mycc.verbose, terms=terms)
+    return e, terms.result()

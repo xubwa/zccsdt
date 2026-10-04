@@ -95,7 +95,7 @@ def _complex(x):
     return x
 
 
-def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev):
+def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=None):
     '''The (T) energy of the triples (a, b, c), b0 <= b < b1, c < b, from
     matrices with rows (pair or virtual, i) and columns (virtual, (jk)):
 
@@ -105,14 +105,17 @@ def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev):
 
     The three are complex arrays or tuples of the three real products of
     the 3M scheme.  Returns a complex number whose imaginary part should
-    vanish.'''
+    vanish.  ``terms``: an object whose add(a, b, c, w, u) gets the
+    connected triples w and w plus the disconnected ones u of every virtual
+    triple, divided by the denominator and packed over i > j > k (the (T)
+    terms of the Lambda equations, zccsd.lam_t.Terms; with numpy so far).'''
     o, v = t1.shape
     npo = K.npair(o)
     m3 = isinstance(X1, (tuple, list))
     first = lambda x: x[0] if m3 else x                         # noqa: E731
     s1, n1 = first(X1).shape[1], first(G1).shape[1]
     n2 = first(G2).shape[1] if b0 else 0
-    if _HAVE_C and K.USE_C:
+    if _HAVE_C and K.USE_C and terms is None:
         out = np.zeros(2)
         c = K._c
         dt = np.float64 if m3 else np.complex128
@@ -142,7 +145,10 @@ def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev):
                  + t1[:, c, None] * VpT[pa + b] + fvo[c][:, None] * T2pT[pa + b])
             w = Z[i, pjk] - Z[j, pik] + Z[k, pij]
             u = V[i, pjk] - V[j, pik] + V[k, pij]
-            e += np.sum(u.conj() * w / (eo[i] + eo[j] + eo[k] - ev[a] - ev[b] - ev[c]))
+            d = eo[i] + eo[j] + eo[k] - ev[a] - ev[b] - ev[c]
+            e += np.sum(u.conj() * w / d)
+            if terms is not None:
+                terms.add(a, b, c, w / d, u / d)
     return e
 
 
@@ -204,7 +210,7 @@ def memory_need(nocc, nvir, three_m=True):
 
 
 def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=None,
-           kramers=None):
+           kramers=None, terms=None):
     '''E(T) for the amplitudes t1 and t2 (t2[i,j,a,b] or packed
     [(i>j), (a>b)]) and the integrals of DirectZCCSD.  ``three_m``: three
     real GEMMs for each complex product (default: if the real parts of both
@@ -212,7 +218,8 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
     ``mycc``).  ``kramers``: the spinors are Kramers pairs in the
     order [unbarred, barred] and the amplitudes have their symmetry: only
     the triples with at most one barred virtual are done (default: if
-    ``eris.kramers`` says so and the amplitudes pass kramers.symmetric).'''
+    ``eris.kramers`` says so and the amplitudes pass kramers.symmetric).
+    ``terms``: see _t_batch; terms.kramers is set to what is used here.'''
     log = logger.new_logger(mycc, verbose)
     cput0 = (logger.process_clock(), logger.perf_counter())
     t1 = mycc.t1 if t1 is None else t1
@@ -245,6 +252,8 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                          'all triples are done')
                 kramers = False
     hv = v // 2 if kramers else v                   # b runs over the unbarred virtuals
+    if terms is not None:
+        terms.kramers = bool(kramers)
 
     # where the operands live: T2pT and VpT in memory; A and B in memory, the
     # smaller first, while they fit next to the smallest batch
@@ -380,7 +389,7 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                 G2, end = products(lambda x: x[pa + b0:pa + b1].reshape(nb * o, n),
                                    lambda x: x[:b0].reshape(b0 * npo, n).T, end)
         with timer('t.kernel'):
-            return _t_batch(X1, 0, G1, 0, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev)
+            return _t_batch(X1, 0, G1, 0, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms)
 
     et = 0j
     ntri = lambda a: K.npair(min(a, hv))                        # noqa: E731
@@ -401,7 +410,7 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                                      lambda x: x[:hv].reshape(hv * npo, n).T, end)
                 with timer('t.kernel'):
                     et += _t_batch(X1, (aa - a) * npo, G1, 0, None, aa, 0, hv,
-                                   t1, fvo, VpT, T2pT, eo, ev)
+                                   t1, fvo, VpT, T2pT, eo, ev, terms)
             ndone += na * ntri(a)
         elif brange is None:
             # x_{a,(bc)} as [(bc, i), (a, jk)] for the pairs below a1 - 1,
@@ -415,7 +424,7 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
             with timer('t.kernel'):
                 for aa in range(a, a1):
                     et += _t_batch(X1, (aa - a) * npo, G1, (K.npair(aa) - q0) * o, None, aa, 0, aa,
-                                   t1, fvo, VpT, T2pT, eo, ev)
+                                   t1, fvo, VpT, T2pT, eo, ev, terms)
             ndone += sum(ntri(aa) for aa in range(a, a1))
         else:
             et += one_a(a, *brange)

@@ -323,3 +323,23 @@ def test_t_terms_by_triples(x2c_h2o, kr):
     assert abs(l2 / (eia[:, None, :, None] + eia[None, :, None, :]) - l2r).max() < 1e-13
     for x, ref in zip((goo, gvv, dvo), lam_t.gamma1(t1, t2, eris)):
         assert abs(x - ref).max() < 1e-13 and abs(ref).max() > 1e-3
+
+
+@pytest.mark.parametrize('kr', [False, None])
+def test_t_terms_in_batches(x2c_h2o, kr):
+    '''The (T) terms from the batches of triples.kernel (lam_t.Terms) against
+    the assembly over all virtual triples: with Kramers pairs the kernel
+    visits the triples with an unbarred b and every sum is completed by its
+    time-reversed image.'''
+    from zccsdt.zccsd import lam_t
+    mycc = DirectZCCSD(x2c_h2o, frozen=2)
+    mycc.verbose, mycc.kramers = 0, kr
+    eris = mycc.ao2mo()
+    o, v = eris.nocc, eris.fock.shape[0] - eris.nocc
+    rng = np.random.default_rng(2)
+    t1, t2 = amplitudes(o, v, rng, bool(eris.kramers))
+    ref = lam_t.by_triples(t1, t2, eris)
+    e, got = lam_t.in_batches(mycc, eris, t1, t2)
+    assert abs(e - lam_t.energy(t1, t2, eris)) < 1e-10
+    for x, y in zip(got, ref):
+        assert abs(x - y).max() < 1e-10 and abs(y).max() > 1e-3
