@@ -18,6 +18,11 @@
 #   five; 'xjoda xsox2catm xsox2chf xx2cvtran' stops after the integrals;
 #   with 'xx2chbar xx2clcc' after xx2cccsd also Hbar and the Lambda equations);
 #   CFOUR_CONV: CC_CONV, max residual element (default 7)
+#   CFOUR_EXTRA: more keywords, comma separated (PROPS=FIRST_ORDER: xx2cccsd then
+#   also makes the (T) terms of the Lambda equations and of the densities, and
+#   'xx2chbar xx2clcc xx2cccdenocbp xx2czvec xsox2cprop' give the CCSD(T) dipole)
+#   CFOUR_TAG: suffix of the directory of the kept outputs (two runs of a
+#   molecule in one job)
 # zccsdt: X2C-1e from PySCF (same orbital counts, not the same Hamiltonian),
 #   bench/profile_iter.py with ZC_METHOD=ccsd; ZC_NITER timed iterations
 #   (default 3; 0 skips zccsdt); ZC_ROOT: snapshot of the repository
@@ -54,7 +59,7 @@ H 1.240500 -2.148609 0.000000";;
 
 for job in "$@"; do
   mol=${job%%:*}; basis=${job##*:}
-  tag=${mol}_${basis}_x2c_${SLURM_JOB_ID:-local$$}
+  tag=${mol}_${basis}_x2c_${SLURM_JOB_ID:-local$$}${CFOUR_TAG:+_$CFOUR_TAG}
   # CFOUR work files on node-local disk (the home quota is small); only the
   # outputs are kept
   keep=/home/xwang405/.claude/jobs/7ba4fcf7/tmp/cfour_bench/$tag
@@ -72,7 +77,7 @@ $geom
 SYM=OFF,COORDINATES=CARTESIAN,UNITS=ANGSTROM,CHARGE=0,MULT=1
 RELATIVISTIC=X2C1E,X2CKEY=SOATMX,ABCDTYPE=AOBASIS
 SCF_CONV=10,SCF_MAXCYC=200
-CC_CONV=${CFOUR_CONV:-7},CC_MAXCYC=${CFOUR_MAXCYC:-50}
+CC_CONV=${CFOUR_CONV:-7},CC_MAXCYC=${CFOUR_MAXCYC:-50}${CFOUR_EXTRA:+,$CFOUR_EXTRA}
 MEMORY_SIZE=${CFOUR_MEM_GB:-24},MEM_UNIT=GB)
 
 $basislines
@@ -94,6 +99,7 @@ ZEOF
   [ -f $keep/xx2cccsd.out ] && python $root/bench/cfour/x2ccc_summary.py $keep/xx2cccsd.out
   # the Lambda equations (CFOUR_PROGS with xx2chbar xx2clcc after xx2cccsd)
   [ -f $keep/xx2clcc.out ] && echo "  xx2clcc: $(grep -c 'CCSD cycle  *[0-9]' $keep/xx2clcc.out) Lambda cycles"
+  [ -f $keep/xsox2cprop.out ] && grep -A 11 "^ \*  *Coupled-cluster Properties" $keep/xsox2cprop.out | grep "mu z" | tail -n 1 | sed 's/^ */  xsox2cprop: coupled-cluster dipole, total (a.u., Debye) /'
   cd / && rm -rf $run
   if [ "${ZC_NITER:-3}" != 0 ]; then
     pybasis=cc-$(echo $basis | tr 'A-Z' 'a-z')

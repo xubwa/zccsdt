@@ -48,6 +48,6 @@ done
 rm -rf $scr
 if [ -n "$ZC_EXTRA" ]; then
   echo "=== $ZC_EXTRA  $(date)"
-  (cd $root && eval "$ZC_EXTRA") 2>&1 | grep -v "plugins found\|PYSCF_EXT_PATH\|^/home/"
+  (cd $root && eval "$ZC_EXTRA") 2>&1 | grep --line-buffered -v "plugins found\|PYSCF_EXT_PATH\|^/home/"
 fi
 echo "done $(date)"

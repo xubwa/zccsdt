@@ -61,6 +61,6 @@ if n > 1:
     print('  %-24s %9.3f s' % ('not timed (T1/T2 terms, DIIS, update)',
                                ccsd / n - sum(mean.get(k, 0.0) for k in STAGES)))
 e = first(r'final CCSD correlation energy:\s*(\S+)') or 'not converged'
-et = first(r'Total triples correction in CCSD\(T\)\s*\(\s*([^,]+),')
+et = first(r'Total triples correction in CCSD\(T\)\s*\(\s*([^,]+),') or first(r'(?m)^\(T\) correction\s+(\S+)')
 print('E_corr(CCSD) %s; (T) correction %s; %s'
       % (e, et, first(r'(?m)^(CCSD\(T\) energy\s+\S+)') or 'no CCSD(T) energy'))
