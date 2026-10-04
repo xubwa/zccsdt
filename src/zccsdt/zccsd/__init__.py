@@ -28,6 +28,13 @@ says what was changed):
   antisymmetrized into their blocks at once, the blocks that do not fit
   mapped from a scratch file (the route of socutils' cc through nrr_outcore
   stays as ZCCSD.ao2mo_outcore).
+- lam: the Lambda equations of DirectZCCSD on packed amplitudes, in the
+  layouts and within the memory plan of amps (solve_lambda).
+- lam_t, rdm, zvector: the (T) terms of Lambda, the one-particle density and
+  dipole moment (make_rdm1, dip_moment), the Z-vector equations of the
+  orbital relaxation.  The (T) terms and the orbital gradient are references
+  on full arrays for small molecules (lam_t and rdm from socutils' branch
+  claude/ccsd-lambda-socutils, 8965b9f).
 
 Both classes take a spinor SCF object such as PySCF's x2c.UHF and follow
 PySCF's CCSD settings (conv_tol, diis_space, ...); max_memory is PySCF's (MB
