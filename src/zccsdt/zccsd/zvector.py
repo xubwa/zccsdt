@@ -35,8 +35,25 @@ direct).  With R(z) = -G_vo, a one-particle perturbation V gives
 the relaxed density (tests/test_zccsd_zvector.py: against the derivative
 of E(SCF) + E_corr with the SCF repeated in the field).
 
+Half of it vanishes.  Without Hermitizing the densities, the Lagrangian
+L = E + sum l1 R1 + 1/4 sum l2 R2 (R the residuals of the amplitude
+equations: linear in the integrals) changes by sum_xy kappa_xy Gnh[y, x], and
+
+    G[a, i] = 1/2 (Gnh[a, i] - conj(Gnh[i, a])).
+
+kappa_ai multiplies the excitation a+_a a_i, which commutes with T: Gnh[i, a]
+is minus the derivative of L with respect to t1[i,a], zero for lambda that
+solve their equations.  What is left, Gnh[a, i], is L with the integrals
+one-index transformed by the de-excitation a+_i a_a: a bra index i takes
+the values of a, a ket index a minus those of i.  With D_B the coefficient
+of the block B of integrals in L (the two-particle density, not
+Hermitized), it is a sum over the blocks with an occupied bra or a virtual
+ket index (gradient_terms: from full arrays, the reference of the code for
+the layouts of zccsd.amps).  Only the block <ia||bc> meets <ab||cd>.
+
 What is here: the orbital gradient from the full two-particle density and
-all MO integrals (orbital_gradient: a reference for small molecules), the
+all MO integrals (orbital_gradient: a reference for small molecules) and
+its de-excitation half term by term (gradient_terms: the same), the
 response equation with AO-direct Fock builds (solve: for any size), the
 relaxed density, frozen occupied spinors (relaxed_rdm1_dense).  Not here
 yet: the orbital gradient from intermediates in the layouts of zccsd.amps
@@ -59,6 +76,73 @@ def orbital_gradient(h, eri, dm1, dm2):
     G += 0.5 * (np.einsum('yqrs,xqrs->yx', eri, dm2) - np.einsum('pxrs,pyrs->yx', eri, dm2)
                 + np.einsum('pqys,pqxs->yx', eri, dm2) - np.einsum('pqrx,pqry->yx', eri, dm2))
     return G
+
+
+def gradient_terms(t1, t2, l1, l2, fock, g, nocc):
+    '''Gnh[a, i] (see the module) of the CCSD Lagrangian by blocks of
+    integrals, a dict with the keys 'fock', 'oooo', 'ooov', 'oovv', 'ovov',
+    'ovvv', 'vvvv': the block B of the one-index transformed integrals with
+    its density D_B, the coefficient of B in L as pyscf.cc.gccsd.update_amps
+    writes the equations.  ``fock`` [p,q] and g[p,q,r,s] = <pq||rs> are
+    full arrays over the spinors [occupied, virtual]: a reference for small
+    molecules.  The sum of the terms is twice G[virtual, occupied] of
+    orbital_gradient for converged t and lambda.'''
+    o, n = nocc, fock.shape[0]
+    oc, vi = slice(0, o), slice(o, None)
+    E = np.einsum
+    t1t1 = E('ia,jb->ijab', t1, t1)
+    tau = t2 + t1t1 - t1t1.transpose(0, 1, 3, 2)
+    taut = t2 + 0.5 * (t1t1 - t1t1.transpose(0, 1, 3, 2))
+    m = E('ikac,kjcb->iajb', l2, t2)
+    Y = E('klab,ijab->klij', tau, l2)
+    N = E('ijca,ijce->ae', l2, t2)
+    O = E('ijab,imab->jm', l2, t2)
+    X = {}
+    # <mn||ij>: D = Y / 8
+    X['oooo'] = 0.25 * E('anij,knij->ak', g[vi, oc, oc, oc], Y)
+    # <mn||ie> and <mb||ij>
+    D = (-E('ia,ma,ne->mnie', l1, t1, t1) - 0.5 * E('ia,mnae->mnie', l1, t2)
+         - 0.5 * E('im,ne->mnie', O, t1) + 0.25 * E('mnij,je->mnie', Y, t1)
+         + E('ibme,nb->mnie', m, t1))
+    Dovoo = -0.5 * E('ijab,ma->mbij', l2, t1)
+    X['ooov'] = (E('anie,knie->ak', g[vi, oc, oc, vi], D) + E('maie,mkie->ak', g[oc, vi, oc, vi], D)
+                 - E('mnik,mnia->ak', g[oc, oc, oc, oc], D)
+                 + E('abij,kbij->ak', g[vi, vi, oc, oc], Dovoo))
+    # <mn||ef>
+    D = (0.25 * tau
+         - 0.5 * E('ia,ie,mnaf->mnef', l1, t1, taut) - 0.5 * E('ia,ma,inef->mnef', l1, t1, taut)
+         + E('ia,imae,nf->mnef', l1, t2, t1)
+         - 0.25 * E('be,mnbf->mnef', N, taut) - 0.25 * E('be,mb,nf->mnef', N, t1, t1)
+         - 0.25 * E('jm,jnef->mnef', O, taut) - 0.25 * E('jm,je,nf->mnef', O, t1, t1)
+         + E('mnij,ijef->mnef', Y, tau) / 16
+         - 0.5 * E('jbme,jnfb->mnef', m, t2) - E('jbme,jf,nb->mnef', m, t1, t1))
+    X['oovv'] = (E('anef,knef->ak', g[vi, oc, vi, vi], D) + E('maef,mkef->ak', g[oc, vi, vi, vi], D)
+                 - E('mnkf,mnaf->ak', g[oc, oc, oc, vi], D)
+                 - E('mnek,mnea->ak', g[oc, oc, vi, oc], D))
+    # <mb||je>
+    D = -E('jb,me->mbje', l1, t1) - m.transpose(2, 1, 0, 3) + E('ijab,ie,ma->mbje', l2, t1, t1)
+    X['ovov'] = (E('abje,kbje->ak', g[vi, vi, oc, vi], D)
+                 - E('mbjk,mbja->ak', g[oc, vi, oc, oc], D))
+    # <ma||ef> (the only block that meets <ab||cd>) and <ba||je>
+    D = (-E('ia,ie,mf->maef', l1, t1, t1) - 0.5 * E('ia,imef->maef', l1, t2)
+         - 0.5 * E('ae,mf->maef', N, t1) + 0.25 * E('ijab,ijef,mb->maef', l2, tau, t1)
+         + E('jame,jf->maef', m, t1))
+    Dvvov = 0.5 * E('ijab,ie->baje', l2, t1)
+    X['ovvv'] = (E('abef,kbef->ak', g[vi, vi, vi, vi], D) - E('mbkf,mbaf->ak', g[oc, vi, oc, vi], D)
+                 - E('mbek,mbea->ak', g[oc, vi, vi, oc], D)
+                 - E('bcjk,bcja->ak', g[vi, vi, oc, oc], Dvvov))
+    # <ab||ef>: D = sum_ij l2[ij,ab] tau[ij,ef] / 8
+    X['vvvv'] = -0.25 * E('bckf,ijbc,ijaf->ak', g[vi, vi, oc, vi], l2, tau)
+    # the Fock matrix, f = h + sum_k <pk||qk>: D[p,q] the coefficient of f[p,q]
+    Df = np.zeros((n, n), dtype=np.complex128)
+    Df[oc, vi] = (t1 + E('ia,imae->me', l1, t2) - E('ia,ie,ma->me', l1, t1, t1)
+                  - 0.5 * E('be,mb->me', N, t1) - 0.5 * E('jm,je->me', O, t1))
+    Df[vi, oc] = l1.T
+    Df[vi, vi] = E('ia,ie->ae', l1, t1) + 0.5 * N
+    Df[oc, oc] = -E('ja,ma->mj', l1, t1) - 0.5 * O.T
+    X['fock'] = (fock[vi, :] @ Df[oc, :].T - (fock[:, oc].T @ Df[:, vi]).T
+                 + E('paqk,pq->ak', g[:, vi, :, oc], Df))
+    return X
 
 
 def response(mf, mo_coeff, mo_energy, nocc):

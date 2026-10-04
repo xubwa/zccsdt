@@ -58,6 +58,13 @@ def test_relaxed_density_is_energy_derivative(mol, kr):
     G = zvector.orbital_gradient(h, eri, dm1, dm2)
     assert abs(G + G.conj().T).max() < 1e-10
     assert abs(G[:o, :o]).max() < 1e-8 and abs(G[o:, o:]).max() < 1e-8
+    # half of the de-excitation part of the gradient without Hermitized densities
+    # (the excitation part is the lambda1 equation: zero), from its terms
+    g = eri.transpose(0, 2, 1, 3) - eri.transpose(0, 2, 3, 1)
+    fock = h + np.einsum('pkqk->pq', g[:, :o, :, :o])
+    terms = zvector.gradient_terms(mycc.t1, mycc.t2, l1, l2, fock, g, o)
+    assert abs(G[o:, :o]).max() > 1e-4 and abs(0.5 * sum(terms.values()) - G[o:, :o]).max() < 1e-7
+    assert min(abs(x).max() for x in terms.values()) > 1e-4
     assert abs(G[o:, :o]).max() > 1e-4
 
     relaxed, unrelaxed, z = zvector.relaxed_rdm1_dense(mycc, mf, l1, l2, tol=1e-10)
