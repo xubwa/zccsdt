@@ -1913,8 +1913,73 @@ one-particle terms on the occupied side are dense GEMMs on the pairs
 W are made twice and every iteration (0.9 s); t2, lambda2 and <ij||ab> are
 unpacked in three passes (about 0.6 s); for H2O the contraction of the
 product with the unpacked rows of <ma||ef> is a fifth of the iteration.
-The largest run (benzene/cc-pVTZ, where the integrals are in scratch files
-and the plan is in blocks) has not been made.
+Since this job the two one-particle terms on the occupied side are part of
+the pair products (6c8a393; on the shared node 12.7 s where 13.0 s were).
+
+**Under memory limits and for benzene/cc-pVTZ** (job 31600261, c516, zccsdt
+as of ac46d03; the cc-pVTZ run with three cycles of CCSD and of Lambda, on
+amplitudes that are not converged, for the time and the memory of an
+iteration):
+
+| | C6H6/cc-pVDZ, 24000 MB | C6H6/cc-pVDZ, 8000 MB | C6H6/cc-pVTZ, 24000 MB |
+|---|---|---|---|
+| plan of the Lambda iterations | one block, three real GEMMs, W in memory | blocks of 8 and 14 of 42 occupied, ZGEMM, W and DIIS in scratch files | blocks of 2 and 10, ZGEMM, W and DIIS in scratch files, direct ladder |
+| CCSD iteration, s | 9.46 | 11.21 | 194.3 |
+| Lambda intermediates, s | 7.0 | 8.1 | 114.1 |
+| Lambda iteration, s | 11.88 | 13.40 | 217.8 |
+| of which the two products / the ladder | 5.05 / 1.06 | 6.91 / 1.07 | 121.8 / 32.4 |
+| Lambda cycles | 11 | 11 | (3) |
+| peak anonymous memory | 14.1 GB | 7.94 GB | 26.89 GB |
+
+With 8000 MB lambda converges in the same 11 iterations to the same
+amplitudes. The job showed two faults, both in the drivers and both fixed
+in 2be7e95:
+
+- the 26.89 GB of benzene/cc-pVTZ are the CCSD iterations, not Lambda:
+  `amps.kernel` called its callback with `locals()`, and the dictionary of
+  the frame kept the old and the new packed amplitudes alive through the
+  next step - two packed arrays (2 x 1.62 GB) outside the plan, whenever a
+  callback is set (the benchmark scripts set one to time the cycles; the
+  23.7 GB of job 31582707 were measured without one). The callback gets a
+  dictionary of its own now; `test_callback_keeps_no_amplitudes`;
+- with `max_memory` 4000 MB the Lambda iterations of benzene/cc-pVDZ could
+  not be planned (MemoryError: 1.14 GB left of the 1.77 GB of the smallest
+  plan): the unpacked t2 of the CCSD object, four times the packed array,
+  was in memory while lambda was solved for. `lam.kernel` now packs it,
+  releases it and unpacks it at the end. The same array took 6.5 GB from
+  the plan of the cc-pVTZ run (11.9 GB for the blocks instead of about 18).
+
+The runs after the two fixes (job 31600838, c588, zccsdt as of 2be7e95):
+
+| | C6H6/cc-pVDZ, 4000 MB | C6H6/cc-pVTZ, 24000 MB (three cycles each) |
+|---|---|---|
+| plan of the Lambda iterations | blocks of 1 and 4 of 42 occupied, ZGEMM, W and DIIS in scratch files, direct ladder (the operators kept in memory gave way) | blocks of 1 and 10, ZGEMM, W in memory, DIIS in a scratch file, direct ladder |
+| CCSD iteration, s | 12.66 | 194.1 |
+| Lambda intermediates, s | 10.8 | 119.6 |
+| Lambda iteration, s | 18.59 | 233.6 |
+| Lambda cycles | 11 | (3) |
+| peak anonymous memory: integrals and CCSD / Lambda | 3.40 / 2.88 GB | 23.72 / 18.56 GB |
+
+Both runs stay within `max_memory`, the CCSD of benzene/cc-pVTZ with a
+callback set as well (23.72 GB where 26.89 GB were). With 4000 MB lambda
+converges in the same 11 iterations to the same amplitudes as with 8000 and
+24000 MB.
+
+The Lambda iteration of benzene/cc-pVTZ took longer than in the first job
+(233.6 s; 217.8 s) although its plan had 17.0 GB for the blocks instead of
+11.9 GB: the plan now keeps W in memory and has slabs of one occupied index,
+and the product L T took its rows of lambda2 in blocks of the size of its
+columns, so that it was made of 882 products of one occupied index against
+one (73.0 s and 10.8 s of ring layouts where 63.1 s and 5.8 s were). Since
+2555685 the rows of lambda2 are in blocks of their own: for benzene/cc-pVDZ
+with 4000 MB that product takes 4.6 s in 189 products where it took 5.5 s
+in 882 (job 31601345, c237, a node with the same CCSD iteration, 12.67 s).
+The iteration as a whole took 20.4 s in that job, more than the 18.6 s
+before, because the same code had a larger reserve for an array of the
+intermediates and so smaller blocks (3 instead of 4 occupied indices, 78
+instead of 136 pairs of the ladder); ae5a717 makes the intermediates without
+that array and the reserve is what it was. For benzene/cc-pVTZ the
+iteration has not been timed again.
 
 **The (T) terms** (`zccsd/lam_t.py`, `solve_lambda(with_t=True)`). The
 earlier code of the user is on the branch `claude/ccsd-lambda-socutils` of
