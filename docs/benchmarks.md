@@ -2057,31 +2057,128 @@ not the 1.0 of their multiply-adds:
 
 CFOUR's (T) terms of Lambda have not been timed.
 
-**Z-vector** (`zccsd/zvector.py`). Conventions, the response equation and a
-reference: for C -> C exp(-kappa) the orbital gradient G of the energy with
-its Lagrangian from the one- and two-particle densities; R(z) = -G_vo with
-the orbital Hessian of the SCF (orbital energy differences and the Fock
-matrix of the density change, AO direct, DIIS: any size); the relaxed
-density is the density with z in its virtual-occupied block. The orbital
-gradient is so far made from the full two-particle density of
-`pyscf.cc.gccsd_rdm` and all MO integrals (nmo^4: small molecules). Test
-(H2O/6-31G, all electrons, without and with Kramers pairs): the energy from
-the densities (1e-9); G anti-Hermitian, without occupied-occupied and
-virtual-virtual blocks (1e-11); the relaxed density with the dipole operator
-against the central difference of E(SCF) + E_corr with the SCF repeated in
-the field: 3e-8, where the unrelaxed density is off by 2e-3. Frozen
-occupied spinors: the rotations between them and the active occupied ones
-follow from the Fock matrix staying diagonal (y_ic = G_ic / (e_c - e_i) in
-the density, and its Fock matrix on the right-hand side of the equations);
-the same test with two frozen spinors: 3e-8. `DirectZCCSD.make_rdm1` and
-`dip_moment` (`zccsd/rdm.py`, the interface of the earlier socutils code)
-give the density of t and lambda from the packed amplitudes, and with
-`relaxed=True` the relaxed one.
+**Z-vector** (`zccsd/zvector.py`, `zccsd/orbgrad.py`,
+`make_rdm1(relaxed=True)`). For C -> C exp(-kappa) the energy with its
+Lagrangian changes by sum kappa_xy G_yx; R(z) = -G_vo with the orbital
+Hessian of the SCF (orbital energy differences and the Fock matrix of the
+density change; Jacobi steps, DIIS); the relaxed density is the density with
+z in its virtual-occupied block.
 
-Against CFOUR (`xx2cccdenocbp`, `xx2czvec`, `xsox2cprop` after the Lambda
-equations; job 31600371, H2O/cc-pVDZ, all electrons, CC_CONV=9;
-`bench/check_dipole.py`), the z component of the dipole moment in atomic
-units:
+*The orbital gradient.* With densities that are not Hermitized,
+G[a,i] = (Gnh[a,i] - conj(Gnh[i,a])) / 2, and Gnh[i,a], the derivative along
+the excitation a+_a a_i, is minus the lambda1 equation: zero for converged
+lambda (H2O/6-31G: 2e-8 with lambda converged to 1e-10). What is left,
+Gnh[a,i], is the Lagrangian L = E + l1 R1 + l2 R2 / 4 with the integrals
+one-index transformed by a+_i a_a: a sum over the blocks of integrals of the
+transformed block with its density, the coefficient of that block in L.
+`zvector.gradient_terms` evaluates it from full arrays, block by block (each
+block against L itself on the transformed integrals: 1e-17; the sum against
+the gradient from PySCF's Hermitized two-particle density: 1e-8).
+`zccsd/orbgrad.py` evaluates the same terms in the layouts of the amplitude
+step:
+
+- m = L T, the product of the ring layouts of lambda2 and t2 (o^3 v^3), is
+  kept like W(mbej) of a step (o^2 v^2 elements, in memory or mapped) and
+  read by rows; the density of <mn||ef> is packed like t2, with the second
+  o^3 v^3 product, m^T (t2 - 2 t1 t1), antisymmetrized block by block; the
+  rest are arrays with three occupied indices and three passes over <ma||ef>;
+- only the density of <ia||bc> meets <ab||cd>. Its lambda1 tau and
+  (lambda2 tau) t1 parts take the pp ladder of tau (the AO ladder of the
+  amplitude step, once), its (lambda2 t2) t1 part is a Fock matrix of a
+  v x v density, and its m t1 part - the virtual pair of the contraction
+  split between m and t1 - is contracted with the integrals <j~ e||ab> of
+  the spinors j~ = sum_f t1[j,f] f in the place of an occupied one, which
+  the integral transformation delivers slab by slab (`ao2mo.slabs` with j~
+  as the first index: nothing with four virtual indices and nothing of
+  o v^3 elements is stored);
+- with Kramers pairs the two products are done for the rows with an unbarred
+  occupied index, and the passes over <ma||ef> and <j~ e||ab> for an unbarred
+  first index;
+- memory: the plan of the amplitude step for what `max_memory` leaves next
+  to the packed t2 and lambda2, with the arrays of the gradient in the place
+  of those of a step that are not made here; a slab of the <j~ e||ab>
+  (16 v^3 bytes) has to fit, m goes to a scratch file if that makes room.
+
+*Frozen occupied spinors.* A frozen spinor is an occupied one whose
+amplitudes are zero: with t and lambda padded, the Lagrangian of the
+frozen-core CCSD is that of the CCSD of all spinors, and
+`zvector.gradient_frozen` takes the gradient from the code for all spinors -
+Gnh[a,x] from `orbgrad` for all occupied x; the lambda1 residual of the
+frozen spinors for the excitation half, which no amplitude makes vanish; and
+the rotations between frozen and active occupied spinors from the residuals,
+with one frozen index, of one step of the amplitude equations and one of the
+Lambda equations (a rotation among occupied spinors is a change of the
+amplitudes). The integrals are made once more with all occupied spinors.
+The rotations between frozen and active occupied spinors themselves follow
+from the Fock matrix staying diagonal (y_ic = G_ic / (e_c - e_i) in the
+density, its Fock matrix on the right-hand side of the equations).
+
+*Fock matrices.* The two of the gradient and those of the orbital Hessian
+are J - K of the bare Coulomb operator on the scalar AO integrals
+(`orbgrad.Coulomb`: PySCF's GHF contraction of the spin blocks), with the
+integrals kept in memory if they take no more than a quarter of what
+`max_memory` leaves; `zvector.scf_veff` checks once that this reproduces the
+Fock operator of the SCF object. The spinor integrals of PySCF's 2c SCF took
+1.5 s per build for benzene/cc-pVDZ, these 0.17 s.
+
+Tests (H2O/6-31G unless said otherwise, without and with Kramers pairs): the
+energy from the densities (1e-9); G anti-Hermitian, without
+occupied-occupied and virtual-virtual blocks (1e-11); every block of
+`orbgrad` against `gradient_terms` (1e-11); the relaxed dipole against the
+central difference of E(SCF) + E_corr with the SCF repeated in the field
+(3e-8, where the unrelaxed density is off by 2e-3), all electrons and with
+two frozen spinors; the three blocks of `gradient_frozen` against the
+gradient from the full densities (1e-8: the convergence of lambda, 5e-10,
+4e-14); for H2O/cc-pVTZ the same gradient under ten memory plans (m mapped
+or in memory, one to ten blocks), its allocations within the budget of the
+plan (tracemalloc), and the Kramers reductions against the plain sums
+(1e-10).
+
+Time, against CFOUR's `xx2cccdenocbp` (densities) and `xx2czvec`: one job
+(31605159, c079, 8 cores), CFOUR's chain `xx2cccsd; xx2chbar; xx2clcc;
+xx2cccdenocbp; xx2czvec; xsox2cprop` first, then zccsdt
+(`bench/profile_zvector.py`); all electrons, CCSD and Lambda converged in
+both; seconds:
+
+| | H2O/cc-pVQZ (10 + 220) | C6H6/cc-pVDZ (42 + 186) |
+|---|---|---|
+| CFOUR `xx2cccdenocbp` | 34.7 | 159.1 |
+| CFOUR `xx2czvec` | 4.1 | 16.9 |
+| CFOUR, both | 38.8 | 176.0 |
+| zccsdt: orbital gradient | 2.3 | 20.0 |
+| zccsdt: the Fock operator made and checked | 2.0 | 2.0 |
+| zccsdt: Z-vector equations (9 and 8 Fock builds) | 1.6 | 1.4 |
+| zccsdt, the three | 5.9 (6.6x) | 23.4 (7.5x) |
+| for scale: a CCSD iteration of zccsdt | 0.37 | 8.42 |
+
+(CFOUR's two programs took 36.2 s and 183.6 s in a second job on the same
+node, 31604805. The one-particle density of t and lambda, which `make_rdm1`
+needs as well, is not in zccsdt's three numbers.) Where the 20.0 s of
+benzene go: the two o^3 v^3 products 7.8 s, the small terms 3.6 s, the
+integrals <j~ e||ab> and their contraction 2.5 s, the passes over <ma||ef>
+2.5 s, the products on the pairs 1.7 s, the ladder 1.2 s, the Fock matrices
+0.8 s. The gradient is 2.4 CCSD iterations for benzene and 6 for H2O, where
+the integrals <j~ e||ab> are 40% of it. With `max_memory` 4000 MB (m and
+the integrals in scratch files) the gradient of benzene takes 22.7 s with a
+peak of 2.86 GB. Before the Kramers reductions and with the Fock builds of
+the SCF object (job 31603549) the gradient took 31.3 s and the equations
+12.3 s.
+
+With 12 frozen spinors (benzene/cc-pVDZ, 30 active occupied spinors, a CCSD
+iteration of 3.9 s) the gradient through the code for all 42 occupied
+spinors took 94 s (job 31604805, before the Fock matrices on the scalar
+integrals): the integrals with all occupied spinors, one step of the
+amplitude equations, the intermediates and one step of the Lambda
+equations, and the gradient itself (38 s of the 94, without Kramers pairs:
+the frozen spinors are not paired). With `max_memory` 4000 MB that run was
+refused (the plan for 42 occupied spinors next to the unpacked amplitudes of
+the active space); the amplitudes are packed and the three phases planned
+one by one since then, which a run of that size has not yet confirmed.
+
+Values, against CFOUR (`xx2cccdenocbp`, `xx2czvec`, `xsox2cprop` after the
+Lambda equations; job 31600371, H2O/cc-pVDZ, all electrons, CC_CONV=9;
+`bench/check_dipole.py`, then with the gradient from the full two-particle
+density), the z component of the dipole moment in atomic units:
 
 | | CFOUR | zccsdt | difference |
 |---|---|---|---|
@@ -2099,12 +2196,25 @@ zccsdt are 1.5e-6 lower (0.808720918 and 0.766031611) and the correlation
 part is -0.042689307. CFOUR also prints an "unrelaxed" coupled-cluster
 dipole (0.784942); the density of t and lambda at fixed spinors gives
 0.764129 here, and that same density without its occupied-virtual blocks
-0.7964: CFOUR's number is a third quantity, which was not identified.
+0.7964: CFOUR's number is a third quantity, which was not identified. With
+the gradient of `orbgrad` the relaxed dipole is 0.766033146 (1.4e-8 from
+CFOUR's): the two gradients differ by the excitation half, i.e. by the
+convergence of lambda (1e-8 here).
 
-Not written: the orbital gradient from intermediates in the layouts of the
-amplitude step (the part of the two-particle density with four virtual
-indices through the AO ladder), and the orbital relaxation of the (T)
-terms.
+Not written: the orbital relaxation of the (T) terms
+(`make_rdm1(with_t=True, relaxed=True)` raises). Its scheme was checked on
+full arrays with the gradient by finite differences in the rotation
+(H2O/6-31G, Kramers pairs): with E(T) the gradient has occupied-occupied and
+virtual-virtual blocks (8e-6 and 1e-5 next to 2e-4 in the virtual-occupied
+one), zero between Kramers partners (2e-11); with y = G / (e_q - e_p) for
+the other pairs in the density and its Fock matrix on the right-hand side of
+the Z-vector equations - as for frozen spinors - the relaxed density
+reproduces the finite difference of E(SCF) + E(CCSD) + E(T) with the SCF
+repeated in the field (3e-8; the unrelaxed one is off by 6e-4). An
+evaluation in the batches of (T) needs the two-particle densities of E(T)
+(the products of each batch transposed, with the t2 halves of the operands)
+and their contraction with <ab||cd> through integrals (a q|rs) with a
+virtual first index.
 
 ## Correctness references
 
