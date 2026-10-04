@@ -504,7 +504,7 @@ class Residual:
         s.r1 = np.zeros((o, v), dtype=np.complex128)
         s.foo_t = np.zeros((o, o), dtype=np.complex128)     # partial traces of 1/2 V T
         s.fvv_t = np.zeros((v, v), dtype=np.complex128)
-        s.fvv_a = np.zeros((v, v), dtype=np.complex128)     # sum_mf <ma||fe> t1[m,f]
+        s.fvv_a = np.zeros((v, v), dtype=np.complex128)     # [a, e] = sum_mf <ma||ef> t1[m,f]
         fv = np.empty((v, v), dtype=np.complex128)
         x1 = np.empty((o, v), dtype=np.complex128)
         T = None                # the columns of t2, or their three real parts

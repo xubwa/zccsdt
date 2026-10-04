@@ -105,14 +105,22 @@ def test_step_equals_pyscf(x2c_h2o, monkeypatch, tmp_path, kr):
         res.plan.pblocks = [(0, 3), (3, npo)]
         res.plan.lblocks = [(0, 5), (5, 6), (6, npo)]
         res.plan.w_mapped = True
-        for use_c in (HAVE_C, False):
+        for use_c, three_m in ((HAVE_C, False), (HAVE_C, True), (False, False), (False, True)):
             monkeypatch.setattr(K, 'USE_C', use_c)
+            res.plan.three_m = three_m      # three real GEMMs for a complex product
             L = lam.Lambda(res, t1, t2p)
+            assert L.paired == paired
             same_intermediates(L)
             l1n, l2n = L.update(l1, l2, shift)
             assert abs(l1n - l1r).max() < 1e-12 and abs(l2n - l2r).max() < 1e-12
             L.close()
         monkeypatch.setattr(K, 'USE_C', HAVE_C)
+        # in one block with three real GEMMs
+        res.plan = amps.plan_step(o, v, mol.nao_nr(), None, three_m=True,
+                                  kramers=bool(eris.kramers))
+        L = lam.Lambda(res, t1, t2p)
+        l1n, l2n = L.update(l1, l2, shift)
+        assert abs(l1n - l1r).max() < 1e-12 and abs(l2n - l2r).max() < 1e-12
     res.close()
 
 

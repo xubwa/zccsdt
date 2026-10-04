@@ -48,6 +48,7 @@ from pyscf.lib import logger
 from zccsdt import blas, scratch
 from zccsdt.cc.diis import DIIS
 from zccsdt.timing import timer
+from zccsdt.zccsd import amps
 from zccsdt.zccsd import kernels as K
 
 UNPACK_BYTES = 64 << 20     # rows of <ma||ef> unpacked at a time
@@ -71,7 +72,8 @@ class Lambda:
                             KW=np.empty((o, o, n1), dtype=np.complex128))
         self.t1T = s.t1T
         paired = res.kramers
-        res.kramers = bool(paired and res.symmetric(t1, t2p))
+        # t with the time-reversal symmetry of Kramers pairs: so are the intermediates
+        self.paired = res.kramers = bool(paired and res.symmetric(t1, t2p))
         try:
             with timer('lambda.imds'):
                 foo_x, self.Whh = res._imds_pairs(s)
@@ -80,7 +82,8 @@ class Lambda:
         finally:
             res.kramers = paired
         with timer('lambda.imds'):
-            self.taup = s.taup
+            del s.taup
+            self.fvv_a = s.fvv_a                # [a, e] = sum_mf <ma||ef> t1[m,f]
             Fov, Ft, tF, Foo, Fvv = res._fock(s, foo_x)
             self.Fov = Fov
             self.Hoo = Foo + 0.5 * Ft           # [i, j]
@@ -119,15 +122,21 @@ class Lambda:
         self.res.close()
 
     # -- products with the ring layout of lambda2 ------------------------------
-    def _left(self, l2p, B, C):
-        '''C[(i a), :] = sum_(k c) lambda2[i,k,a,c] B[(k c), :], the rows of
-        the ring layout of lambda2 in blocks of i.'''
+    def _left(self, l2p, B, C, blocks, m3):
+        '''C[(i a), :] = sum_(k c) lambda2[i,k,a,c] B[(k c), :] for the rows of
+        the ``blocks`` of i (the ring layout of lambda2 is generated block by
+        block).  With ``m3`` B is given as its three real parts and each
+        product is three real GEMMs.'''
         o, v = self.res.nocc, self.res.nvir
-        for i0, i1 in self.res.plan.jblocks:
+        for i0, i1 in blocks:
+            rows = slice(i0 * v, i1 * v)
             with timer('ring.layout'):
-                Li = K.ring_cols(l2p, o, v, i0, i1)
+                Li = (K.ring_cols3 if m3 else K.ring_cols)(l2p, o, v, i0, i1)
             with timer('ring.gemm'):
-                blas.gemm(Li.T, B, C=C[i0 * v:i1 * v])
+                if m3:
+                    amps._gemm3([x.T for x in Li], B, C=C[rows])
+                else:
+                    blas.gemm(Li.T, B, C=C[rows])
             del Li
         return C
 
@@ -148,13 +157,14 @@ class Lambda:
     # -- one step ---------------------------------------------------------------
     def update_packed(self, l1, l2p, level_shift=0.0):
         '''(l1new, l2pnew) from lambda1[i,a] and lambda2 packed as
-        [(i>j),(a>b)].'''
+        [(i>j),(a>b)].  With Kramers pairs, and t and lambda with their
+        symmetry, half of each expensive term is computed (below).'''
         res = self.res
         o, v = res.nocc, res.nvir
         n1, npo, npv = o * v, K.npair(o), K.npair(v)
         io, jo = K.tril(o)
         plan = res.plan
-        t1, t1T, t2p, taup, Fov, W = self.t1, self.t1T, self.t2p, self.taup, self.Fov, self.W
+        t1, t1T, t2p, Fov, W = self.t1, self.t1T, self.t2p, self.Fov, self.W
         eo, ev = res.mo_e[:o], res.mo_e[o:] + level_shift
         l1 = np.ascontiguousarray(l1, dtype=np.complex128)
         l2p = np.ascontiguousarray(l2p, dtype=np.complex128)
@@ -162,14 +172,27 @@ class Lambda:
         Hvv[np.diag_indices(v)] -= ev
         Hoo[np.diag_indices(o)] -= eo
         prow, psgn = self._prow, self._psgn
+        m3 = plan.three_m
+        # Kramers pairs: sums over an occupied index run over its unbarred half
+        # and are completed by their time-reversed image; of the ring term the
+        # rows with unbarred i are computed
+        kr = bool(self.paired and res.symmetric(l1, l2p))
+        ho = o // 2
+        size = max(j1 - j0 for j0, j1 in plan.jblocks)
+        msize = min(size, max(m1 - m0 for m0, m1 in plan.mblocks))
+        if kr:
+            mblocks = amps._blocks(ho, msize)
+            jblocks, iblocks = amps._blocks(ho, max(1, size // 2)), amps._blocks(ho, size)
+        else:
+            mblocks, jblocks, iblocks = amps._blocks(o, msize), plan.jblocks, plan.jblocks
 
+        L2 = np.zeros((npo, npv), dtype=np.complex128)
         with timer('lambda.pairs'):
-            # X[(ij),(kl)] = sum_{c>d} lambda2[(ij),(cd)] tau[(kl),(cd)], M the same with t2
-            X = blas.gemm(l2p, taup.T)
+            # M[(ij),(kl)] = sum_{c>d} lambda2[(ij),(cd)] t2[(kl),(cd)]
             M = blas.gemm(l2p, t2p.T)
             # mij[i,j] = 1/2 sum_kcd lambda2[k,i,c,d] t2[k,j,c,d]
             mij = np.einsum('ik,jk,ijk->ij', psgn, psgn, M[prow[:, None, :], prow[None, :, :]])
-            del M
+            r1 = Fov + blas.gemm(l1, Hvv) - blas.gemm(Hoo, l1)
             # mba[b,a] = 1/2 sum_klc lambda2[k,l,c,a] t2[k,l,c,b];
             # lt[p, k, c] = sum_d lambda2[p,c,d] t1[k,d]
             mba = np.zeros((v, v), dtype=np.complex128)
@@ -179,88 +202,134 @@ class Lambda:
                 l2u = K.unpack_tril(l2p[p0:p1], v, 'apb').reshape(v * n, v)     # [(c p), a]
                 t2u = K.unpack_tril(t2p[p0:p1], v, 'apb').reshape(v * n, v)
                 blas.gemm(t2u.T, l2u, C=mba, beta=1.0)
+                del t2u
                 lt[p0:p1] = blas.gemm(l2u, t1T).reshape(v, n, o).transpose(1, 2, 0)
-                del l2u, t2u
+                # sum_{(j>k), c} Hq[i,c,(jk)] lambda2[(jk),c,a]
+                r1 += blas.gemm(self.Hq[:, :, p0:p1].reshape(o, v * n), l2u)
+                del l2u
+            # X[(ij),(kl)] = sum_{c>d} lambda2[(ij),(cd)] tau[(kl),(cd)]
+            X = M
+            X += blas.gemm(lt.reshape(npo * o, v), t1.T).reshape(npo, o, o)[:, jo, io]
             lvv = blas.gemm(t1T, l1)                    # [f, b] = sum_j t1[j,f] lambda1[j,b]
             loo = blas.gemm(l1, t1.T)                   # [j, n] = sum_b lambda1[j,b] t1[n,b]
             tmp1vv, tmp1oo = mba + lvv, mij + loo
-            # the terms that the lambda1 equation contracts with t1: the hh ladder,
-            # the tau <kl||ab> term
-            L2 = blas.gemm(self.Whh, l2p)
+            # Y[i, j, k, c] = sum_b lambda2[i,k,b,c] t1[j,b]
+            Y = np.ascontiguousarray(-(psgn[:, :, None, None] * lt[prow]).transpose(0, 2, 1, 3))
+
+        with timer('lambda.ovvv'):
+            # the terms on the rows of <ma||ef>, summed over m, with the product
+            # Q[(i b), (m d)] = sum_kc lambda2[i,k,b,c] t2[k,m,c,d] for the same m
+            rm = np.zeros((o, v), dtype=np.complex128)
+            dm = np.ascontiguousarray((mba - lvv).T)
+            lt2 = lt.reshape(npo, n1)
+            for m0, m1 in mblocks:
+                nm = m1 - m0
+                O = res.ovvv_p[m0:m1]                                   # [m, c, (a>b)]
+                with timer('ovvv.gemm'):
+                    # - sum_kc <kc||ba> lt[(ij), k, c]
+                    blas.gemm(lt2[:, m0 * v:m1 * v], O.reshape(nm * v, npv), C=L2, beta=1.0)
+                with timer('ring.layout'):
+                    Tc = (K.ring_cols3 if m3 else K.ring_cols)(t2p, o, v, m0, m1)
+                Q = self._left(l2p, Tc, np.empty((n1, nm * v), dtype=np.complex128),
+                               plan.jblocks, m3)
+                del Tc
+                Q4 = Q.reshape(o, v, nm, v)
+                for m in range(m0, m1):
+                    Om = O[m - m0]
+                    with timer('ovvv.rows'):
+                        # P(ij) sum_c lambda1[j,c] <ic||ab>
+                        K.add_rows(L2, prow[m], psgn[m], blas.gemm(l1, Om))
+                        # 1/2 sum_kbc lambda2[i,k,b,c] <ka||cb>*
+                        Lk = np.conj(l2p[np.maximum(prow[m], 0)])
+                        rm += psgn[m][:, None] * blas.gemm(Lk, Om.T).conj()
+                        del Lk
+                    with timer('ovvv.x'):
+                        # sum_cb <mc||ab> X[i,c,b]: the ring part - Q, the t1 parts of
+                        # the terms that are in L2 when it is contracted with t1
+                        Xm = blas.gemm(np.ascontiguousarray(Y[:, m].transpose(0, 2, 1))
+                                       .reshape(n1, o), t1).reshape(o, v, v)
+                        Xm -= Q4[:, :, m - m0, :]
+                        Xm[m] += dm
+                        self._ovvv_x(Om, Xm, rm)
+                        del Xm
+                scratch.unmap(O)
+                del Q, Q4, O
+            if kr:
+                with timer('lambda.kramers'):
+                    from zccsdt.zccsd.kramers import image
+                    K.ksym_packed(L2, res.kpo, res.sgo, res.kpv, res.sgv)
+                    rm += image(rm)
+            r1 += rm
+
+        with timer('lambda.pairs'):
+            # the hh ladder and the tau <kl||ab> term
+            blas.gemm(self.Whh, l2p, C=L2, beta=1.0)
             blas.gemm(X, res.oovv_p, C=L2, beta=1.0)
 
         with timer('lambda.ladder'):
             saved = res.kramers
-            res.kramers = bool(res.paired and res.symmetric(l1, l2p))
+            res.kramers = kr
             try:
                 res.ladder(l2p, L2, left=True)
             finally:
                 res.kramers = saved
 
         with timer('lambda.t1'):
-            r1 = Fov + blas.gemm(l1, Hvv) - blas.gemm(Hoo, l1)
+            # what the lambda1 equation contracts with t1 is in L2, with two terms
+            # too many: their t1 parts are in X above and here
             K.t2p_matvec(L2, t1, r1)
-
-        with timer('lambda.ovvv'):
-            for m0, m1 in plan.jblocks:
-                nm = m1 - m0
-                O = res.ovvv_p[m0:m1]                                   # [m, c, (a>b)]
-                # - sum_kc <kc||ba> lt[(ij), k, c]
-                blas.gemm(lt.reshape(npo, n1)[:, m0 * v:m1 * v], O.reshape(nm * v, npv), C=L2,
-                          beta=1.0)
-                # Q[(i b), (m d)] = sum_kc lambda2[i,k,b,c] t2[k,m,c,d]
-                with timer('ring.layout'):
-                    Tc = K.ring_cols(t2p, o, v, m0, m1)
-                Q = self._left(l2p, Tc, np.empty((n1, nm * v), dtype=np.complex128))
-                del Tc
-                Q4 = Q.reshape(o, v, nm, v)
-                for m in range(m0, m1):
-                    Om = O[m - m0]
-                    # P(ij) sum_c lambda1[j,c] <ic||ab>
-                    K.add_rows(L2, prow[m], psgn[m], blas.gemm(l1, Om))
-                    # 1/2 sum_kbc lambda2[i,k,b,c] <ka||cb>*
-                    Lk = np.conj(l2p[np.maximum(prow[m], 0)])
-                    r1 += psgn[m][:, None] * blas.gemm(Lk, Om.T).conj()
-                    del Lk
-                    # - sum_bd <mb||ad> Q[(i b),(m d)] + sum_bc <mc||ab> mba[b,c] for i = m
-                    Xm = -Q4[:, :, m - m0, :]
-                    Xm[m] += mba.T
-                    self._ovvv_x(Om, np.ascontiguousarray(Xm), r1)
-                    del Xm
-                scratch.unmap(O)
-                del Q, Q4, O
+            r1 += blas.gemm(l1, self.fvv_a)
 
         with timer('lambda.ring'):
-            # Y[i, j, k, c] = sum_b lambda2[i,k,b,c] t1[j,b]
-            Y = -(psgn[:, :, None, None] * lt[prow]).transpose(0, 2, 1, 3)
-            Y = np.ascontiguousarray(Y)
             l1v = np.ascontiguousarray(l1.reshape(n1, 1))
-            for j0, j1 in plan.jblocks:
+            for j0, j1 in jblocks:
                 nj = j1 - j0
-                rows = slice(j0 * v, j1 * v)
-                Wr = W[rows]                                            # [(j b), (k c)]
+                # the rows (j b) of W: of the block, and of the partners of its j
+                parts = [slice(j0 * v, j1 * v)]
+                if kr:
+                    parts.append(slice((j0 + ho) * v, (j1 + ho) * v))
                 # P(ij) P(ab) sum_kc lambda2[k,i,c,a] <jc|Hbar|bk>
-                r4 = self._left(l2p, Wr.T, np.empty((n1, nj * v), dtype=np.complex128))
+                r4 = np.empty((n1, len(parts) * nj * v), dtype=np.complex128)
+                if m3:
+                    with timer('ring.layout'):
+                        if len(parts) == 1:
+                            WJ = W[parts[0]]
+                        else:
+                            WJ = np.empty((2 * nj * v, n1), dtype=np.complex128)
+                            WJ[:nj * v], WJ[nj * v:] = W[parts[0]], W[parts[1]]
+                        W3 = [x.T for x in K.split3(WJ)]
+                        del WJ
+                    self._left(l2p, W3, r4, iblocks, True)
+                    del W3
+                else:
+                    for k, c in enumerate(parts):
+                        self._left(l2p, W[c].T, r4[:, k * nj * v:(k + 1) * nj * v], iblocks, False)
                 with timer('ring.pack'):
-                    K.asym_pack_cols(r4, o, v, j0, j1, 1.0, L2)
+                    if kr:
+                        K.kfill_ring(r4, o, v, 0, ho, nj)
+                        K.asym_pack_cols(r4, o, v, j0, j1, 1.0, L2)
+                        K.asym_pack_cols(r4, o, v, j0 + ho, j1 + ho, 1.0, L2, offset=nj * v)
+                    else:
+                        K.asym_pack_cols(r4, o, v, j0, j1, 1.0, L2)
                 del r4
-                # sum_me lambda1[m,e] <ie|Hbar|am>
-                r1[j0:j1] += blas.gemm(Wr, l1v).reshape(nj, v)
-                # - sum_j sum_kc <jc|Hbar|ak> Y[i,j,k,c]
-                for j in range(j0, j1):
-                    blas.gemm(Y[:, j].reshape(o, n1), Wr[(j - j0) * v:(j - j0 + 1) * v].T, C=r1,
-                              alpha=-1.0, beta=1.0)
-                scratch.unmap(Wr)
+                for c in parts:
+                    Wr, jf = W[c], c.start // v
+                    # sum_me lambda1[m,e] <ie|Hbar|am>
+                    r1[jf:jf + nj] += blas.gemm(Wr, l1v).reshape(nj, v)
+                    # - sum_j sum_kc <jc|Hbar|ak> Y[i,j,k,c]
+                    for j in range(nj):
+                        blas.gemm(Y[:, jf + j].reshape(o, n1), Wr[j * v:(j + 1) * v].T, C=r1,
+                                  alpha=-1.0, beta=1.0)
+                    scratch.unmap(Wr)
 
         with timer('lambda.t2'):
             # the t1 parts of <jc|Hbar|ak> that the lambda2 t1 terms do not take:
             # Yc[i,j,k,n] = sum_c Y[i,j,k,c] t1[n,c], Ykc[i,j,n,f] = sum_k Yc[i,j,k,n] t1[k,f]
             Yc = blas.gemm(Y.reshape(o ** 3, v), t1.T).reshape(o, o, o, o)
             del Y
-            r1 += blas.gemm(np.ascontiguousarray(Yc.transpose(0, 1, 3, 2)).reshape(o, o ** 3),
-                            res.ooov.reshape(o ** 3, v))
-            Ykc = blas.gemm(np.ascontiguousarray(Yc.transpose(0, 1, 3, 2)).reshape(o ** 3, o),
-                            t1).reshape(o, o, o, v)
+            Yc = np.ascontiguousarray(Yc.transpose(0, 1, 3, 2))             # [i, j, n, k]
+            r1 += blas.gemm(Yc.reshape(o, o ** 3), res.ooov.reshape(o ** 3, v))
+            Ykc = blas.gemm(Yc.reshape(o ** 3, o), t1).reshape(o, o, o, v)
             Zp = Ykc[:, io, jo] - Ykc[:, jo, io]                        # [i, (j>n), f]
             del Yc, Ykc
             # virtual side, in blocks of pairs
@@ -268,17 +337,16 @@ class Lambda:
                 n = p1 - p0
                 l2u = K.unpack_tril(l2p[p0:p1], v, 'apb').reshape(v * n, v)     # [(a p), c]
                 Yv = blas.gemm(l2u, Hvv)                # sum_c lambda2[p,a,c] Hvv[c,b]
+                del l2u
                 Nb = res.ooov_en[:, :, p0:p1].reshape(o, v * n)
                 blas.gemm(Nb.T, l1, C=Yv, beta=1.0)     # sum_k <p||kb> lambda1[k,a] as [(b p), a]
                 vu = K.unpack_tril(res.oovv_p[p0:p1], v, 'apb')                 # [b, p, c]
                 blas.gemm(vu.reshape(v * n, v), tmp1vv, C=Yv, alpha=-1.0, beta=1.0)
                 K.asym_pack2(Yv.reshape(v, n, v), 1.0, L2[p0:p1], 'apb')
-                # sum_{(j>k), c} Hq[i,c,(jk)] lambda2[(jk),c,a]
-                r1 += blas.gemm(self.Hq[:, :, p0:p1].reshape(o, v * n), l2u)
                 # - sum_{(j>n), f} <jn||af> Zp[i,(jn),f]
                 blas.gemm(np.ascontiguousarray(Zp[:, p0:p1]).reshape(o, n * v),
                           vu.reshape(v, n * v).T, C=r1, alpha=-1.0, beta=1.0)
-                del l2u, Yv, Nb, vu
+                del Yv, Nb, vu
             del Zp
             # occupied side: the one-particle terms as matrices on the pairs
             Gl = np.zeros((npo, npo), dtype=np.complex128)
@@ -320,7 +388,6 @@ def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-
     '''The iterations of pyscf.cc.ccsd_lambda.kernel on packed amplitudes:
     (converged, l1, l2) with lambda2[i,j,a,b] unpacked at the end.  The first
     guess is conj(t); the DIIS vector is [lambda1, packed lambda2].'''
-    from zccsdt.zccsd import amps
     log = logger.new_logger(mycc, verbose)
     settings = (mycc.max_memory, mycc.diis_space, True if mycc.incore_complete else None,
                 getattr(mycc, 'three_m', None))

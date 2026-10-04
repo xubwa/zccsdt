@@ -43,6 +43,7 @@ _SIGNATURES = {
     'zc_ladder_pack': [_P, _I, _I, _I, _I, _P, _P],
     'zc_ladder_unpack': [_P, _P, _I, _I, _I, _I, _P],
     'zc_ladder_rows': [_P, ctypes.c_int, _I, _I, _I, _I, _I, _P, _I, _P, _I],
+    'zc_ksym_packed': [_P, _I, _I, _P, _P, _P, _P],
 }
 
 
@@ -471,6 +472,22 @@ def kfill_packed(L, drow, srow, kpv, sgv, R):
     k = drow >= 0
     R[drow[k]] += srow[k, None] * sgv * L[k][:, kpv].conj()
     return R
+
+
+def ksym_packed(X, kpo, sgo, kpv, sgv):
+    '''X += its time-reversed image, in place: X[P, Q] += sgo[P] sgv[Q]
+    conj(X[kpo[P], kpv[Q]]) with the values before the call, for a packed
+    array X[(i>j), (a>b)] (kramers.pair_maps of the occupied and of the
+    virtual spinors).  It completes a symmetric quantity of which the part
+    summed over the unbarred half of an index is given.'''
+    kpo, kpv = (np.ascontiguousarray(x, dtype=np.int64) for x in (kpo, kpv))
+    sgo, sgv = (np.ascontiguousarray(x, dtype=np.float64) for x in (sgo, sgv))
+    if USE_C:
+        _lib.zc_ksym_packed(_c(X), X.shape[0], X.shape[1], _c(kpo, np.int64),
+                            _c(sgo, np.float64), _c(kpv, np.int64), _c(sgv, np.float64))
+        return X
+    X += sgo[:, None] * sgv * X[kpo][:, kpv].conj()
+    return X
 
 
 def add_rows_k(R, rows, signs, Z, zrow, kpv, sgv):

@@ -491,6 +491,13 @@ def test_kernels_equal_numpy():
         (a, _), (b, _) = both(K.add_rows_k, rnd(7, K.npair(v8)), np.array([2, -1, 0, 5]),
                               np.array([1., 0, -1, 1]), L, np.array([3, 0, 1, 2]), kp8, sg8)
         same(a, b)
+        # a packed array plus its image, in place; a symmetric array is doubled
+        kp6, sg6 = kramers.pair_maps(o6)
+        x = rnd(K.npair(o6), K.npair(v8))
+        (a, _), (b, _) = both(K.ksym_packed, x, kp6, sg6, kp8, sg8)
+        same(a, b)
+        same(a, x + kramers.image(x, pairs=(0, 1)))
+        same(K.ksym_packed(a.copy(), kp6, sg6, kp8, sg8), 2 * a)
         (a, _), (b, _) = both(K.asym_pack_cols, rnd(n1, 3 * v + 5), o, v, 1, 3, 0.3, R, 4)
         same(a, b)
         # <mb||ef> t1: outputs in the arguments

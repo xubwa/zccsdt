@@ -730,6 +730,38 @@ void zc_kfill_packed(const zc *L, int64_t np, int64_t npv, const int64_t *drow,
     }
 }
 
+/* X += its time-reversed image, in place, for a packed array of np rows of
+ * npv elements:
+ *   X[P, Q] += so[P] sv[Q] conj(X[kpo[P], kpv[Q]])    (the values before the call)
+ * kpo, so and kpv, sv: partner and sign of the occupied and of the virtual
+ * pairs (partners have the same sign).  For an array that holds the part of
+ * a symmetric quantity that was summed over the unbarred half of an index. */
+void zc_ksym_packed(zc *X, int64_t np, int64_t npv, const int64_t *kpo, const double *so,
+                    const int64_t *kpv, const double *sv)
+{
+    #pragma omp parallel
+    {
+        zc *a = malloc(sizeof(zc) * 2 * npv), *b = a + npv;
+        #pragma omp for schedule(dynamic, 8)
+        for (int64_t p = 0; p < np; p++) {
+            const int64_t q = kpo[p];
+            if (q < p)
+                continue;                               /* done with its partner */
+            zc *xp = X + p * npv, *xq = X + q * npv;
+            memcpy(a, xp, sizeof(zc) * npv);
+            if (q != p)
+                memcpy(b, xq, sizeof(zc) * npv);
+            const zc *other = q != p ? b : a;
+            for (int64_t c = 0; c < npv; c++)
+                xp[c] = a[c] + so[p] * sv[c] * conj(other[kpv[c]]);
+            if (q != p)
+                for (int64_t c = 0; c < npv; c++)
+                    xq[c] = b[c] + so[q] * sv[c] * conj(a[kpv[c]]);
+        }
+        free(a);
+    }
+}
+
 /* R[rows[k], q] += signs[k] sgv[q] Z[zrow[k], kpv[q]] for n rows: zc_add_rows
  * for the time-reversed image of the rows of Z (not conjugated); rows < 0
  * are skipped. */
