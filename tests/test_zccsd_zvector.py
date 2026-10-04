@@ -26,8 +26,8 @@ def scf(mol, eps=0.0, V=None):
     return mf
 
 
-def ccsd(mf, kr):
-    mycc = DirectZCCSD(mf)
+def ccsd(mf, kr, frozen=0):
+    mycc = DirectZCCSD(mf, frozen=frozen)
     mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt, mycc.kramers = 0, 1e-12, 1e-9, kr
     mycc.max_cycle = 200
     mycc.kernel()
@@ -81,6 +81,32 @@ def test_relaxed_density_is_energy_derivative(mol, kr):
     plain = mycc.dip_moment(l1=l1, l2=l2, unit='AU')
     assert 1e-3 < abs(plain[2] - dip[2]) < 1e-2
     assert abs(mycc.dip_moment(l1=l1, l2=l2)[2] - plain[2] * 2.541746) < 1e-5
+
+
+@pytest.mark.parametrize('kr', [False, None])
+def test_relaxed_density_with_frozen_spinors(mol, kr):
+    '''Two frozen occupied spinors: the rotations between them and the active
+    occupied ones follow from the Fock matrix staying diagonal.  The relaxed
+    density, in the basis of all spinors, against the central difference of
+    E(SCF) + E_corr with the SCF repeated in the field; the same with and
+    without Kramers pairs.'''
+    mf = scf(mol)
+    mycc = ccsd(mf, kr, frozen=2)
+    relaxed, unrelaxed, z = zvector.relaxed_rdm1_dense(mycc, mf, tol=1e-10)
+    C, mo_e, o, frozen = zvector.full_space(mycc)
+    assert o == 10 and list(frozen) == [0, 1] and z.shape == (C.shape[1] - o, o)
+    assert abs(C.conj().T @ mf.get_ovlp() @ C - np.eye(C.shape[1])).max() < 1e-9
+    assert abs(relaxed[2:o, :2]).max() > 1e-5           # the core-valence elements
+    assert abs(unrelaxed[2:o, :2]).max() < 1e-12
+    V = mol.intor('int1e_r_spinor')[2]
+    Vmo = C.conj().T @ V @ C
+    eps = 1e-4
+    ep, em = [(m.e_tot + ccsd(m, kr, 2).e_corr) for m in (scf(mol, eps, V), scf(mol, -eps, V))]
+    derivative = (ep - em) / (2 * eps)
+    assert abs(derivative - np.einsum('pq,qp', Vmo, relaxed).real) < 2e-7
+    assert abs(derivative - np.einsum('pq,qp', Vmo, unrelaxed).real) > 1e-3
+    nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())[2]
+    assert abs(mycc.dip_moment(relaxed=True, unit='AU')[2] - (nuclear - derivative)) < 2e-7
 
 
 def test_gamma1_equals_pyscf():

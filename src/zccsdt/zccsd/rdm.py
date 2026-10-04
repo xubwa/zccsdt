@@ -63,9 +63,9 @@ def gamma1(t1, t2, l1, l2, pair_bytes=1 << 30):
 def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False,
               with_t=False, relaxed=False):
     '''The one-particle density of the CCSD (``with_t``: CCSD(T)) of
-    ``mycc``, in the basis of the active spinors eris.mo_coeff, or in the 2c
-    AO basis with the frozen spinors (``ao_repr``).  lambda is solved for if
-    it is not given.'''
+    ``mycc``, in the basis of the active spinors eris.mo_coeff (``relaxed``:
+    of all spinors, zvector.full_space), or in the 2c AO basis with the
+    frozen spinors (``ao_repr``).  lambda is solved for if it is not given.'''
     if eris is None:
         eris = mycc.eris if mycc.eris is not None else mycc.ao2mo(mycc.mo_coeff)
     t1 = mycc.t1 if t1 is None else t1
@@ -77,7 +77,11 @@ def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False
         if with_t:
             raise NotImplementedError('orbital relaxation with the (T) terms')
         from zccsdt.zccsd import zvector
-        dm1 = zvector.relaxed_rdm1_dense(mycc, l1=l1, l2=l2)[0]
+        dm1 = zvector.relaxed_rdm1_dense(mycc, l1=l1, l2=l2)[0]     # all spinors
+        if not ao_repr:
+            return dm1
+        C = zvector.full_space(mycc)[0]
+        return C @ dm1 @ C.conj().T
     else:
         doo, dov, dvo, dvv = gamma1(t1, t2, l1, l2)
         if with_t:

@@ -1943,10 +1943,40 @@ gradient is so far made from the full two-particle density of
 the densities (1e-9); G anti-Hermitian, without occupied-occupied and
 virtual-virtual blocks (1e-11); the relaxed density with the dipole operator
 against the central difference of E(SCF) + E_corr with the SCF repeated in
-the field: 3e-8, where the unrelaxed density is off by 2e-3. Not written:
-the orbital gradient from intermediates in the layouts of the amplitude
-step (the part of the two-particle density with four virtual indices
-through the AO ladder), frozen spinors, the (T) terms.
+the field: 3e-8, where the unrelaxed density is off by 2e-3. Frozen
+occupied spinors: the rotations between them and the active occupied ones
+follow from the Fock matrix staying diagonal (y_ic = G_ic / (e_c - e_i) in
+the density, and its Fock matrix on the right-hand side of the equations);
+the same test with two frozen spinors: 3e-8. `DirectZCCSD.make_rdm1` and
+`dip_moment` (`zccsd/rdm.py`, the interface of the earlier socutils code)
+give the density of t and lambda from the packed amplitudes, and with
+`relaxed=True` the relaxed one.
+
+Against CFOUR (`xx2cccdenocbp`, `xx2czvec`, `xsox2cprop` after the Lambda
+equations; job 31600371, H2O/cc-pVDZ, all electrons, CC_CONV=9;
+`bench/check_dipole.py`), the z component of the dipole moment in atomic
+units:
+
+| | CFOUR | zccsdt | difference |
+|---|---|---|---|
+| E(SCF) | -76.075431217 | -76.075431227 | 1.0e-8 |
+| E_corr(CCSD) | -0.213384851 | -0.213384837 | 1.4e-8 |
+| SCF dipole | 0.808722476 | 0.808720918 | 1.6e-6 |
+| CCSD dipole, relaxed | 0.766033160 | 0.766031614 | 1.5e-6 |
+| its correlation part | -0.042689316 | -0.042689304 | 1.2e-8 |
+
+The dipole operator of zccsdt is that of the 2c AO basis without a
+picture-change transformation, which is where the 1.6e-6 of both dipoles
+may come from (not checked); the correlation part, which is what lambda,
+the densities and the Z-vector equations make, agrees to 1e-8. CFOUR also
+prints an "unrelaxed" coupled-cluster dipole (0.784942); the density of t
+and lambda at fixed spinors gives 0.764128 here, and that same density
+without its occupied-virtual blocks 0.796421: CFOUR's number is a third
+quantity, which was not identified.
+
+Not written: the orbital gradient from intermediates in the layouts of the
+amplitude step (the part of the two-particle density with four virtual
+indices through the AO ladder), the (T) terms.
 
 ## Correctness references
 

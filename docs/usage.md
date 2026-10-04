@@ -199,8 +199,8 @@ mu = mycc.dip_moment()                  # its dipole moment, Debye (unit='AU')
 
 mycc.solve_lambda(with_t=True)          # CCSD(T): small molecules only so far
 mycc.make_rdm1(with_t=True)
-mycc.dip_moment(relaxed=True)           # with orbital relaxation: CCSD, all electrons,
-                                        # small molecules only so far
+mycc.dip_moment(relaxed=True)           # with orbital relaxation: CCSD, small molecules
+                                        # only so far
 ```
 
 The Lambda equations run on the integrals and within the memory plan of the

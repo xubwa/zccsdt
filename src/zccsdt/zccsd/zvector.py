@@ -38,10 +38,11 @@ of E(SCF) + E_corr with the SCF repeated in the field).
 What is here: the orbital gradient from the full two-particle density and
 all MO integrals (orbital_gradient: a reference for small molecules), the
 response equation with AO-direct Fock builds (solve: for any size), the
-relaxed density.  Not here yet: the orbital gradient from intermediates in
-the layouts of zccsd.amps (no full two-particle density, the vvvv part
-through the AO ladder), frozen spinors, and the (T) terms, for which the
-occupied-occupied and virtual-virtual rotations do not drop out.
+relaxed density, frozen occupied spinors (relaxed_rdm1_dense).  Not here
+yet: the orbital gradient from intermediates in the layouts of zccsd.amps
+(no full two-particle density, the vvvv part through the AO ladder), and
+the (T) terms, for which the occupied-occupied and virtual-virtual
+rotations do not drop out.
 '''
 
 import numpy as np
@@ -108,18 +109,41 @@ def relaxed_rdm1(dm1, z, nocc):
     return out
 
 
+def full_space(mycc):
+    '''(C, mo_energy, nocc, frozen) for the Z-vector equations of ``mycc``:
+    all spinors of its SCF in the 2c AO basis - the active ones as the
+    amplitudes have them (eris.mo_coeff: Kramers pairs), the frozen ones as
+    the SCF has them, in the order of the SCF - their energies, the number
+    of occupied ones, and the indices of the frozen occupied ones.'''
+    from pyscf.cc import ccsd
+    eris = mycc.eris
+    active = ccsd.get_frozen_mask(mycc)
+    C = np.array(mycc.mo_coeff, dtype=np.complex128)
+    C[:, active] = eris.mo_coeff
+    mo_e = np.array(mycc._scf.mo_energy, dtype=np.float64)
+    mo_e[active] = eris.mo_energy
+    occupied = mycc.mo_occ > 0
+    if (~active & ~occupied).any() or not occupied[:occupied.sum()].all():
+        raise NotImplementedError('Z-vector equations with frozen virtual spinors')
+    return C, mo_e, int(occupied.sum()), np.flatnonzero(~active & occupied)
+
+
 def relaxed_rdm1_dense(mycc, mf=None, l1=None, l2=None, tol=1e-9, verbose=None):
     '''The relaxed one-particle density of the CCSD of ``mycc`` (DirectZCCSD
-    after kernel(); no frozen spinors) in the basis of the spinors
-    mycc.eris.mo_coeff, with the orbital gradient from the full
-    two-particle density of pyscf.cc.gccsd_rdm and all MO integrals: the
-    reference for small molecules.  Returns (dm1 relaxed, dm1 unrelaxed, z).'''
+    after kernel()) in the basis of all spinors (full_space), with the
+    orbital gradient from the full two-particle density of pyscf.cc
+    .gccsd_rdm and all MO integrals: the reference for small molecules.
+    Returns (dm1 relaxed, dm1 unrelaxed, z[a,i] for all occupied i).
+
+    Frozen occupied spinors c.  The energy depends on the rotations between
+    them and the active occupied i; in a perturbation these follow from the
+    Fock matrix staying diagonal, f_ic = 0, not from an equation of their
+    own: with y_ic = G_ic / (e_c - e_i) the density gets y in its (i, c) and
+    conj(y) in its (c, i) elements, and the right-hand side of the Z-vector
+    equations the Fock matrix of the density Ci y Cc^+ + Cc y^+ Ci^+.'''
     from pyscf.cc import gccsd_rdm
     mf = mycc._scf if mf is None else mf
-    eris = mycc.eris
-    C, o = eris.mo_coeff, eris.nocc
-    if C.shape[1] != mf.mo_coeff.shape[1]:
-        raise NotImplementedError('Z-vector equations with frozen spinors')
+    C, mo_e, o, frozen = full_space(mycc)
     if l1 is None or l2 is None:
         l1, l2 = mycc.solve_lambda()
     dm1 = gccsd_rdm.make_rdm1(mycc, mycc.t1, mycc.t2, l1, l2)
@@ -128,7 +152,16 @@ def relaxed_rdm1_dense(mycc, mf=None, l1=None, l2=None, tol=1e-9, verbose=None):
     eri = mf.mol.intor('int2e_spinor')
     eri = np.einsum('mp,nq,mnls,lr,st->pqrt', C.conj(), C, eri, C.conj(), C, optimize=True)
     G = orbital_gradient(h, eri, dm1, dm2)
-    conv, z = solve(mf, C, eris.mo_energy, o, -G[o:, :o], tol=tol, verbose=verbose)
+    gvo = -G[o:, :o]
+    out = np.array(dm1, dtype=np.complex128)
+    if frozen.size:
+        act = np.setdiff1d(np.arange(o), frozen)
+        y = G[np.ix_(act, frozen)] / (mo_e[frozen][None, :] - mo_e[act][:, None])
+        Y = C[:, act] @ y @ C[:, frozen].conj().T
+        gvo = gvo - C[:, o:].conj().T @ mf.get_veff(mf.mol, Y + Y.conj().T) @ C[:, :o]
+        out[np.ix_(act, frozen)] += y
+        out[np.ix_(frozen, act)] += y.conj().T
+    conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose)
     if not conv:
         logger.warn(mycc, 'Z-vector equations not converged')
-    return relaxed_rdm1(dm1, z, o), dm1, z
+    return relaxed_rdm1(out, z, o), dm1, z
