@@ -65,7 +65,7 @@ occupied-occupied and virtual-virtual rotations do not drop out.
 import numpy as np
 from pyscf.lib import logger
 
-from zccsdt import blas
+from zccsdt import blas, memory
 from zccsdt.cc.diis import DIIS
 
 
@@ -241,7 +241,28 @@ def full_space(mycc):
     return C, mo_e, int(occupied.sum()), np.flatnonzero(~active & occupied)
 
 
-def gradient_frozen(mycc, t1, t2, l1, l2, verbose=None, coulomb=None):
+def pad_amplitudes(nocc, nvir, act, x1, x2):
+    '''(y1[i,a], y2[(i>j), (a>b)]) for all ``nocc`` occupied spinors from the
+    amplitudes x1[i,a] and x2 ([i,j,a,b] or packed) of the active ones at the
+    positions ``act`` (ascending), zero where an index is frozen.'''
+    from zccsdt.zccsd import kernels as K
+    y1 = np.zeros((nocc, nvir), dtype=np.complex128)
+    y1[act] = x1
+    x2 = np.ascontiguousarray(x2, dtype=np.complex128)
+    y2 = np.zeros((K.npair(nocc), K.npair(nvir)), dtype=np.complex128)
+    y2[active_pairs(act)] = x2 if x2.ndim == 2 else K.pack_t2(x2)
+    return y1, y2
+
+
+def active_pairs(act):
+    '''The packed rows (i > j) of the pairs of active occupied spinors among
+    those of all occupied spinors.'''
+    from zccsdt.zccsd import kernels as K
+    ia, ja = K.tril(act.size)
+    return act[ia] * (act[ia] - 1) // 2 + act[ja]
+
+
+def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coulomb=None):
     '''(G[a, x], G[i, c]): the blocks of the orbital gradient that the
     Z-vector equations of a CCSD with frozen occupied spinors need - the
     virtual spinors a with all occupied x, frozen and active, in the order of
@@ -265,13 +286,56 @@ def gradient_frozen(mycc, t1, t2, l1, l2, verbose=None, coulomb=None):
 
     with R and rho the residuals of the amplitude equations and of the Lambda
     equations with one frozen index: one step of each on the padded
-    amplitudes (zccsd.amps, zccsd.lam).  G = (Gnh - Gnh^+) / 2.'''
-    from zccsdt.zccsd import amps, lam, orbgrad
+    amplitudes (zccsd.amps, zccsd.lam).  G = (Gnh - Gnh^+) / 2.
+
+    Memory: the three phases are planned one by one within max_memory, for
+    all occupied spinors - at least what a step of the CCSD without frozen
+    spinors takes.  t2 and lambda2 of the CCSD object (the default) are
+    packed and released while this runs, lambda2 is padded only when the
+    Lambda step needs it, and if a plan does not fit next to the integrals
+    of the active space, those are released (mycc.eris = None: mycc.ao2mo()
+    makes them again when they are needed).'''
     from zccsdt.zccsd import kernels as K
     log = logger.new_logger(mycc, verbose)
     C, mo_e, o, frozen = full_space(mycc)
     act = np.setdiff1d(np.arange(o), frozen)
     v = C.shape[1] - o
+    eo, ev = mo_e[:o], mo_e[o:]
+    oa, rows_act = act.size, active_pairs(act)
+
+    def packed(x):
+        x = np.ascontiguousarray(x, dtype=np.complex128)
+        return x if x.ndim == 2 else K.pack_t2(x)
+    # as lam.kernel: the arrays of the CCSD object are packed and released while
+    # this runs, and unpacked again at the end
+    own_t, own_l = t2 is None, l2 is None
+    T1, T2p = pad_amplitudes(o, v, act, mycc.t1 if t1 is None else t1,
+                             mycc.t2 if own_t else t2)
+    l1 = np.ascontiguousarray(mycc.l1 if l1 is None else l1, dtype=np.complex128)
+    l2a = packed(mycc.l2 if own_l else l2)          # of the active spinors, until it is needed
+    t2 = l2 = None
+    if own_t:
+        mycc.t2 = None
+    if own_l:
+        mycc.l2 = None
+    try:
+        return _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, [l2a], log,
+                                coulomb)
+    finally:
+        if own_t:
+            mycc.t2 = K.unpack_t2(np.ascontiguousarray(T2p[rows_act]), oa, v)
+        if own_l:
+            mycc.l2 = K.unpack_t2(l2a, oa, v)
+
+
+def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulomb):
+    '''gradient_frozen for the padded t; l2a: a list with the packed lambda2
+    of the active spinors.'''
+    import gc
+    from zccsdt.zccsd import amps, lam, orbgrad
+    from zccsdt.zccsd import kernels as K
+    v = C.shape[1] - o
+    eo, ev = mo_e[:o], mo_e[o:]
     # the CCSD of all spinors, as they are: no frozen ones, no pairing of its own
     full = mycc.__class__(mycc._scf, frozen=0, mo_coeff=C, mo_occ=mycc.mo_occ)
     full.verbose, full.max_memory, full.kramers = mycc.verbose, mycc.max_memory, False
@@ -280,27 +344,41 @@ def gradient_frozen(mycc, t1, t2, l1, l2, verbose=None, coulomb=None):
     if getattr(mycc.eris, 'residual', None) is not None:
         mycc.eris.residual.close()
         mycc.eris.residual = None
-    eris = full.ao2mo(C)
-    if getattr(mycc.eris, 'aoladder', None) is not None:    # the AO operators are the same
-        eris.aoladder.close()
-        eris.aoladder = mycc.eris.aoladder
-    eo, ev = mo_e[:o], mo_e[o:]
+    lad = getattr(mycc.eris, 'aoladder', None)          # the AO operators are the same
 
-    def padded(x1, x2):
-        y1 = np.zeros((o, v), dtype=np.complex128)
-        y1[act] = x1
-        x2 = np.ascontiguousarray(x2, dtype=np.complex128)
-        x2p = x2 if x2.ndim == 2 else K.pack_t2(x2)
-        y2 = np.zeros((K.npair(o), K.npair(v)), dtype=np.complex128)
-        ia, ja = K.tril(act.size)
-        y2[act[ia] * (act[ia] - 1) // 2 + act[ja]] = x2p
-        return y1, y2
+    def guarded(f):
+        '''f(), once more without the integrals of the active space if it
+        does not fit next to them.'''
+        try:
+            return f()
+        except MemoryError:
+            if mycc.eris is None:
+                raise
+        # (outside the except block: what the failed attempt made is released
+        # with its traceback)
+        before = memory.resident()
+        mycc.eris = None
+        gc.collect()
+        log.info('Orbital gradient with frozen spinors: the integrals of the active space '
+                 'are released (max_memory): %.2f GB of %.2f GB in memory',
+                 (before - memory.resident()) / 1e9, before / 1e9)
+        return f()
 
-    (T1, T2p), (L1, L2p) = padded(t1, t2), padded(l1, l2)
-    del t2, l2
-    res = eris.residual = amps.Residual(eris, plan=False)
-    # one step of the amplitude equations: nothing of its own to set aside
-    res.replan(full.max_memory, 0, False, full.three_m)
+    def setup():
+        eris = full.ao2mo(C)
+        if lad is not None:
+            eris.aoladder.close()
+            eris.aoladder = lad
+        res = eris.residual = amps.Residual(eris, plan=False)
+        # one step of the amplitude equations: nothing of its own to set aside
+        res.replan(full.max_memory, 0, False, full.three_m)
+        return eris, res
+
+    try:
+        eris, res = guarded(setup)
+    except MemoryError as err:
+        raise MemoryError('%s (the orbital gradient with frozen spinors is that of all %d '
+                          'occupied spinors)' % (err, o)) from None
     log.info('Orbital gradient with frozen spinors: all %d occupied spinors; %s', o,
              res.describe())
     prow = np.array([r for r, _ in res.pair_rows])
@@ -323,12 +401,13 @@ def gradient_frozen(mycc, t1, t2, l1, l2, verbose=None, coulomb=None):
         return r1, out
 
     t1n, t2n = res.update_packed(T1, T2p)
+    L1, L2p = pad_amplitudes(o, v, act, l1, l2a[0])
     R1, RL = with_frozen(t1n, t2n, T1, T2p, L2p)
     del t1n, t2n
     # one step of the Lambda equations: its arrays, less the lambda2 that is
     # here already (the plan counts three packed arrays of its own)
-    res.replan(full.max_memory, 0, False, full.three_m,
-               reserve=max(0, lam.reserve_bytes(o, v) - L2p.nbytes))
+    guarded(lambda: res.replan(full.max_memory, 0, False, full.three_m,
+                               reserve=max(0, lam.reserve_bytes(o, v) - L2p.nbytes)))
     L = lam.Lambda(res, T1, T2p)
     try:
         l1n, l2n = L.update_packed(L1, L2p)
@@ -338,7 +417,8 @@ def gradient_frozen(mycc, t1, t2, l1, l2, verbose=None, coulomb=None):
     del l1n, l2n, L
     Gci = blas.gemm(P1, T1.T) + PT                      # [c, i], all occupied i
     Gic = -(blas.gemm(R1, L1.T) + RL)                   # [c, i] holds Gnh[i, c]
-    Gnh = orbgrad.kernel(full, eris, T1, T2p, L1, L2p, verbose, coulomb=coulomb)
+    Gnh = guarded(lambda: orbgrad.kernel(full, eris, T1, T2p, L1, L2p, log,
+                                         coulomb=coulomb))
     res.close()
     Gvo = 0.5 * Gnh
     Gvo[:, frozen] += 0.5 * P1.conj().T
@@ -358,8 +438,8 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     from zccsdt.zccsd import orbgrad, rdm
     from zccsdt.zccsd import kernels as K
     mf = mycc._scf if mf is None else mf
-    if eris is None:
-        eris = mycc.eris if mycc.eris is not None else mycc.ao2mo(mycc.mo_coeff)
+    if eris is None and mycc.eris is None:
+        mycc.ao2mo(mycc.mo_coeff)
     if l1 is None or l2 is None:
         # those of the CCSD object (as PySCF's make_rdm1 takes them), solved for
         # if there are none, if they are not those of the amplitudes given, or
@@ -369,7 +449,8 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
             mycc.solve_lambda(t1, t2, eris=eris)
         l1 = l2 = None
     C, mo_e, o, frozen = full_space(mycc)
-    oa, v = eris.nocc, C.shape[1] - o               # active occupied spinors
+    oa, v = o - frozen.size, C.shape[1] - o         # active occupied spinors
+    act = np.setdiff1d(np.arange(o), frozen)
 
     def packed(x):
         x = np.ascontiguousarray(x, dtype=np.complex128)
@@ -386,26 +467,31 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     if own_l:
         mycc.l2 = None
     try:
-        coulomb = orbgrad.Coulomb(mf.mol, mycc.max_memory)
-        veff = scf_veff(mf, coulomb=coulomb)
-        out = dm1 = gccsd_rdm._make_rdm1(mycc, rdm.gamma1(t1, t2p, l1, l2p),
-                                         with_frozen=bool(frozen.size))
+        budget = memory.budget(mycc.max_memory)
+        d1 = rdm.gamma1(t1, t2p, l1, l2p, **({} if budget is None else
+                                             {'pair_bytes': max(1, min(1 << 30, budget // 4))}))
+        out = dm1 = gccsd_rdm._make_rdm1(mycc, d1, with_frozen=bool(frozen.size))
         if not frozen.size:
-            gvo = -0.5 * orbgrad.kernel(mycc, eris, t1, t2p, l1, l2p, verbose, coulomb=coulomb)
+            gvo = -0.5 * orbgrad.kernel(mycc, mycc.eris if eris is None else eris, t1, t2p,
+                                        l1, l2p, verbose)
         else:
-            Gvo, Gic = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose, coulomb)
-            act = np.setdiff1d(np.arange(o), frozen)
-            y = Gic / (mo_e[frozen][None, :] - mo_e[act][:, None])
-            Y = C[:, act] @ y @ C[:, frozen].conj().T
-            gvo = -Gvo - C[:, o:].conj().T @ veff(Y + Y.conj().T) @ C[:, :o]
-            out = np.array(dm1, dtype=np.complex128)
-            out[np.ix_(act, frozen)] += y
-            out[np.ix_(frozen, act)] += y.conj().T
+            Gvo, Gic = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose)
     finally:
         if own_t:
             mycc.t2 = K.unpack_t2(t2p, oa, v)
         if own_l:
             mycc.l2 = K.unpack_t2(l2p, oa, v)
+    t2p = l2p = None
+    # the Fock operator of the orbital Hessian: after the gradient, which has
+    # taken what memory there is
+    veff = scf_veff(mf, mycc.max_memory)
+    if frozen.size:
+        y = Gic / (mo_e[frozen][None, :] - mo_e[act][:, None])
+        Y = C[:, act] @ y @ C[:, frozen].conj().T
+        gvo = -Gvo - C[:, o:].conj().T @ veff(Y + Y.conj().T) @ C[:, :o]
+        out = np.array(dm1, dtype=np.complex128)
+        out[np.ix_(act, frozen)] += y
+        out[np.ix_(frozen, act)] += y.conj().T
     conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose, veff=veff)
     if not conv:
         logger.warn(mycc, 'Z-vector equations not converged')

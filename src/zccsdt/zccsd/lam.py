@@ -75,18 +75,20 @@ UNPACK_BYTES = 64 << 20     # rows of <ma||ef> unpacked at a time, at most
 
 
 def reserve_bytes(nocc, nvir):
-    '''Bytes of the arrays of the Lambda equations that the memory plan of
-    the amplitude step (amps.plan_step) does not know: Hq and lambda2 t1
-    with three occupied indices, four matrices on the pairs, what the terms
-    on the rows of
-    <ma||ef> take for one occupied index (three arrays of o v^2 elements,
-    the rows that are unpacked, two arrays of o v(v-1)/2 elements), and
-    the third array of the product L T for one occupied index (_q_blocks).'''
+    '''Bytes to set aside when the amplitude step is planned for the Lambda
+    equations.  The arrays that are kept - Hq and lambda2 t1 with three
+    occupied indices, four matrices on the pairs, o^4 - take the place of the
+    intermediates of a step, which the plan counts (amps.step_arrays) and
+    which are not there during an iteration: only what they have more counts.
+    To that, what the terms on the rows of <ma||ef> take for one occupied
+    index (three arrays of o v^2 elements, the rows that are unpacked, two
+    arrays of o v(v-1)/2 elements), and the third array of the product L T
+    for one occupied index (_q_blocks).'''
     o, v = int(nocc), int(nvir)
     npo, npv = K.npair(o), K.npair(v)
     kept = 16 * (2 * o * v * npo + 4 * npo * npo + 2 * o ** 4)
     rows = 64 * o * v * v + 32 * o * npv
-    return kept + rows + 16 * o * v * v
+    return max(0, kept - amps.step_arrays(o, v)) + rows + 16 * o * v * v
 
 
 def _q_blocks(plan, o, v):

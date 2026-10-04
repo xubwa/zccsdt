@@ -66,6 +66,7 @@ def main():
     t_lam = time.perf_counter() - t0
     print('Lambda %.1f s, converged %s' % (t_lam, mycc.converged_lambda))
 
+    del eris        # the CCSD object has them: the frozen path may have to release them
     watch = MemWatch()
     watch.start()
     timing.reset()

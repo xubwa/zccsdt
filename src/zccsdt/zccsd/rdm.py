@@ -71,19 +71,20 @@ def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False
     ``mycc``, in the basis of the active spinors eris.mo_coeff (``relaxed``:
     of all spinors, zvector.full_space), or in the 2c AO basis with the
     frozen spinors (``ao_repr``).  lambda is solved for if it is not given.'''
-    if eris is None:
-        eris = mycc.eris if mycc.eris is not None else mycc.ao2mo(mycc.mo_coeff)
     if relaxed:
         if with_t:
             raise NotImplementedError('orbital relaxation with the (T) terms')
-        # the amplitudes of the CCSD object are not taken here: zvector.kernel
-        # packs them and releases the full arrays while it runs
+        # neither the amplitudes nor the integrals of the CCSD object are taken
+        # here: zvector.kernel packs the first and releases the full arrays while
+        # it runs, and with frozen spinors it may have to give up the second
         from zccsdt.zccsd import zvector
-        dm1 = zvector.kernel(mycc, t1, t2, l1, l2, eris)[0]         # all spinors
-        if not ao_repr:
-            return dm1
+        if eris is None and mycc.eris is None:
+            mycc.ao2mo(mycc.mo_coeff)
         C = zvector.full_space(mycc)[0]
-        return C @ dm1 @ C.conj().T
+        dm1 = zvector.kernel(mycc, t1, t2, l1, l2, eris)[0]         # all spinors
+        return C @ dm1 @ C.conj().T if ao_repr else dm1
+    if eris is None:
+        eris = mycc.eris if mycc.eris is not None else mycc.ao2mo(mycc.mo_coeff)
     t1 = mycc.t1 if t1 is None else t1
     t2 = mycc.t2 if t2 is None else t2
     if l1 is None or l2 is None:
