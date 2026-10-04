@@ -199,8 +199,7 @@ mu = mycc.dip_moment()                  # its dipole moment, Debye (unit='AU')
 
 mycc.solve_lambda(with_t=True)          # CCSD(T): with the (T) terms; E(T) is in mycc.e_t
 mycc.make_rdm1(with_t=True)
-mycc.dip_moment(relaxed=True)           # with orbital relaxation: CCSD, small molecules
-                                        # only so far
+mycc.dip_moment(relaxed=True)           # with orbital relaxation (CCSD; Z-vector equations)
 ```
 
 The Lambda equations run on the integrals and within the memory plan of the
@@ -213,10 +212,18 @@ basis. The dipole operator has the picture-change transformation of X2C
 (`picture_change=False`: the bare operator). With `with_t` the (T) terms of
 the equations and of the density come from the batches of the (T) code, in
 2.5 times the time of the (T) energy and within `max_memory`; that run gives
-E(T) as well, so `ccsd_t()` need not be called before it. The orbital
-gradient of the Z-vector equations (`relaxed`) is evaluated from full nmo^4
-arrays for now (docs/benchmarks.md); `make_rdm1()` itself is evaluated from
-the packed amplitudes and is not limited in that way.
+E(T) as well, so `ccsd_t()` need not be called before it.
+
+`relaxed=True` adds the response of the spinors (`zccsd/zvector.py`): the
+orbital gradient of the CCSD Lagrangian is evaluated in the layouts of the
+amplitude step and within `max_memory` (`zccsd/orbgrad.py`: about three
+CCSD iterations), the Z-vector equations take a few Fock builds. The result
+is the density in the basis of all spinors of the SCF (`ao_repr=True`: in
+the 2c AO basis). Frozen occupied spinors are allowed: the gradient is then
+taken from the code for all spinors with zero amplitudes for the frozen
+ones, which makes the integrals once more with all occupied spinors.
+`relaxed=True` together with `with_t=True` is not there yet (the orbital
+relaxation of the (T) terms; docs/benchmarks.md).
 
 At `verbose >= 4` the log says where the integrals are (memory or scratch
 file), how the step is sliced, which BLAS does the matrix products and

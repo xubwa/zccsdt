@@ -25,7 +25,8 @@ from pyscf.data import nist
 
 def gamma1(t1, t2, l1, l2, pair_bytes=1 << 30):
     '''(doo, dov, dvo, dvv) of pyscf.cc.gccsd_rdm._gamma1_intermediates from
-    t2 and lambda2 packed over i > j and a > b: the two contractions of
+    t2 and lambda2 (as [i,j,a,b], or packed over i > j and a > b, which is
+    what is used): the two contractions of
     lambda2 with t2 as products of the packed arrays (the occupied one) and
     of blocks of pairs unpacked over a and b (the virtual one), on all
     threads; nothing of o^2 v^2 elements besides the two packed arrays.'''
@@ -34,8 +35,9 @@ def gamma1(t1, t2, l1, l2, pair_bytes=1 << 30):
     o, v = t1.shape
     t1 = np.ascontiguousarray(t1, dtype=np.complex128)
     l1 = np.ascontiguousarray(l1, dtype=np.complex128)
-    t2p = K.pack_t2(np.ascontiguousarray(t2, dtype=np.complex128))
-    l2p = K.pack_t2(np.ascontiguousarray(l2, dtype=np.complex128))
+    t2p, l2p = (np.ascontiguousarray(x, dtype=np.complex128) for x in (t2, l2))
+    t2p = t2p if t2p.ndim == 2 else K.pack_t2(t2p)
+    l2p = l2p if l2p.ndim == 2 else K.pack_t2(l2p)
     npo = K.npair(o)
     # mij[i,j] = 1/2 sum_kcd lambda2[k,i,c,d] t2[k,j,c,d]: from the pairs with k
     M = blas.gemm(l2p, t2p.T)
@@ -71,32 +73,33 @@ def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False
     frozen spinors (``ao_repr``).  lambda is solved for if it is not given.'''
     if eris is None:
         eris = mycc.eris if mycc.eris is not None else mycc.ao2mo(mycc.mo_coeff)
-    t1 = mycc.t1 if t1 is None else t1
-    t2 = mycc.t2 if t2 is None else t2
-    if l1 is None or l2 is None:
-        l1, l2 = mycc.solve_lambda(t1, t2, eris=eris, with_t=with_t)
-    o = eris.nocc
     if relaxed:
         if with_t:
             raise NotImplementedError('orbital relaxation with the (T) terms')
+        # the amplitudes of the CCSD object are not taken here: zvector.kernel
+        # packs them and releases the full arrays while it runs
         from zccsdt.zccsd import zvector
         dm1 = zvector.kernel(mycc, t1, t2, l1, l2, eris)[0]         # all spinors
         if not ao_repr:
             return dm1
         C = zvector.full_space(mycc)[0]
         return C @ dm1 @ C.conj().T
-    else:
-        doo, dov, dvo, dvv = gamma1(t1, t2, l1, l2)
-        if with_t:
-            terms = getattr(mycc, '_t_density', None)       # of solve_lambda(with_t=True)
-            if terms is None:
-                from zccsdt.zccsd import triples
-                terms = triples.kernel(mycc, eris, t1, t2, terms=True)[1][2:]
-            goo, gvv, gvo = terms
-            doo[np.diag_indices(o)] -= goo
-            dvv[np.diag_indices(dvv.shape[0])] += gvv
-            dvo += gvo
-        dm1 = gccsd_rdm._make_rdm1(mycc, (doo, dov, dvo, dvv), with_frozen=False)
+    t1 = mycc.t1 if t1 is None else t1
+    t2 = mycc.t2 if t2 is None else t2
+    if l1 is None or l2 is None:
+        l1, l2 = mycc.solve_lambda(t1, t2, eris=eris, with_t=with_t)
+    o = eris.nocc
+    doo, dov, dvo, dvv = gamma1(t1, t2, l1, l2)
+    if with_t:
+        terms = getattr(mycc, '_t_density', None)           # of solve_lambda(with_t=True)
+        if terms is None:
+            from zccsdt.zccsd import triples
+            terms = triples.kernel(mycc, eris, t1, t2, terms=True)[1][2:]
+        goo, gvv, gvo = terms
+        doo[np.diag_indices(o)] -= goo
+        dvv[np.diag_indices(dvv.shape[0])] += gvv
+        dvo += gvo
+    dm1 = gccsd_rdm._make_rdm1(mycc, (doo, dov, dvo, dvv), with_frozen=False)
     if not ao_repr:
         return dm1
     C = eris.mo_coeff

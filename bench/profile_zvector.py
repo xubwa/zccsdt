@@ -11,8 +11,9 @@ environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              so many cycles (the gradient is then that of amplitudes which
              are not converged: for its time and memory only);
              ZC_ZVECTOR=0: without the Z-vector equations;
-             ZC_FROZEN: so many frozen occupied spinors (the gradient then
-             through zvector.gradient_frozen, on all spinors).
+             ZC_FROZEN: so many frozen occupied spinors: the relaxed density
+             as a whole (zvector.kernel: the gradient on all spinors through
+             zvector.gradient_frozen, then the Z-vector equations).
 '''
 import os
 import resource
@@ -70,21 +71,21 @@ def main():
     timing.reset()
     t0 = time.perf_counter()
     if frozen:
-        G, Gic = zvector.gradient_frozen(mycc, mycc.t1, mycc.t2, mycc.l1, mycc.l2)
-        G = -2.0 * G                # as below: -G / 2 is used
+        G = zvector.kernel(mycc, tol=1e-8)[2]       # z
     else:
         G = orbgrad.kernel(mycc)
     t_og = time.perf_counter() - t0
     watch.stop()
-    print('orbital gradient: %.1f s, largest element %.3e, peak anonymous memory %.2f GB'
-          % (t_og, abs(G).max(), watch.anon / 1e6))
+    print('%s: %.1f s, largest element %.3e, peak anonymous memory %.2f GB'
+          % ('relaxed density (gradient on all spinors and Z-vector equations)' if frozen
+             else 'orbital gradient', t_og, abs(G).max(), watch.anon / 1e6))
     for name, w, calls in timing.report():
         if name.startswith('og.'):
             print('  %-12s %9.2f s  %5.1f %%  (%d calls)' % (name[3:], w, 100 * w / t_og, calls))
     for name, w, calls in timing.report():
         if not name.startswith('og.') and w > 0.02 * t_og:
             print('    %-16s %9.2f s  (%d calls)' % (name, w, calls))
-    print('the orbital gradient takes %.2f CCSD iterations' % (t_og * len(cycles) / (t2 - t1)))
+    print('that is %.2f CCSD iterations' % (t_og * len(cycles) / (t2 - t1)))
 
     if os.environ.get('ZC_ZVECTOR', '1') != '0' and not frozen:
         C, mo_e, nocc, frozen = zvector.full_space(mycc)
