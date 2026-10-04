@@ -106,6 +106,17 @@ def main():
         conv, z = zvector.solve(mf, C, mo_e, nocc, -0.5 * G, tol=1e-8, verbose=4, veff=veff)
         print('Z-vector equations: %.1f s, converged %s, largest element %.3e'
               % (time.perf_counter() - t0, conv, abs(z).max()))
+        # all of it as DirectZCCSD.make_rdm1(relaxed=True) does it: the density of t and
+        # lambda, the gradient, the Fock operator and its check, the equations
+        del veff, R
+        watch = MemWatch()
+        watch.start()
+        t0 = time.perf_counter()
+        z2 = zvector.kernel(mycc, tol=1e-8)[2]
+        t_all = time.perf_counter() - t0
+        watch.stop()
+        print('relaxed density, all of it (zvector.kernel): %.1f s, peak anonymous memory %.2f GB; '
+              'z differs by %.1e' % (t_all, watch.anon / 1e6, abs(z2 - z).max()))
     print('peak RSS %.2f GB' % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6))
 
 
