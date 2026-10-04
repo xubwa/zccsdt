@@ -10,7 +10,9 @@ environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              DirectZCCSD.kramers; ZC_CCSD_CYCLES, ZC_LAMBDA_CYCLES: at most
              so many cycles (the gradient is then that of amplitudes which
              are not converged: for its time and memory only);
-             ZC_ZVECTOR=0: without the Z-vector equations.
+             ZC_ZVECTOR=0: without the Z-vector equations;
+             ZC_FROZEN: so many frozen occupied spinors (the gradient then
+             through zvector.gradient_frozen, on all spinors).
 '''
 import os
 import resource
@@ -35,7 +37,8 @@ def main():
     t0 = time.perf_counter()
     mf = x2c.UHF(mol).run(conv_tol=1e-10)
     t_scf = time.perf_counter() - t0
-    mycc = DirectZCCSD(mf)
+    frozen = int(os.environ.get('ZC_FROZEN', 0))
+    mycc = DirectZCCSD(mf, frozen=frozen)
     mycc.verbose, mycc.max_cycle = 0, int(os.environ.get('ZC_CCSD_CYCLES', 100))
     mycc.conv_tol, mycc.conv_tol_normt = 1e-9, 1e-7
     if 'ZC_KRAMERS' in os.environ:
@@ -48,9 +51,9 @@ def main():
     mycc.kernel(eris=eris)
     t2 = time.perf_counter()
     o, v = mycc.t1.shape
-    print('%s/%s DirectZCCSD  nocc=%d nvir=%d  Kramers pairs: %s  max_memory %.0f MB  threads %s'
-          % (mol_name, basis, o, v, bool(eris.kramers), maxmem,
-             os.environ.get('OMP_NUM_THREADS', '?')))
+    print('%s/%s DirectZCCSD  nocc=%d nvir=%d  frozen %d  Kramers pairs: %s  max_memory %.0f MB  '
+          'threads %s' % (mol_name, basis, o, v, frozen, bool(eris.kramers), maxmem,
+                          os.environ.get('OMP_NUM_THREADS', '?')))
     print('matrix products: ' + blas.backend()[1])
     print('SCF %.1f s; integrals %.1f s; CCSD %.1f s: %d cycles (%.2f s each), converged %s, '
           'E_corr %.10f' % (t_scf, t1 - t0, t2 - t1, len(cycles),
@@ -66,7 +69,11 @@ def main():
     watch.start()
     timing.reset()
     t0 = time.perf_counter()
-    G = orbgrad.kernel(mycc)
+    if frozen:
+        G, Gic = zvector.gradient_frozen(mycc, mycc.t1, mycc.t2, mycc.l1, mycc.l2)
+        G = -2.0 * G                # as below: -G / 2 is used
+    else:
+        G = orbgrad.kernel(mycc)
     t_og = time.perf_counter() - t0
     watch.stop()
     print('orbital gradient: %.1f s, largest element %.3e, peak anonymous memory %.2f GB'
@@ -79,7 +86,7 @@ def main():
             print('    %-16s %9.2f s  (%d calls)' % (name, w, calls))
     print('the orbital gradient takes %.2f CCSD iterations' % (t_og * len(cycles) / (t2 - t1)))
 
-    if os.environ.get('ZC_ZVECTOR', '1') != '0':
+    if os.environ.get('ZC_ZVECTOR', '1') != '0' and not frozen:
         C, mo_e, nocc, frozen = zvector.full_space(mycc)
         R, eai = zvector.response(mf, C, mo_e, nocc)
         t0 = time.perf_counter()

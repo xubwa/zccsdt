@@ -447,7 +447,11 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
     # ---- <ia||bc> density with <ab||cd>
     with timer('og.ladder'):
         Rl = np.zeros((npo, npv), dtype=np.complex128)
-        res.ladder(taup, Rl)
+        saved, res.kramers = res.kramers, kr        # half of the pairs only for symmetric t
+        try:
+            res.ladder(taup, Rl)
+        finally:
+            res.kramers = saved
         X['ovvv'] += K.t2p_matvec(Rl, l1, np.zeros((o, v), dtype=np.complex128)).T
         Pl = np.zeros((v, v), dtype=np.complex128)
         for p0, p1 in pblocks:

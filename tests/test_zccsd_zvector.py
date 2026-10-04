@@ -249,3 +249,20 @@ def test_orbital_gradient_within_plan(monkeypatch):
                 ref = G
             assert abs(G - ref).max() < 1e-11 and abs(ref).max() > 1e-3
     assert blocked > 3 and mapped > 1 and refused == 1
+    # Kramers pairs (the last case was without): what is done for half of the
+    # rows and sums and completed by time reversal against all of it, and
+    # amplitudes without the symmetry, for which all of it is done
+    cc = DirectZCCSD(mf)
+    cc.verbose, cc.max_memory = 0, 100000
+    eris = cc.ao2mo()
+    assert eris.kramers
+    plan = amps.plan_step(o, v, nao, None, (), diis_incore=False, three_m=False, kramers=True)
+    for paired in (True, False):
+        (t1, t2p), (l1, l2p) = packed(), packed()
+        if not paired:
+            t2p = t2p + 0.01 * (rng.standard_normal(t2p.shape) + 1j * rng.standard_normal(t2p.shape))
+        res = eris.residual = amps.Residual(eris, plan=plan)
+        assert res.kramers and res.symmetric(t1, t2p) == paired
+        G = orbgrad.gradient(cc, eris, t1, t2p, l1, l2p)
+        res.kramers = False
+        assert abs(G - orbgrad.gradient(cc, eris, t1, t2p, l1, l2p)).max() < 1e-10
