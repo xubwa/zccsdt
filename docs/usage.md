@@ -190,6 +190,27 @@ PySCF's settings apply (`conv_tol`, `conv_tol_normt`, `max_cycle`,
 - `socutils_amps = True`, `ovvv_direct = True`, `ladder = 'chol'`: the
   routes copied from socutils (einsums on full arrays, PySCF's driver).
 
+Lambda and densities:
+
+```python
+l1, l2 = mycc.solve_lambda()            # CCSD Lambda: mycc.l1[i,a], mycc.l2[i,j,a,b]
+l1, l2 = mycc.solve_lambda(with_t=True) # with the (T) terms: small molecules only so far
+
+from pyscf.cc import gccsd_rdm          # the density expressions of PySCF's GCCSD
+dm1 = gccsd_rdm.make_rdm1(mycc, mycc.t1, mycc.t2, l1, l2)      # unrelaxed, <q+ p>
+
+from zccsdt.zccsd import zvector        # orbital relaxation: small molecules only so far
+relaxed, unrelaxed, z = zvector.relaxed_rdm1_dense(mycc)       # all electrons, CCSD
+```
+
+The Lambda equations run on the integrals and within the memory plan of the
+CCSD, with Kramers pairs where the CCSD has them; an iteration takes 1.3
+times a CCSD iteration. Like `t1` and `t2`, `l1`, `l2` and the densities
+refer to the spinors `mycc.eris.mo_coeff`; an expectation value is
+`einsum('pq,qp', V, dm1)` with V in that basis. The (T) terms of Lambda and
+the orbital gradient of the Z-vector equations are evaluated from full
+o^3 v^3 and nmo^4 arrays for now (docs/benchmarks.md).
+
 At `verbose >= 4` the log says where the integrals are (memory or scratch
 file), how the step is sliced, which BLAS does the matrix products and
 whether Kramers pairs are used.

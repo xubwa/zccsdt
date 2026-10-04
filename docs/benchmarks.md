@@ -1828,6 +1828,126 @@ What is not done:
   from memory one cache miss at a time, and the loops over k < j are a few
   elements long.
 
+### The Lambda equations (`zccsd/lam.py`), their (T) terms, the Z-vector
+
+**CCSD Lambda** (`DirectZCCSD.solve_lambda`). The equations of
+`pyscf.cc.gccsd_lambda` for lambda1[i,a] and lambda2 packed over i > j and
+a > b, in the layouts of the amplitude step:
+
+- what depends on t alone is made once, by the first pass of the amplitude
+  step with the full product <mn||ef> t2: elements of the similarity-
+  transformed Hamiltonian - its one-particle blocks, <ij|Hbar|kl> on packed
+  pairs, <mb|Hbar|ej> in the ring layout (o^2 v^2 elements, in memory or
+  mapped), an intermediate with three occupied indices, the T1 equation;
+- no intermediate with three virtual indices is made (PySCF's and the
+  earlier socutils code keep one of o v^3 elements). lambda2 with
+  <ab|Hbar|ci> in the lambda1 equation is evaluated from its parts: the
+  integral with the rows of lambda2; the ring part by a product of the ring
+  layouts of lambda2 and t2, in blocks of columns that are contracted with
+  the rows of <ma||ef>; the t1 <mb|Hbar|ej> part with the rows of W as they
+  are read for the ring term; the ladder part as the AO ladder of lambda2
+  contracted with t1;
+- per iteration: two o^3 v^3 products (the ring term of the lambda2
+  equation and the product above), the AO ladder with the two sets of
+  coefficients exchanged, one pass over <ma||ef>, one over W;
+- Kramers pairs: the sums over the first index of <ma||ef> run over the
+  unbarred m and are completed by their time-reversed image (for the
+  packed array in place), of the ring term the rows with unbarred i are
+  computed, the ladder is done for one pair of each two partners; three
+  real GEMMs per product where the plan of the amplitude step uses them;
+- memory: the plan of the amplitude step for the budget less what that
+  plan does not know (`lam.reserve_bytes`); with ZGEMM the blocks of the
+  product with t2 are two thirds of the plan's, since it holds three arrays
+  of a block of columns where the step holds two.
+
+Tests (`tests/test_zccsd_lambda.py`, H2O X2C spinors): one step and the
+intermediates against PySCF's on integrals made by brute force from the AO
+integrals, for random complex t and lambda (1e-12; observed 1e-15), without
+and with Kramers pairs, in blocks, W mapped, three real GEMMs, numpy
+kernels; the converged lambda against PySCF's iterations; the one-particle
+density of t and lambda against the derivative of the CCSD energy with
+respect to a complex Hermitian one-particle perturbation at fixed spinors
+(central difference: 1.5e-9); the allocations of a step against
+`lam.working_set` (tracemalloc), for budgets from the smallest up.
+
+Against CFOUR (`xx2chbar`, then `xx2clcc`), one job, CFOUR first on the same
+node (31600070, c516, 8 cores, `max_memory` 24000 MB and MEMORY_SIZE 24 GB,
+MKL 2026.1; zccsdt as of d4520a8; `bench/profile_lambda.py`). CFOUR with
+CC_CONV=7, zccsdt until the norm of the change is below 1e-7. Seconds:
+
+| | H2O/cc-pVQZ: CFOUR | zccsdt | C6H6/cc-pVDZ: CFOUR | zccsdt |
+|---|---|---|---|---|
+| CCSD iteration on this node | 2.75 | 0.44 | 26.92 | 9.46 |
+| Hbar / the intermediates | 29.1 | 0.23 | 158.7 | 7.0 |
+| Lambda: cycles | 10 | 11 | 12 | 11 |
+| Lambda: seconds | 46.9 | 6.5 | 321.9 | 130.6 |
+| per cycle | 4.7 | 0.590 | 26.8 | 11.88 |
+| Hbar and Lambda | 76.0 | 6.7 (11x) | 480.5 | 137.5 (3.5x) |
+| peak memory, GB (zccsdt: of the whole run, integrals and CCSD included) | 2.8 | 5.3 | 12.6 | 14.1 |
+
+The time of `xx2clcc` per cycle is its wall time over its cycles. c516 is
+one of the nodes on which CFOUR is slow (26.9 s per CCSD iteration for
+benzene; 23.0 s on the fast ones), so the factors would be smaller there, as
+for the amplitude equations.
+
+Where an iteration of zccsdt goes (the same job, seconds):
+
+| | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|
+| the two o^3 v^3 products | 0.163 | 5.05 |
+| the terms on the rows of <ma\|\|ef> (GEMM with lambda2 t1; rows; contraction with the product) | 0.187 (0.026; 0.042; 0.119) | 1.71 (0.85; 0.30; 0.57) |
+| ring layouts, packing | 0.025 | 0.91 |
+| AO ladder | 0.088 | 1.06 |
+| pair-pair products, mba, lambda2 t1 | 0.034 | 1.34 |
+| virtual and occupied one-particle terms | 0.045 | 1.11 |
+| lambda1 terms, DIIS | 0.031 | 0.56 |
+| iteration (with what is under no timer) | 0.590 | 11.88 |
+| the CCSD iteration | 0.44 | 9.46 |
+
+An iteration is 1.26-1.34 times a CCSD iteration. For benzene the two
+products take what the two of the amplitude step take (4.7-5.8 s in the
+CCSD iterations of the other jobs; not timed in this one), and the rest is
+more than there. Known reserves, not measured: the two
+one-particle terms on the occupied side are dense GEMMs on the pairs
+(about 0.5 s for benzene); the ring layout of lambda2 and the real parts of
+W are made twice and every iteration (0.9 s); t2, lambda2 and <ij||ab> are
+unpacked in three passes (about 0.6 s); for H2O the contraction of the
+product with the unpacked rows of <ma||ef> is a fifth of the iteration.
+The largest run (benzene/cc-pVTZ, where the integrals are in scratch files
+and the plan is in blocks) has not been made.
+
+**The (T) terms** (`zccsd/lam_t.py`, `solve_lambda(with_t=True)`). The
+earlier code of the user is on the branch `claude/ccsd-lambda-socutils` of
+socutils (8965b9f; `cc/lambda_zccsd.py`, `cc/lambda_t_zccsd.py`,
+`cc/rdm_zccsd.py`): PySCF's equations on full arrays with the pp ladder
+through the AO ladder, and for (T) PySCF's source terms with the bare
+integrals conjugated, which complex spinors need. The (T) source terms are
+copied from there, with the (T) terms of the one-particle density of
+`pyscf.cc.gccsd_t_rdm`; the triples are full o^3 v^3 arrays, i.e. this is a
+reference for small molecules. Test: E(T) of these triples against
+`triples.kernel` (1e-10), and the density with lambda and the (T) terms
+against the central difference of E(CCSD) + E(T) for a perturbation of the
+Fock matrix in its occupied-virtual blocks and on its diagonal (1e-8, of
+a (T) part of 4e-5 to 1e-3), without and with Kramers pairs. The evaluation
+in the batches of `zccsd/triples.py` is not written.
+
+**Z-vector** (`zccsd/zvector.py`). Conventions, the response equation and a
+reference: for C -> C exp(-kappa) the orbital gradient G of the energy with
+its Lagrangian from the one- and two-particle densities; R(z) = -G_vo with
+the orbital Hessian of the SCF (orbital energy differences and the Fock
+matrix of the density change, AO direct, DIIS: any size); the relaxed
+density is the density with z in its virtual-occupied block. The orbital
+gradient is so far made from the full two-particle density of
+`pyscf.cc.gccsd_rdm` and all MO integrals (nmo^4: small molecules). Test
+(H2O/6-31G, all electrons, without and with Kramers pairs): the energy from
+the densities (1e-9); G anti-Hermitian, without occupied-occupied and
+virtual-virtual blocks (1e-11); the relaxed density with the dipole operator
+against the central difference of E(SCF) + E_corr with the SCF repeated in
+the field: 3e-8, where the unrelaxed density is off by 2e-3. Not written:
+the orbital gradient from intermediates in the layouts of the amplitude
+step (the part of the two-particle density with four virtual indices
+through the AO ladder), frozen spinors, the (T) terms.
+
 ## Correctness references
 
 | Reference | Agreement | Test |
