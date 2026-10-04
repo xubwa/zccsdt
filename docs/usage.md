@@ -209,8 +209,8 @@ times a CCSD iteration. Like `t1` and `t2`, `l1`, `l2` and `make_rdm1()`
 refer to the spinors `mycc.eris.mo_coeff`: an expectation value is
 `einsum('pq,qp', V, dm1)` with V in that basis, or with
 `make_rdm1(ao_repr=True)` (frozen spinors included) and V in the 2c AO
-basis. The dipole operator is that of the 2c AO basis, without a
-picture-change transformation. The (T) terms (`with_t`) and the orbital
+basis. The dipole operator has the picture-change transformation of X2C
+(`picture_change=False`: the bare operator). The (T) terms (`with_t`) and the orbital
 gradient of the Z-vector equations (`relaxed`) are evaluated from full
 o^3 v^3 and nmo^4 arrays for now (docs/benchmarks.md); `make_rdm1()` itself
 is evaluated from the packed amplitudes and is not limited in that way.

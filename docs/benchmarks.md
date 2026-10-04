@@ -1961,18 +1961,19 @@ units:
 |---|---|---|---|
 | E(SCF) | -76.075431217 | -76.075431227 | 1.0e-8 |
 | E_corr(CCSD) | -0.213384851 | -0.213384837 | 1.4e-8 |
-| SCF dipole | 0.808722476 | 0.808720918 | 1.6e-6 |
-| CCSD dipole, relaxed | 0.766033160 | 0.766031614 | 1.5e-6 |
-| its correlation part | -0.042689316 | -0.042689304 | 1.2e-8 |
+| SCF dipole | 0.808722476 | 0.808722456 | 2.0e-8 |
+| CCSD dipole, relaxed | 0.766033160 | 0.766033118 | 4.2e-8 |
+| its correlation part | -0.042689316 | -0.042689338 | 2.2e-8 |
 
-The dipole operator of zccsdt is that of the 2c AO basis without a
-picture-change transformation, which is where the 1.6e-6 of both dipoles
-may come from (not checked); the correlation part, which is what lambda,
-the densities and the Z-vector equations make, agrees to 1e-8. CFOUR also
-prints an "unrelaxed" coupled-cluster dipole (0.784942); the density of t
-and lambda at fixed spinors gives 0.764128 here, and that same density
-without its occupied-virtual blocks 0.796421: CFOUR's number is a third
-quantity, which was not identified.
+The dipoles agree as the energies do. The dipole operator has the
+picture-change transformation of the X2C Hamiltonian
+(`rdm.dipole_integrals`, PySCF's `with_x2c.picture_change`); with the bare
+operator of the 2c AO basis, which the socutils code used, both dipoles of
+zccsdt are 1.5e-6 lower (0.808720918 and 0.766031611) and the correlation
+part is -0.042689307. CFOUR also prints an "unrelaxed" coupled-cluster
+dipole (0.784942); the density of t and lambda at fixed spinors gives
+0.764129 here, and that same density without its occupied-virtual blocks
+0.7964: CFOUR's number is a third quantity, which was not identified.
 
 Not written: the orbital gradient from intermediates in the layouts of the
 amplitude step (the part of the two-particle density with four virtual

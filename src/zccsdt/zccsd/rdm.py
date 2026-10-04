@@ -11,8 +11,9 @@ orbital relaxation of zccsd.zvector (CCSD without frozen spinors, small
 molecules so far).  ``with_t``: lambda with the (T) terms and the (T) terms of
 the density (zccsd.lam_t: full o^3 v^3 arrays, small molecules so far).
 
-The dipole operator is that of the 2c AO basis, without a picture-change
-transformation.
+The dipole operator is that of the 2c AO basis with the picture-change
+transformation of the X2C Hamiltonian (dipole_integrals; the socutils code
+used the bare operator: H2O/cc-pVDZ 1.6e-6 a.u. in the dipole).
 '''
 
 import numpy as np
@@ -100,14 +101,25 @@ def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False
     return dm + Cf @ Cf.conj().T
 
 
+def dipole_integrals(mycc, picture_change=True):
+    '''The dipole operator r[x, p, q] in the 2c AO basis (origin at zero):
+    with the picture-change transformation of the X2C Hamiltonian of the
+    SCF if it has one (``with_x2c``), else the bare operator.'''
+    mol = mycc.mol
+    x2c = getattr(mycc._scf, 'with_x2c', None)
+    with mol.with_common_orig((0, 0, 0)):
+        if picture_change and x2c is not None:
+            return np.asarray(x2c.picture_change(('int1e_r_spinor', 'int1e_sprsp_spinor')))
+        return mol.intor('int1e_r_spinor')
+
+
 def dip_moment(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, with_t=False,
-               relaxed=False, unit='Debye'):
-    '''The electric dipole moment from make_rdm1 and the dipole integrals of
-    the 2c AO basis (origin at zero); ``unit``: 'Debye' or 'AU'.'''
+               relaxed=False, unit='Debye', picture_change=True):
+    '''The electric dipole moment from make_rdm1 and dipole_integrals;
+    ``unit``: 'Debye' or 'AU'.'''
     dm = make_rdm1(mycc, t1, t2, l1, l2, eris, ao_repr=True, with_t=with_t, relaxed=relaxed)
     mol = mycc.mol
-    with mol.with_common_orig((0, 0, 0)):
-        r = mol.intor('int1e_r_spinor')
+    r = dipole_integrals(mycc, picture_change)
     dip = (np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())
            - np.einsum('xpq,qp->x', r, dm).real)
     if unit.upper() == 'DEBYE':

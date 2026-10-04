@@ -76,11 +76,14 @@ def test_relaxed_density_is_energy_derivative(mol, kr):
     assert abs(mycc.make_rdm1(l1=l1, l2=l2) - dm1).max() < 1e-12
     assert abs(mycc.make_rdm1(l1=l1, l2=l2, relaxed=True) - relaxed).max() < 1e-9
     nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())[2]
-    dip = mycc.dip_moment(l1=l1, l2=l2, relaxed=True, unit='AU')
+    dip = mycc.dip_moment(l1=l1, l2=l2, relaxed=True, unit='AU', picture_change=False)
     assert abs(dip[2] - (nuclear - derivative)) < 2e-7 and abs(dip[:2]).max() < 1e-7
-    plain = mycc.dip_moment(l1=l1, l2=l2, unit='AU')
+    plain = mycc.dip_moment(l1=l1, l2=l2, unit='AU', picture_change=False)
     assert 1e-3 < abs(plain[2] - dip[2]) < 1e-2
-    assert abs(mycc.dip_moment(l1=l1, l2=l2)[2] - plain[2] * 2.541746) < 1e-5
+    # the operator with the picture-change transformation of X2C: the default
+    changed = mycc.dip_moment(l1=l1, l2=l2, unit='AU')
+    assert 1e-10 < abs(changed[2] - plain[2]) < 1e-5     # 9e-9 in this basis
+    assert abs(mycc.dip_moment(l1=l1, l2=l2)[2] - changed[2] * 2.541746) < 1e-5
 
 
 @pytest.mark.parametrize('kr', [False, None])
@@ -106,7 +109,8 @@ def test_relaxed_density_with_frozen_spinors(mol, kr):
     assert abs(derivative - np.einsum('pq,qp', Vmo, relaxed).real) < 2e-7
     assert abs(derivative - np.einsum('pq,qp', Vmo, unrelaxed).real) > 1e-3
     nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())[2]
-    assert abs(mycc.dip_moment(relaxed=True, unit='AU')[2] - (nuclear - derivative)) < 2e-7
+    dip = mycc.dip_moment(relaxed=True, unit='AU', picture_change=False)
+    assert abs(dip[2] - (nuclear - derivative)) < 2e-7
 
 
 def test_gamma1_equals_pyscf():

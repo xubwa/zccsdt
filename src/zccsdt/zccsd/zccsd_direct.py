@@ -493,10 +493,11 @@ class DirectZCCSD(_zccsd.ZCCSD):
         return rdm.make_rdm1(self, t1, t2, l1, l2, eris, ao_repr, with_t, relaxed)
 
     def dip_moment(self, t1=None, t2=None, l1=None, l2=None, eris=None, with_t=False,
-                   relaxed=False, unit='Debye'):
-        '''The electric dipole moment from make_rdm1 (zccsdt.zccsd.rdm).'''
+                   relaxed=False, unit='Debye', picture_change=True):
+        '''The electric dipole moment from make_rdm1 (zccsdt.zccsd.rdm), the
+        operator with the picture-change transformation of X2C.'''
         from zccsdt.zccsd import rdm
-        return rdm.dip_moment(self, t1, t2, l1, l2, eris, with_t, relaxed, unit)
+        return rdm.dip_moment(self, t1, t2, l1, l2, eris, with_t, relaxed, unit, picture_change)
 
     def ao2mo(self, mo_coeff=None):
         if mo_coeff is None:
