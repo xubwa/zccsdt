@@ -116,6 +116,19 @@ def test_relaxed_density_with_frozen_spinors(mol, kr):
     relaxed, unrelaxed, z = zvector.relaxed_rdm1_dense(mycc, mf, tol=1e-10)
     C, mo_e, o, frozen = zvector.full_space(mycc)
     assert o == 10 and list(frozen) == [0, 1] and z.shape == (C.shape[1] - o, o)
+    # without the full arrays: the frozen spinors as occupied ones with zero
+    # amplitudes in the code for all spinors (zvector.gradient_frozen)
+    h = C.conj().T @ mf.get_hcore() @ C
+    eri = mol.intor('int2e_spinor')
+    eri = np.einsum('mp,nq,mnls,lr,st->pqrt', C.conj(), C, eri, C.conj(), C, optimize=True)
+    amplitudes = (mycc.t1, mycc.t2, mycc.l1, mycc.l2)
+    G = zvector.orbital_gradient(h, eri, gccsd_rdm.make_rdm1(mycc, *amplitudes),
+                                 gccsd_rdm.make_rdm2(mycc, *amplitudes))
+    Gvo, Gic = zvector.gradient_frozen(mycc, *amplitudes)
+    assert abs(Gvo - G[o:, :o]).max() < 1e-7 and abs(Gvo[:, :2]).max() > 1e-4
+    assert abs(Gic - G[2:o, :2]).max() < 1e-9 and abs(Gic).max() > 1e-4
+    rel2, unrel2, z2 = zvector.kernel(mycc, mf=mf, tol=1e-10)
+    assert abs(unrel2 - unrelaxed).max() < 1e-12 and abs(rel2 - relaxed).max() < 2e-7
     assert abs(C.conj().T @ mf.get_ovlp() @ C - np.eye(C.shape[1])).max() < 1e-9
     assert abs(relaxed[2:o, :2]).max() > 1e-5           # the core-valence elements
     assert abs(unrelaxed[2:o, :2]).max() < 1e-12
@@ -179,14 +192,14 @@ def test_orbital_gradient_within_plan(monkeypatch):
     orbgrad.kernel plans it.'''
     import tracemalloc
     from zccsdt import memory
-    from zccsdt.zccsd import amps, kramers
+    from zccsdt.zccsd import amps, ao2mo, kramers
     from zccsdt.zccsd import kernels as K
     monkeypatch.setattr(memory, 'resident', lambda: 0)
     monkeypatch.setattr(orbgrad, 'UNPACK_BYTES', 1 << 20)   # of the size of the arrays here
     mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
     mf = x2c.UHF(mol).run(conv_tol=1e-10)
     rng = np.random.default_rng(1)
-    blocked = mapped = 0
+    blocked = mapped = refused = 0
     for kr in (None, False):
         cc = DirectZCCSD(mf)
         cc.verbose, cc.kramers, cc.max_memory = 0, kr, 100000
@@ -208,6 +221,14 @@ def test_orbital_gradient_within_plan(monkeypatch):
         for factor in (1.0, 1.3, 2.0, 4.0, 40.0):
             plan = amps.plan_step(o, v, nao, int(factor * need), (), diis_incore=False,
                                   three_m=False, kramers=eris.kramers)
+            # the least of the step is not that of the integrals <j~ e||ab>: a slab of
+            # 16 v^3 bytes with what makes it, and the arrays of one occupied spinor
+            room = plan.budget + orbgrad.reserve_bytes(o, v) - 64 * o * v * v
+            if ao2mo.plan_slabs(mol, o, v, None, sort_arrays=0).need > room:
+                with pytest.raises(MemoryError, match='of the orbital gradient'):
+                    orbgrad.slab_plan(mol, plan, o, v)
+                refused += 1
+                continue
             eris.residual = amps.Residual(eris, plan=plan)
             tracemalloc.start()
             base = tracemalloc.get_traced_memory()[0]
@@ -227,4 +248,4 @@ def test_orbital_gradient_within_plan(monkeypatch):
             if ref is None:
                 ref = G
             assert abs(G - ref).max() < 1e-11 and abs(ref).max() > 1e-3
-    assert blocked > 3 and mapped > 1
+    assert blocked > 3 and mapped > 1 and refused == 1

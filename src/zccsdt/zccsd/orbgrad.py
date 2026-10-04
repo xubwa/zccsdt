@@ -101,12 +101,12 @@ def fock_matrices(mol, C, densities):
     return [C.conj().T @ (vj[k] - vk[k]) @ C for k in range(len(densities))]
 
 
-def reserve_bytes(nocc, nvir):
-    '''Bytes of the arrays of this module that the memory plan of the
-    amplitude step (amps.plan_step) does not know: two matrices on the pairs,
-    the arrays with three occupied indices that are alive together (lambda2
-    t1 and two more of its size, one of o^3 v elements), and what the terms
-    on the rows of <ma||ef> take for one occupied index.'''
+def own_bytes(nocc, nvir):
+    '''Bytes of the arrays of this module besides two packed ones and m: two
+    matrices on the pairs, the arrays with three occupied indices that are
+    alive together (lambda2 t1 and two more of its size, one of o^3 v
+    elements), and what the terms on the rows of <ma||ef> take for one
+    occupied index.'''
     o, v = int(nocc), int(nvir)
     npo, npv = K.npair(o), K.npair(v)
     kept = 16 * (2 * npo * npo + 3 * npo * o * v + o ** 3 * v + 2 * o ** 4)
@@ -114,12 +114,41 @@ def reserve_bytes(nocc, nvir):
     return kept + rows + UNPACK_BYTES
 
 
+def reserve_bytes(nocc, nvir):
+    '''Bytes to set aside when the amplitude step is planned for this
+    module: what own_bytes has more than the plan counts for arrays that are
+    not made here - the intermediates of a step (amps.step_arrays) and one of
+    its three packed T2 (here: tau and the density of <mn||ef> or the ladder;
+    t2 itself is given, like lambda2, and is there when the plan is made).'''
+    spare = amps.step_arrays(nocc, nvir) + 16 * K.npair(nocc) * K.npair(nvir)
+    return max(0, own_bytes(nocc, nvir) - spare)
+
+
 def working_set(plan, nocc, nvir):
-    '''Bytes that gradient() takes under the Plan ``plan`` of the amplitude
-    step, next to the packed t2 and lambda2 it is given: the working set of
-    a step (its three packed arrays are tau, the density of <mn||ef> or the
-    ladder, and m in the place of W) and reserve_bytes.'''
+    '''Bytes that gradient() takes at most under the Plan ``plan`` of the
+    amplitude step, next to the packed t2 and lambda2 it is given: the
+    working set of a step (m in the place of W) and reserve_bytes.'''
     return plan.work + reserve_bytes(nocc, nvir)
+
+
+def slab_plan(mol, plan, nocc, nvir):
+    '''The ao2mo.Plan of the integrals <j~ e||ab>: slabs (j~ q|rs) of the
+    integral transformation within what the Plan ``plan`` of the step leaves
+    next to m (if it is in memory) and the arrays of one j.  MemoryError if
+    one spinor j~ does not fit: 16 v^3 bytes for its slab, twice what a row
+    of the packed <ma||ef> takes.'''
+    from zccsdt.zccsd import ao2mo
+    o, v = int(nocc), int(nvir)
+    left = None
+    if plan.budget is not None:
+        left = (plan.budget + reserve_bytes(o, v) - (0 if plan.w_mapped else 16 * (o * v) ** 2)
+                - 64 * o * v * v)
+    try:
+        return ao2mo.plan_slabs(mol, o, v, left, sort_arrays=0)
+    except MemoryError as err:
+        raise MemoryError('%s (the integrals <j~ e||ab> of the orbital gradient%s)'
+                          % (err, '' if plan.w_mapped else
+                             ', next to the product of lambda2 and t2 kept in memory')) from None
 
 
 def kernel(mycc, eris=None, t1=None, t2=None, l1=None, l2=None, verbose=None, parts=None):
@@ -157,6 +186,13 @@ def kernel(mycc, eris=None, t1=None, t2=None, l1=None, l2=None, verbose=None, pa
             raise MemoryError('%s (the orbital gradient: the plan of the amplitude step, with '
                               '%s set aside for its own arrays)'
                               % (err, amps._size(reserve_bytes(o, v)))) from None
+        try:
+            slab_plan(eris.mol, res.plan, o, v)
+        except MemoryError:
+            if res.plan.w_mapped:
+                raise
+            res.plan.w_mapped = True        # m in a scratch file leaves room for the slabs
+            slab_plan(eris.mol, res.plan, o, v)
         log.info('Orbital gradient: %s', res.describe())
         return gradient(mycc, eris, t1, t2p, l1, l2p, parts)
     finally:
@@ -185,6 +221,7 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
     t1T = np.ascontiguousarray(t1.T)
     X = {k: np.zeros((v, o), dtype=np.complex128) for k in GROUPS}
     pblocks = plan.pblocks
+    slabs = slab_plan(eris.mol, plan, o, v)             # before anything is done
 
     with timer('og.pairs'):
         # M[(ij),(kl)] = sum_{c>d} lambda2[(ij),(cd)] t2[(kl),(cd)], with tau: Xl
@@ -391,17 +428,7 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
         Cv = eris.mo_ao_spin[:, o:]
         Cd = np.hstack((Cv @ t1.T, Cv))
         c5 = np.zeros((o, v), dtype=np.complex128)                      # the conjugate, [I, A]
-        # what the plan had, less m if it is in memory and the arrays of one j
-        left = None
-        if plan.budget is not None:
-            left = (plan.budget + reserve_bytes(o, v) - (0 if scratch.is_mapped(m) else m.nbytes)
-                    - 64 * o * v * v)
-        try:
-            slab_plan = ao2mo.plan_slabs(eris.mol, o, v, left, sort_arrays=0)
-        except MemoryError as err:
-            raise MemoryError('%s (the integrals <j~ e||ab> of the orbital gradient)'
-                              % err) from None
-        for j0, j1, g in ao2mo.slabs(eris.mol, Cd[:nao], Cd[nao:], (0, o), (o, o + v), slab_plan):
+        for j0, j1, g in ao2mo.slabs(eris.mol, Cd[:nao], Cd[nao:], (0, o), (o, o + v), slabs):
             for j in range(j0, j1):
                 gj = g[j - j0]
                 mj = np.conj(np.asarray(m[j * v:(j + 1) * v])).reshape(v, o, v)  # [b, I, e]

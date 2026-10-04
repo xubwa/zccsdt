@@ -121,6 +121,16 @@ class Plan:
     budget: object      # bytes there were (None: unknown, everything in memory)
 
 
+def step_arrays(nocc, nvir):
+    '''Bytes of the arrays of a step that plan_step counts as always there
+    next to its three packed T2: W(mnij) and its Fock part, Nq, the t1
+    <mb||je> array, o^4.  (What the Lambda equations and the orbital gradient
+    keep in their place is theirs to count.)'''
+    o, v = int(nocc), int(nvir)
+    npo = K.npair(o)
+    return 16 * (3 * npo * npo + 2 * o * v * npo + 2 * o * o * o * v + 4 * o ** 4)
+
+
 def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore=None,
               three_m=None, kramers=False, ladder_units=None):
     '''The Plan of one step within ``budget`` bytes (None: unlimited).
@@ -143,8 +153,8 @@ def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore
     budget = None if budget is None else int(budget)
     P = 16 * npo * npv                              # one packed T2
     col = 16 * n1 * v                               # the rows (m e) of one m, the columns (j b) of one j
-    # t2, tau, the residual; W(mnij) and its Fock part, Nq, the t1 <mb||je> array, o^4
-    fixed = 3 * P + 16 * (3 * npo * npo + 2 * o * v * npo + 2 * o * o * n1 + 4 * o ** 4)
+    # t2, tau, the residual, and step_arrays
+    fixed = 3 * P + step_arrays(o, v)
     row = col * (('V' in mapped) + ('E' in mapped)) + 16 * v * npv * ('ovvv_p' in mapped)
     pair = 32 * v * v + 16 * o * v                  # virtual-side terms of one pair
     lad = max(16 * n2 * (n2 + v), 24 * n2 * n2, 16 * v * (n2 + v))      # the ladder of one pair
