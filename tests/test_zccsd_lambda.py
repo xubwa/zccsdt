@@ -180,3 +180,60 @@ def test_density_is_energy_derivative(x2c_h2o, kr):
     eps = 1e-4
     derivative = (run(eps, V).e_corr - run(-eps, V).e_corr) / (2 * eps)
     assert abs(expected) > 1e-5 and abs(derivative - expected) < 2e-8
+
+
+def test_lambda_peak_within_plan(monkeypatch):
+    '''The arrays that a Lambda step allocates stay within lam.working_set of
+    the plan (tracemalloc follows numpy's allocations): slabs and blocks of
+    several sizes, ZGEMM and three real GEMMs, with and without Kramers
+    pairs; and the working set within the budget and lam.reserve_bytes, which
+    is what the iterations are planned with.'''
+    import tracemalloc
+    from zccsdt import memory
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
+    mf = x2c.UHF(mol).run(conv_tol=1e-10)
+    rng = np.random.default_rng(1)
+    blocked = 0
+    for kr in (None, False):
+        cc = DirectZCCSD(mf)
+        cc.verbose, cc.kramers, cc.max_memory = 0, kr, 100000
+        eris = cc.ao2mo()
+        o, v, nao = eris.nocc, eris.fock.shape[0] - eris.nocc, mol.nao_nr()
+        npo, npv = K.npair(o), K.npair(v)
+
+        def packed():
+            x1 = 0.05 * (rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v)))
+            x2 = 0.02 * (rng.standard_normal((npo, npv)) + 1j * rng.standard_normal((npo, npv)))
+            if eris.kramers:
+                x1 = 0.5 * (x1 + kramers.image(x1))
+                x2 = np.ascontiguousarray(0.5 * (x2 + kramers.image(x2, pairs=(0, 1))))
+            return x1, x2
+
+        (t1, t2p), (l1, l2p) = packed(), packed()
+        need = amps.plan_step(o, v, nao, None, (), kramers=eris.kramers).need
+        reserve = lam.reserve_bytes(o, v)
+        ref = None
+        for factor in (1.0, 1.3, 2.0, 4.0):
+            for m3 in (False, True):
+                plan = amps.plan_step(o, v, nao, int(factor * need), (), diis_incore=False,
+                                      three_m=m3, kramers=eris.kramers)
+                res = amps.Residual(eris, plan=plan)
+                L = lam.Lambda(res, t1, t2p)        # W, Hq and the rest that is made once
+                L.update_packed(l1, l2p)
+                tracemalloc.start()
+                base = tracemalloc.get_traced_memory()[0]
+                new = L.update_packed(l1, l2p)
+                peak = tracemalloc.get_traced_memory()[1] - base
+                tracemalloc.stop()
+                L.close()
+                # outside the step: W if it is in memory, t2 and lambda2
+                held = (0 if plan.w_mapped else 16 * (o * v) ** 2) + 32 * npo * npv
+                work = lam.working_set(plan, o, v)
+                assert peak + held <= work, (kr, factor, m3, peak, held, work)
+                assert work <= max(plan.budget, plan.work) + reserve
+                blocked += len(plan.jblocks) > 1
+                if ref is None:
+                    ref = new
+                assert abs(new[0] - ref[0]).max() < 1e-12 and abs(new[1] - ref[1]).max() < 1e-12
+    assert blocked > 6

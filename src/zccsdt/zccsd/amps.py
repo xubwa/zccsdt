@@ -323,11 +323,13 @@ class Residual:
         self.gave_way = False       # the kept AO operators were dropped for the step
         if plan is None:
             self.replan(max_memory, diis_space, diis_incore, three_m)
-        else:
+        elif plan is not False:     # False: the caller plans (replan) before the first step
             self._set_ladder()
 
-    def replan(self, max_memory=None, diis_space=6, diis_incore=None, three_m=None):
-        '''A new Plan for the memory there is now (see plan_step).'''
+    def replan(self, max_memory=None, diis_space=6, diis_incore=None, three_m=None, reserve=0):
+        '''A new Plan for the memory there is now (see plan_step), less
+        ``reserve`` bytes for arrays that the plan does not know (those of
+        the Lambda equations, zccsd.lam).'''
         names = ('V', 'E', 'ovvv_p')
         mapped = [n for n in names if scratch.is_mapped(getattr(self, n))]
         self.close()
@@ -336,7 +338,10 @@ class Residual:
         self.kramers = self.paired
 
         def plan():
-            return plan_step(self.nocc, self.nvir, self.nao, memory.budget(max_memory), mapped,
+            budget = memory.budget(max_memory)
+            if budget is not None:
+                budget -= int(reserve)
+            return plan_step(self.nocc, self.nvir, self.nao, budget, mapped,
                              diis_space, diis_incore, three_m, self.paired, lad.unit_range())
 
         try:

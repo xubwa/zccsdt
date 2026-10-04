@@ -15,7 +15,8 @@
 #   C1, run as xjoda; xsox2catm; xsox2chf; xx2cvtran; xx2cccsd (no xcfour driver)
 #   CFOUR_CALC: CCSD(T) (default) or CCSD; CFOUR_MEM_GB: MEMORY_SIZE (default 24);
 #   CFOUR_MAXCYC (default 50); CFOUR_PROGS: the programs to run (default: all
-#   five; 'xjoda xsox2catm xsox2chf xx2cvtran' stops after the integrals);
+#   five; 'xjoda xsox2catm xsox2chf xx2cvtran' stops after the integrals;
+#   with 'xx2chbar xx2clcc' after xx2cccsd also Hbar and the Lambda equations);
 #   CFOUR_CONV: CC_CONV, max residual element (default 7)
 # zccsdt: X2C-1e from PySCF (same orbital counts, not the same Hamiltonian),
 #   bench/profile_iter.py with ZC_METHOD=ccsd; ZC_NITER timed iterations
@@ -91,6 +92,8 @@ ZEOF
   grep -E "Integral transformation Elapsed|MO Integral sorting Elapsed|AO Integral Elapsed" \
     $keep/xx2cvtran.out | sed 's/^ */  xx2cvtran: /; s/  */ /g'
   [ -f $keep/xx2cccsd.out ] && python $root/bench/cfour/x2ccc_summary.py $keep/xx2cccsd.out
+  # the Lambda equations (CFOUR_PROGS with xx2chbar xx2clcc after xx2cccsd)
+  [ -f $keep/xx2clcc.out ] && echo "  xx2clcc: $(grep -c 'CCSD cycle  *[0-9]' $keep/xx2clcc.out) Lambda cycles"
   cd / && rm -rf $run
   if [ "${ZC_NITER:-3}" != 0 ]; then
     pybasis=cc-$(echo $basis | tr 'A-Z' 'a-z')

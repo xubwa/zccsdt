@@ -51,7 +51,46 @@ from zccsdt.timing import timer
 from zccsdt.zccsd import amps
 from zccsdt.zccsd import kernels as K
 
-UNPACK_BYTES = 64 << 20     # rows of <ma||ef> unpacked at a time
+UNPACK_BYTES = 64 << 20     # rows of <ma||ef> unpacked at a time, at most
+
+
+def reserve_bytes(nocc, nvir):
+    '''Bytes of the arrays of the Lambda equations that the memory plan of
+    the amplitude step (amps.plan_step) does not know: Hq and lambda2 t1
+    with three occupied indices, four matrices on the pairs, and what the
+    terms on the rows of <ma||ef> take for one occupied index (three arrays
+    of o v^2 elements and the rows that are unpacked, two of o v(v-1)/2),
+    and the third array of the product L T for one occupied index (_q_block).'''
+    o, v = int(nocc), int(nvir)
+    npo, npv = K.npair(o), K.npair(v)
+    kept = 16 * (2 * o * v * npo + 4 * npo * npo + 2 * o ** 4)
+    rows = 64 * o * v * v + 32 * o * npv
+    return kept + rows + 16 * o * v * v
+
+
+def _q_block(plan, o, v):
+    '''Occupied indices in a block of columns of the product L T.  The
+    blocks of the plan of the amplitude step hold two arrays of the size of
+    a block of columns (four with the real parts of three real GEMMs, which
+    is what this product takes as well); with ZGEMM this product has three:
+    its blocks are two thirds of those, more where the plan leaves memory.'''
+    col = 16 * o * v * v
+    size = max(j1 - j0 for j0, j1 in plan.jblocks)
+    msize = min(size, max(m1 - m0 for m0, m1 in plan.mblocks))
+    if plan.three_m or plan.budget is None:
+        return msize
+    slack = max(0, plan.budget - plan.work) + col       # one block is in reserve_bytes
+    return int(min(msize, max(1, (2 * size * col + slack) // (3 * col))))
+
+
+def working_set(plan, nocc, nvir):
+    '''Bytes that a Lambda step takes under the Plan ``plan`` of the
+    amplitude step: its working set, reserve_bytes, and what the blocks of
+    the product L T take of the memory that the plan leaves.'''
+    o, v = int(nocc), int(nvir)
+    size = max(j1 - j0 for j0, j1 in plan.jblocks)
+    more = 0 if plan.three_m else max(0, 3 * _q_block(plan, o, v) - 2 * size - 1)
+    return plan.work + reserve_bytes(o, v) + more * 16 * o * v * v
 
 
 class Lambda:
@@ -144,7 +183,7 @@ class Lambda:
         '''out[i,a] += sum_cb <mc||ab> X[i,c,b] from the packed rows
         Om[c,(a>b)], a few of them unpacked at a time.'''
         o, v = X.shape[:2]
-        step = max(1, UNPACK_BYTES // (16 * v * v))
+        step = max(1, min(o, UNPACK_BYTES // (16 * v * v)))     # no more than X itself
         Xm = X.reshape(o, v * v)
         for c0 in range(0, v, step):
             c1 = min(v, c0 + step)
@@ -179,7 +218,8 @@ class Lambda:
         kr = bool(self.paired and res.symmetric(l1, l2p))
         ho = o // 2
         size = max(j1 - j0 for j0, j1 in plan.jblocks)
-        msize = min(size, max(m1 - m0 for m0, m1 in plan.mblocks))
+        msize = _q_block(plan, o, v)
+        qblocks = amps._blocks(o, msize)        # rows of lambda2 for the product with t2
         if kr:
             mblocks = amps._blocks(ho, msize)
             jblocks, iblocks = amps._blocks(ho, max(1, size // 2)), amps._blocks(ho, size)
@@ -213,8 +253,10 @@ class Lambda:
             lvv = blas.gemm(t1T, l1)                    # [f, b] = sum_j t1[j,f] lambda1[j,b]
             loo = blas.gemm(l1, t1.T)                   # [j, n] = sum_b lambda1[j,b] t1[n,b]
             tmp1vv, tmp1oo = mba + lvv, mij + loo
-            # Y[i, j, k, c] = sum_b lambda2[i,k,b,c] t1[j,b]
-            Y = np.ascontiguousarray(-(psgn[:, :, None, None] * lt[prow]).transpose(0, 2, 1, 3))
+
+        def Yrows(j):
+            '''Y[i, j, k, c] = sum_b lambda2[i,k,b,c] t1[j,b] for one j, as [i, k, c].'''
+            return -psgn[:, :, None] * lt[prow, j]
 
         with timer('lambda.ovvv'):
             # the terms on the rows of <ma||ef>, summed over m, with the product
@@ -230,8 +272,7 @@ class Lambda:
                     blas.gemm(lt2[:, m0 * v:m1 * v], O.reshape(nm * v, npv), C=L2, beta=1.0)
                 with timer('ring.layout'):
                     Tc = (K.ring_cols3 if m3 else K.ring_cols)(t2p, o, v, m0, m1)
-                Q = self._left(l2p, Tc, np.empty((n1, nm * v), dtype=np.complex128),
-                               plan.jblocks, m3)
+                Q = self._left(l2p, Tc, np.empty((n1, nm * v), dtype=np.complex128), qblocks, m3)
                 del Tc
                 Q4 = Q.reshape(o, v, nm, v)
                 for m in range(m0, m1):
@@ -246,7 +287,7 @@ class Lambda:
                     with timer('ovvv.x'):
                         # sum_cb <mc||ab> X[i,c,b]: the ring part - Q, the t1 parts of
                         # the terms that are in L2 when it is contracted with t1
-                        Xm = blas.gemm(np.ascontiguousarray(Y[:, m].transpose(0, 2, 1))
+                        Xm = blas.gemm(np.ascontiguousarray(Yrows(m).transpose(0, 2, 1))
                                        .reshape(n1, o), t1).reshape(o, v, v)
                         Xm -= Q4[:, :, m - m0, :]
                         Xm[m] += dm
@@ -318,16 +359,16 @@ class Lambda:
                     r1[jf:jf + nj] += blas.gemm(Wr, l1v).reshape(nj, v)
                     # - sum_j sum_kc <jc|Hbar|ak> Y[i,j,k,c]
                     for j in range(nj):
-                        blas.gemm(Y[:, jf + j].reshape(o, n1), Wr[j * v:(j + 1) * v].T, C=r1,
+                        blas.gemm(Yrows(jf + j).reshape(o, n1), Wr[j * v:(j + 1) * v].T, C=r1,
                                   alpha=-1.0, beta=1.0)
                     scratch.unmap(Wr)
 
         with timer('lambda.t2'):
             # the t1 parts of <jc|Hbar|ak> that the lambda2 t1 terms do not take:
-            # Yc[i,j,k,n] = sum_c Y[i,j,k,c] t1[n,c], Ykc[i,j,n,f] = sum_k Yc[i,j,k,n] t1[k,f]
-            Yc = blas.gemm(Y.reshape(o ** 3, v), t1.T).reshape(o, o, o, o)
-            del Y
-            Yc = np.ascontiguousarray(Yc.transpose(0, 1, 3, 2))             # [i, j, n, k]
+            # Yc[i,j,n,k] = sum_c Y[i,j,k,c] t1[n,c], Ykc[i,j,n,f] = sum_k Yc[i,j,n,k] t1[k,f]
+            ltt = blas.gemm(lt.reshape(npo * o, v), t1.T).reshape(npo, o, o)    # [p, j, n]
+            Yc = np.ascontiguousarray(-(psgn[:, :, None, None] * ltt[prow]).transpose(0, 2, 3, 1))
+            del ltt
             r1 += blas.gemm(Yc.reshape(o, o ** 3), res.ooov.reshape(o ** 3, v))
             Ykc = blas.gemm(Yc.reshape(o ** 3, o), t1).reshape(o, o, o, v)
             Zp = Ykc[:, io, jo] - Ykc[:, jo, io]                        # [i, (j>n), f]
@@ -392,11 +433,11 @@ def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-
     settings = (mycc.max_memory, mycc.diis_space, True if mycc.incore_complete else None,
                 getattr(mycc, 'three_m', None))
     if getattr(eris, 'residual', None) is None:
-        eris.residual = amps.Residual(eris, *settings[:3], three_m=settings[3])
-    else:
-        eris.residual.replan(*settings)
+        eris.residual = amps.Residual(eris, plan=False)
     res = eris.residual
     o, v = res.nocc, res.nvir
+    res.replan(*settings, reserve=reserve_bytes(o, v))
+    log.info('Lambda equations: %s', res.describe())
     t1 = np.ascontiguousarray(mycc.t1 if t1 is None else t1, dtype=np.complex128)
     t2 = mycc.t2 if t2 is None else t2
     t2p = K.pack_t2(np.ascontiguousarray(t2, dtype=np.complex128))
