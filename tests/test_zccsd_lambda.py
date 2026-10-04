@@ -287,6 +287,7 @@ def test_t_density_is_energy_derivative(x2c_h2o, kr):
             dvv[np.diag_indices(n - o)] += gvv
             dvo += gvo
         dm1 = gccsd_rdm._make_rdm1(mycc, (doo, dov, dvo, dvv), with_frozen=False)
+        assert abs(mycc.make_rdm1(l1=l1, l2=l2, with_t=with_t) - dm1).max() < 1e-12
         expected = (np.einsum('pq,qp', V, dm1) - np.trace(V[:o, :o])).real
         # the error of the central difference is 1e-8 here
         assert abs(d_ccsd + with_t * d_t - expected) < 5e-8

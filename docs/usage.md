@@ -213,7 +213,7 @@ basis. The dipole operator is that of the 2c AO basis, without a
 picture-change transformation. The (T) terms (`with_t`) and the orbital
 gradient of the Z-vector equations (`relaxed`) are evaluated from full
 o^3 v^3 and nmo^4 arrays for now (docs/benchmarks.md); `make_rdm1()` itself
-uses the expressions of `pyscf.cc.gccsd_rdm` on the full t2 and lambda2.
+is evaluated from the packed amplitudes and is not limited in that way.
 
 At `verbose >= 4` the log says where the integrals are (memory or scratch
 file), how the step is sliced, which BLAS does the matrix products and

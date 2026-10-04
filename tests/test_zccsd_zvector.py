@@ -83,6 +83,25 @@ def test_relaxed_density_is_energy_derivative(mol, kr):
     assert abs(mycc.dip_moment(l1=l1, l2=l2)[2] - plain[2] * 2.541746) < 1e-5
 
 
+def test_gamma1_equals_pyscf():
+    '''The one-particle density intermediates from packed amplitudes against
+    PySCF's on the full ones, random complex t and lambda.'''
+    from zccsdt.zccsd import rdm
+    rng = np.random.default_rng(3)
+    o, v = 6, 9
+
+    def amplitudes():
+        x1 = rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v))
+        x2 = rng.standard_normal((o, o, v, v)) + 1j * rng.standard_normal((o, o, v, v))
+        x2 = x2 - x2.transpose(1, 0, 2, 3)
+        return 0.1 * x1, 0.1 * np.ascontiguousarray(x2 - x2.transpose(0, 1, 3, 2))
+
+    (t1, t2), (l1, l2) = amplitudes(), amplitudes()
+    ref = gccsd_rdm._gamma1_intermediates(None, t1, t2, l1, l2)
+    for a, b in zip(rdm.gamma1(t1, t2, l1, l2, pair_bytes=5000), ref):
+        assert abs(a - b).max() < 1e-12
+
+
 def test_density_with_frozen_spinors_in_the_ao_basis(mol):
     '''make_rdm1(ao_repr=True) with frozen spinors and Kramers pairs: the
     number of electrons, and the expectation value of a one-particle
