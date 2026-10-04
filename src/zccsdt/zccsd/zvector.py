@@ -300,7 +300,6 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
     C, mo_e, o, frozen = full_space(mycc)
     act = np.setdiff1d(np.arange(o), frozen)
     v = C.shape[1] - o
-    eo, ev = mo_e[:o], mo_e[o:]
     oa, rows_act = act.size, active_pairs(act)
 
     def packed(x):
@@ -319,7 +318,7 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
     if own_l:
         mycc.l2 = None
     try:
-        return _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, [l2a], log,
+        return _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log,
                                 coulomb)
     finally:
         if own_t:
@@ -329,8 +328,8 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
 
 
 def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulomb):
-    '''gradient_frozen for the padded t; l2a: a list with the packed lambda2
-    of the active spinors.'''
+    '''gradient_frozen for the padded t and the packed lambda2 of the active
+    spinors, l2a.'''
     import gc
     from zccsdt.zccsd import amps, lam, orbgrad
     from zccsdt.zccsd import kernels as K
@@ -401,7 +400,7 @@ def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulo
         return r1, out
 
     t1n, t2n = res.update_packed(T1, T2p)
-    L1, L2p = pad_amplitudes(o, v, act, l1, l2a[0])
+    L1, L2p = pad_amplitudes(o, v, act, l1, l2a)
     R1, RL = with_frozen(t1n, t2n, T1, T2p, L2p)
     del t1n, t2n
     # one step of the Lambda equations: its arrays, less the lambda2 that is
