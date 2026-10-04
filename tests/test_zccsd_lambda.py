@@ -296,3 +296,30 @@ def test_t_density_is_energy_derivative(x2c_h2o, kr):
         expected = (np.einsum('pq,qp', V, dm1) - np.trace(V[:o, :o])).real
         # the error of the central difference is 1e-8 here
         assert abs(d_ccsd + with_t * d_t - expected) < 5e-8
+
+
+@pytest.mark.parametrize('kr', [False, None])
+def test_t_terms_by_triples(x2c_h2o, kr):
+    '''The (T) terms of Lambda and of the density assembled from the virtual
+    triples a > b > c in their three roles (lam_t.by_triples: the form in
+    which the batches of zccsd.triples have the triples) against the full
+    arrays; random complex amplitudes, a Fock matrix with occupied-virtual
+    elements.'''
+    from zccsdt.zccsd import lam_t
+    mycc = DirectZCCSD(x2c_h2o, frozen=2)
+    mycc.verbose, mycc.kramers = 0, kr
+    eris = mycc.ao2mo()
+    o, n = eris.nocc, eris.fock.shape[0]
+    rng = np.random.default_rng(2)
+    f = 0.05 * (rng.standard_normal((o, n - o)) + 1j * rng.standard_normal((o, n - o)))
+    eris.fock = eris.fock.copy()
+    eris.fock[:o, o:] += f
+    eris.fock[o:, :o] += f.conj().T
+    t1, t2 = amplitudes(o, n - o, rng, False)
+    l1r, l2r = lam_t.sources(t1, t2, eris)
+    eia = eris.mo_energy[:o, None] - eris.mo_energy[o:]
+    l1, l2, goo, gvv, dvo = lam_t.by_triples(t1, t2, eris)
+    assert abs(l1 / eia - l1r).max() < 1e-13
+    assert abs(l2 / (eia[:, None, :, None] + eia[None, :, None, :]) - l2r).max() < 1e-13
+    for x, ref in zip((goo, gvv, dvo), lam_t.gamma1(t1, t2, eris)):
+        assert abs(x - ref).max() < 1e-13 and abs(ref).max() > 1e-3

@@ -94,3 +94,54 @@ def gamma1(t1, t2, eris):
     gvv = np.einsum('ijkacd,ijkacd->a', t3c + t3d, t3c.conj()) / 12
     dvo = 0.25 * np.einsum('ijab,ijkabc->ck', t2.conj(), t3c)
     return goo, gvv, dvo
+
+
+def by_triples(t1, t2, eris):
+    '''(l1, l2, goo, gvv, dvo): the source terms of sources() before the
+    division by the denominators (l1[i,a], l2[i,j,a,b]) and the density
+    terms of gamma1(), assembled from the virtual triples a > b > c alone.
+
+    This is the form in which the batches of zccsd.triples have the
+    triples: w = t3c[:, :, :, a, b, c] and m = conj(2 t3c + t3d) of one
+    triple, antisymmetric in i, j, k.  Each triple contributes in three
+    roles, one for each of its virtual indices s, with the other two as a
+    pair p > q and the sign of the permutation (s, p, q) of (a, b, c): + for
+    s = a (b, c), - for s = b (a, c), + for s = c (a, b):
+
+      l1[i, s]       += sign sum_{j>k} conj(w[i,j,k]) conj(<jk||pq>)
+      tmp[i, j, s, e] -= sign sum_k m[i,j,k] conj(<ke||pq>)      l2 += tmp - tmp(s <-> e)
+      l2[i, j, (pq)]  -= sign P(ij) sum_{m>n} m[i,m,n] conj(<mn||js>)
+      l2[i, j, (pq)]  += sign sum_k conj(f[k,s]) conj(w[i,j,k])
+      dvo[s, k]       += sign sum_{i>j} conj(t2[i,j,p,q]) w[i,j,k]
+      goo[i]          += sum_{k>l} conj(w + v)[i,k,l] w[i,k,l]
+      gvv[s]          += sum_{i>j>k} (w + v)[i,j,k] conj(w[i,j,k])
+
+    (l2[i, j, (pq)]: the element p, q and minus it at q, p.)  The triples
+    themselves come from the full arrays of triples() here: this function
+    checks the assembly, for the evaluation in batches to follow it.'''
+    ovvv, ooov, oovv, fock, o, v = _blocks(eris)
+    t3c, t3d, _ = triples(t1, t2, eris)
+    fov = fock[:o, o:]
+    l1 = np.zeros((o, v), dtype=np.complex128)
+    tmp = np.zeros((o, o, v, v), dtype=np.complex128)
+    l2 = np.zeros((o, o, v, v), dtype=np.complex128)
+    goo, gvv = np.zeros(o, dtype=np.complex128), np.zeros(v, dtype=np.complex128)
+    dvo = np.zeros((v, o), dtype=np.complex128)
+    for a in range(v):
+        for b in range(a):
+            for c in range(b):
+                w = t3c[:, :, :, a, b, c]
+                u = w + t3d[:, :, :, a, b, c]
+                m = (w + u).conj()
+                goo += 0.5 * np.einsum('ikl,ikl->i', u.conj(), w)
+                x = np.einsum('ijk,ijk', u, w.conj()) / 6
+                for s, p, q, sign in ((a, b, c, 1.0), (b, a, c, -1.0), (c, a, b, 1.0)):
+                    gvv[s] += x
+                    l1[:, s] += 0.5 * sign * np.einsum('ijk,jk->i', w.conj(), oovv[:, :, p, q].conj())
+                    tmp[:, :, s] -= sign * np.einsum('ijk,ke->ije', m, ovvv[:, :, p, q].conj())
+                    y = 0.5 * np.einsum('imn,mnj->ij', m, ooov[:, :, :, s].conj())
+                    y = sign * (np.einsum('k,ijk->ij', fov[:, s].conj(), w.conj()) - y + y.T)
+                    l2[:, :, p, q] += y
+                    l2[:, :, q, p] -= y
+                    dvo[s] += 0.5 * sign * np.einsum('ij,ijk->k', t2[:, :, p, q].conj(), w)
+    return l1, l2 + tmp - tmp.transpose(0, 1, 3, 2), goo, gvv, dvo
