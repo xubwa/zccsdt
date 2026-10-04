@@ -1016,8 +1016,9 @@ pairs; the last subsection is where it stands.
   the amplitude step). Times per residual evaluation from its own timers
   (`bench/cfour/x2ccc_summary.py`), the first evaluation left out; peak RSS
   from `/usr/bin/time`.
-- zccsdt (bd8a2a8): X2C-1e of PySCF (`x2c.UHF`) -- the same orbital
-  counts, not the same Hamiltonian, so the energies are not compared.
+- zccsdt (bd8a2a8): X2C-1e of PySCF (`x2c.UHF`). (The energies were not
+  compared at first; converged, the two programs agree to 5e-8 Eh in SCF,
+  CCSD and (T): the last subsection.)
   `bench/profile_iter.py` with `ZC_METHOD=ccsd ZC_PACKED=1`, mean of 3
   iterations after a warm-up iteration.
 
@@ -1567,7 +1568,34 @@ where the plan says so) and `max_memory` 24000 MB:
   (ket, bra, sort: 2.5 s for H2O/cc-pVQZ here) is that of the section on the
   integrals, a little faster than CFOUR's (2.6 s).
 
-**Memory.** Benzene/cc-pVDZ with Kramers pairs, the same job. Everything
+**A whole calculation, to convergence** (`bench/run_zccsd.py`; job 31572991,
+c418, 8 cores, CFOUR first; MKL 2026.1). CFOUR with `CC_CONV=7` (the largest
+change of an amplitude below 1e-7); zccsdt until the norm of the change of
+[t1, packed t2] is below 1e-7 and the energy changes by less than 1e-9.
+Seconds:
+
+| | H2O/cc-pVQZ: CFOUR | zccsdt | C6H6/cc-pVDZ: CFOUR | zccsdt |
+|---|---|---|---|---|
+| integral transformation | 2.9 | 5.0 | 9.6 | 10.1 |
+| CCSD: cycles, seconds | 10, 22.8 | 12, 4.5 | 12, 298.8 | 13, 108.8 |
+| (T) | 17.4 | 4.7 | 1141.8 | 186.0 |
+| transformation, CCSD and (T) (CFOUR: `xx2cvtran` + `xx2cccsd`) | 45.5 | 14.2 (3.2x) | 1453.8 | 304.9 (4.8x) |
+| without Kramers pairs: CCSD, (T), all | | 7.7, 9.0, 21.5 (2.1x) | | 195.0, 374.4, 579.4 (2.5x) |
+| peak memory, GB | 3.7 | 7.8 | 13.7 | 16.0 |
+| E_corr(CCSD) | -0.3172894490 | -0.3172894448 | -0.8372715768 | -0.8372715247 |
+| E(T) | -0.0092679387 | -0.0092679380 | -0.0363228986 | -0.0363228895 |
+
+- The two programs solve the same problem: the SCF energies differ by
+  1.5e-8 and 3.5e-8 Eh, E_corr(CCSD) by 4e-9 and 5e-8, E(T) by 7e-10 and
+  9e-9. With and without Kramers pairs zccsdt gives the same E_corr and
+  E(T) to the ten digits printed, for both molecules.
+- zccsdt needs one or two cycles more, to a criterion that is the stricter
+  one (the norm bounds the largest change).
+- A 24-core job of another session ran on the node from the middle of
+  CFOUR's benzene run on; the times per iteration are those of the quiet
+  nodes (8.37 s, CFOUR 22.98 s).
+
+**Memory.** Benzene/cc-pVDZ with Kramers pairs, job 31554690. Everything
 is planned from `max_memory`: slabs and blocks of the CCSD step, the DIIS
 vectors, the operands and batches of (T).
 
