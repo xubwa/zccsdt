@@ -489,14 +489,16 @@ class Residual:
         ``ring``: the factor of the product <mn||ef> t2 in W, 1/2 in the
         amplitude equations; with 1 W is the element <mb|Hbar|ej> of the
         similarity-transformed Hamiltonian, which the Lambda equations need
-        (zccsdt.zccsd.lam).  They also ask for s.KW[m, i, (j b)] = sum_e
-        t1[i,e] (<mb||ej> + ring sum_nf <mn||ef> t2[n,j,f,b]), and give no
-        residual (s.R is None).'''
+        (zccsdt.zccsd.lam).  They also ask (s.fold_kw) for KW[m, i, (j b)] =
+        sum_e t1[i,e] (<mb||ej> + ring sum_nf <mn||ef> t2[n,j,f,b]), added
+        to s.Nq[m, b, (i>j)] antisymmetrized in i and j, slab by slab, and
+        give no residual (s.R is None).'''
         o, v = self.nocc, self.nvir
         n1, npo, npv = o * v, K.npair(o), K.npair(v)
         plan, V, E = self.plan, self.V, self.E
         t1, t1T, t1c, t2p, taup, R = s.t1, s.t1T, s.t1.conj(), s.t2p, s.taup, s.R
-        KW = getattr(s, 'KW', None)
+        fold_kw = getattr(s, 'fold_kw', False)
+        io, jo = K.tril(o)
         trace = 0.5 / ring          # the partial traces are those of 1/2 V T
         single = len(plan.jblocks) == 1
         s.g = np.empty((o, v), dtype=np.complex128)         # sum_nf <mn||ef> t1[n,f]
@@ -567,9 +569,10 @@ class Residual:
             with timer('amps.ring'):
                 # + 1/2 sum_nf <mn||ef> t2[n,j,f,b]: the o^3 v^3 term of W; its
                 # partial traces are the <mn||ef> t2 terms of Foo and Fvv
-                if KW is not None:      # t1 W before the product, for its part of KW
+                if fold_kw:             # t1 W before the product, for its part of KW
+                    KW = np.empty((nm, o, n1), dtype=np.complex128)
                     for m in range(m0, m1):
-                        blas.gemm(t1, Wb[(m - m0) * v:(m - m0 + 1) * v], C=KW[m])
+                        blas.gemm(t1, Wb[(m - m0) * v:(m - m0 + 1) * v], C=KW[m - m0])
                 if m3:
                     with timer('ring.layout'):
                         Vb = K.split3(Vb)
@@ -602,9 +605,12 @@ class Residual:
                                 s.fvv_t += trace * X4[m - m0, :, m - j0]
                             W4 += X4
                             del X4
-                if KW is not None:      # sum_e t1[i,e] (<mb||ej> + the product)
+                if fold_kw:             # sum_e t1[i,e] (<mb||ej> + the product), into Nq
                     for m in range(m0, m1):
-                        KW[m] = s.Kt[m] + blas.gemm(t1, Wb[(m - m0) * v:(m - m0 + 1) * v]) - KW[m]
+                        x = (s.Kt[m] + blas.gemm(t1, Wb[(m - m0) * v:(m - m0 + 1) * v])
+                             - KW[m - m0]).reshape(o, o, v)
+                        s.Nq[m] += (x[io, jo] - x[jo, io]).T
+                    del KW, x
             if self.kramers:                # the rows of the partners of these m
                 with timer('amps.ring'), timer('ring.layout'):
                     K.kfill_ring(W, o, v, m0, m1, ho)
@@ -622,8 +628,6 @@ class Residual:
             with timer('amps.kramers'):
                 fill_barred(s.g)
                 fill_barred(s.Kt.reshape(o, o, o, v))
-                if KW is not None:
-                    fill_barred(KW.reshape(o, o, o, v))
                 fill_barred(s.Nq, pairs=(2,))
                 fill_barred(s.foo_t)
                 for x in (s.X1, s.r1, s.fvv_t, s.fvv_a):

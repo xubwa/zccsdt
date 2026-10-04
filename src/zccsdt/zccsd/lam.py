@@ -77,14 +77,14 @@ UNPACK_BYTES = 64 << 20     # rows of <ma||ef> unpacked at a time, at most
 def reserve_bytes(nocc, nvir):
     '''Bytes of the arrays of the Lambda equations that the memory plan of
     the amplitude step (amps.plan_step) does not know: Hq and lambda2 t1
-    with three occupied indices (while Hq is made: Hq and an array of twice
-    its size), four matrices on the pairs, what the terms on the rows of
+    with three occupied indices, four matrices on the pairs, what the terms
+    on the rows of
     <ma||ef> take for one occupied index (three arrays of o v^2 elements,
     the rows that are unpacked, two arrays of o v(v-1)/2 elements), and
     the third array of the product L T for one occupied index (_q_blocks).'''
     o, v = int(nocc), int(nvir)
     npo, npv = K.npair(o), K.npair(v)
-    kept = 16 * (3 * o * v * npo + 4 * npo * npo + 2 * o ** 4)
+    kept = 16 * (2 * o * v * npo + 4 * npo * npo + 2 * o ** 4)
     rows = 64 * o * v * v + 32 * o * npv
     return kept + rows + 16 * o * v * v
 
@@ -138,7 +138,7 @@ class Lambda:
         t1 = self.t1 = np.ascontiguousarray(t1, dtype=np.complex128)
         t2p = self.t2p = np.ascontiguousarray(t2p, dtype=np.complex128)
         s = SimpleNamespace(t1=t1, t1T=np.ascontiguousarray(t1.T), t2p=t2p, R=None,
-                            KW=np.empty((o, o, n1), dtype=np.complex128))
+                            fold_kw=True)
         self.t1T = s.t1T
         paired = res.kramers
         # t with the time-reversal symmetry of Kramers pairs: so are the intermediates
@@ -169,11 +169,8 @@ class Lambda:
             # Hq[i, c, (j>k)] = <jk||ic>* + sum_{d>b} <ic||db> tau[(jk),(db)]
             #   + P(jk) sum_b t1[j,b] (<ic||bk> + sum <il||bd> t2[l,k,d,c])
             #   - P(jk) sum_lb <li||jb> t2[k,l,c,b]
+            # (the first two lines from the pass above)
             Hq = s.Nq
-            KW = s.KW.reshape(o, o, o, v)                                   # [i, j, k, c]
-            for i in range(o):
-                Hq[i] += (KW[i][io, jo] - KW[i][jo, io]).T
-            del KW, s.KW
             # A[(p i), (q c)] = sum_lb <li||pb> t2[q,l,c,b] for a block of q: - A into
             # the pairs (p > q), + A into the pairs (q > p)
             Or = res.ooov_r.reshape(n1, o * o).T                            # [(p i), (l b)]
