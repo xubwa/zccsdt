@@ -834,8 +834,9 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
     GCCSD, so the iterates are the same; it is kept in memory if the memory
     plan of the step says so or mycc.incore_complete is set, else in a
     mapped scratch file (mycc.diis_file; zccsdt.cc.diis).
-    ``callback(locals())`` is called after every step as in PySCF; the new
-    amplitudes are 't1new' and 't2pnew' (packed).'''
+    ``callback(envs)`` is called after every step, as in PySCF, with a dict
+    of the names mycc, eris, res, istep, t1, t2p, t1new, t2pnew (the new
+    amplitudes, packed), eccsd, eold, adiis, log.'''
     log = logger.new_logger(mycc, verbose)
     name = mycc.__class__.__name__
     settings = (mycc.max_memory, mycc.diis_space, True if mycc.incore_complete else None,
@@ -893,7 +894,11 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
         for istep in range(max_cycle):
             t1new, t2pnew = res.update_packed(t1, t2p, mycc.level_shift)
             if callback is not None:
-                callback(locals())
+                # not locals(): the frame would keep its values - the old and
+                # the new packed amplitudes - alive through the next step
+                callback(dict(mycc=mycc, eris=eris, res=res, istep=istep, t1=t1, t2p=t2p,
+                              t1new=t1new, t2pnew=t2pnew, eccsd=eccsd, eold=eold,
+                              adiis=adiis, log=log))
             with timer('amps.diis'):
                 normt = np.sqrt(K.diff_norm2(t1new, t1) + K.diff_norm2(t2pnew, t2p))
                 if mycc.iterative_damping < 1.0:

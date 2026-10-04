@@ -59,7 +59,13 @@ def main():
     t2 = time.perf_counter()
     res = eris.residual
     o, v = res.nocc, res.nvir
-    # the plan of the Lambda iterations (lam.kernel): the budget less what is theirs
+    peak_ccsd = watch.anon
+    watch.stop()
+    # as lam.kernel: t2 packed, the unpacked array released, then the plan of the
+    # Lambda iterations - the budget less what is theirs
+    t2p = K.pack_t2(np.ascontiguousarray(mycc.t2))
+    t1a = np.ascontiguousarray(mycc.t1)
+    mycc.t2 = None
     res.replan(mycc.max_memory, mycc.diis_space, None, mycc.three_m,
                reserve=lam.reserve_bytes(o, v))
     print('%s/%s DirectZCCSD  nocc=%d nvir=%d  Kramers pairs: %s  max_memory %.0f MB  threads %s'
@@ -71,12 +77,10 @@ def main():
     print('integrals %.1f s; CCSD %.1f s: %d cycles (%.2f s each), converged %s, E_corr %.10f'
           % (t1 - t0, t2 - t1, len(cycles), (t2 - t1) / max(len(cycles), 1), mycc.converged,
              mycc.e_corr))
-    peak_ccsd = watch.anon
 
     # the iterations of lam.kernel, timed one by one
-    t2p = K.pack_t2(np.ascontiguousarray(mycc.t2))
-    t1a = np.ascontiguousarray(mycc.t1)
-    mycc.t2 = None
+    watch = MemWatch()
+    watch.start()
     timing.reset()
     t3 = time.perf_counter()
     L = lam.Lambda(res, t1a, t2p)
@@ -122,7 +126,7 @@ def main():
         show((), '  ')
     print('|lambda1 - conj t1| %.2e  |lambda2 - conj t2| %.2e'
           % (abs(l1 - t1a.conj()).max(), abs(l2p - t2p.conj()).max()))
-    print('peak anonymous memory: CCSD %.2f GB, with Lambda %.2f GB; peak RSS %.2f GB'
+    print('peak anonymous memory: integrals and CCSD %.2f GB, Lambda %.2f GB; peak RSS %.2f GB'
           % (peak_ccsd / 1e6, watch.anon / 1e6,
              resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6))
     L.close()

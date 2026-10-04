@@ -696,3 +696,39 @@ def test_kramers_pairs():
         bad.ao2mo()
     bad.kramers = None
     assert bad.ao2mo().kramers is False
+
+
+def test_callback_keeps_no_amplitudes(x2c_h2o, monkeypatch, tmp_path):
+    '''A callback of the CCSD iterations must not keep packed amplitudes
+    alive through the next step (callback(locals()) did: the frame held the
+    old and the new ones, two packed arrays that the memory plan of the step
+    does not know).  With the DIIS vectors in a scratch file the amplitudes
+    that a step returns are dead when the next step starts.'''
+    import gc
+    import weakref
+    from zccsdt.zccsd import amps
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    mycc = DirectZCCSD(x2c_h2o, frozen=2)
+    mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-9, 1e-7
+    made, alive, seen = [], [], []
+    update = amps.Residual.update_packed
+    from zccsdt.cc import diis as diis_module
+    diis = amps.DIIS
+    monkeypatch.setattr(amps, 'DIIS', lambda space, filename, incore: diis(space, filename, False))
+    monkeypatch.setattr(diis_module, 'INCORE_SIZE', 0)      # small parts go to the file as well
+
+    def watched(self, t1, t2p, level_shift=0.0):
+        gc.collect()
+        alive.append(sum(r() is not None for r in made))
+        out = update(self, t1, t2p, level_shift)
+        made.append(weakref.ref(out[1]))
+        return out
+
+    monkeypatch.setattr(amps.Residual, 'update_packed', watched)
+    mycc.callback = lambda envs: seen.append(sorted(envs))
+    mycc.kernel()
+    # the first DIIS call hands the first amplitudes back as they are: they are
+    # the input of the second step
+    assert mycc.converged and len(alive) > 5 and alive[1] <= 1 and max(alive[2:]) == 0
+    assert {'t1new', 't2pnew', 'istep', 'eccsd', 'mycc', 'eris'} <= set(seen[0])

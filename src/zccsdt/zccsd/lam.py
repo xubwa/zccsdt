@@ -442,11 +442,26 @@ def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-
         eris.residual = amps.Residual(eris, plan=False)
     res = eris.residual
     o, v = res.nocc, res.nvir
+    t1 = np.ascontiguousarray(mycc.t1 if t1 is None else t1, dtype=np.complex128)
+    # t2 of the CCSD object is packed and released while lambda is solved for
+    # (the unpacked array is four times the packed one), and unpacked again
+    # at the end
+    own = t2 is None
+    t2p = K.pack_t2(np.ascontiguousarray(mycc.t2 if own else t2, dtype=np.complex128))
+    if own:
+        t2 = mycc.t2 = None
+    try:
+        return _iterate(mycc, res, t1, t2p, l1, l2, max_cycle, tol, log, sources, settings)
+    finally:
+        if own:
+            mycc.t2 = K.unpack_t2(t2p, o, v)
+
+
+def _iterate(mycc, res, t1, t2p, l1, l2, max_cycle, tol, log, sources, settings):
+    '''The iterations of kernel() for the packed t2.'''
+    o, v = res.nocc, res.nvir
     res.replan(*settings, reserve=reserve_bytes(o, v))
     log.info('Lambda equations: %s', res.describe())
-    t1 = np.ascontiguousarray(mycc.t1 if t1 is None else t1, dtype=np.complex128)
-    t2 = mycc.t2 if t2 is None else t2
-    t2p = K.pack_t2(np.ascontiguousarray(t2, dtype=np.complex128))
     cput1 = cput0 = (logger.process_clock(), logger.perf_counter())
     lam = Lambda(res, t1, t2p)
     cput1 = log.timer('Lambda intermediates', *cput1)
