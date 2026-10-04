@@ -1978,8 +1978,15 @@ The iteration as a whole took 20.4 s in that job, more than the 18.6 s
 before, because the same code had a larger reserve for an array of the
 intermediates and so smaller blocks (3 instead of 4 occupied indices, 78
 instead of 136 pairs of the ladder); ae5a717 makes the intermediates without
-that array and the reserve is what it was. For benzene/cc-pVTZ the
-iteration has not been timed again.
+that array and the reserve is what it was.
+
+The code as it is (ae5a717; job 31601552, c025, four cycles each): for
+benzene/cc-pVDZ an iteration of Lambda takes 11.16 s next to a CCSD
+iteration of 9.44 s with 24000 MB (1.18 times; the two products 5.05 s, the
+pair and one-particle parts 1.73 s instead of 2.45 s), and 18.61 s next to
+12.64 s with 4000 MB (the product L T 4.60 s in 126 products, the direct
+ladder 3.04 s in blocks of 109 pairs; peak 2.86 GB). For benzene/cc-pVTZ
+the iteration has not been timed again.
 
 **The (T) terms** (`zccsd/lam_t.py`, `solve_lambda(with_t=True)`). The
 earlier code of the user is on the branch `claude/ccsd-lambda-socutils` of
