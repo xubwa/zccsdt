@@ -260,7 +260,8 @@ def test_orbital_gradient_within_plan(monkeypatch):
     for paired in (True, False):
         (t1, t2p), (l1, l2p) = packed(), packed()
         if not paired:
-            t2p = t2p + 0.01 * (rng.standard_normal(t2p.shape) + 1j * rng.standard_normal(t2p.shape))
+            t2p = t2p + 0.01 * (rng.standard_normal(t2p.shape)
+                                + 1j * rng.standard_normal(t2p.shape))
         res = eris.residual = amps.Residual(eris, plan=plan)
         assert res.kramers and res.symmetric(t1, t2p) == paired
         G = orbgrad.gradient(cc, eris, t1, t2p, l1, l2p)
