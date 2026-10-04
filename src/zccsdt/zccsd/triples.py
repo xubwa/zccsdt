@@ -56,7 +56,36 @@ the same arrays, allocated once for the largest batch (new arrays for every
 batch are mapped and zeroed by the system page by page: a fifth of the time
 of the GEMMs).  MemoryError below three packed T2 and the batch of one b.
 
-Timers (zccsdt.timing): 't.setup', 't.gemm', 't.kernel'.
+The (T) terms of the Lambda equations and of the one-particle density
+(``terms=True``; the equations are in zccsd.lam_t) are sums over the same
+triples, each in three roles - one of its virtual indices s, the other two as
+a pair p > q, the sign of the permutation (s, p, q) of (a, b, c).  Two of
+them cost as much as the x: with w and u the connected triples and those
+plus the disconnected ones, over the denominator, and M[i, (jk)] =
+conj(w + u)[ijk],
+
+    lt[(se), (ij)] += sign sum_{(pq), k}  A[(pq), k, e]      M[k, (ij)]     (- (s <-> e))
+    lt[(pq), (ij)] += sign sum_{s, (mn)}  M[i, (mn)] B[s, (mn), v + j]     (- (i <-> j))
+
+(A[(pq), k, e] = -conj(<ke||pq>), B[s, (mn), v + j] = -conj(<mn||js>): the
+integrals in A and B).  Each of the three x of a triple - x_{a,(bc)},
+x_{b,(ac)}, x_{c,(ab)} - is the x of that triple alone, and the three are its
+three roles: the kernel writes sign M over them once it has formed w, and
+the two sums become the products of the batch transposed,
+
+    x = A B^T      ->      Q = A[:, :v]^T M,     Y = M B[:, v:],
+
+for every product that made x: Q[e, (s, (ij))] summed over the rows (pair,
+k) of the product, Y[(pair, i), j] over its columns (s, (mn)).  They leave
+GEMM in an array of REVERSE_BYTES at most, a block of s or of pairs at a
+time, and are antisymmetrized into lt[(a>b), (i>j)], the transpose of the
+packed layout (rows that are written as a whole).  The other terms - on
+<bc||jk>, on t2, on the Fock matrix - are sums in the kernel.  With Kramers
+pairs the triples that are done give half of every sum, the time-reversed
+image the other half.
+
+Timers (zccsdt.timing): 't.setup', 't.gemm', 't.kernel'; 't.lam.gemm' and
+'t.lam.add' for the two products of the Lambda terms.
 '''
 
 import ctypes
@@ -73,6 +102,9 @@ from zccsdt.zccsd import kernels as K
 # 234.1 / 223.5 / 223.9 s for 2 / 4 / 8 GB with three real GEMMs (which hold two
 # thirds of the elements in the same bytes)
 BATCH_BYTES = 4 << 30
+# The products of the triples with the integrals (the terms of Lambda) of a
+# block of virtuals or of pairs, at most
+REVERSE_BYTES = 64 << 20
 
 _P, _I = ctypes.c_void_p, ctypes.c_int64
 if K._lib is not None and hasattr(K._lib, 'zc_t_batch'):
@@ -86,6 +118,12 @@ if K._lib is not None and hasattr(K._lib, 'zc_t_batch'):
     _HAVE_C = True
 else:
     _HAVE_C = False
+_HAVE_LAM = _HAVE_C and hasattr(K._lib, 'zc_t_batch_lam')    # not in a library built before it
+if _HAVE_LAM:
+    for _f, _a in (('zc_t_batch_lam', K._lib.zc_t_batch.argtypes + [_P] * 5),
+                   ('zc_t_lam_particle', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _I, _I, _P]),
+                   ('zc_t_lam_hole', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _P])):
+        getattr(K._lib, _f).argtypes, getattr(K._lib, _f).restype = _a, None
 
 
 def _complex(x):
@@ -95,7 +133,20 @@ def _complex(x):
     return x
 
 
-def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=None):
+class _Sums:
+    '''The (T) terms of the Lambda equations and of the density as they are
+    added up over the triples: l1[i,a], dvo[a,i], the diagonals goo[i] and
+    gvv[a], and lt[(a>b), (i>j)], the terms of lambda2 transposed.'''
+
+    def __init__(self, o, v):
+        self.l1 = np.zeros((o, v), dtype=np.complex128)
+        self.dvo = np.zeros((v, o), dtype=np.complex128)
+        self.goo = np.zeros(o, dtype=np.complex128)
+        self.gvv = np.zeros(v, dtype=np.complex128)
+        self.lt = np.zeros((K.npair(v), K.npair(o)), dtype=np.complex128)
+
+
+def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=None, sums=None):
     '''The (T) energy of the triples (a, b, c), b0 <= b < b1, c < b, from
     matrices with rows (pair or virtual, i) and columns (virtual, (jk)):
 
@@ -108,14 +159,19 @@ def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=No
     vanish.  ``terms``: an object whose add(a, b, c, w, u) gets the
     connected triples w and w plus the disconnected ones u of every virtual
     triple, divided by the denominator and packed over i > j > k (the (T)
-    terms of the Lambda equations, zccsd.lam_t.Terms; with numpy so far).'''
+    terms of the Lambda equations one triple at a time: zccsd.lam_t.Terms,
+    the reference).  ``sums``: the _Sums that these terms are added to; then
+    the three x of every triple are overwritten by M[i, (jk)] =
+    conj(w + u)[ijk] with the sign of their role - x_{a,(bc)} by M,
+    x_{b,(ac)} by -M, x_{c,(ab)} by M -, and the x_{y,(ay)} of G1 by zero:
+    the operands of the two products that kernel() does with them.'''
     o, v = t1.shape
     npo = K.npair(o)
     m3 = isinstance(X1, (tuple, list))
     first = lambda x: x[0] if m3 else x                         # noqa: E731
     s1, n1 = first(X1).shape[1], first(G1).shape[1]
     n2 = first(G2).shape[1] if b0 else 0
-    if _HAVE_C and K.USE_C and terms is None:
+    if _HAVE_C and K.USE_C and terms is None and (sums is None or _HAVE_LAM):
         out = np.zeros(2)
         c = K._c
         dt = np.float64 if m3 else np.complex128
@@ -124,11 +180,21 @@ def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=No
             x = (x if m3 else (x,)) if x is not None else ()
             p = [c(y, dt) + row * y.strides[0] for y in x] + [None] * 3
             return (ctypes.c_void_p * 3)(*p[:3])
-        K._lib.zc_t_batch(ptrs(X1), s1, c1, ptrs(G1, g1), n1, ptrs(G2 if b0 else None), n2,
-                          int(m3), a, b0, b1, o, v, c(t1), c(fvo), c(VpT), c(T2pT),
-                          c(eo, np.float64), c(ev, np.float64), c(out, np.float64))
+        args = (ptrs(X1), s1, c1, ptrs(G1, g1), n1, ptrs(G2 if b0 else None), n2,
+                int(m3), a, b0, b1, o, v, c(t1), c(fvo), c(VpT), c(T2pT),
+                c(eo, np.float64), c(ev, np.float64), c(out, np.float64))
+        if sums is None:
+            K._lib.zc_t_batch(*args)
+        else:
+            K._lib.zc_t_batch_lam(*args, c(sums.l1), c(sums.dvo), c(sums.goo), c(sums.gvv),
+                                  c(sums.lt))
         return complex(out[0], out[1])
     p0, pa = b0 * (b0 - 1) // 2, a * (a - 1) // 2
+    if sums is not None:        # the x as they are, to be written
+        raw = lambda x: x if m3 else (x,)                           # noqa: E731
+        X1w = [x.reshape(-1, o, s1)[:, :, c1:c1 + npo] for x in raw(X1)]
+        G1w = [x[g1:g1 + b1 * o].reshape(b1, o, n1 // npo, npo) for x in raw(G1)]
+        G2w = [x.reshape(b1 - b0, o, b0, npo) for x in raw(G2)] if b0 else None
     X1 = _complex(X1).reshape(-1, o, s1)[:, :, c1:c1 + npo]
     G1 = _complex(G1)[g1:g1 + b1 * o].reshape(b1, o, n1 // npo, npo)
     G2 = _complex(G2).reshape(b1 - b0, o, b0, npo) if b0 else None
@@ -149,6 +215,29 @@ def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=No
             e += np.sum(u.conj() * w / d)
             if terms is not None:
                 terms.add(a, b, c, w / d, u / d)
+            if sums is not None:
+                wd, ud = w / d, u / d
+                e3 = ud.conj() * wd
+                for x in (i, j, k):
+                    np.add.at(sums.goo, x, e3)
+                sums.gvv[[a, b, c]] += e3.sum().conj()
+                # conj(w) and M = conj(w + u) as [i, (jk)], all i
+                Wc, M = (np.zeros((o, npo), dtype=np.complex128) for _ in range(2))
+                for full, val in ((Wc, wd.conj()), (M, (wd + ud).conj())):
+                    full[i, pjk], full[j, pik], full[k, pij] = val, -val, val
+                for s, row, sign in ((a, pbc, 1.0), (b, pa + c, -1.0), (c, pa + b, 1.0)):
+                    sums.l1[:, s] += sign * (Wc @ VpT[row])
+                    sums.dvo[s] += sign * (Wc @ T2pT[row]).conj()
+                    sums.lt[row] += sign * (fvo[s] @ Wc)
+                third = ([x[b, :, c - b0] for x in G1w] if c >= b0
+                         else [x[b - b0, :, c] for x in G2w])
+                for out, val in (([x[pbc - p0] for x in X1w], M),
+                                 ([x[c, :, b - b0] for x in G1w], -M), (third, M)):
+                    _store(val, out)
+    if sums is not None:
+        for y in range(b0, b1):
+            for x in G1w:
+                x[y, :, y - b0] = 0.0
     return e
 
 
@@ -201,12 +290,18 @@ def _store(x, out):
         np.add(out[0], out[1], out=out[2])
 
 
-def memory_need(nocc, nvir, three_m=True):
+def memory_need(nocc, nvir, three_m=True, terms=False):
     '''(bytes of the arrays that are always in memory - two packed T2 and a
     third while t2 is being packed -, bytes of the batch of one virtual
-    orbital): the least (T) can run in is their sum.'''
+    orbital): the least (T) can run in is their sum.  ``terms``: with the
+    terms of the Lambda equations - their array takes the place of the third
+    packed T2, and the products of the triples with the integrals need an
+    array for one virtual orbital or one pair.'''
     npo, npv, xbytes = K.npair(nocc), K.npair(nvir), 24 if three_m else 16
-    return 48 * npo * npv, xbytes * nocc * npo * 3 * nvir
+    floor = xbytes * nocc * npo * 3 * nvir
+    if terms:
+        floor += xbytes * max(nvir * npo, nocc * nocc)
+    return 48 * npo * npv, floor
 
 
 def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=None,
@@ -219,7 +314,15 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
     order [unbarred, barred] and the amplitudes have their symmetry: only
     the triples with at most one barred virtual are done (default: if
     ``eris.kramers`` says so and the amplitudes pass kramers.symmetric).
-    ``terms``: see _t_batch; terms.kramers is set to what is used here.'''
+
+    ``terms=True``: with the (T) terms of the Lambda equations and of the
+    one-particle density, (E(T), (l1, l2p, goo, gvv, dvo)): the source
+    terms of lambda1[i,a] and of lambda2 packed [(i>j), (a>b)] before the
+    division by their denominators, and the terms of the density of
+    zccsd.lam_t.gamma1 (about twice the time of E(T), a packed T2 more in
+    memory at the end).  ``terms`` may also be an object as _t_batch takes
+    it (the reference, one triple at a time); terms.kramers is set to what
+    is used here.'''
     log = logger.new_logger(mycc, verbose)
     cput0 = (logger.process_clock(), logger.perf_counter())
     t1 = mycc.t1 if t1 is None else t1
@@ -228,6 +331,9 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
     o, v = t1.shape
     npo, npv = K.npair(o), K.npair(v)
     if o < 3 or v < 3:
+        if terms is True:
+            x = _Sums(o, v)
+            return 0.0, (x.l1, np.ascontiguousarray(x.lt.T), x.goo, x.gvv, x.dvo)
         return 0.0
     mo_e = np.asarray(eris.mo_energy, dtype=np.float64)
     eo, ev = np.ascontiguousarray(mo_e[:o]), np.ascontiguousarray(mo_e[o:])
@@ -252,12 +358,15 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                          'all triples are done')
                 kramers = False
     hv = v // 2 if kramers else v                   # b runs over the unbarred virtuals
-    if terms is not None:
+    lam = terms is True
+    if lam:
+        terms = None
+    elif terms is not None:
         terms.kramers = bool(kramers)
 
     # where the operands live: T2pT and VpT in memory; A and B in memory, the
     # smaller first, while they fit next to the smallest batch
-    fixed, floor = memory_need(o, v, m3)
+    fixed, floor = memory_need(o, v, m3, lam)
     n = v + o                                       # the joint index (e | m)
     shapes = {'A': (npv, o, n), 'B': (v, npo, n)}
     if budget is not None and budget < fixed + floor:
@@ -277,7 +386,16 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                                       hint=' or give the calculation more memory (max_memory)')
             ops[name] = tuple(scr.create('%s%d' % (name, k), shapes[name], dtype)
                               for k in range(nparts))
-    nbytes = BATCH_BYTES if left is None else min(BATCH_BYTES, floor + left)
+    # the products of the terms of Lambda leave GEMM in an array of their own:
+    # the least (one virtual, one pair), and an eighth of what there is more
+    rbytes = xbytes * max(v * npo, o * o) if lam else 0
+    if left is None:
+        rbytes = max(rbytes, REVERSE_BYTES) if lam else 0
+        nbytes = BATCH_BYTES
+    else:
+        rbytes += min(left // 8, max(0, REVERSE_BYTES - rbytes)) if lam else 0
+        nbytes = min(BATCH_BYTES, floor + left - rbytes)
+    rcap = rbytes // xbytes
     # the batches: (a, a1, None), a range of a with all its b - b < a, or with
     # Kramers pairs b below the barred half -, or (a, a + 1, (b0, b1)), one a
     # and a range of b; cap: the elements of the x of the largest batch
@@ -306,6 +424,9 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                  '%s %.2f GB' % (k, xbytes * np.prod(shapes[k], dtype=np.int64) / 1e9)
                  for k in mapped) if mapped else 'all arrays in memory',
              len(plan), xbytes * cap / 1e9, 'three real GEMMs per product' if m3 else 'ZGEMM')
+    if lam:
+        log.info('(T): with the terms of the Lambda equations and of the density; their '
+                 'products in blocks of %.1f MB', rbytes / 1e6)
     log.info('(T): matrix products on %s', blas.backend()[1])
 
     def blocks(nrow, per_row):
@@ -362,6 +483,10 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
     # per batch are mapped and zeroed page by page every time, as much memory
     # traffic as the kernel's own
     pool = [np.empty(cap, dtype=dtype) for _ in range(nparts)]
+    sums = rbuf = None
+    if lam:
+        sums = _Sums(o, v)
+        rbuf = [np.empty(rcap, dtype=dtype) for _ in range(nparts)]
 
     def products(rows, cols, off=0):
         '''x = A[rows] B[cols]^T over the joint index (e | m), for a block of
@@ -374,6 +499,53 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
         assert end <= cap
         out = [blas.gemm(a[k], b[k], pool[k][off:end].reshape(m, nc)) for k in range(nparts)]
         return (out if m3 else out[0]), end
+
+    def reverse(X, r0, r1, s0, s1):
+        '''The two products of the terms of Lambda for x[(r, i), (s, (jk))], the
+        pairs r0 <= r < r1 of A times the virtuals s0 <= s < s1 of B, after the
+        kernel has put the triples M in its place: Q[e, (s, (ij))], the sum
+        over (r, k) of A[r, k, e] M, and Y[(r, i), j], the sum over
+        (s, (mn)) of M B[s, (mn), v + j], antisymmetrized into sums.lt.'''
+        X = X if m3 else (X,)
+        nr, ns = (r1 - r0) * o, (s1 - s0) * npo
+        assert X[0].shape == (nr, ns)
+        ptr = lambda x: [K._c(y, dtype) for y in x] + [None, None]  # noqa: E731
+        step = max(1, rcap // (v * npo))
+        for sa in range(s0, s1, step):
+            sb = min(s1, sa + step)
+            nc = (sb - sa) * npo
+            with timer('t.lam.gemm'):
+                Q = [blas.gemm(A[k][r0:r1].reshape(nr, n)[:, :v].T,
+                               X[k][:, (sa - s0) * npo:(sb - s0) * npo],
+                               rbuf[k][:v * nc].reshape(v, nc)) for k in range(nparts)]
+            with timer('t.lam.add'):
+                if _HAVE_LAM and K.USE_C:
+                    K._lib.zc_t_lam_particle(*ptr(Q)[:3], int(m3), nc, v, npo, sa, sb,
+                                             K._c(sums.lt))
+                    continue
+                Q = _complex(Q if m3 else Q[0]).reshape(v, sb - sa, npo)
+                for x in range(sa, sb):
+                    sums.lt[K.npair(x):K.npair(x) + x] += Q[:x, x - sa]
+                    e = np.arange(x + 1, v)
+                    sums.lt[e * (e - 1) // 2 + x] -= Q[x + 1:, x - sa]
+        step = max(1, rcap // (o * o))
+        for ra in range(r0, r1, step):
+            rb = min(r1, ra + step)
+            with timer('t.lam.gemm'):
+                Y = [blas.gemm(X[k][(ra - r0) * o:(rb - r0) * o],
+                               B[k][s0:s1].reshape(ns, n)[:, v:],
+                               rbuf[k][:(rb - ra) * o * o].reshape((rb - ra) * o, o))
+                     for k in range(nparts)]
+            with timer('t.lam.add'):
+                if _HAVE_LAM and K.USE_C:
+                    K._lib.zc_t_lam_hole(*ptr(Y)[:3], int(m3), o, ra, rb, K._c(sums.lt))
+                    continue
+                Y = _complex(Y if m3 else Y[0]).reshape(rb - ra, o, o)
+                sums.lt[ra:rb] += (Y - Y.transpose(0, 2, 1))[:, io, jo]
+
+    def block(X, rows, cols):
+        '''The rows and columns of the x of a product that one a uses.'''
+        return [x[rows, cols] for x in X] if m3 else X[rows, cols]
 
     def one_a(a, b0, b1):
         '''The triples of one a with b0 <= b < b1: x_{a,(bc)} for the pairs with
@@ -389,7 +561,13 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                 G2, end = products(lambda x: x[pa + b0:pa + b1].reshape(nb * o, n),
                                    lambda x: x[:b0].reshape(b0 * npo, n).T, end)
         with timer('t.kernel'):
-            return _t_batch(X1, 0, G1, 0, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms)
+            e = _t_batch(X1, 0, G1, 0, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms, sums)
+        if lam:
+            reverse(X1, p0, p1, a, a + 1)
+            reverse(G1, pa, pa + b1, b0, b1)
+            if b0:
+                reverse(G2, pa + b0, pa + b1, 0, b0)
+        return e
 
     et = 0j
     ntri = lambda a: K.npair(min(a, hv))                        # noqa: E731
@@ -410,7 +588,11 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                                      lambda x: x[:hv].reshape(hv * npo, n).T, end)
                 with timer('t.kernel'):
                     et += _t_batch(X1, (aa - a) * npo, G1, 0, None, aa, 0, hv,
-                                   t1, fvo, VpT, T2pT, eo, ev, terms)
+                                   t1, fvo, VpT, T2pT, eo, ev, terms, sums)
+                if lam:
+                    reverse(G1, pa, pa + hv, 0, hv)
+            if lam:
+                reverse(X1, 0, pr, a, a1)
             ndone += na * ntri(a)
         elif brange is None:
             # x_{a,(bc)} as [(bc, i), (a, jk)] for the pairs below a1 - 1,
@@ -424,7 +606,13 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
             with timer('t.kernel'):
                 for aa in range(a, a1):
                     et += _t_batch(X1, (aa - a) * npo, G1, (K.npair(aa) - q0) * o, None, aa, 0, aa,
-                                   t1, fvo, VpT, T2pT, eo, ev, terms)
+                                   t1, fvo, VpT, T2pT, eo, ev, terms, sums)
+            for aa in range(a, a1) if lam else ():
+                # of the x of the range, a has those of its pairs b < a and of y < a
+                pa, col = K.npair(aa), (aa - a) * npo
+                reverse(block(X1, slice(0, pa * o), slice(col, col + npo)), 0, pa, aa, aa + 1)
+                reverse(block(G1, slice((pa - q0) * o, (pa + aa - q0) * o), slice(0, aa * npo)),
+                        pa, pa + aa, 0, aa)
             ndone += sum(ntri(aa) for aa in range(a, a1))
         else:
             et += one_a(a, *brange)
@@ -438,9 +626,24 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
         et = 2.0 * et.real + 0j
     if abs(et.imag) > 1e-6:
         log.warn('Non-zero imaginary part found in the (T) energy %s', et)
-    del A, B, ops, pool
+    del A, B, ops, pool, rbuf
     if scr is not None:
         scr.close()
+    if lam:
+        with timer('t.lam.add'):
+            # lambda2 in its packed layout; the half of the sums that the
+            # triples with a barred b would give
+            del T2pT, VpT
+            l2p = np.ascontiguousarray(sums.lt.T)
+            sums.lt = None
+            out = [sums.l1, l2p, sums.goo, sums.gvv, sums.dvo]
+            if kramers:
+                from zccsdt.zccsd.kramers import image, pair_maps, partner_signs
+                K.ksym_packed(l2p, *pair_maps(o), *pair_maps(v))
+                for k in (0, 4):
+                    out[k] = out[k] + image(out[k])
+                for k in (2, 3):
+                    out[k] = out[k] + out[k][partner_signs(out[k].size)[0]].conj()
     log.timer('%s(T)' % mycc.__class__.__name__, *cput0)
     log.note('%s(T) correction = %.15g', mycc.__class__.__name__, et.real)
-    return et.real
+    return (et.real, tuple(out)) if lam else et.real

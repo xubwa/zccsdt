@@ -42,6 +42,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <omp.h>
 
 typedef double complex zc;
@@ -259,4 +260,408 @@ void zc_t_t2x(const zc *t2p, int64_t no, int64_t npv, int64_t q0, int64_t q1,
             for (int64_t m = i + 1; m < no; m++)
                 PUT(x + m, -t2p[(m * (m - 1) / 2 + i) * npv + q]);
         }
+}
+
+/* ----------------------------------------- the (T) terms of the Lambda equations
+ *
+ * E(T) depends on t1 and t2 and on the Fock matrix: the Lambda equations of
+ * CCSD(T) have its derivatives with respect to the amplitudes as source
+ * terms, and the one-particle density has (T) terms of its own
+ * (zccsdt/zccsd/lam_t.py has the equations).  With w and u = w + (the
+ * disconnected part) of the virtual triple a > b > c, both divided by the
+ * denominator, all of them are sums over the triples, each in three roles:
+ * one of its virtual indices s, the other two as a pair p > q, and the sign
+ * of the permutation (s, p, q) of (a, b, c) - + for (a, (bc)), - for
+ * (b, (ac)), + for (c, (ab)):
+ *
+ *   l1[i, s]       += sign sum_{j>k} conj(w[ijk]) <pq||jk>
+ *   dvo[s, k]      += sign sum_{i>j} conj(t2[i,j,p,q]) w[ijk]
+ *   goo[i]         += sum_{k>l} conj(u[ikl]) w[ikl]
+ *   gvv[s]         += sum_{i>j>k} u[ijk] conj(w[ijk])
+ *   lt[(pq), (ij)] += sign sum_k f[s,k] conj(w[ijk])
+ *
+ * and two contractions of
+ *
+ *   M[i, (jk)] = conj(w + u)[ijk]      (all i, pairs j > k; antisymmetric in
+ *                                       the three, zero where i is j or k)
+ *
+ * with <ke||pq> over k and with <mn||js> over m > n: o^3 v^4 / 4 and
+ * o^4 v^3 / 4 multiply-adds, as many as the x took.  These two are products
+ * of the shape of those that made the x, result and operand exchanged, and
+ * are left to GEMM: each of the three x of a triple belongs to that triple
+ * alone, so zc_t_batch_lam writes sign M over them - M over x_{a,(bc)}, -M
+ * over x_{b,(ac)}, M over x_{c,(ab)} (with m3: its real part, its imaginary
+ * part and their sum over the three real arrays) -, zeroes the x_{y,(ay)} of
+ * G1, which belong to no triple, and the caller multiplies the arrays of the
+ * batch with the integrals of A and B (triples.py).  The other sums are done
+ * here.
+ */
+
+static inline zc dotu(const zc *x, const zc *y, int64_t n)
+{
+    double sr = 0.0, si = 0.0;
+    #pragma omp simd reduction(+:sr, si)
+    for (int64_t k = 0; k < n; k++) {
+        const double xr = creal(x[k]), xi = cimag(x[k]), yr = creal(y[k]), yi = cimag(y[k]);
+        sr += xr * yr - xi * yi;
+        si += xr * yi + xi * yr;
+    }
+    return sr + si * I;
+}
+
+/* The arguments of zc_t_batch (X1, G1, G2 are overwritten), and the sums:
+ * l1[i,a], dvo[a,i], goo[i], gvv[a] and lt[(a>b), (i>j)], which are added
+ * to. */
+void zc_t_batch_lam(void **X1p, int64_t s1, int64_t c1, void **G1p, int64_t n1, void **G2p,
+                    int64_t n2, int m3, int64_t a, int64_t b0, int64_t b1, int64_t no,
+                    int64_t nv, const zc *t1, const zc *fvo, const zc *VpT, const zc *T2pT,
+                    const double *eo, const double *ev, double *out, zc *l1, zc *dvo,
+                    zc *goo, zc *gvv, zc *lt)
+{
+    const int64_t npo = no * (no - 1) / 2;
+    const int64_t p0 = b0 * (b0 - 1) / 2, pa = a * (a - 1) / 2;
+    const int64_t bmin = b0 > 1 ? b0 : 1;
+    const int64_t pbeg = bmin * (bmin - 1) / 2, pend = b1 * (b1 - 1) / 2;
+    const int64_t chunk = 1 + 8192 / (no * npo);
+    const int64_t ns = b1 + 1;          /* the virtuals of the sums: those below b1, and a */
+    double er = 0.0, ei = 0.0;
+    int has_f = 0;
+    for (int64_t x = 0; x < no * nv && !has_f; x++)
+        has_f = creal(fvo[x]) != 0.0 || cimag(fvo[x]) != 0.0;
+    #pragma omp parallel reduction(+:er, ei)
+    {
+        zc *Z = malloc(sizeof(zc) * no * npo);
+        double *zp = malloc(sizeof(double) * 3 * npo);
+        zc *tx = malloc(sizeof(zc) * 6 * no);
+        zc *ta = tx, *tb = tx + no, *tc = tx + 2 * no;
+        zc *fa = tx + 3 * no, *fb = tx + 4 * no, *fc = tx + 5 * no;
+        zc *wv = malloc(sizeof(zc) * 2 * no), *uv = wv + no;    /* the k of one (i, j) */
+        /* the sums of one pair (b, c) over the pairs of occupied spinors,
+         * for the rows (bc), (ac), (ab) of <bc||jk> (l1) and of t2 (dvo) */
+        zc *acc = malloc(sizeof(zc) * 6 * no);
+        zc *la = acc, *lb = acc + no, *lc = acc + 2 * no;
+        zc *da = acc + 3 * no, *db = acc + 4 * no, *dc = acc + 5 * no;
+        zc *fr = has_f ? malloc(sizeof(zc) * 3 * npo) : NULL;   /* the f terms of the rows */
+        /* the sums of this thread */
+        zc *l1t = calloc(no * ns, sizeof(zc)), *dvt = calloc(ns * no, sizeof(zc));
+        zc *got = calloc(no, sizeof(zc)), *gvt = calloc(ns, sizeof(zc));
+        #pragma omp for schedule(static)
+        for (int64_t y = b0; y < b1; y++)
+            for (int64_t i = 0; i < no; i++) {
+                const int64_t off = (y * no + i) * n1 + (y - b0) * npo;
+                if (m3)
+                    for (int k = 0; k < 3; k++)
+                        memset((double *)G1p[k] + off, 0, sizeof(double) * npo);
+                else
+                    memset((zc *)G1p[0] + off, 0, sizeof(zc) * npo);
+            }
+        #pragma omp for schedule(dynamic, chunk)
+        for (int64_t pbc = pbeg; pbc < pend; pbc++) {
+            int64_t b = (int64_t)((1.0 + sqrt(1.0 + 8.0 * (double)pbc)) / 2.0);
+            while (b * (b - 1) / 2 > pbc)
+                b--;
+            while ((b + 1) * b / 2 <= pbc)
+                b++;
+            const int64_t c = pbc - b * (b - 1) / 2;
+            /* Z[i, (jk)] = x_{a,(bc)} - x_{b,(ac)} + x_{c,(ab)} */
+            for (int64_t i = 0; i < no; i++) {
+                const int64_t o1 = ((pbc - p0) * no + i) * s1 + c1;
+                const int64_t o2 = (c * no + i) * n1 + (b - b0) * npo;
+                const int64_t o3 = c >= b0 ? (b * no + i) * n1 + (c - b0) * npo
+                                           : ((b - b0) * no + i) * n2 + c * npo;
+                zc *z = Z + i * npo;
+                if (m3) {
+                    for (int k = 0; k < 3; k++) {
+                        const double *r1 = (const double *)X1p[k] + o1;
+                        const double *r2 = (const double *)G1p[k] + o2;
+                        const double *r3 = (const double *)(c >= b0 ? G1p[k] : G2p[k]) + o3;
+                        double *d = zp + k * npo;
+                        for (int64_t q = 0; q < npo; q++)
+                            d[q] = r1[q] - r2[q] + r3[q];
+                    }
+                    const double *d0 = zp, *d1 = zp + npo, *d2 = zp + 2 * npo;
+                    for (int64_t q = 0; q < npo; q++)
+                        z[q] = (d0[q] - d1[q]) + (d2[q] - d0[q] - d1[q]) * I;
+                } else {
+                    const zc *r1 = (const zc *)X1p[0] + o1, *r2 = (const zc *)G1p[0] + o2;
+                    const zc *r3 = (const zc *)(c >= b0 ? G1p[0] : G2p[0]) + o3;
+                    for (int64_t q = 0; q < npo; q++)
+                        z[q] = r1[q] - r2[q] + r3[q];
+                }
+            }
+            const zc *vbc = VpT + pbc * npo, *tbc = T2pT + pbc * npo;
+            const zc *vac = VpT + (pa + c) * npo, *tac = T2pT + (pa + c) * npo;
+            const zc *vab = VpT + (pa + b) * npo, *tab = T2pT + (pa + b) * npo;
+            for (int64_t k = 0; k < no; k++) {
+                ta[k] = t1[k * nv + a];
+                tb[k] = t1[k * nv + b];
+                tc[k] = t1[k * nv + c];
+                fa[k] = fvo[a * no + k];
+                fb[k] = fvo[b * no + k];
+                fc[k] = fvo[c * no + k];
+            }
+            memset(acc, 0, sizeof(zc) * 6 * no);
+            if (has_f)
+                memset(fr, 0, sizeof(zc) * 3 * npo);
+            zc xs = 0.0;                                /* sum of conj(u) w / D^2 */
+            const double eabc = ev[a] + ev[b] + ev[c];
+            for (int64_t i = 2; i < no; i++)
+                for (int64_t j = 1; j < i; j++) {
+                    const int64_t pij = i * (i - 1) / 2 + j;
+                    const int64_t oj = j * (j - 1) / 2, oi = i * (i - 1) / 2;
+                    zc *zi = Z + i * npo + oj, *zj = Z + j * npo + oi;
+                    zc *zk = Z + pij;                               /* Z[k, (ij)]: stride npo */
+                    const zc tai = ta[i], tbi = tb[i], tci = tc[i];
+                    const zc taj = ta[j], tbj = tb[j], tcj = tc[j];
+                    const zc vbcij = vbc[pij], vacij = vac[pij], vabij = vab[pij];
+                    const zc tbcij = tbc[pij], tacij = tac[pij], tabij = tab[pij];
+                    const double dij = eo[i] + eo[j] - eabc;
+                    for (int64_t k = 0; k < j; k++) {
+                        const zc w = zi[k] - zj[k] + zk[k * npo];
+                        wv[k] = w;
+                        uv[k] = w + tai * vbc[oj + k] - tbi * vac[oj + k] + tci * vab[oj + k]
+                                - taj * vbc[oi + k] + tbj * vac[oi + k] - tcj * vab[oi + k]
+                                + ta[k] * vbcij - tb[k] * vacij + tc[k] * vabij;
+                    }
+                    if (has_f) {
+                        const zc fai = fa[i], fbi = fb[i], fci = fc[i];
+                        const zc faj = fa[j], fbj = fb[j], fcj = fc[j];
+                        for (int64_t k = 0; k < j; k++)
+                            uv[k] += fai * tbc[oj + k] - fbi * tac[oj + k] + fci * tab[oj + k]
+                                     - faj * tbc[oi + k] + fbj * tac[oi + k] - fcj * tab[oi + k]
+                                     + fa[k] * tbcij - fb[k] * tacij + fc[k] * tabij;
+                    }
+                    /* the energy and the diagonals of the density; M[i,(jk)] = m,
+                     * M[j,(ik)] = -m, M[k,(ij)] = m over the three Z of (ijk),
+                     * which are read here only; conj(w) / D for the other sums */
+                    zc g = 0.0;
+                    for (int64_t k = 0; k < j; k++) {
+                        const zc w = wv[k], u = uv[k];
+                        const double rd = 1.0 / (dij + eo[k]);
+                        er += (creal(u) * creal(w) + cimag(u) * cimag(w)) * rd;
+                        ei += (creal(u) * cimag(w) - cimag(u) * creal(w)) * rd;
+                        const zc e3 = conj(u) * w * (rd * rd);
+                        const zc m = conj(w + u) * rd;
+                        g += e3;
+                        got[k] += e3;
+                        zi[k] = m;
+                        zj[k] = -m;
+                        zk[k * npo] = m;
+                        wv[k] = conj(w) * rd;
+                    }
+                    got[i] += g;
+                    got[j] += g;
+                    xs += g;
+                    /* conj(w[ijk]) with the pair (jk) for i, -(ik) for j, (ij) for k */
+                    la[i] += dotu(wv, vbc + oj, j);
+                    lb[i] += dotu(wv, vac + oj, j);
+                    lc[i] += dotu(wv, vab + oj, j);
+                    la[j] -= dotu(wv, vbc + oi, j);
+                    lb[j] -= dotu(wv, vac + oi, j);
+                    lc[j] -= dotu(wv, vab + oi, j);
+                    da[i] += dotu(wv, tbc + oj, j);
+                    db[i] += dotu(wv, tac + oj, j);
+                    dc[i] += dotu(wv, tab + oj, j);
+                    da[j] -= dotu(wv, tbc + oi, j);
+                    db[j] -= dotu(wv, tac + oi, j);
+                    dc[j] -= dotu(wv, tab + oi, j);
+                    for (int64_t k = 0; k < j; k++) {
+                        const zc wc = wv[k];
+                        la[k] += wc * vbcij;
+                        lb[k] += wc * vacij;
+                        lc[k] += wc * vabij;
+                        da[k] += wc * tbcij;
+                        db[k] += wc * tacij;
+                        dc[k] += wc * tabij;
+                    }
+                    if (has_f) {
+                        /* f[s,k] conj(w[ijk]) to the pair (ij), -f[s,j] to (ik),
+                         * f[s,i] to (jk) */
+                        const zc fai = fa[i], fbi = fb[i], fci = fc[i];
+                        const zc faj = fa[j], fbj = fb[j], fcj = fc[j];
+                        zc *f1 = fr, *f2 = fr + npo, *f3 = fr + 2 * npo;
+                        f1[pij] += dotu(wv, fa, j);
+                        f2[pij] += dotu(wv, fb, j);
+                        f3[pij] += dotu(wv, fc, j);
+                        for (int64_t k = 0; k < j; k++) {
+                            const zc wc = wv[k];
+                            f1[oi + k] -= faj * wc;
+                            f2[oi + k] -= fbj * wc;
+                            f3[oi + k] -= fcj * wc;
+                            f1[oj + k] += fai * wc;
+                            f2[oj + k] += fbi * wc;
+                            f3[oj + k] += fci * wc;
+                        }
+                    }
+                }
+            /* M vanishes where its single index is one of the pair: these Z
+             * belong to no (ijk) */
+            for (int64_t i = 1; i < no; i++)
+                for (int64_t j = 0; j < i; j++) {
+                    const int64_t pij = i * (i - 1) / 2 + j;
+                    Z[i * npo + pij] = 0.0;
+                    Z[j * npo + pij] = 0.0;
+                }
+            /* M, -M, M in place of the three x */
+            for (int64_t i = 0; i < no; i++) {
+                const int64_t o1 = ((pbc - p0) * no + i) * s1 + c1;
+                const int64_t o2 = (c * no + i) * n1 + (b - b0) * npo;
+                const int64_t o3 = c >= b0 ? (b * no + i) * n1 + (c - b0) * npo
+                                           : ((b - b0) * no + i) * n2 + c * npo;
+                const zc *z = Z + i * npo;
+                if (m3) {
+                    void **G3p = c >= b0 ? G1p : G2p;
+                    double *x0 = (double *)X1p[0] + o1, *x1 = (double *)X1p[1] + o1;
+                    double *x2 = (double *)X1p[2] + o1;
+                    double *g0 = (double *)G1p[0] + o2, *g1 = (double *)G1p[1] + o2;
+                    double *g2 = (double *)G1p[2] + o2;
+                    double *h0 = (double *)G3p[0] + o3, *h1 = (double *)G3p[1] + o3;
+                    double *h2 = (double *)G3p[2] + o3;
+                    for (int64_t q = 0; q < npo; q++) {
+                        const double re = creal(z[q]), im = cimag(z[q]);
+                        x0[q] = re;
+                        x1[q] = im;
+                        x2[q] = re + im;
+                        g0[q] = -re;
+                        g1[q] = -im;
+                        g2[q] = -(re + im);
+                        h0[q] = re;
+                        h1[q] = im;
+                        h2[q] = re + im;
+                    }
+                } else {
+                    zc *r1 = (zc *)X1p[0] + o1, *r2 = (zc *)G1p[0] + o2;
+                    zc *r3 = (zc *)(c >= b0 ? G1p[0] : G2p[0]) + o3;
+                    for (int64_t q = 0; q < npo; q++) {
+                        r1[q] = z[q];
+                        r2[q] = -z[q];
+                        r3[q] = z[q];
+                    }
+                }
+            }
+            /* the sums of the pair with the signs of the three roles; a is
+             * the last of the ns virtuals */
+            for (int64_t x = 0; x < no; x++) {
+                l1t[x * ns + b1] += la[x];
+                l1t[x * ns + b] -= lb[x];
+                l1t[x * ns + c] += lc[x];
+                dvt[b1 * no + x] += conj(da[x]);
+                dvt[b * no + x] -= conj(db[x]);
+                dvt[c * no + x] += conj(dc[x]);
+            }
+            gvt[b1] += conj(xs);
+            gvt[b] += conj(xs);
+            gvt[c] += conj(xs);
+            if (has_f) {
+                /* the row (bc) is this pair's own; (ac) and (ab) are shared
+                 * with the other pairs of a */
+                zc *r = lt + pbc * npo;
+                for (int64_t q = 0; q < npo; q++)
+                    r[q] += fr[q];
+                #pragma omp critical(zc_t_lam_rows)
+                {
+                    zc *rc = lt + (pa + c) * npo, *rb = lt + (pa + b) * npo;
+                    for (int64_t q = 0; q < npo; q++) {
+                        rc[q] -= fr[npo + q];
+                        rb[q] += fr[2 * npo + q];
+                    }
+                }
+            }
+        }
+        #pragma omp critical(zc_t_lam_sums)
+        {
+            for (int64_t x = 0; x < no; x++) {
+                for (int64_t s = 0; s < b1; s++)
+                    l1[x * nv + s] += l1t[x * ns + s];
+                l1[x * nv + a] += l1t[x * ns + b1];
+                dvo[a * no + x] += dvt[b1 * no + x];
+                goo[x] += got[x];
+            }
+            for (int64_t s = 0; s < b1; s++) {
+                for (int64_t x = 0; x < no; x++)
+                    dvo[s * no + x] += dvt[s * no + x];
+                gvv[s] += gvt[s];
+            }
+            gvv[a] += gvt[b1];
+        }
+        free(Z);
+        free(zp);
+        free(tx);
+        free(wv);
+        free(acc);
+        free(fr);
+        free(l1t);
+        free(dvt);
+        free(got);
+        free(gvt);
+    }
+    out[0] = er;
+    out[1] = ei;
+}
+
+/* The product of the triples of a batch with <ke||pq>, as it comes from GEMM
+ * transposed - Q[e, (s - sa, (ij))], ld elements per row; complex (q0), or
+ * with m3 its three real products -, antisymmetrized over the virtual pair
+ * into lt[(a>b), (i>j)]:
+ *
+ *   lt[(s>e), (ij)] += Q[e, (s, (ij))],    lt[(e>s), (ij)] -= Q[e, (s, (ij))]
+ *
+ * for sa <= s < sb.  Two s of the block meet in one row: the s one after the
+ * other, the rows of one s on the threads. */
+void zc_t_lam_particle(const void *q0, const void *q1, const void *q2, int m3, int64_t ld,
+                       int64_t nv, int64_t npo, int64_t sa, int64_t sb, zc *lt)
+{
+    /* a few rows are not worth a team of threads */
+    #pragma omp parallel if(nv * npo > 65536)
+    for (int64_t s = sa; s < sb; s++) {
+        #pragma omp for schedule(static)
+        for (int64_t e = 0; e < nv; e++) {
+            if (e == s)
+                continue;
+            const int64_t hi = e < s ? s : e, lo = e < s ? e : s;
+            const double sg = e < s ? 1.0 : -1.0;
+            const int64_t off = e * ld + (s - sa) * npo;
+            zc *r = lt + (hi * (hi - 1) / 2 + lo) * npo;
+            if (m3) {
+                const double *d0 = (const double *)q0 + off, *d1 = (const double *)q1 + off;
+                const double *d2 = (const double *)q2 + off;
+                for (int64_t x = 0; x < npo; x++)
+                    r[x] += sg * ((d0[x] - d1[x]) + (d2[x] - d0[x] - d1[x]) * I);
+            } else {
+                const zc *q = (const zc *)q0 + off;
+                for (int64_t x = 0; x < npo; x++)
+                    r[x] += sg * q[x];
+            }
+        }
+    }
+}
+
+/* The product of the triples of a batch with <mn||js> - Y[(r - ra, i), j] for
+ * the pairs ra <= r < rb of virtual spinors; complex, or its three real
+ * products -, antisymmetrized over the occupied pair into lt[(a>b), (i>j)]:
+ * lt[r, (ij)] += Y[(r, i), j] - Y[(r, j), i]. */
+void zc_t_lam_hole(const void *y0, const void *y1, const void *y2, int m3, int64_t no,
+                   int64_t ra, int64_t rb, zc *lt)
+{
+    const int64_t npo = no * (no - 1) / 2;
+    #pragma omp parallel for schedule(static) if((rb - ra) * no * no > 65536)
+    for (int64_t r = ra; r < rb; r++) {
+        const int64_t off = (r - ra) * no * no;
+        zc *row = lt + r * npo;
+        if (m3) {
+            const double *d0 = (const double *)y0 + off, *d1 = (const double *)y1 + off;
+            const double *d2 = (const double *)y2 + off;
+            for (int64_t i = 1; i < no; i++)
+                for (int64_t j = 0; j < i; j++) {
+                    const int64_t x = i * no + j, y = j * no + i;
+                    const double p1 = d0[x] - d0[y], p2 = d1[x] - d1[y], p3 = d2[x] - d2[y];
+                    row[i * (i - 1) / 2 + j] += (p1 - p2) + (p3 - p1 - p2) * I;
+                }
+        } else {
+            const zc *yy = (const zc *)y0 + off;
+            for (int64_t i = 1; i < no; i++)
+                for (int64_t j = 0; j < i; j++)
+                    row[i * (i - 1) / 2 + j] += yy[i * no + j] - yy[j * no + i];
+        }
+    }
 }

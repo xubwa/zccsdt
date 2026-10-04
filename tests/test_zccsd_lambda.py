@@ -10,6 +10,7 @@ import pytest
 from pyscf import gto, x2c
 from pyscf.cc import gccsd_lambda, gccsd_rdm
 
+from zccsdt import memory
 from zccsdt.zccsd import DirectZCCSD, amps, kramers, lam
 from zccsdt.zccsd import kernels as K
 
@@ -189,7 +190,6 @@ def test_lambda_peak_within_plan(monkeypatch):
     pairs; and the working set within the budget and lam.reserve_bytes, which
     is what the iterations are planned with.'''
     import tracemalloc
-    from zccsdt import memory
     monkeypatch.setattr(memory, 'resident', lambda: 0)
     mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
     mf = x2c.UHF(mol).run(conv_tol=1e-10)
@@ -326,20 +326,117 @@ def test_t_terms_by_triples(x2c_h2o, kr):
 
 
 @pytest.mark.parametrize('kr', [False, None])
-def test_t_terms_in_batches(x2c_h2o, kr):
-    '''The (T) terms from the batches of triples.kernel (lam_t.Terms) against
-    the assembly over all virtual triples: with Kramers pairs the kernel
+def test_t_terms_in_batches(x2c_h2o, kr, monkeypatch):
+    """The (T) terms from the batches of triples.kernel against the assembly
+    over all virtual triples: one triple at a time (lam_t.Terms), and as the
+    code does them (terms=True: the triples written over their x, the two
+    products of each batch, the other sums in the kernel) - in one batch, in
+    ranges of a, in the smallest batches, with ZGEMM and with three real
+    GEMMs, with the C and the numpy kernels, with and without occupied-
+    virtual elements of the Fock matrix.  With Kramers pairs the kernel
     visits the triples with an unbarred b and every sum is completed by its
-    time-reversed image.'''
-    from zccsdt.zccsd import lam_t
+    time-reversed image."""
+    from zccsdt.zccsd import lam_t, triples
     mycc = DirectZCCSD(x2c_h2o, frozen=2)
     mycc.verbose, mycc.kramers = 0, kr
     eris = mycc.ao2mo()
     o, v = eris.nocc, eris.fock.shape[0] - eris.nocc
+    paired = bool(eris.kramers)
     rng = np.random.default_rng(2)
-    t1, t2 = amplitudes(o, v, rng, bool(eris.kramers))
-    ref = lam_t.by_triples(t1, t2, eris)
-    e, got = lam_t.in_batches(mycc, eris, t1, t2)
-    assert abs(e - lam_t.energy(t1, t2, eris)) < 1e-10
-    for x, y in zip(got, ref):
-        assert abs(x - y).max() < 1e-10 and abs(y).max() > 1e-3
+    t1, t2 = amplitudes(o, v, rng, paired)
+    floor = triples.memory_need(o, v, False)[1]
+    have_c = K.USE_C
+    for with_f in (False, True):
+        if with_f:
+            f = 0.05 * (rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v)))
+            if paired:
+                f = 0.5 * (f + kramers.image(f))
+            eris.fock = eris.fock.copy()
+            eris.fock[:o, o:] += f
+            eris.fock[o:, :o] += f.conj().T
+        ref = lam_t.by_triples(t1, t2, eris)
+        e_ref = lam_t.energy(t1, t2, eris)
+        assert min(abs(y).max() for y in ref) > 1e-3
+        e, got = lam_t.in_batches(mycc, eris, t1, t2)
+        assert abs(e - e_ref) < 1e-10
+        for x, y in zip(got, ref):
+            assert abs(x - y).max() < 1e-10
+        for nbytes in (4 << 30, 2 * floor * v, floor):
+            monkeypatch.setattr(triples, 'BATCH_BYTES', nbytes)
+            for use_c in (True, False):
+                monkeypatch.setattr(K, 'USE_C', use_c and have_c)
+                for m3 in (True, False):
+                    e, (l1, l2p, goo, gvv, dvo) = triples.kernel(mycc, eris, t1, t2, 0,
+                                                                 three_m=m3, terms=True)
+                    assert abs(e - e_ref) < 1e-10
+                    for x, y in zip((l1, K.unpack_t2(l2p, o, v), goo, gvv, dvo), ref):
+                        assert abs(x - y).max() < 1e-10
+            monkeypatch.setattr(K, 'USE_C', have_c)
+        monkeypatch.setattr(triples, 'BATCH_BYTES', 4 << 30)
+        # the blocks of the two products: one virtual and one pair at a time
+        monkeypatch.setattr(triples, 'REVERSE_BYTES', 0)
+        monkeypatch.setattr(memory, 'resident', lambda: 0)
+        need = sum(triples.memory_need(o, v, False, True))
+        e, (l1, l2p, goo, gvv, dvo) = triples.kernel(mycc, eris, t1, t2, 0, three_m=False,
+                                                     terms=True, max_memory=3 * need / 1e6)
+        for x, y in zip((l1, K.unpack_t2(l2p, o, v), goo, gvv, dvo), ref):
+            assert abs(x - y).max() < 1e-10
+        monkeypatch.undo()
+
+
+@pytest.mark.parametrize('kr', [False, None])
+def test_t_terms_peak_within_plan(kr, monkeypatch, tmp_path):
+    """What triples.kernel allocates, with and without the terms of the
+    Lambda equations, stays within max_memory (tracemalloc follows numpy's
+    allocations; t2 is given packed, as solve_lambda gives it): from the
+    least - the operands in a scratch file, one virtual per batch - to
+    everything in memory; MemoryError below the least.  What the plan does
+    not know is small: Python's own objects (the list of a few thousand
+    batches; a megabyte is allowed for them) and what the HDF5 library
+    takes when its first file is opened (1 MiB, kept: done before the
+    measurements).  The results do not depend on the plan."""
+    import tracemalloc
+    from pyscf import lib
+    from zccsdt import scratch
+    from zccsdt.zccsd import triples
+    monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    mol = gto.M(atom='C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; H 0 -0.9289 1.2321; '
+                'H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321', basis='6-31g', verbose=0)
+    mycc = DirectZCCSD(x2c.UHF(mol).run(conv_tol=1e-10))
+    mycc.verbose, mycc.kramers = 0, kr
+    eris = mycc.ao2mo()
+    o, v = eris.nocc, eris.fock.shape[0] - eris.nocc
+    npo, npv = K.npair(o), K.npair(v)
+    rng = np.random.default_rng(3)
+    t1 = 0.05 * (rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v)))
+    t2p = 0.02 * (rng.standard_normal((npo, npv)) + 1j * rng.standard_normal((npo, npv)))
+    if eris.kramers:
+        t1 = 0.5 * (t1 + kramers.image(t1))
+        t2p = np.ascontiguousarray(0.5 * (t2p + kramers.image(t2p, pairs=(0, 1))))
+    scratch.Scratch().close()
+    ref, mapped = {}, 0
+    for lam_terms in (None, True):
+        for m3 in (False, True):
+            fixed, floor = triples.memory_need(o, v, m3, bool(lam_terms))
+            need = fixed + floor
+            assert need > 5e6 and 16 * npo * npv > 1e6      # against the megabyte allowed
+            operands = (24 if m3 else 16) * (npv * o + v * npo) * (v + o)
+            with pytest.raises(MemoryError, match='one virtual orbital'):
+                triples.kernel(mycc, eris, t1, t2p, 0, three_m=m3, terms=lam_terms,
+                               max_memory=0.95 * need / 1e6)
+            for factor in (1.0, 1.5, 4.0, 40.0) if lam_terms else (1.0, 4.0):
+                budget = int(factor * need) + 1
+                tracemalloc.start()
+                base = tracemalloc.get_traced_memory()[0]
+                out = triples.kernel(mycc, eris, t1, t2p, 0, three_m=m3, terms=lam_terms,
+                                     max_memory=budget / 1e6)
+                peak = tracemalloc.get_traced_memory()[1] - base
+                tracemalloc.stop()
+                assert peak <= budget + 1000000, (lam_terms, m3, factor, peak, budget)
+                mapped += budget < need + operands
+                flat = [out] if lam_terms is None else [out[0], *out[1]]
+                for x, y in zip(flat, ref.setdefault(lam_terms, flat)):
+                    assert np.abs(x - y).max() < 1e-11
+    assert mapped >= 6 and abs(ref[None][0] - ref[True][0]) < 1e-12

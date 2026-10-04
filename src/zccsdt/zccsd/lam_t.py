@@ -15,8 +15,11 @@ orbital energies in the denominators of E(T), and a virtual-occupied block
 from the Fock matrix in the disconnected triples.
 
 The connected and the disconnected triples are formed here as full o^3 v^3
-arrays: this is the reference that an evaluation in the batches of
-zccsd.triples has to reproduce.
+arrays: the reference.  The code for molecules of any size is in
+zccsd.triples (kernel with terms=True: the same sums in the batches of the
+(T) energy); by_triples and Terms here are the two steps between them - the
+sums over the virtual triples a > b > c in their three roles, and the same
+from the triples as the batches deliver them.
 '''
 
 import numpy as np
@@ -156,9 +159,9 @@ class Terms:
     an unbarred b; time reversal maps them onto the others, and every sum is
     completed by its image.
 
-    With numpy, one triple at a time: this fixes what the batches have to
-    deliver; the contractions as GEMMs on the batch and in the kernel are to
-    replace it.'''
+    With numpy, one triple at a time: the check of the batches and of the
+    time reversal.  triples.kernel(terms=True) does the same sums with two
+    GEMMs per product of a batch and in its kernel.'''
 
     def __init__(self, t2, eris):
         self.ovvv, self.ooov, self.oovv, fock, o, v = _blocks(eris)
@@ -213,7 +216,8 @@ class Terms:
 
 def in_batches(mycc, eris, t1, t2):
     '''(E(T), (l1, l2, goo, gvv, dvo)): the (T) energy and the terms of
-    by_triples from the batches of zccsd.triples.kernel (Terms).'''
+    by_triples from the batches of zccsd.triples.kernel, one triple at a
+    time (Terms; l2[i,j,a,b] unpacked).'''
     from zccsdt.zccsd import triples as _triples
     terms = Terms(t2, eris)
     e = _triples.kernel(mycc, eris, t1, t2, mycc.verbose, terms=terms)
