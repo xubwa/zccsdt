@@ -253,6 +253,14 @@ class Lambda:
             lvv = blas.gemm(t1T, l1)                    # [f, b] = sum_j t1[j,f] lambda1[j,b]
             loo = blas.gemm(l1, t1.T)                   # [j, n] = sum_b lambda1[j,b] t1[n,b]
             tmp1vv, tmp1oo = mba + lvv, mij + loo
+            # - sum_k sum_(j>l) <jl||ka> X[(i k),(jl)]
+            for k in range(o):
+                r1 += psgn[k][:, None] * blas.gemm(np.ascontiguousarray(X[prow[k]]),
+                                                   res.ooov_en[k].T)
+            # X with the occupied one-particle term - P(ij) tmp1oo[i,k] <kj||ab>, as a
+            # matrix on the pairs like the Fock term of the amplitude step
+            for rows, cols, f0, f1, sign in res._g:
+                X[rows, cols] += sign * tmp1oo[f0, f1]
 
         def Yrows(j):
             '''Y[i, j, k, c] = sum_b lambda2[i,k,b,c] t1[j,b] for one j, as [i, k, c].'''
@@ -303,9 +311,14 @@ class Lambda:
             r1 += rm
 
         with timer('lambda.pairs'):
-            # the hh ladder and the tau <kl||ab> term
-            blas.gemm(self.Whh, l2p, C=L2, beta=1.0)
+            # the hh ladder and the tau <kl||ab> term, each with a one-particle term
+            # on the occupied side (their contractions with t1 are taken back below)
+            Gl = self.Whh.copy()
+            for rows, cols, f0, f1, sign in res._g:
+                Gl[rows, cols] += sign * Hoo[f0, f1]
+            blas.gemm(Gl, l2p, C=L2, beta=1.0)
             blas.gemm(X, res.oovv_p, C=L2, beta=1.0)
+            del Gl, X
 
         with timer('lambda.ladder'):
             saved = res.kramers
@@ -316,10 +329,17 @@ class Lambda:
                 res.kramers = saved
 
         with timer('lambda.t1'):
-            # what the lambda1 equation contracts with t1 is in L2, with two terms
-            # too many: their t1 parts are in X above and here
+            # what the lambda1 equation contracts with t1 is in L2, with four terms
+            # too many: the t1 parts of two are in the contraction with <ma||ef>
+            # above and in the first line here, those of the two one-particle
+            # terms follow
             K.t2p_matvec(L2, t1, r1)
             r1 += blas.gemm(l1, self.fvv_a)
+            lt1 = K.t2p_matvec(l2p, t1, np.zeros((o, v), dtype=np.complex128))
+            r1 += blas.gemm(Hoo, lt1) + blas.gemm(tmp1oo, Fov - res.fov)
+            K.t2p_matvec(l2p, self.res1 + blas.gemm(Hoo.T, t1), r1)
+            K.t2p_matvec(res.oovv_p, blas.gemm(tmp1oo.T, t1) - blas.gemm(t1, mba.T)
+                         - blas.gemm(mij.T, t1), r1)
 
         with timer('lambda.ring'):
             l1v = np.ascontiguousarray(l1.reshape(n1, 1))
@@ -389,26 +409,10 @@ class Lambda:
                           vu.reshape(v, n * v).T, C=r1, alpha=-1.0, beta=1.0)
                 del Yv, Nb, vu
             del Zp
-            # occupied side: the one-particle terms as matrices on the pairs
-            Gl = np.zeros((npo, npo), dtype=np.complex128)
-            Gv = np.zeros((npo, npo), dtype=np.complex128)
-            for rows, cols, f0, f1, sign in res._g:
-                Gl[rows, cols] += sign * Hoo[f0, f1]
-                Gv[rows, cols] += sign * tmp1oo[f0, f1]
-            blas.gemm(Gl, l2p, C=L2, beta=1.0)
-            blas.gemm(Gv, res.oovv_p, C=L2, beta=1.0)
-            del Gl, Gv
             L2 += res.oovv_p
             K.outer_pp(l1, Fov, 1.0, L2)
 
         with timer('lambda.t1'):
-            # - sum_k sum_(j>l) <jl||ka> X[(i k),(jl)]
-            for k in range(o):
-                r1 += psgn[k][:, None] * blas.gemm(np.ascontiguousarray(X[prow[k]]),
-                                                   res.ooov_en[k].T)
-            del X
-            K.t2p_matvec(l2p, np.ascontiguousarray(self.res1), r1)
-            K.t2p_matvec(res.oovv_p, -blas.gemm(t1, mba.T) - blas.gemm(mij.T, t1), r1)
             r1 -= np.einsum('jika,kj->ia', res.ooov, mij)
             r1 -= blas.gemm(mij, Fov) + blas.gemm(Fov, mba)
             K.div_packed(L2, eo, ev)
