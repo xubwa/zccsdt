@@ -146,27 +146,55 @@ def gradient_terms(t1, t2, l1, l2, fock, g, nocc):
     return X
 
 
-def response(mf, mo_coeff, mo_energy, nocc):
+def scf_veff(mf, max_memory=None, coulomb=None):
+    '''A function dm -> J - K for a density change dm in the 2c AO basis of
+    the SCF ``mf``, for the orbital Hessian: the bare Coulomb operator on the
+    scalar AO integrals (orbgrad.Coulomb on the spin blocks: many times
+    faster than the spinor integrals of a 2c SCF) if that is the
+    two-electron part of the Fock operator of ``mf`` - it is compared with
+    mf.get_veff on the density of the SCF -, else mf.get_veff itself.'''
+    from zccsdt.zccsd import orbgrad
+    mol = mf.mol
+    slow = lambda dm: mf.get_veff(mol, dm)                          # noqa: E731
+    dm = mf.make_rdm1()
+    nao = mol.nao_nr()
+    if getattr(dm, 'ndim', 0) != 2 or dm.shape[0] not in (2 * nao, mol.nao_2c()):
+        return slow
+    if coulomb is None:
+        coulomb = orbgrad.Coulomb(mol, max_memory)
+    if dm.shape[0] == 2 * nao and not hasattr(mf, 'with_x2c'):      # GHF: the (spin, AO) basis
+        fast = coulomb.veff
+    else:                                                           # j-adapted spinors
+        c2 = np.vstack(mol.sph2spinor_coeff())
+        fast = lambda d: c2.conj().T @ coulomb.veff(c2 @ d @ c2.conj().T) @ c2     # noqa: E731
+    ref = slow(dm)
+    return fast if abs(fast(dm) - ref).max() < 1e-8 * max(1.0, abs(ref).max()) else slow
+
+
+def response(mf, mo_coeff, mo_energy, nocc, veff=None):
     '''The orbital Hessian R of the SCF ``mf`` as a function x[a,i] ->
     R(x)[a,i] for the spinors ``mo_coeff`` (2c AO basis, [occupied,
-    virtual], canonical) with the orbital energies ``mo_energy``.'''
+    virtual], canonical) with the orbital energies ``mo_energy``.  ``veff``:
+    J - K of a density change (default: mf.get_veff; see scf_veff).'''
     Co, Cv = mo_coeff[:, :nocc], mo_coeff[:, nocc:]
     eai = mo_energy[nocc:, None] - mo_energy[:nocc]
+    if veff is None:
+        veff = lambda dm: mf.get_veff(mf.mol, dm)                   # noqa: E731
 
     def R(x):
         dP = Cv @ x @ Co.conj().T
         dP = dP + dP.conj().T
-        return eai * x + Cv.conj().T @ mf.get_veff(mf.mol, dP) @ Co
+        return eai * x + Cv.conj().T @ veff(dP) @ Co
 
     return R, eai
 
 
-def solve(mf, mo_coeff, mo_energy, nocc, gvo, tol=1e-9, max_cycle=50, verbose=None):
+def solve(mf, mo_coeff, mo_energy, nocc, gvo, tol=1e-9, max_cycle=50, verbose=None, veff=None):
     '''z[a,i] with R(z) = gvo (gvo = -G[virtual, occupied]): Jacobi steps
-    with the orbital energy differences, DIIS; one Fock build per step.
-    Returns (converged, z).'''
+    with the orbital energy differences, DIIS; one Fock build per step
+    (``veff``: see response).  Returns (converged, z).'''
     log = logger.new_logger(mf, verbose)
-    R, eai = response(mf, mo_coeff, mo_energy, nocc)
+    R, eai = response(mf, mo_coeff, mo_energy, nocc, veff)
     z = gvo / eai
     adiis = DIIS(space=8, incore=True)
     conv = False
@@ -213,7 +241,7 @@ def full_space(mycc):
     return C, mo_e, int(occupied.sum()), np.flatnonzero(~active & occupied)
 
 
-def gradient_frozen(mycc, t1, t2, l1, l2, verbose=None):
+def gradient_frozen(mycc, t1, t2, l1, l2, verbose=None, coulomb=None):
     '''(G[a, x], G[i, c]): the blocks of the orbital gradient that the
     Z-vector equations of a CCSD with frozen occupied spinors need - the
     virtual spinors a with all occupied x, frozen and active, in the order of
@@ -300,7 +328,7 @@ def gradient_frozen(mycc, t1, t2, l1, l2, verbose=None):
     del l1n, l2n, L
     Gci = blas.gemm(P1, T1.T) + PT                      # [c, i], all occupied i
     Gic = -(blas.gemm(R1, L1.T) + RL)                   # [c, i] holds Gnh[i, c]
-    Gnh = orbgrad.kernel(full, eris, T1, T2p, L1, L2p, verbose)
+    Gnh = orbgrad.kernel(full, eris, T1, T2p, L1, L2p, verbose, coulomb=coulomb)
     res.close()
     Gvo = 0.5 * Gnh
     Gvo[:, frozen] += 0.5 * P1.conj().T
@@ -320,23 +348,25 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     if l1 is None or l2 is None:
         l1, l2 = mycc.solve_lambda(t1, t2, eris=eris)
     C, mo_e, o, frozen = full_space(mycc)
+    coulomb = orbgrad.Coulomb(mf.mol, mycc.max_memory)
+    veff = scf_veff(mf, coulomb=coulomb)
     if not frozen.size:
         out = dm1 = rdm.make_rdm1(mycc, t1, t2, l1, l2, eris)
-        gvo = -0.5 * orbgrad.kernel(mycc, eris, t1, t2, l1, l2, verbose)
+        gvo = -0.5 * orbgrad.kernel(mycc, eris, t1, t2, l1, l2, verbose, coulomb=coulomb)
     else:
         from pyscf.cc import gccsd_rdm
         t1 = mycc.t1 if t1 is None else t1
         t2 = mycc.t2 if t2 is None else t2
         dm1 = gccsd_rdm._make_rdm1(mycc, rdm.gamma1(t1, t2, l1, l2), with_frozen=True)
-        Gvo, Gic = gradient_frozen(mycc, t1, t2, l1, l2, verbose)
+        Gvo, Gic = gradient_frozen(mycc, t1, t2, l1, l2, verbose, coulomb)
         act = np.setdiff1d(np.arange(o), frozen)
         y = Gic / (mo_e[frozen][None, :] - mo_e[act][:, None])
         Y = C[:, act] @ y @ C[:, frozen].conj().T
-        gvo = -Gvo - C[:, o:].conj().T @ mf.get_veff(mf.mol, Y + Y.conj().T) @ C[:, :o]
+        gvo = -Gvo - C[:, o:].conj().T @ veff(Y + Y.conj().T) @ C[:, :o]
         out = np.array(dm1, dtype=np.complex128)
         out[np.ix_(act, frozen)] += y
         out[np.ix_(frozen, act)] += y.conj().T
-    conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose)
+    conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose, veff=veff)
     if not conv:
         logger.warn(mycc, 'Z-vector equations not converged')
     return relaxed_rdm1(out, z, o), dm1, z

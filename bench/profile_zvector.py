@@ -92,9 +92,17 @@ def main():
         t0 = time.perf_counter()
         R(np.asarray(-0.5 * G / eai))
         t_fock = time.perf_counter() - t0
-        print('one Fock build of the response (the SCF object): %.1f s' % t_fock)
         t0 = time.perf_counter()
-        conv, z = zvector.solve(mf, C, mo_e, nocc, -0.5 * G, tol=1e-8, verbose=4)
+        veff = zvector.scf_veff(mf, mycc.max_memory)
+        t_setup = time.perf_counter() - t0
+        R, eai = zvector.response(mf, C, mo_e, nocc, veff)
+        t0 = time.perf_counter()
+        R(np.asarray(-0.5 * G / eai))
+        print('one Fock build of the response: %.2f s with the SCF object, %.2f s with '
+              'zvector.scf_veff (made and checked in %.2f s)'
+              % (t_fock, time.perf_counter() - t0, t_setup))
+        t0 = time.perf_counter()
+        conv, z = zvector.solve(mf, C, mo_e, nocc, -0.5 * G, tol=1e-8, verbose=4, veff=veff)
         print('Z-vector equations: %.1f s, converged %s, largest element %.3e'
               % (time.perf_counter() - t0, conv, abs(z).max()))
     print('peak RSS %.2f GB' % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6))

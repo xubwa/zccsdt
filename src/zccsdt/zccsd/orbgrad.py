@@ -68,7 +68,7 @@ Timers (zccsdt.timing): 'og.pairs', 'og.ring' (the two products), 'og.ladder',
 import numpy as np
 from pyscf.lib import logger
 
-from zccsdt import blas, scratch
+from zccsdt import blas, memory, scratch
 from zccsdt.timing import timer
 from zccsdt.zccsd import amps
 from zccsdt.zccsd import kernels as K
@@ -91,20 +91,43 @@ def _ovvv_x(Om, X, out):
     return out
 
 
-def fock_matrices(mol, C, densities):
+class Coulomb:
+    '''J - K of the bare Coulomb operator for one-particle densities in the
+    (spin, AO) basis of the scalar AOs, complex and not necessarily
+    Hermitian: PySCF's GHF contraction of the spin blocks with the real
+    scalar integrals.  The integrals are kept in memory (8-fold symmetry:
+    nao^4 bytes) if they take no more than a quarter of what ``max_memory``
+    leaves; else every call computes them (AO direct).'''
+
+    def __init__(self, mol, max_memory=None):
+        self.mol = mol
+        budget = memory.budget(max_memory)
+        self.eri = None
+        if budget is None or 4 * mol.nao_nr() ** 4 <= budget:
+            with timer('og.eri'):
+                self.eri = mol.intor('int2e', aosym='s8')
+
+    def veff(self, dms):
+        '''J - K for the density D[(s mu), (s' nu)], or for a stack of them.'''
+        from pyscf.scf import ghf, hf
+
+        def jkbuild(mol, dm, hermi, with_j, with_k, omega=None):
+            if self.eri is not None:
+                return hf.dot_eri_dm(self.eri, dm, hermi, with_j, with_k)
+            return hf.get_jk(mol, dm, hermi, None, with_j, with_k, omega)
+
+        vj, vk = ghf.get_jk(self.mol, np.asarray(dms), hermi=0, jkbuild=jkbuild)
+        return vj - vk
+
+
+def fock_matrices(coulomb, C, densities):
     '''[C^+ (J - K)(D) C for D in densities]: the Coulomb and exchange
-    matrices of the bare Coulomb operator for one-particle densities given in
-    the basis of the spinors C[(spin, AO), p] as d[p, q], the coefficient of
-    f[p, q] (D[nu, mu] = sum C[nu, q] d[p, q] conj(C[mu, p])), AO direct on
-    the scalar integrals.  The densities need not be Hermitian.'''
-    from pyscf.scf import ghf, hf
-
-    def jkbuild(mol, dm, hermi, with_j, with_k, omega=None):
-        return hf.get_jk(mol, dm, hermi, None, with_j, with_k, omega)
-
-    dms = np.array([C @ d.T @ C.conj().T for d in densities])
-    vj, vk = ghf.get_jk(mol, dms, hermi=0, jkbuild=jkbuild)
-    return [C.conj().T @ (vj[k] - vk[k]) @ C for k in range(len(densities))]
+    matrices of the bare Coulomb operator (``coulomb``: a Coulomb) for
+    one-particle densities given in the basis of the spinors C[(spin, AO), p]
+    as d[p, q], the coefficient of f[p, q] (D[nu, mu] = sum C[nu, q] d[p, q]
+    conj(C[mu, p])).  The densities need not be Hermitian.'''
+    veff = coulomb.veff(np.array([C @ d.T @ C.conj().T for d in densities]))
+    return [C.conj().T @ veff[k] @ C for k in range(len(densities))]
 
 
 def own_bytes(nocc, nvir):
@@ -157,7 +180,8 @@ def slab_plan(mol, plan, nocc, nvir):
                              ', next to the product of lambda2 and t2 kept in memory')) from None
 
 
-def kernel(mycc, eris=None, t1=None, t2=None, l1=None, l2=None, verbose=None, parts=None):
+def kernel(mycc, eris=None, t1=None, t2=None, l1=None, l2=None, verbose=None, parts=None,
+           coulomb=None):
     '''Gnh[a, i] for the amplitudes and lambda of ``mycc`` (default: its t1,
     t2, l1, l2; t2 and lambda2 as [i,j,a,b] or packed [(i>j), (a>b)]), within
     its max_memory: the plan of the amplitude step for what is left next to
@@ -200,7 +224,7 @@ def kernel(mycc, eris=None, t1=None, t2=None, l1=None, l2=None, verbose=None, pa
             res.plan.w_mapped = True        # m in a scratch file leaves room for the slabs
             slab_plan(eris.mol, res.plan, o, v)
         log.info('Orbital gradient: %s', res.describe())
-        return gradient(mycc, eris, t1, t2p, l1, l2p, parts)
+        return gradient(mycc, eris, t1, t2p, l1, l2p, parts, coulomb)
     finally:
         res.close()
         if own_t:
@@ -210,11 +234,12 @@ def kernel(mycc, eris=None, t1=None, t2=None, l1=None, l2=None, verbose=None, pa
         log.timer('Orbital gradient', *cput0)
 
 
-def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
+def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None, coulomb=None):
     '''Gnh[a, i] (see the module) for the amplitudes t1[i,a], t2 packed
     [(i>j), (a>b)] and lambda in the same layouts; the integrals and the
     memory plan are those of eris.residual.  ``parts``: a dict that gets the
-    terms by block of integrals, as zvector.gradient_terms returns them.'''
+    terms by block of integrals, as zvector.gradient_terms returns them.
+    ``coulomb``: the Coulomb for the two Fock matrices (default: a new one).'''
     res = eris.residual
     o, v = res.nocc, res.nvir
     n1, npo, npv = o * v, K.npair(o), K.npair(v)
@@ -493,7 +518,9 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
         Df[:o, :o], Df[:o, o:], Df[o:, :o], Df[o:, o:] = Doo, Dov, l1.T, Dvv
         DN = np.zeros((n, n), dtype=np.complex128)
         DN[o:, o:] = N
-        Vf, VN = fock_matrices(eris.mol, C, (Df, DN))
+        if coulomb is None:
+            coulomb = Coulomb(eris.mol, mycc.max_memory)
+        Vf, VN = fock_matrices(coulomb, C, (Df, DN))
         fvo = res.fov.conj().T
         X['fock'] += (blas.gemm(fvo, Doo.T) + blas.gemm(res.fvv, Dov.T) - blas.gemm(Dov.T, res.foo)
                       - blas.gemm(Dvv.T, fvo) + Vf[o:, :o])
