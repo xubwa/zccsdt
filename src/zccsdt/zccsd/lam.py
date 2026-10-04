@@ -425,10 +425,12 @@ class Lambda:
 
 
 def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-8,
-           verbose=None):
+           verbose=None, sources=None):
     '''The iterations of pyscf.cc.ccsd_lambda.kernel on packed amplitudes:
     (converged, l1, l2) with lambda2[i,j,a,b] unpacked at the end.  The first
-    guess is conj(t); the DIIS vector is [lambda1, packed lambda2].'''
+    guess is conj(t); the DIIS vector is [lambda1, packed lambda2].
+    ``sources``: (s1[i,a], s2[i,j,a,b]) that are added to lambda1 and lambda2
+    after every step - the (T) terms of zccsd.lam_t.'''
     log = logger.new_logger(mycc, verbose)
     settings = (mycc.max_memory, mycc.diis_space, True if mycc.incore_complete else None,
                 getattr(mycc, 'three_m', None))
@@ -447,6 +449,9 @@ def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-
     l1 = t1.conj() if l1 is None else np.ascontiguousarray(l1, dtype=np.complex128)
     l2p = (K.copy(t2p, conj=True) if l2 is None
            else K.pack_t2(np.ascontiguousarray(l2, dtype=np.complex128)))
+    if sources is not None:
+        s1 = np.ascontiguousarray(sources[0], dtype=np.complex128)
+        s2p = K.pack_t2(np.ascontiguousarray(sources[1], dtype=np.complex128))
     adiis = None
     if mycc.diis:
         adiis = DIIS(space=mycc.diis_space, filename=mycc.diis_file, incore=res.plan.diis_incore)
@@ -454,6 +459,9 @@ def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-
     try:
         for istep in range(max_cycle):
             l1new, l2pnew = lam.update_packed(l1, l2p, mycc.level_shift)
+            if sources is not None:
+                l1new += s1
+                l2pnew += s2p
             with timer('lambda.diis'):
                 norm = np.sqrt(K.diff_norm2(l1new, l1) + K.diff_norm2(l2pnew, l2p))
                 l1, l2p = l1new, l2pnew

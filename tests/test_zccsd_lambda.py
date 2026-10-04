@@ -237,3 +237,56 @@ def test_lambda_peak_within_plan(monkeypatch):
                     ref = new
                 assert abs(new[0] - ref[0]).max() < 1e-12 and abs(new[1] - ref[1]).max() < 1e-12
     assert blocked > 6
+
+
+@pytest.mark.parametrize('kr', [False, None])
+def test_t_density_is_energy_derivative(x2c_h2o, kr):
+    '''CCSD(T): lambda with the (T) terms (zccsd.lam_t, the expressions of
+    the user's socutils code on full arrays) and the (T) terms of the
+    one-particle density give the derivative of E(CCSD) + E(T) with respect
+    to a perturbation of the Fock matrix in its occupied-virtual blocks and
+    on its diagonal (the orbital energies of the denominators of (T)), at
+    fixed spinors; without the (T) terms they give that of E(CCSD).'''
+    from zccsdt.zccsd import lam_t
+
+    def run(eps=0.0, V=None):
+        mycc = DirectZCCSD(x2c_h2o, frozen=2)
+        mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt, mycc.kramers = 0, 1e-12, 1e-9, kr
+        mycc.max_cycle = 200
+        eris = mycc.ao2mo()
+        if V is not None:
+            eris.fock = eris.fock + eps * V
+            eris.mo_energy = eris.fock.diagonal().real.copy()
+        mycc.kernel(eris=eris)
+        assert mycc.converged
+        return mycc, mycc.e_corr, mycc.ccsd_t(eris=eris)
+
+    mycc, _, e_t = run()
+    eris = mycc.eris
+    o, n = eris.nocc, eris.fock.shape[0]
+    assert abs(lam_t.energy(mycc.t1, mycc.t2, eris) - e_t) < 1e-10
+    rng = np.random.default_rng(5)
+    V0 = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+    V0 = 0.1 * (V0 + V0.conj().T)
+    if eris.kramers:
+        for a in (slice(0, o), slice(o, n)):
+            for b in (slice(0, o), slice(o, n)):
+                V0[a, b] = 0.5 * (V0[a, b] + kramers.image(V0[a, b]))
+    V = np.diag(V0.diagonal())
+    V[:o, o:], V[o:, :o] = V0[:o, o:], V0[o:, :o]
+    eps = 1e-4
+    (_, ep, tp), (_, em, tm) = run(eps, V), run(-eps, V)
+    d_ccsd, d_t = (ep - em) / (2 * eps), (tp - tm) / (2 * eps)
+    assert abs(d_t) > 1e-5              # what the (T) terms have to account for
+    for with_t in (False, True):
+        l1, l2 = mycc.solve_lambda(with_t=with_t)
+        doo, dov, dvo, dvv = gccsd_rdm._gamma1_intermediates(mycc, mycc.t1, mycc.t2, l1, l2)
+        if with_t:
+            goo, gvv, gvo = lam_t.gamma1(mycc.t1, mycc.t2, eris)
+            doo[np.diag_indices(o)] -= goo
+            dvv[np.diag_indices(n - o)] += gvv
+            dvo += gvo
+        dm1 = gccsd_rdm._make_rdm1(mycc, (doo, dov, dvo, dvv), with_frozen=False)
+        expected = (np.einsum('pq,qp', V, dm1) - np.trace(V[:o, :o])).real
+        # the error of the central difference is 1e-8 here
+        assert abs(d_ccsd + with_t * d_t - expected) < 5e-8
