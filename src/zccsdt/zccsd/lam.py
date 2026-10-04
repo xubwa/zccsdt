@@ -465,8 +465,12 @@ def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-
     '''The iterations of pyscf.cc.ccsd_lambda.kernel on packed amplitudes:
     (converged, l1, l2) with lambda2[i,j,a,b] unpacked at the end.  The first
     guess is conj(t); the DIIS vector is [lambda1, packed lambda2].
-    ``sources``: (s1[i,a], s2[i,j,a,b]) that are added to lambda1 and lambda2
-    after every step - the (T) terms of zccsd.lam_t.'''
+    ``sources``: (s1[i,a], s2) that are added to lambda1 and lambda2 after
+    every step - the (T) terms, divided by the denominators; s2 as
+    lambda2[i,j,a,b] or packed [(i>j), (a>b)].  Or a function of t1 and the
+    packed t2 that returns them: it is called when t2 is packed and the
+    unpacked array released (zccsd.triples.kernel, which takes more memory
+    than a step here).'''
     log = logger.new_logger(mycc, verbose)
     settings = (mycc.max_memory, mycc.diis_space, True if mycc.incore_complete else None,
                 getattr(mycc, 'three_m', None))
@@ -483,6 +487,8 @@ def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-
     if own:
         t2 = mycc.t2 = None
     try:
+        if callable(sources):
+            sources = sources(t1, t2p)
         return _iterate(mycc, res, t1, t2p, l1, l2, max_cycle, tol, log, sources, settings)
     finally:
         if own:
@@ -507,7 +513,10 @@ def _iterate(mycc, res, t1, t2p, l1, l2, max_cycle, tol, log, sources, settings)
            else K.pack_t2(np.ascontiguousarray(l2, dtype=np.complex128)))
     if sources is not None:
         s1 = np.ascontiguousarray(sources[0], dtype=np.complex128)
-        s2p = K.pack_t2(np.ascontiguousarray(sources[1], dtype=np.complex128))
+        s2p = np.ascontiguousarray(sources[1], dtype=np.complex128)
+        if s2p.ndim == 4:
+            s2p = K.pack_t2(s2p)
+        sources = True              # the arrays themselves are held here only
     adiis = None
     if mycc.diis:
         adiis = DIIS(space=mycc.diis_space, filename=mycc.diis_file, incore=res.plan.diis_incore)

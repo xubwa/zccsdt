@@ -422,7 +422,7 @@ class DirectZCCSD(_zccsd.ZCCSD):
     ao_ladder = None
 
     _keys = {'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
-             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density'}
+             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density', 'e_t'}
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -468,28 +468,34 @@ class DirectZCCSD(_zccsd.ZCCSD):
         GCCSD, self.converged_lambda.  With zccsdt.zccsd.amps they are solved
         in zccsdt.zccsd.lam, on the integrals and within the memory plan of
         the CCSD; like t1 and t2 they refer to the spinors eris.mo_coeff.
-        ``with_t``: for CCSD(T), with the (T) terms of zccsdt.zccsd.lam_t -
-        from the batches of the (T) code, but one triple at a time with
-        numpy so far: small and medium molecules.'''
+        ``with_t``: for CCSD(T), with the (T) terms of the equations
+        (zccsdt.zccsd.lam_t) from the batches of the (T) code
+        (zccsdt.zccsd.triples.kernel with terms=True: about twice the time
+        of the (T) energy); self.e_t is set on the way.'''
         if not self._fixed_layouts():
             return _zccsd.ZCCSD.solve_lambda(self, t1, t2, l1, l2, eris)
         from zccsdt.zccsd import lam
         if eris is None:
             eris = self.eris if self.eris is not None else self.ao2mo(self.mo_coeff)
-        sources = None
-        if with_t:
-            # the (T) terms from the batches of the (T) code, one triple at a time
-            # with numpy so far; the (T) terms of the density are kept for make_rdm1
-            from zccsdt.zccsd import lam_t
-            _, (s1, s2, goo, gvv, dvo) = lam_t.in_batches(
-                self, eris, self.t1 if t1 is None else t1, self.t2 if t2 is None else t2)
-            eia = eris.mo_energy[:eris.nocc, None] - eris.mo_energy[eris.nocc:]
-            s2 /= eia[:, None, :, None] + eia[None, :, None, :]
-            sources = (s1 / eia, s2)
+
+        def t_terms(t1, t2p):
+            # the (T) terms of lambda over their denominators; those of the
+            # density are kept for make_rdm1
+            from zccsdt.zccsd import kernels as K, triples
+            if getattr(eris, 'residual', None) is not None:
+                eris.residual.close()               # as in ccsd_t: W(mbej) and the AO
+            if getattr(eris, 'aoladder', None) is not None:
+                eris.aoladder.close()               # operators are made again for the steps
+            self.e_t, (s1, s2p, goo, gvv, dvo) = triples.kernel(
+                self, eris, t1, t2p, self.verbose, three_m=self.three_m, terms=True)
+            eo, ev = (np.ascontiguousarray(x, dtype=np.float64)
+                      for x in (eris.mo_energy[:eris.nocc], eris.mo_energy[eris.nocc:]))
             self._t_density = (goo, gvv, dvo)
+            return s1 / (eo[:, None] - ev), K.div_packed(s2p, eo, ev)
+
         self.converged_lambda, self.l1, self.l2 = lam.kernel(
             self, eris, t1, t2, l1, l2, max_cycle=self.max_cycle, tol=self.conv_tol_normt,
-            verbose=self.verbose, sources=sources)
+            verbose=self.verbose, sources=t_terms if with_t else None)
         return self.l1, self.l2
 
     def make_rdm1(self, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False,

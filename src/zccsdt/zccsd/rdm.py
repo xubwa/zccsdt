@@ -9,7 +9,8 @@ Kramers pairs if the CCSD uses them) or in the 2c AO basis.  It is the
 response density at fixed spinors; ``relaxed`` adds the
 orbital relaxation of zccsd.zvector (CCSD without frozen spinors, small
 molecules so far).  ``with_t``: lambda with the (T) terms and the (T) terms of
-the density (zccsd.lam_t: full o^3 v^3 arrays, small molecules so far).
+the density (zccsd.lam_t has the equations; zccsd.triples.kernel does them
+in the batches of the (T) energy).
 
 The dipole operator is that of the 2c AO basis with the picture-change
 transformation of the X2C Hamiltonian (dipole_integrals; the socutils code
@@ -88,8 +89,8 @@ def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False
         if with_t:
             terms = getattr(mycc, '_t_density', None)       # of solve_lambda(with_t=True)
             if terms is None:
-                from zccsdt.zccsd import lam_t
-                terms = lam_t.in_batches(mycc, eris, t1, t2)[1][2:]
+                from zccsdt.zccsd import triples
+                terms = triples.kernel(mycc, eris, t1, t2, terms=True)[1][2:]
             goo, gvv, gvo = terms
             doo[np.diag_indices(o)] -= goo
             dvv[np.diag_indices(dvv.shape[0])] += gvv
