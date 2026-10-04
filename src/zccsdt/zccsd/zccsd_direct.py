@@ -422,7 +422,7 @@ class DirectZCCSD(_zccsd.ZCCSD):
     ao_ladder = None
 
     _keys = {'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
-             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore'}
+             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density'}
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -469,7 +469,8 @@ class DirectZCCSD(_zccsd.ZCCSD):
         in zccsdt.zccsd.lam, on the integrals and within the memory plan of
         the CCSD; like t1 and t2 they refer to the spinors eris.mo_coeff.
         ``with_t``: for CCSD(T), with the (T) terms of zccsdt.zccsd.lam_t -
-        for now from full o^3 v^3 arrays, i.e. for small molecules.'''
+        from the batches of the (T) code, but one triple at a time with
+        numpy so far: small and medium molecules.'''
         if not self._fixed_layouts():
             return _zccsd.ZCCSD.solve_lambda(self, t1, t2, l1, l2, eris)
         from zccsdt.zccsd import lam
@@ -477,9 +478,15 @@ class DirectZCCSD(_zccsd.ZCCSD):
             eris = self.eris if self.eris is not None else self.ao2mo(self.mo_coeff)
         sources = None
         if with_t:
+            # the (T) terms from the batches of the (T) code, one triple at a time
+            # with numpy so far; the (T) terms of the density are kept for make_rdm1
             from zccsdt.zccsd import lam_t
-            sources = lam_t.sources(self.t1 if t1 is None else t1, self.t2 if t2 is None else t2,
-                                    eris)
+            _, (s1, s2, goo, gvv, dvo) = lam_t.in_batches(
+                self, eris, self.t1 if t1 is None else t1, self.t2 if t2 is None else t2)
+            eia = eris.mo_energy[:eris.nocc, None] - eris.mo_energy[eris.nocc:]
+            s2 /= eia[:, None, :, None] + eia[None, :, None, :]
+            sources = (s1 / eia, s2)
+            self._t_density = (goo, gvv, dvo)
         self.converged_lambda, self.l1, self.l2 = lam.kernel(
             self, eris, t1, t2, l1, l2, max_cycle=self.max_cycle, tol=self.conv_tol_normt,
             verbose=self.verbose, sources=sources)

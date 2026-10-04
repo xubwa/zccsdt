@@ -86,8 +86,11 @@ def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False
     else:
         doo, dov, dvo, dvv = gamma1(t1, t2, l1, l2)
         if with_t:
-            from zccsdt.zccsd import lam_t
-            goo, gvv, gvo = lam_t.gamma1(t1, t2, eris)
+            terms = getattr(mycc, '_t_density', None)       # of solve_lambda(with_t=True)
+            if terms is None:
+                from zccsdt.zccsd import lam_t
+                terms = lam_t.in_batches(mycc, eris, t1, t2)[1][2:]
+            goo, gvv, gvo = terms
             doo[np.diag_indices(o)] -= goo
             dvv[np.diag_indices(dvv.shape[0])] += gvv
             dvo += gvo
