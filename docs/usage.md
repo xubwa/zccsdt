@@ -164,8 +164,8 @@ PySCF's settings apply (`conv_tol`, `conv_tol_normt`, `max_cycle`,
   (from the `Mole` object). The integrals, the CCSD step and (T) are sliced
   to stay within it; what does not fit goes to scratch files (`ZCCSDT_TMPDIR`,
   else PySCF's TMPDIR). A calculation that has the memory should be given
-  it: benzene/cc-pVDZ takes 10 s per iteration with 24000 MB and 14 s with
-  4000 MB.
+  it: benzene/cc-pVDZ takes 9.4 s per iteration with 24000 MB and 13.0 s
+  with 4000 MB on the same node.
 - `kramers` (default `None`): for a time-reversal symmetric reference (a
   closed shell without a magnetic field) the spinors are rotated within
   their degenerate levels into Kramers pairs and the symmetry of the

@@ -1634,8 +1634,33 @@ before last in the same job:
   the rule for the parts, a GEMM with beta = 1 into a zeroed array: 0.380
   and 8.390 s per iteration against 0.365 and 8.320 s before, 0.05 s of
   the difference for benzene in the ladder. One part is now multiplied as
-  it was before, one GEMM per square matrix into a new array (not measured
-  again yet).
+  it was before, one GEMM per square matrix into a new array, and the
+  default is as fast as the code before (the next table).
+
+The code as it is now against the code before, the same way (job 31582707,
+c436, a node on which benzene/cc-pVDZ takes 9.4 s per iteration, not 8.3 s),
+with the limits of the memory:
+
+| seconds | H2O/cc-pVQZ | C6H6/cc-pVDZ | C6H6/cc-pVDZ, 8000 MB | C6H6/cc-pVDZ, 4000 MB |
+|---|---|---|---|---|
+| before: iteration, of which the ladder | 0.420, 0.085 | 9.368, 1.061 | 11.354, 1.059 | 14.064, 1.091 |
+| now: iteration, of which the ladder | 0.426, 0.087 | 9.374, 1.063 | 11.070, 1.061 | 12.955, 1.105 |
+| before: integral step | 5.6 | 11.7 | 13.4 | 17.0 |
+| now: integral step | 5.1 | 10.2 | 11.8 | 14.4 |
+| before: slabs and blocks of the step (of 42) | | one, one | 9, 13 | 2, 5 |
+| now: slabs and blocks of the step | | one, one | 10, 15 | 2, 8 |
+| peak memory of the iterations (GB), before / now | 2.39 / 2.41 | 11.11 / 11.50 | 7.34 / 7.47 | 3.52 / 3.51 |
+
+In all of these the operators fit (0.68 GB, one part) and the ladder is the
+same. Under a limit the iteration is 2.5% and 8% shorter. The step has
+0.19 GB more to plan with, hence larger slabs and blocks: the construction
+of the operators before, numpy gathers in threads, left about 0.2 GB of
+anonymous memory that was no array any more when the budget made its
+batches small (219 MB more than the operators with 4000 MB, none with
+24000 MB, not given back by `malloc_trim`; measured on the operators alone,
+on the login node), and `max_memory` counts what the process holds. The new
+construction leaves nothing. With ZGEMM (4000 MB) the copy of the column
+blocks of W(mbej) is gone as well (below); the two were not measured apart.
 
 **The plan of the step, checked against the allocations.** The three
 benzene/cc-pVTZ runs above peaked at 26.8 GB of anonymous memory under
@@ -1643,15 +1668,17 @@ benzene/cc-pVTZ runs above peaked at 26.8 GB of anonymous memory under
 had two arrays that were not in its plan, a copy of the two column blocks
 of W(mbej) for the ZGEMM of pass 2 (a range of j and their partners) and
 the rows of tau and of the result that the ladder gathers for one pair of
-each two partners. The copy is gone
-(one GEMM per column block, into the two halves of the columns of the
-result: `blas.gemm` writes into a block of columns of a row-major array),
-the arrays of the ladder are counted, and
+each two partners. The copy is gone (one GEMM per column block, into the
+two halves of the columns of the result: `blas.gemm` writes into a block of
+columns of a row-major array), the arrays of the ladder are counted, and
 `test_amps_peak_within_plan` holds the peak of the allocations of a step
 (tracemalloc) against the working set of the plan for a budget that forces
 slabs and blocks; it fails for the code before (59.5 MB against 54.2 MB
-planned). At the size of benzene/cc-pVTZ the corrected plan has not been
-run yet.
+planned). With the corrected plan benzene/cc-pVTZ peaks at 23.7 GB under
+`max_memory` 24000 MB (job 31582707, c436: 196.2 s per iteration on that
+node, the direct ladder 26.5 s of it in one pass over the integrals; the
+ratio to c282 is 1.06, that of the benzene/cc-pVDZ iterations of the two
+jobs 1.12).
 
 ### CCSD(T) against CFOUR: where it stands
 
