@@ -35,9 +35,29 @@ its parts instead:
 Per iteration: two o^3 v^3 products, the AO ladder, one pass over <ma||ef>
 (one GEMM with lambda2 t1 for a slab) and one over W.
 
+Kramers pairs.  With t and lambda symmetric under time reversal, the terms
+that are sums over the first index of <ma||ef> run over the unbarred m and
+are completed by their image (kernels.ksym_packed for the packed array, in
+place: these terms therefore go first into the new array), of the ring
+term the rows with unbarred i are computed, in blocks of unbarred j and
+their partners, and the ladder is done for one pair of each two partners.
+
+What the lambda1 equation contracts with t1 - the hh ladder, the tau term,
+the pp ladder - is taken from the new lambda2 array once these are in it.
+The array then holds four terms more (the two of the pass over <ma||ef>,
+two one-particle terms that ride on the matrices of the hh ladder and of
+the tau term): their contractions with t1 are taken back term by term.
+
+Memory.  The iterations are planned by amps.plan_step for the budget less
+reserve_bytes, the arrays of this module that the plan does not know;
+working_set is what a step takes (tests/test_zccsd_lambda.py holds the
+allocations against it).  kernel() releases the unpacked t2 of the CCSD
+object while it runs.
+
 Timers (zccsdt.timing): 'lambda.imds' (the intermediates, once); per
-iteration 'lambda.pairs', 'lambda.ladder', 'lambda.ovvv', 'lambda.ring',
-'lambda.t2', 'lambda.t1', 'lambda.diis'.
+iteration 'lambda.pairs', 'lambda.ladder', 'lambda.ovvv' (with 'ovvv.gemm',
+'ovvv.rows', 'ovvv.x'), 'lambda.ring', 'lambda.t2', 'lambda.t1',
+'lambda.kramers', and 'ring.gemm', 'ring.layout', 'ring.pack' inside them.
 '''
 
 from types import SimpleNamespace
@@ -57,11 +77,11 @@ UNPACK_BYTES = 64 << 20     # rows of <ma||ef> unpacked at a time, at most
 def reserve_bytes(nocc, nvir):
     '''Bytes of the arrays of the Lambda equations that the memory plan of
     the amplitude step (amps.plan_step) does not know: Hq and lambda2 t1
-    with three occupied indices (while Hq is made: Hq and an array twice
-    its size), four matrices on the pairs, and what the
-    terms on the rows of <ma||ef> take for one occupied index (three arrays
-    of o v^2 elements and the rows that are unpacked, two of o v(v-1)/2),
-    and the third array of the product L T for one occupied index (_q_block).'''
+    with three occupied indices (while Hq is made: Hq and an array of twice
+    its size), four matrices on the pairs, what the terms on the rows of
+    <ma||ef> take for one occupied index (three arrays of o v^2 elements,
+    the rows that are unpacked, two arrays of o v(v-1)/2 elements), and
+    the third array of the product L T for one occupied index (_q_block).'''
     o, v = int(nocc), int(nvir)
     npo, npv = K.npair(o), K.npair(v)
     kept = 16 * (3 * o * v * npo + 4 * npo * npo + 2 * o ** 4)
