@@ -57,13 +57,14 @@ UNPACK_BYTES = 64 << 20     # rows of <ma||ef> unpacked at a time, at most
 def reserve_bytes(nocc, nvir):
     '''Bytes of the arrays of the Lambda equations that the memory plan of
     the amplitude step (amps.plan_step) does not know: Hq and lambda2 t1
-    with three occupied indices, four matrices on the pairs, and what the
+    with three occupied indices (while Hq is made: Hq and an array twice
+    its size), four matrices on the pairs, and what the
     terms on the rows of <ma||ef> take for one occupied index (three arrays
     of o v^2 elements and the rows that are unpacked, two of o v(v-1)/2),
     and the third array of the product L T for one occupied index (_q_block).'''
     o, v = int(nocc), int(nvir)
     npo, npv = K.npair(o), K.npair(v)
-    kept = 16 * (2 * o * v * npo + 4 * npo * npo + 2 * o ** 4)
+    kept = 16 * (3 * o * v * npo + 4 * npo * npo + 2 * o ** 4)
     rows = 64 * o * v * v + 32 * o * npv
     return kept + rows + 16 * o * v * v
 
@@ -141,15 +142,20 @@ class Lambda:
             #   - P(jk) sum_lb <li||jb> t2[k,l,c,b]
             Hq = s.Nq
             KW = s.KW.reshape(o, o, o, v)                                   # [i, j, k, c]
-            Hq += (KW[:, io, jo] - KW[:, jo, io]).transpose(0, 2, 1)
+            for i in range(o):
+                Hq[i] += (KW[i][io, jo] - KW[i][jo, io]).T
             del KW, s.KW
-            A = np.empty((o * o, n1), dtype=np.complex128)                  # [(j i), (k c)]
-            Or = np.ascontiguousarray(res.ooov_r.reshape(n1, o * o).T)      # [(j i), (l b)]
-            for k0, k1 in res.plan.jblocks:
-                blas.gemm(Or, K.ring_cols(t2p, o, v, k0, k1), C=A[:, k0 * v:k1 * v])
-            A = A.reshape(o, o, o, v)                                       # [j, i, k, c]
-            Hq += (A[jo, :, io] - A[io, :, jo]).transpose(1, 2, 0)
-            del A, Or
+            # A[(p i), (q c)] = sum_lb <li||pb> t2[q,l,c,b] for a block of q: - A into
+            # the pairs (p > q), + A into the pairs (q > p)
+            Or = res.ooov_r.reshape(n1, o * o).T                            # [(p i), (l b)]
+            pairs = np.arange(o)
+            for q0, q1 in res.plan.jblocks:
+                A = blas.gemm(Or, K.ring_cols(t2p, o, v, q0, q1)).reshape(o, o, q1 - q0, v)
+                for q in range(q0, q1):
+                    hi, lo = pairs[q + 1:], pairs[:q]
+                    Hq[:, :, hi * (hi - 1) // 2 + q] -= A[hi, :, q - q0].transpose(1, 2, 0)
+                    Hq[:, :, q * (q - 1) // 2 + lo] += A[lo, :, q - q0].transpose(1, 2, 0)
+                del A
             self.Hq = Hq
         # the pairs that contain an occupied spinor: packed rows and signs, [i, k]
         self._prow = np.array([r for r, _ in res.pair_rows])
@@ -460,7 +466,12 @@ def kernel(mycc, eris, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-
 def _iterate(mycc, res, t1, t2p, l1, l2, max_cycle, tol, log, sources, settings):
     '''The iterations of kernel() for the packed t2.'''
     o, v = res.nocc, res.nvir
-    res.replan(*settings, reserve=reserve_bytes(o, v))
+    try:
+        res.replan(*settings, reserve=reserve_bytes(o, v))
+    except MemoryError as err:
+        raise MemoryError('%s (the Lambda equations: the plan of the amplitude step, with %s '
+                          'set aside for their own arrays)'
+                          % (err, amps._size(reserve_bytes(o, v)))) from None
     log.info('Lambda equations: %s', res.describe())
     cput1 = cput0 = (logger.process_clock(), logger.perf_counter())
     lam = Lambda(res, t1, t2p)

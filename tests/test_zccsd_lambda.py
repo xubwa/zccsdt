@@ -219,7 +219,13 @@ def test_lambda_peak_within_plan(monkeypatch):
                 plan = amps.plan_step(o, v, nao, int(factor * need), (), diis_incore=False,
                                       three_m=m3, kramers=eris.kramers)
                 res = amps.Residual(eris, plan=plan)
+                work = lam.working_set(plan, o, v)
+                tracemalloc.start()
+                base = tracemalloc.get_traced_memory()[0]
                 L = lam.Lambda(res, t1, t2p)        # W, Hq and the rest that is made once
+                made = tracemalloc.get_traced_memory()[1] - base
+                tracemalloc.stop()
+                assert made + 16 * npo * npv <= work, (kr, factor, m3, made, work)
                 L.update_packed(l1, l2p)
                 tracemalloc.start()
                 base = tracemalloc.get_traced_memory()[0]
@@ -229,7 +235,6 @@ def test_lambda_peak_within_plan(monkeypatch):
                 L.close()
                 # outside the step: W if it is in memory, t2 and lambda2
                 held = (0 if plan.w_mapped else 16 * (o * v) ** 2) + 32 * npo * npv
-                work = lam.working_set(plan, o, v)
                 assert peak + held <= work, (kr, factor, m3, peak, held, work)
                 assert work <= max(plan.budget, plan.work) + reserve
                 blocked += len(plan.jblocks) > 1
