@@ -7,7 +7,7 @@ import pytest
 from pyscf import gto, x2c
 from pyscf.cc import gccsd_rdm
 
-from zccsdt.zccsd import DirectZCCSD, zvector
+from zccsdt.zccsd import DirectZCCSD, orbgrad, zvector
 
 
 @pytest.fixture(scope='module')
@@ -65,10 +65,21 @@ def test_relaxed_density_is_energy_derivative(mol, kr):
     terms = zvector.gradient_terms(mycc.t1, mycc.t2, l1, l2, fock, g, o)
     assert abs(G[o:, :o]).max() > 1e-4 and abs(0.5 * sum(terms.values()) - G[o:, :o]).max() < 1e-7
     assert min(abs(x).max() for x in terms.values()) > 1e-4
+    # the same terms in the layouts of the amplitude step (zccsd.orbgrad)
+    parts = {}
+    Gnh = orbgrad.kernel(mycc, l1=l1, l2=l2, parts=parts)
+    for k, x in terms.items():
+        assert abs(parts[k] - x).max() < 1e-11, k
+    assert abs(Gnh - sum(terms.values())).max() < 1e-11
     assert abs(G[o:, :o]).max() > 1e-4
 
     relaxed, unrelaxed, z = zvector.relaxed_rdm1_dense(mycc, mf, l1, l2, tol=1e-10)
     assert abs(unrelaxed - dm1).max() < 1e-12 and abs(relaxed - relaxed.conj().T).max() < 1e-12
+    # with the orbital gradient of zccsd.orbgrad: the two differ as lambda is converged
+    rel2, unrel2, z2 = zvector.kernel(mycc, l1=l1, l2=l2, mf=mf, tol=1e-10)
+    print('relaxed density, orbgrad against the full arrays: %.2e (z: %.2e)'
+          % (abs(rel2 - relaxed).max(), abs(z2 - z).max()))
+    assert abs(unrel2 - dm1).max() < 1e-12 and abs(rel2 - relaxed).max() < 1e-7
     R, eai = zvector.response(mf, C, eris.mo_energy, o)
     assert abs(R(z) + G[o:, :o]).max() < 1e-9
     V = mol.intor('int1e_r_spinor')[2]
@@ -81,7 +92,7 @@ def test_relaxed_density_is_energy_derivative(mol, kr):
     # the same through DirectZCCSD.make_rdm1 and dip_moment: the field r_z times
     # eps lowers the energy by eps times the electronic part of the dipole
     assert abs(mycc.make_rdm1(l1=l1, l2=l2) - dm1).max() < 1e-12
-    assert abs(mycc.make_rdm1(l1=l1, l2=l2, relaxed=True) - relaxed).max() < 1e-9
+    assert abs(mycc.make_rdm1(l1=l1, l2=l2, relaxed=True) - rel2).max() < 1e-9
     nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())[2]
     dip = mycc.dip_moment(l1=l1, l2=l2, relaxed=True, unit='AU', picture_change=False)
     assert abs(dip[2] - (nuclear - derivative)) < 2e-7 and abs(dip[:2]).max() < 1e-7
@@ -156,3 +167,64 @@ def test_density_with_frozen_spinors_in_the_ao_basis(mol):
     frozen = mf.mo_coeff[:, :2]
     expect = np.einsum('pq,qp', C.conj().T @ V @ C, dm1) + np.trace(frozen.conj().T @ V @ frozen)
     assert abs(np.einsum('pq,qp', V, dm_ao) - expect) < 1e-10
+
+
+def test_orbital_gradient_within_plan(monkeypatch):
+    '''orbgrad.gradient under memory plans of several sizes - m in memory
+    and in a scratch file, the products and the pairs in one block and in
+    several - with and without Kramers pairs, for random t and lambda: the
+    same gradient, and what it allocates (tracemalloc follows numpy's
+    allocations) next to the packed t2 and lambda2 that it is given stays
+    within the budget of the plan and orbgrad.reserve_bytes, which is how
+    orbgrad.kernel plans it.'''
+    import tracemalloc
+    from zccsdt import memory
+    from zccsdt.zccsd import amps, kramers
+    from zccsdt.zccsd import kernels as K
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    monkeypatch.setattr(orbgrad, 'UNPACK_BYTES', 1 << 20)   # of the size of the arrays here
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
+    mf = x2c.UHF(mol).run(conv_tol=1e-10)
+    rng = np.random.default_rng(1)
+    blocked = mapped = 0
+    for kr in (None, False):
+        cc = DirectZCCSD(mf)
+        cc.verbose, cc.kramers, cc.max_memory = 0, kr, 100000
+        eris = cc.ao2mo()
+        o, v, nao = eris.nocc, eris.fock.shape[0] - eris.nocc, mol.nao_nr()
+        npo, npv = K.npair(o), K.npair(v)
+
+        def packed():
+            x1 = 0.05 * (rng.standard_normal((o, v)) + 1j * rng.standard_normal((o, v)))
+            x2 = 0.02 * (rng.standard_normal((npo, npv)) + 1j * rng.standard_normal((npo, npv)))
+            if eris.kramers:
+                x1 = 0.5 * (x1 + kramers.image(x1))
+                x2 = np.ascontiguousarray(0.5 * (x2 + kramers.image(x2, pairs=(0, 1))))
+            return x1, x2
+
+        (t1, t2p), (l1, l2p) = packed(), packed()
+        need = amps.plan_step(o, v, nao, None, (), kramers=eris.kramers).need
+        ref = None
+        for factor in (1.0, 1.3, 2.0, 4.0, 40.0):
+            plan = amps.plan_step(o, v, nao, int(factor * need), (), diis_incore=False,
+                                  three_m=False, kramers=eris.kramers)
+            eris.residual = amps.Residual(eris, plan=plan)
+            tracemalloc.start()
+            base = tracemalloc.get_traced_memory()[0]
+            G = orbgrad.gradient(cc, eris, t1, t2p, l1, l2p)
+            peak = tracemalloc.get_traced_memory()[1] - base
+            tracemalloc.stop()
+            # the integrals <j~ e||ab> are made in slabs as large as the budget
+            # allows: beyond the working set of the plan where there is room
+            work = max(orbgrad.working_set(plan, o, v), plan.budget + orbgrad.reserve_bytes(o, v))
+            print('Kramers %-5s x%-4.1f budget %7.1f MB  working set %7.1f MB  peak %7.1f MB  '
+                  'W mapped %-5s blocks %d %d' % (bool(eris.kramers), factor, plan.budget / 1e6,
+                                                 work / 1e6, peak / 1e6, plan.w_mapped,
+                                                 len(plan.jblocks), len(plan.pblocks)))
+            assert peak <= work, (kr, factor, peak, work)
+            blocked += len(plan.jblocks) > 1
+            mapped += plan.w_mapped
+            if ref is None:
+                ref = G
+            assert abs(G - ref).max() < 1e-11 and abs(ref).max() > 1e-3
+    assert blocked > 3 and mapped > 1

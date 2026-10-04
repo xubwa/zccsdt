@@ -55,11 +55,11 @@ What is here: the orbital gradient from the full two-particle density and
 all MO integrals (orbital_gradient: a reference for small molecules) and
 its de-excitation half term by term (gradient_terms: the same), the
 response equation with AO-direct Fock builds (solve: for any size), the
-relaxed density, frozen occupied spinors (relaxed_rdm1_dense).  Not here
-yet: the orbital gradient from intermediates in the layouts of zccsd.amps
-(no full two-particle density, the vvvv part through the AO ladder), and
-the (T) terms, for which the occupied-occupied and virtual-virtual
-rotations do not drop out.
+relaxed density (kernel: with the orbital gradient of zccsd.orbgrad, in the
+layouts of zccsd.amps and within max_memory; relaxed_rdm1_dense: from the
+full arrays, also with frozen occupied spinors).  Not here yet: frozen
+spinors without the full arrays, and the (T) terms, for which the
+occupied-occupied and virtual-virtual rotations do not drop out.
 '''
 
 import numpy as np
@@ -210,6 +210,31 @@ def full_space(mycc):
     if (~active & ~occupied).any() or not occupied[:occupied.sum()].all():
         raise NotImplementedError('Z-vector equations with frozen virtual spinors')
     return C, mo_e, int(occupied.sum()), np.flatnonzero(~active & occupied)
+
+
+def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-9,
+           verbose=None):
+    '''(dm1 relaxed, dm1 unrelaxed, z[a,i]) for the CCSD of ``mycc`` in the
+    basis of all spinors (full_space): the density of t and lambda from the
+    packed amplitudes (zccsd.rdm), the orbital gradient of zccsd.orbgrad and
+    the Z-vector equations (solve).  lambda is solved for if it is not given.
+    With frozen spinors: relaxed_rdm1_dense, small molecules only.'''
+    from zccsdt.zccsd import orbgrad, rdm
+    mf = mycc._scf if mf is None else mf
+    if l1 is None or l2 is None:
+        l1, l2 = mycc.solve_lambda(t1, t2, eris=eris)
+    C, mo_e, o, frozen = full_space(mycc)
+    if frozen.size:
+        if not (t1 is None or t1 is mycc.t1) or not (t2 is None or t2 is mycc.t2):
+            raise NotImplementedError('the relaxed density with frozen spinors for amplitudes '
+                                      'other than those of the CCSD object')
+        return relaxed_rdm1_dense(mycc, mf, l1, l2, tol, verbose)
+    dm1 = rdm.make_rdm1(mycc, t1, t2, l1, l2, eris)
+    gvo = -0.5 * orbgrad.kernel(mycc, eris, t1, t2, l1, l2, verbose)
+    conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose)
+    if not conv:
+        logger.warn(mycc, 'Z-vector equations not converged')
+    return relaxed_rdm1(dm1, z, o), dm1, z
 
 
 def relaxed_rdm1_dense(mycc, mf=None, l1=None, l2=None, tol=1e-9, verbose=None):

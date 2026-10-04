@@ -7,7 +7,8 @@ density of t and lambda with the expressions of pyscf.cc.gccsd_rdm, D[p,q] =
 basis of the spinors that the amplitudes refer to (eris.mo_coeff: the
 Kramers pairs if the CCSD uses them) or in the 2c AO basis.  It is the
 response density at fixed spinors; ``relaxed`` adds the
-orbital relaxation of zccsd.zvector (CCSD without frozen spinors, small
+orbital relaxation of zccsd.zvector (CCSD: with the orbital gradient of
+zccsd.orbgrad for any size; with frozen spinors from full arrays, small
 molecules so far).  ``with_t``: lambda with the (T) terms and the (T) terms of
 the density (zccsd.lam_t has the equations; zccsd.triples.kernel does them
 in the batches of the (T) energy).
@@ -79,7 +80,7 @@ def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False
         if with_t:
             raise NotImplementedError('orbital relaxation with the (T) terms')
         from zccsdt.zccsd import zvector
-        dm1 = zvector.relaxed_rdm1_dense(mycc, l1=l1, l2=l2)[0]     # all spinors
+        dm1 = zvector.kernel(mycc, t1, t2, l1, l2, eris)[0]         # all spinors
         if not ao_repr:
             return dm1
         C = zvector.full_space(mycc)[0]
