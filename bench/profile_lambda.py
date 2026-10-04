@@ -10,7 +10,10 @@ when the norm of the change of the amplitudes is below ZC_CONV (default
 1e-7; CFOUR's CC_CONV=7 asks the largest change to be below 1e-7).
 environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              DirectZCCSD.kramers; ZC_THREE_M: 0 or 1: DirectZCCSD.three_m;
-             ZC_CONV; ZC_AO_LADDER: DirectZCCSD.ao_ladder.
+             ZC_CONV; ZC_AO_LADDER: DirectZCCSD.ao_ladder;
+             ZC_CCSD_CYCLES, ZC_LAMBDA_CYCLES: at most so many cycles (for
+             the time and the memory of an iteration of a large molecule:
+             Lambda then runs on amplitudes that are not converged).
 '''
 import os
 import resource
@@ -37,7 +40,7 @@ def main():
                 max_memory=maxmem)
     mf = x2c.UHF(mol).run(conv_tol=1e-10)
     mycc = DirectZCCSD(mf)
-    mycc.verbose, mycc.max_cycle = 0, 100
+    mycc.verbose, mycc.max_cycle = 0, int(os.environ.get('ZC_CCSD_CYCLES', 100))
     mycc.conv_tol, mycc.conv_tol_normt = 0.01 * conv, conv
     if 'ZC_KRAMERS' in os.environ:
         mycc.kramers = bool(int(os.environ['ZC_KRAMERS']))
@@ -56,11 +59,15 @@ def main():
     t2 = time.perf_counter()
     res = eris.residual
     o, v = res.nocc, res.nvir
+    # the plan of the Lambda iterations (lam.kernel): the budget less what is theirs
+    res.replan(mycc.max_memory, mycc.diis_space, None, mycc.three_m,
+               reserve=lam.reserve_bytes(o, v))
     print('%s/%s DirectZCCSD  nocc=%d nvir=%d  Kramers pairs: %s  max_memory %.0f MB  threads %s'
           % (mol_name, basis, o, v, bool(eris.kramers), maxmem,
              os.environ.get('OMP_NUM_THREADS', '?')))
     print('matrix products: ' + blas.backend()[1])
-    print('plan: ' + res.describe())
+    print('plan of the Lambda iterations: %s; Lambda working set %.2f GB'
+          % (res.describe(), lam.working_set(res.plan, o, v) / 1e9))
     print('integrals %.1f s; CCSD %.1f s: %d cycles (%.2f s each), converged %s, E_corr %.10f'
           % (t1 - t0, t2 - t1, len(cycles), (t2 - t1) / max(len(cycles), 1), mycc.converged,
              mycc.e_corr))
@@ -77,7 +84,7 @@ def main():
     l1, l2p = t1a.conj(), K.copy(t2p, conj=True)
     adiis = DIIS(space=mycc.diis_space, filename=mycc.diis_file, incore=res.plan.diis_incore)
     times, snaps, norm = [], [], 1.0
-    for it in range(100):
+    for it in range(int(os.environ.get('ZC_LAMBDA_CYCLES', 100))):
         snaps.append(timing.snapshot())
         ta = time.perf_counter()
         with timing.timer('update_lambda'):
