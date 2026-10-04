@@ -1988,6 +1988,16 @@ pair and one-particle parts 1.73 s instead of 2.45 s), and 18.61 s next to
 ladder 3.04 s in blocks of 109 pairs; peak 2.86 GB). For benzene/cc-pVTZ
 the iteration has not been timed again.
 
+The memory that is set aside for the arrays of Lambda (`lam.reserve_bytes`)
+counted them on top of the plan of a step, which already holds the
+intermediates of a step that are not there during a Lambda iteration
+(`amps.step_arrays`): only what the arrays of Lambda have more is set aside
+now (benzene: 139 MB instead of 501 MB; the tracemalloc test holds with it,
+by 13 MB and more for H2O/cc-pVTZ). With 4000 MB the blocks are larger for
+it: 13.24 s per iteration next to a CCSD iteration of 11.71 s, with a peak
+of 3.04 GB; with 24000 MB 9.64 s next to 8.39 s (job 31606686, c398, four
+cycles each).
+
 **The (T) terms** (`zccsd/lam_t.py`, `zccsd/triples.py`,
 `solve_lambda(with_t=True)`). The earlier code of the user is on the branch
 `claude/ccsd-lambda-socutils` of socutils (8965b9f; `cc/lambda_zccsd.py`,
@@ -2152,28 +2162,35 @@ both; seconds:
 | for scale: a CCSD iteration of zccsdt | 0.37 | 8.42 |
 
 (CFOUR's two programs took 36.2 s and 183.6 s in a second job on the same
-node, 31604805. The one-particle density of t and lambda, which `make_rdm1`
-needs as well, is not in zccsdt's three numbers.) Where the 20.0 s of
+node, 31604805. The relaxed density as `make_rdm1(relaxed=True)` makes it -
+the one-particle density of t and lambda and the three parts above - took
+5.8 s and 23.8 s in a later job, 31606686 on c398, where the three parts
+took the same as here.) Where the 20.0 s of
 benzene go: the two o^3 v^3 products 7.8 s, the small terms 3.6 s, the
 integrals <j~ e||ab> and their contraction 2.5 s, the passes over <ma||ef>
 2.5 s, the products on the pairs 1.7 s, the ladder 1.2 s, the Fock matrices
 0.8 s. The gradient is 2.4 CCSD iterations for benzene and 6 for H2O, where
 the integrals <j~ e||ab> are 40% of it. With `max_memory` 4000 MB (m and
-the integrals in scratch files) the gradient of benzene takes 22.7 s with a
-peak of 2.86 GB. Before the Kramers reductions and with the Fock builds of
-the SCF object (job 31603549) the gradient took 31.3 s and the equations
-12.3 s.
+the integrals in scratch files) the gradient of benzene takes 22.4 s with a
+peak of 2.86 GB, and the relaxed density as a whole 38.8 s with a peak of
+3.34 GB: the scalar AO integrals are then not kept, and the eight Fock
+builds of the equations take 12.6 s, AO direct. Before the Kramers
+reductions and with the Fock builds of the SCF object (job 31603549) the
+gradient took 31.3 s and the equations 12.3 s.
 
 With 12 frozen spinors (benzene/cc-pVDZ, 30 active occupied spinors, a CCSD
-iteration of 3.9 s) the gradient through the code for all 42 occupied
-spinors took 94 s (job 31604805, before the Fock matrices on the scalar
-integrals): the integrals with all occupied spinors, one step of the
-amplitude equations, the intermediates and one step of the Lambda
-equations, and the gradient itself (38 s of the 94, without Kramers pairs:
-the frozen spinors are not paired). With `max_memory` 4000 MB that run was
-refused (the plan for 42 occupied spinors next to the unpacked amplitudes of
-the active space); the amplitudes are packed and the three phases planned
-one by one since then, which a run of that size has not yet confirmed.
+iteration of 3.43 s; job 31606686) the relaxed density takes 85.1 s with a
+peak of 15.5 GB: the integrals with all 42 occupied spinors, one step of
+the amplitude equations, the intermediates and one step of the Lambda
+equations, the gradient itself (31 s, without Kramers pairs: the frozen
+spinors are not paired), the Z-vector equations. That is 25 iterations of
+the frozen-core CCSD, and 3.6 times what the relaxed density of the same
+molecule takes without frozen spinors. With `max_memory` 4000 MB it takes
+142.8 s with a peak of 3.70 GB: the three phases are planned one by one for
+all occupied spinors, the unpacked amplitudes are released, and the
+integrals of the active space are given up when a phase does not fit next
+to them (they were here: 1.2 GB; `mycc.ao2mo()` makes them again). What it
+needs at least is what a step of the CCSD of all spinors needs.
 
 Values, against CFOUR (`xx2cccdenocbp`, `xx2czvec`, `xsox2cprop` after the
 Lambda equations; job 31600371, H2O/cc-pVDZ, all electrons, CC_CONV=9;

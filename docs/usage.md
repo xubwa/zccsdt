@@ -221,7 +221,11 @@ CCSD iterations), the Z-vector equations take a few Fock builds. The result
 is the density in the basis of all spinors of the SCF (`ao_repr=True`: in
 the 2c AO basis). Frozen occupied spinors are allowed: the gradient is then
 taken from the code for all spinors with zero amplitudes for the frozen
-ones, which makes the integrals once more with all occupied spinors.
+ones, which makes the integrals once more with all occupied spinors and
+needs the memory of a CCSD step without frozen spinors (benzene/cc-pVDZ with
+a frozen core: 85 s instead of 24 s; if `max_memory` is short, the integrals
+of the active space are released, and `mycc.eris` is then `None` until
+`mycc.ao2mo()` is called again).
 `relaxed=True` together with `with_t=True` is not there yet (the orbital
 relaxation of the (T) terms; docs/benchmarks.md).
 
