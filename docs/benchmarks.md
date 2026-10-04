@@ -1988,20 +1988,74 @@ pair and one-particle parts 1.73 s instead of 2.45 s), and 18.61 s next to
 ladder 3.04 s in blocks of 109 pairs; peak 2.86 GB). For benzene/cc-pVTZ
 the iteration has not been timed again.
 
-**The (T) terms** (`zccsd/lam_t.py`, `solve_lambda(with_t=True)`). The
-earlier code of the user is on the branch `claude/ccsd-lambda-socutils` of
-socutils (8965b9f; `cc/lambda_zccsd.py`, `cc/lambda_t_zccsd.py`,
-`cc/rdm_zccsd.py`): PySCF's equations on full arrays with the pp ladder
-through the AO ladder, and for (T) PySCF's source terms with the bare
-integrals conjugated, which complex spinors need. The (T) source terms are
-copied from there, with the (T) terms of the one-particle density of
-`pyscf.cc.gccsd_t_rdm`; the triples are full o^3 v^3 arrays, i.e. this is a
-reference for small molecules. Test: E(T) of these triples against
-`triples.kernel` (1e-10), and the density with lambda and the (T) terms
-against the central difference of E(CCSD) + E(T) for a perturbation of the
-Fock matrix in its occupied-virtual blocks and on its diagonal (1e-8, of
-a (T) part of 4e-5 to 1e-3), without and with Kramers pairs. The evaluation
-in the batches of `zccsd/triples.py` is not written.
+**The (T) terms** (`zccsd/lam_t.py`, `zccsd/triples.py`,
+`solve_lambda(with_t=True)`). The earlier code of the user is on the branch
+`claude/ccsd-lambda-socutils` of socutils (8965b9f; `cc/lambda_zccsd.py`,
+`cc/lambda_t_zccsd.py`, `cc/rdm_zccsd.py`): PySCF's equations on full
+arrays with the pp ladder through the AO ladder, and for (T) PySCF's source
+terms with the bare integrals conjugated, which complex spinors need. The
+(T) source terms are copied from there, with the (T) terms of the
+one-particle density of `pyscf.cc.gccsd_t_rdm`, as a reference on full
+o^3 v^3 arrays (`lam_t.sources`, `lam_t.gamma1`). Test: E(T) of these
+triples against `triples.kernel` (1e-10), and the density with lambda and
+the (T) terms against the central difference of E(CCSD) + E(T) for a
+perturbation of the Fock matrix in its occupied-virtual blocks and on its
+diagonal (1e-8, of a (T) part of 4e-5 to 1e-3), without and with Kramers
+pairs.
+
+For molecules of any size the terms are evaluated in the batches of the (T)
+energy (`triples.kernel(terms=True)`, which `solve_lambda(with_t=True)` and
+`make_rdm1(with_t=True)` call). Every term is a sum over the virtual triples
+a > b > c, each in three roles (one of its virtual indices, the other two
+as a pair). The two that cost o^3 v^4 / 4 and o^4 v^3 / 4 - the triples
+with <ke||pq> and with <mn||js>, as much as the intermediates x of the
+energy took - have the shape of the products that made x, with result and
+operand exchanged: the kernel writes M = conj(2w + v) / D of a triple, with
+the sign of the role, over its three x (each belongs to that triple alone),
+and for every product x = A B^T of a batch two products follow, A[:, :v]^T M
+and M B[:, v:] (GEMM; three real ones with `three_m`), which are
+antisymmetrized into the terms of lambda2 kept transposed, [(a>b), (i>j)],
+so that rows are written as a whole. The terms on <bc||jk>, on t2 and on
+the Fock matrix and the diagonals of the density are sums in the kernel.
+With Kramers pairs the triples that are done (unbarred b) give half of every
+sum and the time-reversed image the other half. Memory: the terms of lambda2
+take the place of the third packed T2 of the plan, the products leave GEMM
+in an array of at most 64 MB. Tests: against the assembly from full arrays
+for one batch, ranges of a and the smallest batches, ZGEMM and three real
+GEMMs, C and numpy kernels, with and without f_ov and Kramers pairs (1e-15
+without, 1e-12 with them: the symmetry of the integrals); the finite
+difference above through `solve_lambda(with_t=True)`; what the kernel
+allocates against `max_memory` from the least to all in memory.
+
+One job (31602768, c280, 8 cores, MKL; `bench/profile_t_lambda.py`: the (T)
+energy, then the energy with the terms, on the amplitudes of the same
+CCSD), seconds:
+
+| | (T) energy | with the terms | ratio | peak memory |
+|---|---|---|---|---|
+| H2O/cc-pVQZ (10 + 220 spinors), three real GEMMs | 5.1 | 13.8 | 2.7 | 7.0 GB |
+| C6H6/cc-pVDZ (42 + 186), three real GEMMs | 224.4 | 573.8 | 2.56 | 14.9 GB |
+| C6H6/cc-pVDZ, ZGEMM | 228.1 | 560.4 | 2.46 | 13.4 GB |
+| C6H6/cc-pVDZ, `max_memory` 4000 MB (A in a scratch file, ZGEMM, 765 batches) | 232.6 | 579.6 | 2.49 | 3.86 GB |
+
+Where the 574 s of benzene go: the products of the energy 177 s as before,
+the two products of the terms 251 s, the kernel 138 s (47 s for the energy
+alone), their antisymmetrization 7 s. The terms cost 1.5 times the energy,
+not the 1.0 of their multiply-adds:
+
+- the two products of the terms have the multiply-adds of the product that
+  made x, but the large array is now an operand, which GEMM packs: at the
+  shapes of a benzene batch ZGEMM does 573 GFLOPS for A B^T and 277 and 282
+  for the two others (DGEMM: 488, 371 and 125; one run on the tunnel node,
+  8 threads, not a benchmark). Three real GEMMs gain nothing here (251 s
+  against 247 s). One pass over M in blocks that stay in the cache, feeding
+  both products, is not written;
+- the kernel writes M three times (nine real arrays with three real GEMMs)
+  where the energy only reads: its time follows the memory traffic. The
+  role of the first index could be taken from the array of the second
+  (products for one b at a time), which would save one of the three.
+
+CFOUR's (T) terms of Lambda have not been timed.
 
 **Z-vector** (`zccsd/zvector.py`). Conventions, the response equation and a
 reference: for C -> C exp(-kappa) the orbital gradient G of the energy with
@@ -2049,7 +2103,8 @@ dipole (0.784942); the density of t and lambda at fixed spinors gives
 
 Not written: the orbital gradient from intermediates in the layouts of the
 amplitude step (the part of the two-particle density with four virtual
-indices through the AO ladder), the (T) terms.
+indices through the AO ladder), and the orbital relaxation of the (T)
+terms.
 
 ## Correctness references
 

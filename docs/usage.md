@@ -197,7 +197,7 @@ l1, l2 = mycc.solve_lambda()            # CCSD Lambda: mycc.l1[i,a], mycc.l2[i,j
 dm1 = mycc.make_rdm1()                  # density of t and lambda at fixed spinors, <q+ p>
 mu = mycc.dip_moment()                  # its dipole moment, Debye (unit='AU')
 
-mycc.solve_lambda(with_t=True)          # CCSD(T): small molecules only so far
+mycc.solve_lambda(with_t=True)          # CCSD(T): with the (T) terms; E(T) is in mycc.e_t
 mycc.make_rdm1(with_t=True)
 mycc.dip_moment(relaxed=True)           # with orbital relaxation: CCSD, small molecules
                                         # only so far
@@ -210,10 +210,13 @@ refer to the spinors `mycc.eris.mo_coeff`: an expectation value is
 `einsum('pq,qp', V, dm1)` with V in that basis, or with
 `make_rdm1(ao_repr=True)` (frozen spinors included) and V in the 2c AO
 basis. The dipole operator has the picture-change transformation of X2C
-(`picture_change=False`: the bare operator). The (T) terms (`with_t`) and the orbital
-gradient of the Z-vector equations (`relaxed`) are evaluated from full
-o^3 v^3 and nmo^4 arrays for now (docs/benchmarks.md); `make_rdm1()` itself
-is evaluated from the packed amplitudes and is not limited in that way.
+(`picture_change=False`: the bare operator). With `with_t` the (T) terms of
+the equations and of the density come from the batches of the (T) code, in
+2.5 times the time of the (T) energy and within `max_memory`; that run gives
+E(T) as well, so `ccsd_t()` need not be called before it. The orbital
+gradient of the Z-vector equations (`relaxed`) is evaluated from full nmo^4
+arrays for now (docs/benchmarks.md); `make_rdm1()` itself is evaluated from
+the packed amplitudes and is not limited in that way.
 
 At `verbose >= 4` the log says where the integrals are (memory or scratch
 file), how the step is sliced, which BLAS does the matrix products and
