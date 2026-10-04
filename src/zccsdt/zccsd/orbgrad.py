@@ -51,9 +51,15 @@ Cost: two o^3 v^3 products, one AO ladder, three passes over <ma||ef> (one
 of them over the integrals of the j~), two Fock matrices: about a Lambda
 iteration and the (ov|vv) part of the integral transformation.
 
-No frozen spinors yet (the rotations between frozen and active spinors need
-integrals with one frozen index), and no Kramers pairs in the sums: all of
-each term is computed.
+Kramers pairs.  With t and lambda symmetric under time reversal, the two
+o^3 v^3 products are done for the rows with an unbarred occupied index and
+completed by the symmetry (kernels.kfill_ring), and the sums over the first
+index of <ma||ef> - of the stored integrals and of the <j~ e||ab> - run over
+the unbarred half and are completed by the time-reversed image.  The ladder
+does half of the pairs (amps).
+
+Frozen spinors are not known here: zvector.gradient_frozen runs this module
+on all spinors, with zero amplitudes for the frozen ones.
 
 Timers (zccsdt.timing): 'og.pairs', 'og.ring' (the two products), 'og.ladder',
 'og.ovvv', 'og.dressed', 'og.fock', 'og.small'.
@@ -222,6 +228,32 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
     X = {k: np.zeros((v, o), dtype=np.complex128) for k in GROUPS}
     pblocks = plan.pblocks
     slabs = slab_plan(eris.mol, plan, o, v)             # before anything is done
+    # Kramers pairs: the rows of the ring products with an unbarred occupied
+    # index, the sums over the first index of <ma||ef> over its unbarred half;
+    # Xh collects the halves that their time-reversed image completes
+    kr = bool(res.kramers and res.symmetric(t1, t2p) and res.symmetric(l1, l2p))
+    ho = o // 2 if kr else o
+    Xh = {k: np.zeros((v, o), dtype=np.complex128) for k in GROUPS}
+    size = max(j1 - j0 for j0, j1 in plan.jblocks)
+    if kr:      # blocks of unbarred columns (each with its partners) and of unbarred rows
+        cblocks, rblocks = amps._blocks(ho, max(1, size // 2)), amps._blocks(ho, size)
+    else:
+        cblocks, rblocks = plan.jblocks, plan.jblocks
+
+    def ring(j0, j1, t1t1=False):
+        '''The columns (j b) of t2 in the ring layout for the block of j (with
+        Kramers pairs: followed by those of the partners of its j); with
+        ``t1t1``: of t2[n,j,f,b] - 2 t1[n,b] t1[j,f].'''
+        parts = [(j0, j1)] + ([(j0 + ho, j1 + ho)] if kr else [])
+        nc = (j1 - j0) * v
+        Tc = np.empty((n1, len(parts) * nc), dtype=np.complex128)
+        for k, (a0, a1) in enumerate(parts):
+            Tk = K.ring_cols(t2p, o, v, a0, a1).reshape(o, v, a1 - a0, v)
+            if t1t1:
+                Tk -= 2.0 * t1[:, None, None, :] * t1[a0:a1].T[None, :, :, None]
+            Tc[:, k * nc:(k + 1) * nc] = Tk.reshape(n1, nc)
+            del Tk
+        return Tc
 
     with timer('og.pairs'):
         # M[(ij),(kl)] = sum_{c>d} lambda2[(ij),(cd)] t2[(kl),(cd)], with tau: Xl
@@ -266,14 +298,18 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
     # ---- m = L T in the ring layout, [(i b), (m d)], by blocks of its columns
     m = res._w_array()
     with timer('og.ring'):
-        for m0, m1 in plan.jblocks:
-            Tc = K.ring_cols(t2p, o, v, m0, m1)
-            Q = np.empty((n1, (m1 - m0) * v), dtype=np.complex128)
-            for i0, i1 in plan.jblocks:
+        for m0, m1 in cblocks:
+            Tc = ring(m0, m1)
+            nc = (m1 - m0) * v
+            Q = np.empty((n1, Tc.shape[1]), dtype=np.complex128)
+            for i0, i1 in rblocks:
                 Li = K.ring_cols(l2p, o, v, i0, i1)
                 blas.gemm(Li.T, Tc, C=Q[i0 * v:i1 * v])
                 del Li
-            m[:, m0 * v:m1 * v] = Q
+            if kr:
+                K.kfill_ring(Q, o, v, 0, ho, m1 - m0)
+                m[:, (m0 + ho) * v:(m1 + ho) * v] = Q[:, nc:]
+            m[:, m0 * v:m1 * v] = Q[:, :nc]
             del Q, Tc
 
     with timer('og.small'):
@@ -320,10 +356,13 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
         blas.gemm(Xl.T, taup, C=Dp, beta=1.0)
     with timer('og.ring'):
         # 1/2 P(mn) P(ef) sum_jb m[jb,me] (t2[jn,bf] - 2 t1[j,f] t1[n,b])
-        for n0, n1_ in plan.jblocks:
-            Tc = K.ring_cols(t2p, o, v, n0, n1_).reshape(o, v, n1_ - n0, v)
-            Tc -= 2.0 * t1[:, None, None, :] * t1[n0:n1_].T[None, :, :, None]
-            R = blas.gemm(m.T, Tc.reshape(n1, (n1_ - n0) * v))
+        for n0, n1_ in cblocks:
+            Tc = ring(n0, n1_, t1t1=True)
+            R = np.empty((n1, Tc.shape[1]), dtype=np.complex128)
+            blas.gemm(m[:, :ho * v].T, Tc, C=R[:ho * v])     # the rows (m e) with unbarred m
+            if kr:
+                K.kfill_ring(R, o, v, 0, ho, n1_ - n0)
+                K.asym_pack_cols(R, o, v, n0 + ho, n1_ + ho, 0.5, Dp, offset=(n1_ - n0) * v)
             K.asym_pack_cols(R, o, v, n0, n1_, 0.5, Dp)
             del R, Tc
 
@@ -335,15 +374,15 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
             del Du
 
     # ---- the pass over <ma||ef>
-    Jv = np.empty((o, v, npo), dtype=np.complex128)     # sum conj(<If||bc>) lambda2[(ij),(bc)]
+    Jv = np.empty((ho, v, npo), dtype=np.complex128)    # sum conj(<If||bc>) lambda2[(ij),(bc)]
     c44 = np.zeros((o, v), dtype=np.complex128)         # conj of the <mb||je> term, [I, A]
     fstep = max(1, min(v, UNPACK_BYTES // (16 * npv)))
     with timer('og.ovvv'):
-        for j in range(o):
+        for j in range(ho):
             Om = res.ovvv_p[j]                                          # [e, (a>b)]
             # <mn||ef> density with <nA||ef>
             Dn = np.ascontiguousarray((psgn[:, j][:, None] * Dp[prow[:, j]]).T)     # [(ef), I]
-            blas.gemm(Om, Dn, C=X['oovv'], alpha=-1.0, beta=1.0)
+            blas.gemm(Om, Dn, C=Xh['oovv'], alpha=-1.0, beta=1.0)
             del Dn
             # <ab||ef> density: its lambda2 with conj(<jf||bc>), a few rows f at a time
             for f0 in range(0, v, fstep):
@@ -355,15 +394,15 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
             Dj -= t1[:, None, :] * l1[j][None, :, None]
             Dj -= np.asarray(m[j * v:(j + 1) * v]).reshape(v, o, v).transpose(1, 0, 2)
             _ovvv_x(Om, np.ascontiguousarray(np.conj(Dj.transpose(0, 2, 1))), c44)
-            X['ovov'] -= blas.gemm(res.ooov[j].conj().reshape(o, n1), Dj.reshape(n1, v)).T
+            Xh['ovov'] -= blas.gemm(res.ooov[j].conj().reshape(o, n1), Dj.reshape(n1, v)).T
             scratch.unmap(Om)
             del Dj, Aj
-        X['ovov'] += c44.conj().T
+        Xh['ovov'] += c44.conj().T
         del Dp
         for p0, p1 in pblocks:
             n = p1 - p0
             tu = K.unpack_tril(taup[p0:p1], v, 'apb').reshape(v * n, v)         # [(f p), A]
-            X['vvvv'] += blas.gemm(Jv[:, :, p0:p1].reshape(o, v * n), tu).T
+            Xh['vvvv'][:, :ho] += blas.gemm(Jv[:, :, p0:p1].reshape(ho, v * n), tu).T
             del tu
         del Jv
 
@@ -426,9 +465,9 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
         from zccsdt.zccsd import ao2mo
         nao = eris.nao_sph
         Cv = eris.mo_ao_spin[:, o:]
-        Cd = np.hstack((Cv @ t1.T, Cv))
+        Cd = np.hstack((Cv @ t1[:ho].T, Cv))
         c5 = np.zeros((o, v), dtype=np.complex128)                      # the conjugate, [I, A]
-        for j0, j1, g in ao2mo.slabs(eris.mol, Cd[:nao], Cd[nao:], (0, o), (o, o + v), slabs):
+        for j0, j1, g in ao2mo.slabs(eris.mol, Cd[:nao], Cd[nao:], (0, ho), (ho, ho + v), slabs):
             for j in range(j0, j1):
                 gj = g[j - j0]
                 mj = np.conj(np.asarray(m[j * v:(j + 1) * v])).reshape(v, o, v)  # [b, I, e]
@@ -439,7 +478,7 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
                           gj.reshape(v * v, v), C=c5, beta=1.0)
                 del mj, gj
         del g
-        X['ovvv'] += c5.conj().T
+        Xh['ovvv'] += c5.conj().T
     res.close()
     del m
 
@@ -455,6 +494,12 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, parts=None):
         X['fock'] += (blas.gemm(fvo, Doo.T) + blas.gemm(res.fvv, Dov.T) - blas.gemm(Dov.T, res.foo)
                       - blas.gemm(Dvv.T, fvo) + Vf[o:, :o])
         X['ovvv'] += 0.5 * blas.gemm(VN[o:, o:], t1.T)
+    if kr:
+        from zccsdt.zccsd.kramers import image
+        for k in GROUPS:
+            Xh[k] += image(Xh[k])
+    for k in GROUPS:
+        X[k] += Xh[k]
     if parts is not None:
         parts.update(X)
     return sum(X.values())
