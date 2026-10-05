@@ -169,13 +169,9 @@ def compare(ops_file, den_file, prop_out):
     ops, den = np.load(ops_file), np.load(den_file)
     ref = printed(prop_out)
     kinds = [k for k in ('scf', 'relaxed') if k in den.files and k in ref]
-    print('the electronic part, as xsox2cprop prints it; operators that vanish here are left out')
-    print('%-16s' % 'operator' + ''.join('  %18s %18s %8s' % ('CFOUR ' + k, 'zccsdt', 'diff.')
-                                         for k in kinds))
-    worst = {}
+    rows = {}
     for key in sorted(k for k in ops.files if k != SCFDM):
         o = ops[key]
-        row, show, note = '', False, ''
         for kind in kinds:
             heading, label, sign = expected(key, kind)
             ours = sign * np.einsum('pq,qp', o, den[kind])
@@ -186,26 +182,49 @@ def compare(ops_file, den_file, prop_out):
             if theirs is None and heading != 'not printed':     # another heading here
                 same = [v for (h, l), v in ref[kind].items() if l == label]
                 theirs = same[0] if len(same) == 1 else None
+            rows.setdefault(key, {})[kind] = (theirs, ours)
+    # the size of a tensor: the largest of the components of an operator at
+    # an atom (a component that vanishes by symmetry has only noise, and the
+    # noise of a property of the core is large in absolute terms)
+    scale = {}
+    for key, row in rows.items():
+        group = '|'.join(key.split('|')[:2]) if key.count('|') == 2 else key
+        if group[:-1] in ('SOX2CDP', 'UTM10', 'SOM10', 'UTML0'):
+            group = group[:-1]
+        size = max([abs(t) for t, _ in row.values() if t is not None] or [0.0])
+        scale[group] = max(scale.get(group, 0.0), size)
+        row['group'] = group
+    print('the electronic part, as xsox2cprop prints it; left out: what vanishes here (below 1e-6 '
+          'of the\nlargest component of the operator at the atom, or below 1e-5 in all)')
+    print('%-16s' % 'operator' + ''.join('  %20s %20s %8s' % ('CFOUR ' + k, 'zccsdt', 'diff.')
+                                         for k in kinds))
+    worst = {}
+    for key, row in rows.items():
+        size = scale[row['group']]
+        text, show, note = '', False, ''
+        for kind in kinds:
+            theirs, ours = row[kind]
             if theirs is None:
-                row += '  %18s %18.10f %8s' % ('not printed', ours.real, '')
+                text += '  %20s %20.10f %8s' % ('not printed', ours.real, '')
                 continue
             # a doublet: the two programs may hold different Kramers partners,
             # and what is odd under time reversal then has the other sign
             flip = abs(theirs) > 1e-6 and abs(ours.real + theirs) < 1e-3 * abs(theirs)
             diff = -ours.real - theirs if flip else ours.real - theirs
-            row += '  %18.10f %18.10f %8.1e' % (theirs, ours.real, diff)
-            if abs(theirs) > 1e-6 or abs(ours) > 1e-6:
+            text += '  %20.10f %20.10f %8.1e' % (theirs, ours.real, diff)
+            if size > 1e-5 and max(abs(theirs), abs(ours)) > 1e-6 * size:
                 show = True
-                worst[kind] = max(worst.get(kind, (0.0, '')),
-                                  (abs(diff) / max(abs(theirs), 1e-6), key))
+            if size > 1e-5:
+                worst[kind] = max(worst.get(kind, (0.0, '')), (abs(diff) / size, key))
             if flip:
                 note = '  other sign'
-            if abs(ours.imag) > 1e-8:
+            if abs(ours.imag) > 1e-8 * max(size, 1.0):
                 note += '  imaginary part %.1e' % ours.imag
         if show:
-            print('%-16s' % key + row + note)
+            print('%-16s' % key + text + note)
     for kind, (rel, key) in worst.items():
-        print('largest relative difference with the %s density: %.1e (%s)' % (kind, rel, key))
+        print('largest difference with the %s density, relative to the size of the operator: '
+              '%.1e (%s)' % (kind, rel, key))
 
 
 if __name__ == '__main__':
