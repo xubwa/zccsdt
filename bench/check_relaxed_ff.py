@@ -9,7 +9,8 @@ usage: python bench/check_relaxed_ff.py MOLECULE BASIS [EPS]
   MOLECULE, BASIS and the environment as bench/profile_t_relaxed.py
   (ZC_FROZEN, ZC_NUCMOD, ZC_HAM, ZC_SCF, ZC_MAXMEM); EPS: default 2e-3
 environment: ZC_ANALYTIC: the analytic dipole (z, a.u.) of another run to
-             compare with; without it the dipole is computed here first.
+             compare with (then only the SCF is run without the field);
+             without it the dipole is computed here first.
 '''
 import os
 import sys
@@ -30,28 +31,32 @@ def main():
     frozen = int(os.environ.get('ZC_FROZEN', 0))
     mol = spinors.molecule(mol_name, basis, max_memory=maxmem)
 
-    def energy(field=None, dm0=None):
+    def energy(field=None, dm0=None, scf_only=False):
         t0 = time.perf_counter()
         mf = spinors.scf(mol, 1e-12, 1e-9, field, dm0)
         mycc = DirectZCCSD(mf, frozen=frozen)
         mycc.verbose, mycc.max_cycle = 0, 200
         mycc.conv_tol, mycc.conv_tol_normt = 1e-11, 1e-9
+        if scf_only:
+            return mf, mycc, np.array([mf.e_tot, 0.0, 0.0]), time.perf_counter() - t0
         mycc.kernel()
         e = np.array([mf.e_tot, mycc.e_corr, mycc.ccsd_t()])
         if not (mf.converged and mycc.converged):
             print('  not converged: SCF %s, CCSD %s' % (mf.converged, mycc.converged))
         return mf, mycc, e, time.perf_counter() - t0
 
-    mf0, cc0, e0, wall = energy()
-    o, v = cc0.t1.shape
-    print('%s/%s  nocc=%d nvir=%d  frozen %d  Hamiltonian %s  %s nuclei  SCF of %s'
-          % (mol_name, basis, o, v, frozen, os.environ.get('ZC_HAM', 'x2c1e'),
-             'Gaussian' if mol.nucmod else 'point', os.environ.get('ZC_SCF', 'pyscf')))
-    print('E(SCF) %.10f  E_corr(CCSD) %.10f  E(T) %.10f  (%.0f s)' % (*e0, wall))
+    given = bool(os.environ.get('ZC_ANALYTIC'))
+    mf0, cc0, e0, wall = energy(scf_only=given)
+    print('%s/%s  %d spinors, %d electrons  frozen %d  Hamiltonian %s  %s nuclei  SCF of %s'
+          % (mol_name, basis, mol.nao_2c(), mol.nelectron, frozen,
+             os.environ.get('ZC_HAM', 'x2c1e'), 'Gaussian' if mol.nucmod else 'point',
+             os.environ.get('ZC_SCF', 'pyscf')))
+    print('without the field: E(SCF) %.10f' % e0[0] + ('' if given else
+          '  E_corr(CCSD) %.10f  E(T) %.10f' % tuple(e0[1:])) + '  (%.0f s)' % wall)
     r = rdm.dipole_integrals(cc0, True)[2]
     nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())[2]
     dm0 = mf0.make_rdm1()
-    if 'ZC_ANALYTIC' in os.environ:
+    if given:
         analytic = float(os.environ['ZC_ANALYTIC'])
     else:
         t0 = time.perf_counter()
