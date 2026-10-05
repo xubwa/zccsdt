@@ -131,6 +131,14 @@ def step_arrays(nocc, nvir):
     return 16 * (3 * npo * npo + 2 * o * v * npo + 2 * o * o * o * v + 4 * o ** 4)
 
 
+# Parts of a DIIS vector with fewer elements stay in memory when the plan puts
+# the vectors into a scratch file (t1; of the packed T2 a megabyte at most).
+# The default of zccsdt.cc.diis, 1e7 elements, kept the 7.5 million of
+# benzene/cc-pVDZ with a frozen core in memory twelve times: 1.4 GB that the
+# plan had counted as none.
+DIIS_SMALL = 1 << 16
+
+
 def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore=None,
               three_m=None, kramers=False, ladder_units=None):
     '''The Plan of one step within ``budget`` bytes (None: unlimited).
@@ -344,7 +352,7 @@ class Residual:
         mapped = [n for n in names if scratch.is_mapped(getattr(self, n))]
         self.close()
         lad = self.aolad
-        lad.keep()                  # the AO operators, if they were dropped (ccsd_t)
+        self._keep_ladder(max_memory)       # the AO operators, if they were dropped (ccsd_t)
         self.kramers = self.paired
 
         def plan():
@@ -371,6 +379,36 @@ class Residual:
             self.gave_way = True
         self._set_ladder()
         return self.plan
+
+    def _keep_ladder(self, max_memory):
+        '''The AO operators of the ladder made again if they were dropped, in
+        units of integrals sized for the memory there is now: when they were
+        first made nothing else was there (half of the budget for a unit), and
+        after (T) the amplitudes, the sources of lambda and whatever else has
+        come since are.  Kept in memory they give way to the mode 'direct' if
+        they do not fit any more (or MemoryError, if the mode was asked for).'''
+        from zccsdt.zccsd import aoladder
+        lad = self.aolad
+        if lad.mode == 'direct' or lad.same is not None:
+            return
+        budget = memory.budget(max_memory)
+        if budget is not None:
+            floor = aoladder.unit_floor(lad.mol)
+            kept = aoladder.stored_bytes(lad.mol, lad.nblocks) if lad.mode == 'memory' else 0
+            room = budget - kept
+            if room < floor:
+                if lad.mode != 'memory' or not lad.auto:
+                    raise MemoryError(
+                        'the AO operators of the ladder (%s kept%s) cannot be made again: '
+                        '%s are left of max_memory, a unit of their integrals takes %s; '
+                        'ao_ladder = \'direct\' computes them in every iteration'
+                        % (_size(kept), ' in memory' if lad.mode == 'memory' else '',
+                           _size(budget), _size(floor)))
+                lad.to_direct()
+                self.gave_way = True
+                return
+            lad.set_work(max(floor, room // 2))
+        lad.keep()
 
     def _set_ladder(self):
         '''The units of AO integrals of the ladder as the plan sizes them.'''
@@ -902,7 +940,7 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
     adiis = None
     if mycc.diis:
         adiis = DIIS(space=mycc.diis_space, filename=mycc.diis_file,
-                     incore=res.plan.diis_incore)
+                     incore=res.plan.diis_incore, incore_size=DIIS_SMALL)
     conv = False
     try:
         for istep in range(max_cycle):

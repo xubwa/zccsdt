@@ -70,8 +70,11 @@ def main():
     t0 = time.perf_counter()
     mycc.ao2mo()
     t1 = time.perf_counter()
+    watch = MemWatch()
+    watch.start()
     mycc.kernel()
     t2 = time.perf_counter()
+    watch.stop()
     o, v = mycc.t1.shape
     eris = mycc.eris
     print('%s/%s DirectZCCSD  nocc=%d nvir=%d  frozen %d  Kramers pairs: %s  max_memory %.0f MB  '
@@ -82,9 +85,11 @@ def main():
     Cs = mf.mo_coeff
     occ = mf.mo_occ > 0
     print('SCF %.1f s (converged %s, largest occupied-virtual element of its Fock matrix %.1e); '
-          'integrals %.1f s; CCSD %.1f s: %d cycles (%.2f s each), converged %s, E_corr %.10f'
+          'integrals %.1f s; CCSD %.1f s: %d cycles (%.2f s each), converged %s, E_corr %.10f, '
+          'peak anonymous memory %.2f GB'
           % (t_scf, mf.converged, abs(Cs[:, ~occ].conj().T @ fock @ Cs[:, occ]).max(), t1 - t0,
-             t2 - t1, len(cycles), (t2 - t1) / max(len(cycles), 1), mycc.converged, mycc.e_corr))
+             t2 - t1, len(cycles), (t2 - t1) / max(len(cycles), 1), mycc.converged, mycc.e_corr,
+             watch.anon / 1e6))
     mycc.verbose = 4
 
     wall = {}

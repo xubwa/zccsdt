@@ -521,7 +521,8 @@ def _iterate(mycc, res, t1, t2p, l1, l2, max_cycle, tol, log, sources, settings)
         sources = True              # the arrays themselves are held here only
     adiis = None
     if mycc.diis:
-        adiis = DIIS(space=mycc.diis_space, filename=mycc.diis_file, incore=res.plan.diis_incore)
+        adiis = DIIS(space=mycc.diis_space, filename=mycc.diis_file, incore=res.plan.diis_incore,
+                     incore_size=amps.DIIS_SMALL)
     conv = False
     try:
         for istep in range(max_cycle):

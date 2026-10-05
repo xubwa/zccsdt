@@ -713,10 +713,10 @@ def test_callback_keeps_no_amplitudes(x2c_h2o, monkeypatch, tmp_path):
     mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-9, 1e-7
     made, alive, seen = [], [], []
     update = amps.Residual.update_packed
-    from zccsdt.cc import diis as diis_module
     diis = amps.DIIS
-    monkeypatch.setattr(amps, 'DIIS', lambda space, filename, incore: diis(space, filename, False))
-    monkeypatch.setattr(diis_module, 'INCORE_SIZE', 0)      # small parts go to the file as well
+    # all parts of the vectors in the file, the small ones as well
+    monkeypatch.setattr(amps, 'DIIS', lambda space, filename, incore, incore_size=None: diis(
+        space, filename, False, 0))
 
     def watched(self, t1, t2p, level_shift=0.0):
         gc.collect()
@@ -732,3 +732,103 @@ def test_callback_keeps_no_amplitudes(x2c_h2o, monkeypatch, tmp_path):
     # the input of the second step
     assert mycc.converged and len(alive) > 5 and alive[1] <= 1 and max(alive[2:]) == 0
     assert {'t1new', 't2pnew', 'istep', 'eccsd', 'mycc', 'eris'} <= set(seen[0])
+
+
+def test_ladder_operators_made_again_within_memory(monkeypatch):
+    '''(T) drops the AO operators of the ladder; the next plan of the step
+    (Lambda after (T), another CCSD) makes them again - if they still fit
+    into what max_memory leaves then, with a unit of their integrals next to
+    them, and in units sized for that.  Allocations (tracemalloc) within it;
+    the same operators; with no room they give way to the mode 'direct'
+    before anything is allocated, or MemoryError if 'memory' was asked for.'''
+    import tracemalloc
+    from zccsdt import memory
+    from zccsdt.zccsd import amps, aoladder
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
+    mf = x2c.UHF(mol).run(conv_tol=1e-9)
+    cc = DirectZCCSD(mf)
+    cc.verbose, cc.max_memory = 0, 100000
+    eris = cc.ao2mo()
+    res = amps.Residual(eris, plan=False)
+    lad = eris.aoladder
+    assert lad.mode == 'memory' and lad.auto and lad.nblocks == 1
+    ref = [T.copy() for _, T, _ in lad.same + lad.plus]
+    kept, floor, first = lad.nbytes, aoladder.unit_floor(mol), lad._work
+    assert kept == aoladder.stored_bytes(mol) and kept > 10 * floor and first > 100 * floor
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+
+    def peak_of(f):
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        f()
+        peak = tracemalloc.get_traced_memory()[1] - base
+        tracemalloc.stop()
+        return peak
+    budget = kept + 3 * floor
+    lad.close()
+    assert lad.nbytes == 0
+    peak = peak_of(lambda: res._keep_ladder(budget / 1e6))
+    assert lad.mode == 'memory' and lad.nbytes == kept and kept < peak <= budget
+    assert lad._work <= 1.5 * floor + 1 and not res.gave_way
+    for x, y in zip(ref, [T for _, T, _ in lad.same + lad.plus]):
+        assert abs(x - y).max() < 1e-12
+    # no room for a unit next to them: nothing is allocated
+    lad.close()
+    assert peak_of(lambda: res._keep_ladder((kept + 0.5 * floor) / 1e6)) < 0.1 * kept
+    assert lad.mode == 'direct' and res.gave_way and lad.nbytes == 0
+    asked = res.aolad = aoladder.AOLadder(mol, 'memory', first, 1, auto=False)
+    asked.close()
+    with pytest.raises(MemoryError, match='cannot be made again'):
+        res._keep_ladder((kept + 0.5 * floor) / 1e6)
+    res._keep_ladder(None)                  # no limit known: as they were made first
+    assert asked.nbytes == kept
+
+
+def test_diis_vectors_where_the_plan_puts_them(monkeypatch, tmp_path):
+    '''When the memory plan of the step puts the DIIS vectors into a scratch
+    file, the packed T2 of every vector is there: the DIIS of zccsdt.cc keeps
+    parts below 1e7 elements in memory by default (a packed T2 of 7.5 million
+    for benzene/cc-pVDZ with a frozen core: 1.4 GB in twelve vectors that the
+    plan had counted as none), and the CCSD and Lambda iterations pass their
+    own threshold, amps.DIIS_SMALL.  Only t1 stays in memory.'''
+    from zccsdt import memory
+    from zccsdt.cc.diis import DIIS
+    from zccsdt.zccsd import amps, lam
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    rng = np.random.default_rng(0)
+    default, small = DIIS(space=2, incore=False), DIIS(2, None, False, amps.DIIS_SMALL)
+    for k in range(3):                      # the first vector has no error vector yet
+        x = [rng.standard_normal(n) + 1j * rng.standard_normal(n) for n in (100, amps.DIIS_SMALL)]
+        for d in (default, small):
+            d.update([a.copy() for a in x])
+    assert not default.on_disk() and small.on_disk()
+    assert [scratch_is_mapped(a) for a in small.es[-1]] == [False, True]
+    assert [scratch_is_mapped(a) for a in default.es[-1]] == [False, False]
+    default.close()
+    small.close()
+    # the iterations of the CCSD and of Lambda under a plan with the vectors in the file
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
+    cc = DirectZCCSD(x2c.UHF(mol).run(conv_tol=1e-9))
+    cc.verbose, cc.max_cycle = 0, 3
+    eris = cc.ao2mo()
+    o, v, nao = eris.nocc, eris.fock.shape[0] - eris.nocc, mol.nao_nr()
+    assert amps.DIIS_SMALL < o * (o - 1) // 2 * (v * (v - 1) // 2) < 1e7
+    need = amps.plan_step(o, v, nao, None, kramers=True).need
+    resident = memory.resident()
+    monkeypatch.setattr(memory, 'resident', lambda: resident)
+    cc.max_memory = (resident + 1.2 * need + lam.reserve_bytes(o, v)) / 1e6
+    made = []
+    diis = amps.DIIS
+
+    def watched(*args, **kwargs):
+        made.append(diis(*args, **kwargs))
+        return made[-1]
+    monkeypatch.setattr(amps, 'DIIS', watched)
+    monkeypatch.setattr(lam, 'DIIS', watched)
+    seen = []
+    cc.callback = lambda envs: seen.append(envs['adiis'].on_disk())
+    cc.kernel(eris=eris)
+    assert not eris.residual.plan.diis_incore and seen[-1] and len(made) == 1
+    cc.solve_lambda(eris=eris)
+    assert len(made) == 2 and all(d.incore_size == amps.DIIS_SMALL and not d.incore for d in made)

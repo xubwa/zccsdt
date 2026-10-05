@@ -7,6 +7,9 @@ parts of a vector with at least INCORE_SIZE elements are kept in an HDF5 file:
 ``filename`` if given (kept), else a temporary file in the scratch directory
 (ZCCSDT_TMPDIR, else PySCF's lib.param.TMPDIR, which follows PYSCF_TMPDIR /
 TMPDIR).  Smaller parts, and everything with ``incore=True``, stay in memory.
+A caller that plans its memory and has decided for the file passes its own
+threshold (``incore_size``): with the default a vector of 7 million complex
+numbers stays in memory, 12 times over for a subspace of 6.
 
 The file-backed vectors are contiguous HDF5 datasets that are accessed through
 numpy.memmap instead of explicit reads and writes (zccsdt.scratch): the
@@ -126,10 +129,12 @@ class DIIS:
     can also build the new vector directly in the storage: buffers() returns
     the arrays of the vector that the next update() stores.'''
 
-    def __init__(self, space=8, filename=None, incore=False):
+    def __init__(self, space=8, filename=None, incore=False, incore_size=None):
         self.space = space
         self.filename = filename
         self.incore = incore
+        # parts with fewer elements stay in memory whatever ``incore`` says
+        self.incore_size = INCORE_SIZE if incore_size is None else int(incore_size)
         self.xs, self.es = [], []           # stored vectors, oldest first
         self.H = None
         self.xprev = None
@@ -148,7 +153,7 @@ class DIIS:
     def _new_part(self, like, key, in_memory=True):
         '''Storage of one part: a file-backed array if it is large and not
         incore, else an array in memory (None without ``in_memory``).'''
-        if self.incore or like.size < INCORE_SIZE:
+        if self.incore or like.size < self.incore_size:
             return np.empty(like.size, dtype=like.dtype) if in_memory else None
         if self._scratch is None:
             self._scratch = _Scratch(self.filename)
