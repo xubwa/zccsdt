@@ -490,12 +490,12 @@ def test_orbital_gradient_of_t_within_budget(monkeypatch, tmp_path):
     own = orbgrad_t.own_bytes(o, v, nao)
     row, block = 32 * npair * nao, npair * lmax * (8 * nao + 32)
     assert own > 4e6 and row > 1e6
-    cc.max_memory = (own + 0.9 * (row + block)) / 1e6
+    cc.max_memory = (own + 0.95 * (2 * row + block)) / 1e6
     with pytest.raises(MemoryError, match='of one occupied spinor in the AO basis'):
         orbgrad_t.kernel(cc, eris, t1, t2p, terms, triples.Densities(g1, g2, g3))
     ref, plans = None, set()
-    for extra, dens in ((row + block, g1m), (row + block, g1), (3 * row + 2 * block, g1),
-                        (8 * row, g1m), (40 * row, g1)):
+    for extra, dens in ((2 * row + block, g1m), (2 * row + block, g1),
+                        (4 * row + 2 * block, g1), (9 * row, g1m), (40 * row, g1)):
         budget = own + extra + 1
         cc.max_memory = budget / 1e6
         plan = orbgrad_t.vvvv_plan(mol, cc.max_memory, o, v, o // 2)

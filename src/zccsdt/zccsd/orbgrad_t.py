@@ -125,10 +125,10 @@ def vvvv_plan(mol, max_memory, nocc, nvir, nrows):
     '''(occupied spinors per pass over the AO integrals, AOs of the third
     index per block of integrals): the contraction of g1 with <bc||ea>
     within what max_memory leaves now next to own_bytes.  The density of an
-    occupied spinor in the AO basis takes 32 N (N + 1) / 2 x N bytes, a
-    block of nl AOs of the integrals 8 N (N + 1) / 2 x N nl and as much of
-    the densities again.  MemoryError if one spinor and the largest shell do
-    not fit.'''
+    occupied spinor in the AO basis takes 32 N (N + 1) / 2 x N bytes (and
+    once more while it is made), a block of nl AOs of the integrals
+    8 N (N + 1) / 2 x N nl and as much of the densities again.  MemoryError
+    if one spinor and the largest shell do not fit.'''
     nao = mol.nao_nr()
     npair = nao * (nao + 1) // 2
     ao_loc = mol.ao_loc_nr()
@@ -138,7 +138,7 @@ def vvvv_plan(mol, max_memory, nocc, nvir, nrows):
     if left is None:
         return int(nrows), nao
     left -= own_bytes(nocc, nvir, nao)
-    need = row + npair * lmax * (8 * nao + 32)
+    need = 2 * row + npair * lmax * (8 * nao + 32)
     if left < need:
         raise MemoryError(
             'the orbital gradient of (T) needs %s for the density of one occupied spinor in '
@@ -146,9 +146,9 @@ def vvvv_plan(mol, max_memory, nocc, nvir, nrows):
             'other arrays, %s are left of max_memory'
             % (amps._size(need), nao, amps._size(own_bytes(nocc, nvir, nao)),
                amps._size(max(left, 0))))
-    nk = int(max(1, min(nrows, (left - npair * lmax * (8 * nao + 32)) // row,
+    nk = int(max(1, min(nrows, (left - npair * lmax * (8 * nao + 32)) // row - 1,
                         max(1, left // 2 // row))))
-    nl = int(max(lmax, min(nao, (left - nk * row) // (npair * (8 * nao + 32 * nk)))))
+    nl = int(max(lmax, min(nao, (left - (nk + 1) * row) // (npair * (8 * nao + 32 * nk)))))
     return nk, nl
 
 
