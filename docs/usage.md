@@ -227,6 +227,13 @@ needs the memory of a CCSD step without frozen spinors (benzene/cc-pVDZ with
 a frozen core: 85 s instead of 24 s; if `max_memory` is short, the integrals
 of the active space are released, and `mycc.eris` is then `None` until
 `mycc.ao2mo()` is called again).
+A relaxed density is the derivative of the energy only for the spinors of
+a converged SCF, and it has what is left of the orbital gradient in first
+order: PySCF stops at `conv_tol_grad`, by default sqrt(conv_tol), which left
+3e-8 in the Fock matrix of H2O/cc-pVDZ and 5e-8 in its dipole moments. Set
+`mf.conv_tol_grad` (1e-8 or below) for such properties; `relaxed=True`
+warns if the occupied-virtual block of the Fock matrix exceeds 1e-7.
+
 `relaxed=True` together with `with_t=True` is the relaxed density of
 CCSD(T), the derivative of E(SCF) + E(CCSD) + E(T). Call it on the CCSD
 object as it is after `kernel()`: one pass over the triples then gives E(T),
