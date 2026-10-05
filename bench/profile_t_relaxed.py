@@ -9,7 +9,7 @@ xx2clcc, xx2cccdenocbp, xx2czvec, xsox2cprop (bench/cfour/slurm_x2ccc.sh).
 
 usage: python bench/profile_t_relaxed.py MOLECULE BASIS
   MOLECULE: h2o | n2 | c6h6 | ... (the geometries of bench/profile_iter.py)
-X2C-1e spinors from PySCF (x2c.UHF), all electrons.
+X2C-1e spinors from PySCF (x2c.UHF), all electrons unless ZC_FROZEN is set.
 environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              DirectZCCSD.kramers; ZC_CONV: the convergence of the CCSD energy
              (default 1e-9; the amplitudes and lambda 100 times that, the
@@ -20,7 +20,8 @@ environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              ZC_CCSD_CYCLES, ZC_LAMBDA_CYCLES: at most so many cycles (the
              times of the other phases do not depend on the convergence;
              the dipole then means nothing); ZC_T_ENERGY=0: without the run
-             of the (T) energy alone.
+             of the (T) energy alone; ZC_FROZEN: so many frozen occupied
+             spinors.
 '''
 import os
 import resource
@@ -58,7 +59,8 @@ def main():
     mf.max_cycle = 200
     mf.kernel()
     t_scf = time.perf_counter() - t0
-    mycc = DirectZCCSD(mf)
+    frozen = int(os.environ.get('ZC_FROZEN', 0))
+    mycc = DirectZCCSD(mf, frozen=frozen)
     mycc.verbose, mycc.max_cycle = 0, int(os.environ.get('ZC_CCSD_CYCLES', 100))
     mycc.conv_tol, mycc.conv_tol_normt = conv, 100 * conv
     if 'ZC_KRAMERS' in os.environ:
@@ -72,9 +74,9 @@ def main():
     t2 = time.perf_counter()
     o, v = mycc.t1.shape
     eris = mycc.eris
-    print('%s/%s DirectZCCSD  nocc=%d nvir=%d  Kramers pairs: %s  max_memory %.0f MB  threads %s'
-          % (mol_name, basis, o, v, bool(eris.kramers), maxmem,
-             os.environ.get('OMP_NUM_THREADS', '?')))
+    print('%s/%s DirectZCCSD  nocc=%d nvir=%d  frozen %d  Kramers pairs: %s  max_memory %.0f MB  '
+          'threads %s' % (mol_name, basis, o, v, frozen, bool(eris.kramers), maxmem,
+                          os.environ.get('OMP_NUM_THREADS', '?')))
     print('matrix products: ' + blas.backend()[1])
     fock = mf.get_fock()
     C = mf.mo_coeff
@@ -105,6 +107,7 @@ def main():
               % (wall['energy'], e_t, watch.anon / 1e6))
         timers('t.', wall['energy'])
 
+    del eris        # the CCSD object has them: the frozen path may have to release them
     # the Lambda equations of CCSD(T): one pass over the triples for the sources
     # and the densities, then the iterations
     mycc.max_cycle = int(os.environ.get('ZC_LAMBDA_CYCLES', 100))
@@ -154,6 +157,7 @@ def main():
         w = dict((n, x) for n, x, _ in timing.report()).get(key, 0.0)
         print('  %s: %.1f s' % (key[3:], w))
         timers(prefix, max(w, 1e-9), 0.02)
+    o = o + frozen                      # the relaxed density: all spinors of the SCF
     print('  largest elements: z %.3e, occupied-occupied %.3e, virtual-virtual %.3e'
           % (abs(z).max(), abs((relaxed - unrelaxed)[:o, :o]).max(),
              abs((relaxed - unrelaxed)[o:, o:]).max()))
