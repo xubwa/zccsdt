@@ -2422,7 +2422,9 @@ the pass over the triples (244.8 s), 3.52 GB in the Lambda equations
 (63.1 s) and 3.74 GB in the relaxed density (152.0 s; 459.9 s after the
 CCSD), and with all electrons 3.40, 3.82, 3.13 and 3.35 GB (960.3 s after
 the CCSD on that node). The pass over the triples had given all of what was
-left to its batches: they now leave 32 MB of it (`triples.MARGIN_BYTES`).
+left to its batches: they now leave 32 MB of it (`triples.MARGIN_BYTES`),
+and the frozen case then has 3.89, 3.96, 3.53 and 3.75 GB (job 31626316,
+c056; 460.9 s after the CCSD).
 
 ## Correctness references
 
