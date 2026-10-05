@@ -8,8 +8,12 @@ comparison with CFOUR's xx2cccsd (CALC=CCSD(T), PROPS=FIRST_ORDER), xx2chbar,
 xx2clcc, xx2cccdenocbp, xx2czvec, xsox2cprop (bench/cfour/slurm_x2ccc.sh).
 
 usage: python bench/profile_t_relaxed.py MOLECULE BASIS
-  MOLECULE: h2o | n2 | c6h6 | ... (the geometries of bench/profile_iter.py)
-X2C-1e spinors from PySCF (x2c.UHF), all electrons unless ZC_FROZEN is set.
+  MOLECULE: h2o | n2 | c6h6 | hi | auh | ... (the geometries of
+  bench/profile_iter.py and bench/spinors.py); BASIS: a PySCF name, or
+  'heavy,light' (the first for the atoms beyond argon)
+X2C-1e spinors from PySCF (x2c.UHF), all electrons unless ZC_FROZEN is set;
+ZC_NUCMOD, ZC_HAM, ZC_SCF (bench/spinors.py): Gaussian nuclei, the X2CAMF
+Hamiltonian and the SCF of socutils.
 environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              DirectZCCSD.kramers; ZC_CONV: the convergence of the CCSD energy
              (default 1e-9; the amplitudes and lambda 100 times that, the
@@ -21,7 +25,9 @@ environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              times of the other phases do not depend on the convergence;
              the dipole then means nothing); ZC_T_ENERGY=0: without the run
              of the (T) energy alone; ZC_FROZEN: so many frozen occupied
-             spinors.
+             spinors; ZC_VIRCUT: the virtual spinors above this orbital
+             energy (Hartree) frozen as well (CFOUR's %vircut) - the
+             energies only, as with ZC_RELAXED=0.
 '''
 import os
 import resource
@@ -29,10 +35,10 @@ import sys
 import time
 
 import numpy as np
-from pyscf import gto, x2c
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from profile_iter import GEOM, SPIN, MemWatch                           # noqa: E402
+import spinors                                                          # noqa: E402
+from profile_iter import MemWatch                                       # noqa: E402
 
 from zccsdt import blas, timing                                         # noqa: E402
 from zccsdt.zccsd import DirectZCCSD, rdm, triples, zvector             # noqa: E402
@@ -50,17 +56,16 @@ def main():
     mol_name, basis = sys.argv[1:3]
     maxmem = float(os.environ.get('ZC_MAXMEM', 24000))
     conv = float(os.environ.get('ZC_CONV', 1e-9))
-    mol = gto.M(atom=GEOM[mol_name], basis=basis, spin=SPIN.get(mol_name, 0), verbose=0,
-                max_memory=maxmem)
+    mol = spinors.molecule(mol_name, basis, max_memory=maxmem)
     t0 = time.perf_counter()
-    mf = x2c.UHF(mol)
-    mf.conv_tol = float(os.environ.get('ZC_SCF_CONV', 1e-12))
-    mf.conv_tol_grad = float(os.environ.get('ZC_SCF_GRAD', 1e-8))
-    mf.max_cycle = 200
-    mf.kernel()
+    mf = spinors.scf(mol, float(os.environ.get('ZC_SCF_CONV', 1e-12)),
+                     float(os.environ.get('ZC_SCF_GRAD', 1e-8)))
     t_scf = time.perf_counter() - t0
     frozen = int(os.environ.get('ZC_FROZEN', 0))
-    mycc = DirectZCCSD(mf, frozen=frozen)
+    vircut = float(os.environ.get('ZC_VIRCUT', np.inf))
+    high = [p for p, e in enumerate(mf.mo_energy) if e > vircut and mf.mo_occ[p] == 0]
+    energies_only = bool(high) or os.environ.get('ZC_RELAXED', '1') == '0'
+    mycc = DirectZCCSD(mf, frozen=list(range(frozen)) + high if high else frozen)
     mycc.verbose, mycc.max_cycle = 0, int(os.environ.get('ZC_CCSD_CYCLES', 100))
     mycc.conv_tol, mycc.conv_tol_normt = conv, 100 * conv
     if 'ZC_KRAMERS' in os.environ:
@@ -77,9 +82,14 @@ def main():
     watch.stop()
     o, v = mycc.t1.shape
     eris = mycc.eris
-    print('%s/%s DirectZCCSD  nocc=%d nvir=%d  frozen %d  Kramers pairs: %s  max_memory %.0f MB  '
-          'threads %s' % (mol_name, basis, o, v, frozen, bool(eris.kramers), maxmem,
-                          os.environ.get('OMP_NUM_THREADS', '?')))
+    print('%s/%s DirectZCCSD  nocc=%d nvir=%d  frozen %d occupied, %d virtual  Kramers pairs: %s  '
+          'max_memory %.0f MB  threads %s'
+          % (mol_name, basis, o, v, frozen, len(high), bool(eris.kramers), maxmem,
+             os.environ.get('OMP_NUM_THREADS', '?')))
+    print('%d basis functions, %d electrons; Hamiltonian %s, %s nuclei, SCF of %s'
+          % (mol.nao_nr(), mol.nelectron, '+'.join([spinors.hamiltonian()[0]]
+                                                    + spinors.hamiltonian()[1]),
+             'Gaussian' if mol.nucmod else 'point', os.environ.get('ZC_SCF', 'pyscf')))
     print('matrix products: ' + blas.backend()[1])
     fock = mf.get_fock()
     Cs = mf.mo_coeff
@@ -93,7 +103,7 @@ def main():
     mycc.verbose = 4
 
     wall = {}
-    if os.environ.get('ZC_T_ENERGY', '1') != '0':
+    if os.environ.get('ZC_T_ENERGY', '1') != '0' or energies_only:
         # as DirectZCCSD.ccsd_t: on the packed t2, the layouts of the CCSD step released
         t2p = K.pack_t2(np.ascontiguousarray(mycc.t2))
         if getattr(eris, 'residual', None) is not None:
@@ -112,6 +122,10 @@ def main():
               % (wall['energy'], e_t, watch.anon / 1e6))
         timers('t.', wall['energy'])
 
+    if energies_only:
+        print('E(SCF) %.10f  E_corr(CCSD) %.10f  E(T) %.10f' % (mf.e_tot, mycc.e_corr, e_t))
+        print('peak RSS %.2f GB' % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6))
+        return
     del eris        # the CCSD object has them: the frozen path may have to release them
     # the Lambda equations of CCSD(T): one pass over the triples for the sources
     # and the densities, then the iterations
