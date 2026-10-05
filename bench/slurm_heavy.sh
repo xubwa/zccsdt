@@ -25,6 +25,18 @@
 #     without the finite differences; HV_MAXMEM: max_memory of zccsdt in MB
 #     (default 24000; CFOUR's MEMORY_SIZE is HV_CFOUR_GB, default 24);
 #   HV_T_ENERGY=0: zccsdt without the run of the (T) energy alone
+#   HV_MULT=2: a doublet (CFOUR: MULT=2, REFERENCE=UHF; zccsdt: the spin of
+#     bench/spinors.py), run twice by zccsdt: in the state of CFOUR's SCF,
+#     and with the spin on the axis of the molecule
+#   HV_SOCUTILS: the directory with socutils-git as 'socutils' (default
+#     ~/apps/socutils-git-env; it has prop/cfour.py, which reads CFOUR's
+#     operators). With CFOUR and the properties, all one-electron properties
+#     of xsox2cprop are compared: CFOUR's operators with the densities of
+#     zccsdt (bench/cfour/props.py), zccsdt in CFOUR's frame.
+#   HV_FF_OPERATOR: matrices of CFOUR for the finite differences in the
+#     place of the dipole operator, each with its step: 'UTM10Z:1e-3
+#     SOX2CEFD:1e-6' (the magnetic moment along z, the effective electric
+#     field: operators that are odd under time reversal, for a doublet)
 #   ZC_ROOT: snapshot of the repository
 # Thresholds: CFOUR SCF_CONV 10, CC_CONV 9, LINEQ_CONV 9; zccsdt 1e-9 in the
 # orbital gradient of the SCF, 1e-11 in the CCSD energy (1e-9 in t, lambda).
@@ -56,30 +68,77 @@ if [ $props = 1 ]; then
   progs="$progs xx2chbar xx2clcc xx2cccdenocbp xx2czvec xsox2cprop"
   extra="$extra,PROPS=FIRST_ORDER"
 fi
-if [ "${HV_CFOUR:-1}" != 0 ]; then
-  ZC_ROOT=$root ZC_NITER=0 CFOUR_PYBASIS=$basis CFOUR_SCF_CONV=10 CFOUR_CONV=9 \
-    CFOUR_MAXCYC=100 CFOUR_MEM_GB=${HV_CFOUR_GB:-24} CFOUR_EXTRA="$extra" \
-    CFOUR_SECTIONS="$sections" CFOUR_PROGS="$progs" bash $root/bench/cfour/slurm_x2ccc.sh $mol:$label
-fi
-
 scr=/tmp/zccsdt_heavy_${SLURM_JOB_ID:-local$$}
 keep=/home/xwang405/.claude/jobs/7ba4fcf7/tmp/heavy/${mol}_${label}_${SLURM_JOB_ID:-local$$}
 mkdir -p $scr $keep
+socutils=${HV_SOCUTILS:-/home/xwang405/apps/socutils-git-env}
+compare=0
+if [ "${HV_CFOUR:-1}" != 0 ]; then
+  post=
+  if [ $props = 1 ]; then
+    compare=1
+    post="PYTHONPATH=$socutils:$root/src:\$PYTHONPATH python $root/bench/cfour/props.py pack $mol $basis $scr/cfour_ops.npz $keep/geometry.txt"
+  fi
+  ZC_ROOT=$root ZC_NITER=0 CFOUR_PYBASIS=$basis CFOUR_SCF_CONV=10 CFOUR_CONV=9 \
+    CFOUR_MAXCYC=100 CFOUR_MEM_GB=${HV_CFOUR_GB:-24} CFOUR_EXTRA="$extra" \
+    CFOUR_MULT=${HV_MULT:-1} CFOUR_KEEP=$keep CFOUR_POST="$post" \
+    CFOUR_SECTIONS="$sections" CFOUR_PROGS="$progs" bash $root/bench/cfour/slurm_x2ccc.sh $mol:$label
+  # zccsdt in the frame of CFOUR: its operators are in it
+  [ -s $keep/geometry.txt ] && export ZC_GEOMETRY=$keep/geometry.txt
+fi
 export PYSCF_TMPDIR=$scr OMP_WAIT_POLICY=${OMP_WAIT_POLICY:-PASSIVE}
 export ZC_NUCMOD=G ZC_HAM=$ham ZC_SCF=socutils ZC_FROZEN=$((2 * ncore)) ZC_MAXMEM=${HV_MAXMEM:-24000}
 [ -n "$HV_VIRCUT" ] && export ZC_VIRCUT=$HV_VIRCUT
 cd $root
 noise="plugins found\|PYSCF_EXT_PATH\|^/home/\|new_energy_algo\|nuclear model\|^True$\|^False$\|DHF energy\|fractional occupation\|^$"
-echo "=== zccsdt $mol/$basis $ham  $(date)  scratch $scr"
-ZC_CONV=1e-11 ZC_SCF_GRAD=1e-9 ZC_RELAXED=$props ZC_T_ENERGY=${HV_T_ENERGY:-1} PYTHONPATH=src:$PYTHONPATH \
-  /usr/bin/time -f "wall %e s  max RSS %M KB" python -u bench/profile_t_relaxed.py $mol $basis 2>&1 \
-  | grep --line-buffered -v "$noise\|^cycle = " | tee $keep/zccsdt.out
+export PYTHONPATH=$socutils:src:$PYTHONPATH
+[ $props = 1 ] && export ZC_DENSITIES=$scr/zccsdt_densities.npz
+
+zccsdt() {      # $1: file for the output; $2: 0 without the (T) energy alone
+  ZC_CONV=1e-11 ZC_SCF_GRAD=1e-9 ZC_RELAXED=$props ZC_T_ENERGY=$2 \
+    /usr/bin/time -f "wall %e s  max RSS %M KB" python -u bench/profile_t_relaxed.py $mol $basis 2>&1 \
+    | grep --line-buffered -v "$noise\|^cycle = " | tee $keep/$1
+  if [ $compare = 1 ] && [ -f $scr/cfour_ops.npz ] && [ -f $scr/zccsdt_densities.npz ]; then
+    echo "=== the properties of xsox2cprop: CFOUR's operators, the densities of zccsdt  $(date)"
+    python bench/cfour/props.py compare $scr/cfour_ops.npz $scr/zccsdt_densities.npz $keep/xsox2cprop.out \
+      2>&1 | grep -v "$noise" | tee $keep/props_$1
+  fi
+}
+
+if [ "${HV_MULT:-1}" != 1 ] && [ -f $scr/cfour_ops.npz ]; then
+  # A doublet has a Kramers partner, and every state between the two is as
+  # good a solution of the SCF: what is odd under time reversal depends on
+  # which one a program holds. First the state of CFOUR, from the density of
+  # its SCF, for the comparison; then the state with the spin on the axis of
+  # the molecule, which is the one a property is defined for and the one the
+  # finite differences need.
+  echo "=== zccsdt $mol/$basis $ham, from the density of CFOUR's SCF  $(date)  scratch $scr"
+  ZC_DM0=$scr/cfour_ops.npz:SCFDM zccsdt zccsdt_cfour_state.out ${HV_T_ENERGY:-1}
+  export ZC_AXIAL=1
+  echo "=== zccsdt $mol/$basis $ham, the spin on the axis  $(date)"
+  zccsdt zccsdt.out 0
+else
+  echo "=== zccsdt $mol/$basis $ham  $(date)  scratch $scr"
+  zccsdt zccsdt.out ${HV_T_ENERGY:-1}
+fi
 if [ $props = 1 ] && [ "${HV_FF:-1}" != 0 ]; then
-  analytic=$(grep -o "CCSD(T) relaxed [0-9.-]*" $keep/zccsdt.out | awk '{print $3}')
   echo "=== finite differences of the energy  $(date)"
-  ZC_ANALYTIC=$analytic PYTHONPATH=src:$PYTHONPATH /usr/bin/time -f "wall %e s  max RSS %M KB" \
-    python -u bench/check_relaxed_ff.py $mol $basis 2>&1 | grep --line-buffered -v "$noise" | tee $keep/ff.out
+  if [ -n "$HV_FF_OPERATOR" ]; then
+    for item in $HV_FF_OPERATOR; do
+      ZC_FF_OPERATOR=$scr/cfour_ops.npz:${item%%:*} /usr/bin/time -f "wall %e s  max RSS %M KB" \
+        python -u bench/check_relaxed_ff.py $mol $basis ${item##*:} 2>&1 \
+        | grep --line-buffered -v "$noise" | tee -a $keep/ff.out
+    done
+  else
+    analytic=$(grep -o "CCSD(T) relaxed [0-9.-]*" $keep/zccsdt.out | awk '{print $3}')
+    ZC_ANALYTIC=$analytic /usr/bin/time -f "wall %e s  max RSS %M KB" \
+      python -u bench/check_relaxed_ff.py $mol $basis 2>&1 \
+      | grep --line-buffered -v "$noise" | tee $keep/ff.out
+  fi
 fi
 df -h $scr | tail -n 1
+# (HV_KEEP_OPS=1: the operators and the densities kept, for small molecules)
+[ "${HV_KEEP_OPS:-0}" = 1 ] && cp $scr/cfour_ops.npz $scr/zccsdt_densities.npz $keep/
+rm -f $scr/cfour_ops.npz $scr/zccsdt_densities.npz
 rmdir $scr
 echo "done $(date)"

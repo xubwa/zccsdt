@@ -24,7 +24,11 @@
 #   also makes the (T) terms of the Lambda equations and of the densities, and
 #   'xx2chbar xx2clcc xx2cccdenocbp xx2czvec xsox2cprop' give the CCSD(T) dipole)
 #   CFOUR_TAG: suffix of the directory of the kept outputs (two runs of a
-#   molecule in one job)
+#   molecule in one job); CFOUR_KEEP: that directory itself
+#   CFOUR_MULT: the multiplicity (default 1; 2: REFERENCE=UHF, and the SCF
+#   with the damping an open shell needs to converge)
+#   CFOUR_POST: a command run in the directory of the CFOUR run after its
+#   programs, before the directory is removed (bench/cfour/props.py pack)
 #   CFOUR_PYBASIS: a PySCF basis name, or 'heavy,light' (bench/spinors.py):
 #   the geometry (any molecule of bench/spinors.py) and the basis then come
 #   from PySCF's data (bench/cfour/genbas.py writes the GENBAS entries; the
@@ -75,7 +79,7 @@ for job in "$@"; do
   tag=${mol}_${basis}_x2c_${SLURM_JOB_ID:-local$$}${CFOUR_TAG:+_$CFOUR_TAG}
   # CFOUR work files on node-local disk (the home quota is small); only the
   # outputs are kept
-  keep=/home/xwang405/.claude/jobs/7ba4fcf7/tmp/cfour_bench/$tag
+  keep=${CFOUR_KEEP:-/home/xwang405/.claude/jobs/7ba4fcf7/tmp/cfour_bench/$tag}
   run=/tmp/zccsdt_cfour_$tag
   mkdir -p $run $keep && cd $run
   cp ${cfour%/bin}/basis/GENBAS GENBAS
@@ -90,14 +94,17 @@ for job in "$@"; do
   fi
   # (a line of the ZMAT has 80 columns: the extra keywords one per line)
   extra=; [ -n "$CFOUR_EXTRA" ] && extra=$'\n'$(echo "$CFOUR_EXTRA" | tr ',' '\n')
+  scf="SCF_CONV=${CFOUR_SCF_CONV:-10},SCF_MAXCYC=200"
+  [ "${CFOUR_MULT:-1}" != 1 ] && \
+    scf="REFERENCE=UHF,SCF_CONV=${CFOUR_SCF_CONV:-10}"$'\n'"SCF_MAXCYC=600,SCF_DAMPING=500,SCF_EXPSTART=30"
   cat > ZMAT <<ZEOF
 $mol X2C-${CFOUR_CALC:-CCSD(T)} $basis
 $geom
 
 *CFOUR(CALC=${CFOUR_CALC:-CCSD(T)},BASIS=SPECIAL
-SYM=OFF,COORDINATES=CARTESIAN,UNITS=$units,CHARGE=0,MULT=1
+SYM=OFF,COORDINATES=CARTESIAN,UNITS=$units,CHARGE=0,MULT=${CFOUR_MULT:-1}
 RELATIVISTIC=X2C1E,X2CKEY=SOATMX,ABCDTYPE=AOBASIS
-SCF_CONV=${CFOUR_SCF_CONV:-10},SCF_MAXCYC=200
+$scf
 CC_CONV=${CFOUR_CONV:-7},CC_MAXCYC=${CFOUR_MAXCYC:-50}$extra
 MEMORY_SIZE=${CFOUR_MEM_GB:-24},MEM_UNIT=GB)
 
@@ -121,7 +128,8 @@ ZEOF
       echo "$p FAILED"; tail -n 20 $p.out; break
     fi
   done
-  cp ZMAT $keep/
+  cp ZMAT MOL $keep/
+  [ -n "$CFOUR_POST" ] && (eval "$CFOUR_POST") 2>&1 | grep -v "plugins found\|PYSCF_EXT_PATH\|^/home/"
   grep -E "Integral transformation Elapsed|MO Integral sorting Elapsed|AO Integral Elapsed" \
     $keep/xx2cvtran.out | sed 's/^ */  xx2cvtran: /; s/  */ /g'
   [ -f $keep/xsox2chf.out ] && grep "Final SCF Energy" $keep/xsox2chf.out | tail -n 1 | awk '{print "  xsox2chf: E(SCF) " $5 " after " $4 " cycles"}'

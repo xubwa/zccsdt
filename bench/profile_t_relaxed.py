@@ -27,7 +27,9 @@ environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              of the (T) energy alone; ZC_FROZEN: so many frozen occupied
              spinors; ZC_VIRCUT: the virtual spinors above this orbital
              energy (Hartree) frozen as well (CFOUR's %vircut) - the
-             energies only, as with ZC_RELAXED=0.
+             energies only, as with ZC_RELAXED=0; ZC_DENSITIES: a file for
+             the densities in the spinor AO basis (scf, unrelaxed, relaxed;
+             for bench/cfour/props.py).
 '''
 import os
 import resource
@@ -210,6 +212,9 @@ def main():
           % (total, total * len(cycles) / (t2 - t1),
              ', %.2f times the (T) energy' % (total / wall['energy']) if 'energy' in wall else ''))
 
+    if os.environ.get('ZC_DENSITIES'):
+        np.savez(os.environ['ZC_DENSITIES'], scf=mf.make_rdm1(),
+                 unrelaxed=C @ unrelaxed @ C.conj().T, relaxed=C @ relaxed @ C.conj().T)
     nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())
     r = rdm.dipole_integrals(mycc, True)
     print('dipole moment, z component (a.u., picture-change transformed operator): SCF %.9f, '
