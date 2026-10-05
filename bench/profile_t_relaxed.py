@@ -79,11 +79,11 @@ def main():
                           os.environ.get('OMP_NUM_THREADS', '?')))
     print('matrix products: ' + blas.backend()[1])
     fock = mf.get_fock()
-    C = mf.mo_coeff
+    Cs = mf.mo_coeff
     occ = mf.mo_occ > 0
     print('SCF %.1f s (converged %s, largest occupied-virtual element of its Fock matrix %.1e); '
           'integrals %.1f s; CCSD %.1f s: %d cycles (%.2f s each), converged %s, E_corr %.10f'
-          % (t_scf, mf.converged, abs(C[:, ~occ].conj().T @ fock @ C[:, occ]).max(), t1 - t0,
+          % (t_scf, mf.converged, abs(Cs[:, ~occ].conj().T @ fock @ Cs[:, occ]).max(), t1 - t0,
              t2 - t1, len(cycles), (t2 - t1) / max(len(cycles), 1), mycc.converged, mycc.e_corr))
     mycc.verbose = 4
 
@@ -115,23 +115,29 @@ def main():
 
     def t_terms(*args, **kwargs):
         timing.reset()
+        w = MemWatch()
+        w.start()
         ta = time.perf_counter()
         out = inner(*args, **kwargs)
         done['wall'] = time.perf_counter() - ta
+        w.stop()
+        done['anon'] = w.anon
         done['timers'] = [x for x in timing.report() if x[0].startswith('t.')]
+        done['watch'] = MemWatch()          # the Lambda equations alone
+        done['watch'].start()
         return out
     mycc.t_terms = t_terms
-    watch = MemWatch()
-    watch.start()
     ta = time.perf_counter()
     mycc.solve_lambda(with_t='gradient')
     wall['lambda'] = time.perf_counter() - ta - done['wall']
+    watch = done.pop('watch')
     watch.stop()
     mycc.t_terms = inner
     wall['terms'] = done['wall']
     print('(T) with the sources of Lambda and the densities of the orbital gradient: %.1f s%s, '
-          'E(T) %.10f' % (wall['terms'], ' (%.2f times the (T) energy)'
-                          % (wall['terms'] / wall['energy']) if 'energy' in wall else '', mycc.e_t))
+          'E(T) %.10f, peak anonymous memory %.2f GB'
+          % (wall['terms'], ' (%.2f times the (T) energy)' % (wall['terms'] / wall['energy'])
+             if 'energy' in wall else '', mycc.e_t, done['anon'] / 1e6))
     for name, w, calls in done['timers']:
         print('    %-14s %9.1f s  %5.1f %%  (%d calls)' % (name[2:], w, 100 * w / wall['terms'],
                                                            calls))
@@ -139,9 +145,12 @@ def main():
     print('    the density of <bc||ek>: %.2f GB, %s' % (
         den.g1.nbytes / 1e9, 'in a scratch file' if getattr(den.g1, '_mmap', None) is not None
         else 'in memory'))
-    print('Lambda equations of CCSD(T): %.1f s, converged %s; peak anonymous memory of both '
-          '%.2f GB' % (wall['lambda'], mycc.converged_lambda, watch.anon / 1e6))
+    print('Lambda equations of CCSD(T): %.1f s, converged %s; peak anonymous memory %.2f GB'
+          % (wall['lambda'], mycc.converged_lambda, watch.anon / 1e6))
 
+    # (before the kernel: with frozen spinors and little memory it gives up the
+    # integrals of the active space, which have the spinors of the amplitudes)
+    C, mo_e = zvector.full_space(mycc)[:2]
     watch = MemWatch()
     watch.start()
     timing.reset()
@@ -154,16 +163,16 @@ def main():
           % (wall['relaxed'], watch.anon / 1e6))
     timers('zv.', wall['relaxed'])
     for prefix, key in (('og.', 'zv.orbgrad'), ('ogt.', 'zv.orbgrad_t')):
+        # with frozen spinors zv.orbgrad is all of gradient_frozen, orbgrad_t in it
         w = dict((n, x) for n, x, _ in timing.report()).get(key, 0.0)
         print('  %s: %.1f s' % (key[3:], w))
-        timers(prefix, max(w, 1e-9), 0.02)
+        timers(prefix, max(w, wall['relaxed'] if not w else 0.0), 0.02 if w else 0.0)
     o = o + frozen                      # the relaxed density: all spinors of the SCF
     print('  largest elements: z %.3e, occupied-occupied %.3e, virtual-virtual %.3e'
           % (abs(z).max(), abs((relaxed - unrelaxed)[:o, :o]).max(),
              abs((relaxed - unrelaxed)[o:, o:]).max()))
     # the rotations among occupied and among virtual spinors, y = G / (e_q - e_p):
     # how close the levels are that they connect
-    mo_e = zvector.full_space(mycc)[1]
     for name, blk in (('occupied', slice(0, o)), ('virtual', slice(o, None))):
         y = (relaxed - unrelaxed)[blk, blk]
         de = abs(mo_e[blk][None, :] - mo_e[blk][:, None])
@@ -182,7 +191,6 @@ def main():
           % (total, total * len(cycles) / (t2 - t1),
              ', %.2f times the (T) energy' % (total / wall['energy']) if 'energy' in wall else ''))
 
-    C = zvector.full_space(mycc)[0]
     nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())
     r = rdm.dipole_integrals(mycc, True)
     print('dipole moment, z component (a.u., picture-change transformed operator): SCF %.9f, '
