@@ -349,7 +349,8 @@ def active_pairs(act):
     return act[ia] * (act[ia] - 1) // 2 + act[ja]
 
 
-def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coulomb=None):
+def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coulomb=None,
+                    t_terms=None):
     '''(G[a, x], G[i, c]): the blocks of the orbital gradient that the
     Z-vector equations of a CCSD with frozen occupied spinors need - the
     virtual spinors a with all occupied x, frozen and active, in the order of
@@ -381,7 +382,16 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
     packed and released while this runs, lambda2 is padded only when the
     Lambda step needs it, and if a plan does not fit next to the integrals
     of the active space, those are released (mycc.eris = None: mycc.ao2mo()
-    makes them again when they are needed).'''
+    makes them again when they are needed).
+
+    ``t_terms``: for CCSD(T), with lambda of CCSD(T) - the terms and the
+    Densities of zccsd.triples.kernel(terms='gradient') for the active
+    spinors.  E(T) is that of the active spinors and cannot be had from the
+    code for all spinors with zero amplitudes; its densities, zero where an
+    index is frozen, meet the integrals of all occupied spinors
+    (zccsd.orbgrad_t with ``act``), and so do the sources with t.  The
+    blocks above get these terms, and two more are returned: (G[a, x],
+    G[i, c], G[i, j], G[a, b]) with i, j the active occupied spinors.'''
     from zccsdt.zccsd import kernels as K
     log = logger.new_logger(mycc, verbose)
     C, mo_e, o, frozen = full_space(mycc)
@@ -406,7 +416,7 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
         mycc.l2 = None
     try:
         return _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log,
-                                coulomb)
+                                coulomb, t_terms)
     finally:
         if own_t:
             mycc.t2 = K.unpack_t2(np.ascontiguousarray(T2p[rows_act]), oa, v)
@@ -414,7 +424,8 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
             mycc.l2 = K.unpack_t2(l2a, oa, v)
 
 
-def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulomb):
+def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulomb,
+                     t_terms=None):
     '''gradient_frozen for the padded t and the packed lambda2 of the active
     spinors, l2a.'''
     import gc
@@ -508,7 +519,16 @@ def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulo
     res.close()
     Gvo = 0.5 * Gnh
     Gvo[:, frozen] += 0.5 * P1.conj().T
-    return Gvo, 0.5 * (Gic.T - Gci.conj().T)[act]
+    Gic = 0.5 * (Gic.T - Gci.conj().T)[act]
+    if t_terms is None:
+        return Gvo, Gic
+    from zccsdt.zccsd import orbgrad_t
+    del L1, L2p
+    Gt = guarded(lambda: orbgrad_t.kernel(full, eris, T1, T2p, *t_terms, act=act, verbose=log,
+                                          coulomb=coulomb))
+    Gt = 0.5 * (Gt - Gt.conj().T)
+    return (Gvo + Gt[o:, :o], Gic + Gt[np.ix_(act, frozen)], Gt[np.ix_(act, act)],
+            np.ascontiguousarray(Gt[o:, o:]))
 
 
 def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-9,
@@ -523,7 +543,8 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
 
     ``with_t``: for CCSD(T).  lambda is that of CCSD(T) - of the CCSD object
     if it has it, else solved for; l1 and l2 are not taken -, the density has
-    its (T) terms, and the gradient those of zccsd.orbgrad_t, from the
+    its (T) terms, and the gradient those of zccsd.orbgrad_t (with frozen
+    spinors through gradient_frozen), from the
     densities of (T): one pass over the triples gives them together with the
     sources of lambda (solve_lambda with with_t='gradient'; if lambda is
     there without them, the pass is done here).  The occupied-occupied and
@@ -540,8 +561,6 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     C, mo_e, o, frozen = full_space(mycc)
     tg = None
     if with_t:
-        if frozen.size:
-            raise NotImplementedError('orbital relaxation of CCSD(T) with frozen spinors')
         own = (t1 is None and t2 is None and getattr(mycc, 'l1', None) is not None
                and getattr(mycc, 'l2', None) is not None and getattr(mycc, '_l_with_t', False))
         if not own:
@@ -606,9 +625,19 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
                 Gt = 0.5 * (Gt - Gt.conj().T)
                 gvo, Goo, Gvv = -Gt[o:, :o], Gt[:o, :o], Gt[o:, o:]
                 del Gt, terms, dens
-        else:
+        elif not with_t:
             with timer('zv.orbgrad'):
                 Gvo, Gic = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose)
+        else:
+            try:
+                with timer('zv.orbgrad'):
+                    Gvo, Gic, Goo, Gvv = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose,
+                                                         t_terms=(terms, dens))
+            finally:
+                dens.close()
+                mycc._drop_t_terms()
+                mycc._t_density = terms[2:]
+            del terms, dens
     finally:
         if own_t:
             mycc.t2 = K.unpack_t2(t2p, oa, v)

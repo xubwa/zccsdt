@@ -225,31 +225,33 @@ def test_orbital_gradient_of_ccsd_t(mol, kr):
         assert abs(G[blk, blk] - de * D)[~same].max() < 1e-10
 
 
-@pytest.mark.parametrize('kr', [False, None])
-def test_relaxed_ccsd_t_density_is_energy_derivative(mol, kr):
+@pytest.mark.parametrize('kr,frozen', [(False, 0), (None, 0), (False, 2), (None, 2)])
+def test_relaxed_ccsd_t_density_is_energy_derivative(mol, kr, frozen):
     '''CCSD(T): the relaxed density - lambda with the sources of (T), the
     (T) terms of the density and of the orbital gradient, the rotations
     among occupied and among virtual spinors, the Z-vector equations -
     against the central difference of E(SCF) + E(CCSD) + E(T) with the SCF
     repeated in the field; from the full arrays and from the layouts of the
-    amplitude step (zvector.kernel), in one pass over the triples.'''
+    amplitude step (zvector.kernel), in one pass over the triples.  Also
+    with two frozen occupied spinors, whose E(T) is that of the active ones.'''
     mf = scf(mol)
-    mycc = ccsd(mf, kr)
-    C, o = mycc.eris.mo_coeff, mycc.eris.nocc
+    mycc = ccsd(mf, kr, frozen)
+    C, o = zvector.full_space(mycc)[0], 10
     dense, unrelaxed, z = zvector.relaxed_rdm1_dense(mycc, mf, tol=1e-10, with_t=True)
     assert mycc._l_with_t and mycc._t_gradient is None
     relaxed, unrel2, z2 = zvector.kernel(mycc, mf=mf, tol=1e-10, with_t=True)
     assert abs(unrel2 - unrelaxed).max() < 1e-12 and abs(relaxed - dense).max() < 2e-7
     assert abs(relaxed - relaxed.conj().T).max() < 1e-12
-    # the rotations among occupied and among virtual spinors
-    assert abs((relaxed - unrelaxed)[:o, :o]).max() > 5e-6
+    # the rotations among active occupied and among virtual spinors
+    assert abs((relaxed - unrelaxed)[frozen:o, frozen:o]).max() > 5e-6
     assert abs((relaxed - unrelaxed)[o:, o:]).max() > 5e-6
+    assert not frozen or abs((relaxed - unrelaxed)[:frozen, :frozen]).max() < 1e-12
     V = mol.intor('int1e_r_spinor')[2]
     Vmo = C.conj().T @ V @ C
     eps = 1e-4
     e = []
     for m in (scf(mol, eps, V), scf(mol, -eps, V)):
-        cc = ccsd(m, kr)
+        cc = ccsd(m, kr, frozen)
         e.append(m.e_tot + cc.e_corr + cc.ccsd_t())
     derivative = (e[0] - e[1]) / (2 * eps)
     assert abs(derivative - np.einsum('pq,qp', Vmo, dense).real) < 2e-7
@@ -257,12 +259,63 @@ def test_relaxed_ccsd_t_density_is_energy_derivative(mol, kr):
     assert abs(derivative - np.einsum('pq,qp', Vmo, unrelaxed).real) > 3e-4
     # all of it from the CCSD object: lambda, the sources and the densities of
     # (T) in one pass over the triples
-    fresh = ccsd(mf, kr)
+    fresh = ccsd(mf, kr, frozen)
     nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())[2]
     dip = fresh.dip_moment(with_t=True, relaxed=True, unit='AU', picture_change=False)
     assert abs(dip[2] - (nuclear - derivative)) < 2e-7 and abs(dip[:2]).max() < 1e-7
     assert fresh._l_with_t and fresh._t_gradient is None and abs(fresh.e_t - mycc.e_t) < 1e-10
-    assert abs(fresh.make_rdm1(with_t=True) - unrelaxed).max() < 1e-8
+    assert abs(fresh.make_rdm1(with_t=True) - unrelaxed[frozen:, frozen:]).max() < 1e-8
+
+
+def test_orbital_gradient_of_ccsd_t_with_frozen_spinors(mol):
+    '''Two frozen occupied spinors: zccsd.orbgrad_t on the integrals of all
+    occupied spinors, with the densities and the sources of the active ones
+    (zero where an index is frozen), against the full arrays by origin; no
+    gradient between the frozen spinors.'''
+    from zccsdt.zccsd import lam_t, orbgrad_t, triples
+    mf = scf(mol)
+    mycc = ccsd(mf, False, frozen=2)
+    C, mo_e, o, frozen = zvector.full_space(mycc)
+    act = np.setdiff1d(np.arange(o), frozen)
+    n = C.shape[1]
+    oc, vi = slice(0, o), slice(o, n)
+    h = C.conj().T @ mf.get_hcore() @ C
+    eri = mol.intor('int2e_spinor')
+    eri = np.einsum('mp,nq,mnls,lr,st->pqrt', C.conj(), C, eri, C.conj(), C, optimize=True)
+    g = eri.transpose(0, 2, 1, 3) - eri.transpose(0, 2, 3, 1)
+    fock = h + np.einsum('pkqk->pq', g[:, :o, :, :o])
+    t1, t2 = mycc.t1, mycc.t2
+    d2, d1 = zvector.t_densities(t1, t2, mycc.eris, n, o, act)
+    ref, zero2, zero1 = {}, np.zeros_like(d2), np.zeros_like(d1)
+    for name, sl in (('g1', (vi, vi, vi, oc)), ('g2', (oc, vi, oc, oc)), ('g3', (vi, vi, oc, oc))):
+        x = np.zeros_like(d2)
+        x[sl] = d2[sl]
+        ref[name] = zvector.gradient_nh(fock, g, x, zero1, o)
+    ref['fock'] = zvector.gradient_nh(fock, g, zero2, d1, o)
+    # the sources with t, on the active spinors
+    s1, s2 = lam_t.sources(t1, t2, mycc.eris)
+    eia = mo_e[act][:, None] - mo_e[o:]
+    s1, s2 = s1 * eia, s2 * (eia[:, None, :, None] + eia[None, :, None, :])
+    x = np.zeros((n, n), dtype=np.complex128)
+    x[np.ix_(act, np.arange(o, n))] = s1
+    x[np.ix_(act, act)] = -(s1 @ t1.T + 0.5 * np.einsum('jkab,ikab->ji', s2, t2))
+    x[vi, vi] = np.einsum('ia,ib->ba', s1, t1) + 0.5 * np.einsum('ijac,ijbc->ba', s2, t2)
+    ref['sources'] = x
+    full = DirectZCCSD(mf, frozen=0, mo_coeff=C, mo_occ=mycc.mo_occ)
+    full.verbose, full.kramers = 0, False
+    eris = full.ao2mo(C)
+    T1, T2p = zvector.pad_amplitudes(o, n - o, act, t1, t2)
+    e_t, terms, dens = triples.kernel(mycc, mycc.eris, t1, t2, terms='gradient')
+    parts = {}
+    Gt = orbgrad_t.kernel(full, eris, T1, T2p, terms, dens, act=act, parts=parts)
+    dens.close()
+    for name in orbgrad_t.PARTS:
+        assert abs(parts[name] - ref[name]).max() < 1e-11, name
+    # with the frozen spinors as an index of the integrals
+    assert abs(sum(ref[k] for k in ('g1', 'g2', 'g3'))[np.ix_(act, frozen)]).max() > 1e-5
+    assert abs(sum(ref.values())[vi, :2]).max() > 1e-5
+    G = 0.5 * (Gt - Gt.conj().T)
+    assert abs(G[:2, :2]).max() < 1e-15
 
 
 def test_gamma1_equals_pyscf():
@@ -388,3 +441,77 @@ def test_orbital_gradient_within_plan(monkeypatch):
         G = orbgrad.gradient(cc, eris, t1, t2p, l1, l2p)
         res.kramers = False
         assert abs(G - orbgrad.gradient(cc, eris, t1, t2p, l1, l2p)).max() < 1e-10
+
+
+def test_orbital_gradient_of_t_within_budget(monkeypatch, tmp_path):
+    '''zccsd.orbgrad_t: what it allocates (tracemalloc follows numpy's
+    allocations) next to the packed arrays and the densities it is given
+    stays within own_bytes and the slabs of the integral transformation, as
+    its kernel plans them from max_memory - with the density of <bc||ek> in
+    memory and in a scratch file, in one slab and in several; MemoryError
+    where a slab of one virtual spinor does not fit.  Random amplitudes and
+    densities with the symmetry of the Kramers pairs: the same result for
+    every budget, and without the reduction of the sum over the slabs.'''
+    import tracemalloc
+    from pyscf import lib
+    from zccsdt import memory, scratch
+    from zccsdt.zccsd import ao2mo, kramers, orbgrad_t, triples
+    from zccsdt.zccsd import kernels as K
+    monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    monkeypatch.setattr(memory, 'resident', lambda: 0)
+    monkeypatch.setattr(orbgrad, 'UNPACK_BYTES', 1 << 20)   # of the size of the arrays here
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
+    mf = x2c.UHF(mol).run(conv_tol=1e-10)
+    cc = DirectZCCSD(mf)
+    cc.verbose = 0
+    eris = cc.ao2mo()
+    assert eris.kramers
+    o, v = eris.nocc, eris.fock.shape[0] - eris.nocc
+    npo, npv = K.npair(o), K.npair(v)
+    rng = np.random.default_rng(7)
+
+    def random(shape, pairs=()):
+        x = 0.02 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+        return np.ascontiguousarray(0.5 * (x + kramers.image(x, pairs=pairs)))
+    t1, t2p = random((o, v)), random((npo, npv), (0, 1))
+    terms = (random((o, v)), random((npo, npv), (0, 1)), rng.standard_normal(o) + 0j,
+             rng.standard_normal(v) + 0j, random((v, o)))
+    for k in (2, 3):                    # the diagonals of a symmetric density
+        terms[k][terms[k].size // 2:] = terms[k][:terms[k].size // 2]
+    g1 = random((o, v, npv), (2,))
+    g2, g3 = random((o, v, npo), (2,)), random((npo, npv), (0, 1))
+    scr = scratch.Scratch()
+    g1m = scr.create('g1', g1.shape, np.complex128)
+    g1m[:] = g1
+    slab = ao2mo.plan_slabs(mol, v, v, None, sort_arrays=0)
+    own, one = orbgrad_t.own_bytes(o, v), slab.need
+    assert one > 16 * v ** 3 and own > 4e6
+    cc.max_memory = 0.9 * (own + one) / 1e6
+    with pytest.raises(MemoryError, match='of the orbital gradient of \\(T\\)'):
+        orbgrad_t.kernel(cc, eris, t1, t2p, terms, triples.Densities(g1, g2, g3))
+    ref, slabs = None, set()
+    for factor, dens in ((1.0, g1m), (1.0, g1), (3.0, g1), (8.0, g1m), (20.0, g1)):
+        budget = int(own + factor * one) + 1
+        cc.max_memory = budget / 1e6
+        plan = orbgrad_t.slab_plan(mol, cc.max_memory, o, v)
+        slabs.add(plan.nket)
+        coulomb = orbgrad.Coulomb(mol, 0)       # AO direct: the same for every budget
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        G = orbgrad_t.kernel(cc, eris, t1, t2p, terms, triples.Densities(dens, g2, g3),
+                             coulomb=coulomb)
+        peak = tracemalloc.get_traced_memory()[1] - base
+        tracemalloc.stop()
+        print('x%-4.1f budget %6.1f MB  own %5.1f MB  slabs of %3d: %6.1f MB  peak %6.1f MB'
+              % (factor, budget / 1e6, own / 1e6, plan.nket, plan.work / 1e6, peak / 1e6))
+        assert peak <= own + plan.work and peak <= budget, (factor, peak, own, plan.work)
+        ref = G if ref is None else ref
+        assert abs(G - ref).max() < 1e-11 and abs(ref).max() > 1e-3
+    assert len(slabs) > 2 and 1 in slabs
+    scr.close()
+    # all of the slabs, without their time-reversed image
+    eris.residual.kramers = False
+    cc.max_memory = 100000
+    G = orbgrad_t.kernel(cc, eris, t1, t2p, terms, triples.Densities(g1, g2, g3))
+    assert abs(G - ref).max() < 1e-10

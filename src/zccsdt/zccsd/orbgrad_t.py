@@ -97,13 +97,13 @@ def pad(nocc, act, terms, dens):
 def own_bytes(nocc, nvir):
     '''Bytes of the arrays of gradient() besides the packed ones it is given
     and the slabs of the integral transformation: a matrix on the occupied
-    pairs, the arrays with three occupied indices, and what the passes over
-    g1 and <ke||bc> take for one occupied and one virtual index (rows that
-    are unpacked: orbgrad.UNPACK_BYTES at a time).'''
+    pairs, the matrices on the spinors, and what the passes over g1 and
+    <ke||bc> take for one occupied and one virtual index (rows that are
+    unpacked: orbgrad.UNPACK_BYTES at a time).'''
     o, v = int(nocc), int(nvir)
-    npo, npv = K.npair(o), K.npair(v)
-    return (16 * (npo * npo + 4 * o * v * npo + 2 * o ** 3 * v + 3 * o * v * v + 2 * (o + v) * npv)
-            + 3 * orbgrad.UNPACK_BYTES)
+    npo, npv, n = K.npair(o), K.npair(v), o + v
+    return (16 * (npo * npo + 2 * o ** 3 + 12 * n * n + 4 * o * v * v + (3 * o + v) * npv)
+            + 4 * orbgrad.UNPACK_BYTES)
 
 
 def slab_plan(mol, max_memory, nocc, nvir):
@@ -218,21 +218,23 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, slabs, parts=None, cou
         G['g2'][vi, oc] += Tvo2
 
     with timer('ogt.small'):
-        # ---- g2 with <mi||jk>, <ja||kl> = conj(<kl||ja>), <ma||ik>, <mb||jk>
+        # ---- g2[m, a, (jk)], one m at a time, with <mi||jk>, <ja||kl> =
+        # conj(<kl||ja>), <ma||ik> = conj(<ik||ma>), <mb||jk> = conj(<jk||mb>)
         X = G['g2']
         en = res.ooov_en                                                # [i, e, (m>n)] = <mn||ie>
-        Oall = np.empty((o, o, npo), dtype=np.complex128)               # [i, m, (jk)] = <mi||jk>
-        for i in range(o):
-            Oall[i] = -psgn[i][:, None] * res.oooo_p[prow[i]]
-        g2T = np.ascontiguousarray(g2.transpose(1, 0, 2)).reshape(v, o * npo)   # [a, (m, jk)]
-        X[oc, vi] += blas.gemm(Oall.reshape(o, o * npo), g2T.T)
-        del Oall
-        X[oc, oc] += blas.gemm(np.conj(en).reshape(o, v * npo), g2.reshape(o, v * npo).T)
-        g2u = K.unpack_tril(g2.reshape(n1, npo), o, 'pab').reshape(o, v, o, o)  # [m, a, j, k]
-        X[oc, oc] -= blas.gemm(np.ascontiguousarray(g2u.transpose(2, 3, 0, 1)).reshape(o, o * n1),
-                               np.conj(res.ooov).reshape(o, o * n1).T)
-        X[vi, vi] += blas.gemm(np.conj(en.transpose(1, 0, 2)).reshape(v, o * npo), g2T.T)
-        del g2T
+        T2oo = np.zeros((o, o), dtype=np.complex128)
+        for m in act:
+            gm = g2[m]                                                  # [a, (jk)]
+            Om = -psgn[:, m][:, None] * res.oooo_p[prow[:, m]]          # [i, (jk)] = <mi||jk>
+            X[oc, vi] += blas.gemm(Om, gm.T)
+            X[vi, vi] += blas.gemm(np.conj(en[m]), gm.T)
+            # the conjugate of sum_a conj(<kl||ja>) g2[m, a, (kl)], all j
+            blas.gemm(en.reshape(o, v * npo), np.conj(gm).reshape(v * npo, 1), C=T2oo[:, m:m + 1])
+            gu = K.unpack_tril(np.ascontiguousarray(gm), o, 'pab')      # [a, j, k]
+            X[oc, oc] -= blas.gemm(np.ascontiguousarray(gu.transpose(1, 2, 0)).reshape(o, n1),
+                                   np.conj(res.ooov[:, :, m, :]).reshape(o, n1).T)
+            del gu, Om
+        X[oc, oc] += T2oo.conj()
 
     # ---- the pass over <ke||bc> and g1 by k
     c6 = np.zeros((o, v), dtype=np.complex128)          # conjugates
@@ -245,18 +247,19 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, slabs, parts=None, cou
     ustep = max(1, min(v, orbgrad.UNPACK_BYTES // (16 * v * v)))
     with timer('ogt.ovvv'):
         for k in range(o):
+            if pos[k] < 0:              # no density has a frozen k
+                continue
             Om = res.ovvv_p[k]                                          # [e, (b>c)]
             # g3[(bc); i, k] with <bc||ak> = -conj(<ka||bc>)
             Gk = np.conj(psgn[k][:, None] * g3[prow[k]])                # [i, (bc)]
             blas.gemm(Gk, Om.T, C=c6, beta=1.0)
             del Gk
-            if pos[k] < 0:
-                scratch.unmap(Om)
-                continue
             Ek = np.asarray(res.E[k * v:(k + 1) * v])                   # [a, (k' c)]: <kc||a k'>
             # g2[k, c; i, k'] with <kc||a k'>
-            blas.gemm(Ek, np.ascontiguousarray(g2u[k].transpose(2, 0, 1)).reshape(n1, o),
+            gu = K.unpack_tril(np.ascontiguousarray(g2[k]), o, 'pab')   # [c, i, k']
+            blas.gemm(Ek, np.ascontiguousarray(gu.transpose(2, 0, 1)).reshape(n1, o),
                       C=T2ov, beta=1.0)
+            del gu
             Gm = g1[pos[k]]                                             # [e, (b>c)]
             # g1[(bc), a, k] with <bc||ik> = -conj(<ik||bc>)
             Ok = np.conj(psgn[k][:, None] * res.oovv_p[prow[k]])        # [i, (bc)]
@@ -287,7 +290,6 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, slabs, parts=None, cou
     X[vi, oc] += T1vo
     X[vi, vi] += T1vv - cvv.conj().T
     X[oc, vi] += T1ov
-    del g2u
 
     # ---- g1 by its rows e: with <bc||ea> from the slabs of the integral
     # transformation, and with <bc||ei> = -conj(<ie||bc>) (all occupied i)
