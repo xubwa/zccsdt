@@ -122,6 +122,8 @@ BATCH_BYTES = 4 << 30
 # The products of the triples with the integrals (the terms of Lambda) of a
 # block of virtuals or of pairs, at most
 REVERSE_BYTES = 64 << 20
+# Of what max_memory leaves beyond the least, this much is not given to the batches
+MARGIN_BYTES = 32 << 20
 
 _P, _I = ctypes.c_void_p, ctypes.c_int64
 if K._lib is not None and hasattr(K._lib, 'zc_t_batch'):
@@ -482,7 +484,10 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
         nbytes = BATCH_BYTES
     else:
         rbytes += min(left // 8, max(0, REVERSE_BYTES - rbytes)) if lam else 0
-        nbytes = min(BATCH_BYTES, floor + left - rbytes)
+        # not all of what is left: the process grows by some 20 MB during the
+        # pass that are no array of this plan (benzene/cc-pVDZ with a frozen
+        # core under 4000 MB: a peak of 4.02 GB when the batches took it all)
+        nbytes = min(BATCH_BYTES, floor + left - rbytes - min(left // 16, MARGIN_BYTES))
     rcap = rbytes // xbytes
     # the batches: (a, a1, None), a range of a with all its b - b < a, or with
     # Kramers pairs b below the barred half -, or (a, a + 1, (b0, b1)), one a

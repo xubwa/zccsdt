@@ -2401,6 +2401,29 @@ amplitude step -, and the two small densities wait in the scratch file of
 the large one while the Lambda equations are solved, whose plan was at its
 floor here (1.96 GB of 1.96 GB).
 
+With 12 frozen spinors (benzene/cc-pVDZ, 30 active occupied spinors; job
+31612716, c402): the CCSD takes 51.0 s, (T) alone 80.9 s, (T) with the
+sources and the densities 311.1 s, the Lambda equations 62.7 s, and the
+relaxed density 110.6 s - the orbital gradient with the integrals of all 42
+occupied spinors as for CCSD (85 s there), now with the (T) terms -, 484.4 s
+after the CCSD with a peak of 16.2 GB.
+
+Under 4000 MB that case showed 4.90 GB of anonymous memory during the
+Lambda equations (job 31612966, sampled by phase; 4.02 GB in the pass over
+the triples, 3.76 GB in the relaxed density), which the run with all
+electrons had not: the DIIS of `zccsdt.cc` kept parts of a vector with
+fewer than 1e7 elements in memory whatever the plan had decided, and the
+packed lambda2 has 7.5 million with the frozen core (14.8 million without:
+in the scratch file) - twelve vectors, 1.4 GB that the plan counted as
+none. The same held for the CCSD iterations. The iterations pass their own
+threshold now (`amps.DIIS_SMALL`: t1 stays in memory). With it (job 31614667,
+c449) the peaks of that case are 3.89 GB in the CCSD iterations, 4.01 GB in
+the pass over the triples (244.8 s), 3.52 GB in the Lambda equations
+(63.1 s) and 3.74 GB in the relaxed density (152.0 s; 459.9 s after the
+CCSD), and with all electrons 3.40, 3.82, 3.13 and 3.35 GB (960.3 s after
+the CCSD on that node). The pass over the triples had given all of what was
+left to its batches: they now leave 32 MB of it (`triples.MARGIN_BYTES`).
+
 ## Correctness references
 
 | Reference | Agreement | Test |
