@@ -2202,13 +2202,21 @@ Lambda equations; job 31600371, H2O/cc-pVDZ, all electrons, CC_CONV=9;
 `bench/check_dipole.py`, then with the gradient from the full two-particle
 density), the z component of the dipole moment in atomic units:
 
-| | CFOUR | zccsdt | difference |
-|---|---|---|---|
-| E(SCF) | -76.075431217 | -76.075431227 | 1.0e-8 |
-| E_corr(CCSD) | -0.213384851 | -0.213384837 | 1.4e-8 |
-| SCF dipole | 0.808722476 | 0.808722401 | 7.5e-8 |
-| CCSD dipole, relaxed | 0.766033160 | 0.766033118 | 4.2e-8 |
-| its correlation part | -0.042689316 | -0.042689283 | 3.3e-8 |
+| | CFOUR | CFOUR, geometry in bohr | zccsdt | difference |
+|---|---|---|---|---|
+| E(SCF) | -76.075431217 | -76.075431227 | -76.075431227 | < 1e-9 |
+| E_corr(CCSD) | -0.213384851 | -0.213384837 | -0.213384837 | < 1e-9 |
+| SCF dipole | 0.808722476 | 0.808722401 | 0.808722401 | < 1e-9 |
+| CCSD dipole, relaxed | 0.766033160 | 0.766033121 | 0.766033118 | 3e-9 |
+| its correlation part | -0.042689316 | -0.042689280 | -0.042689283 | 3e-9 |
+
+The first column is what CFOUR gives for the geometry in Angstrom, as all
+runs before 2026-10-05 had it: `joda` converts with 0.5291771, PySCF with
+0.52917721092, so CFOUR's molecule is 2.1e-7 larger - 1e-8 in the energies
+and up to 7.5e-8 in the dipoles. With the coordinates in bohr as PySCF
+converts them (`UNITS=BOHR`; `bench/cfour/genbas.py` writes them, and
+GENBAS entries from PySCF's basis data) the two programs agree in all
+digits printed.
 
 The numbers of zccsdt are for an SCF that is converged in its orbital
 gradient (`conv_tol_grad = 1e-9`). PySCF's default for it is sqrt(conv_tol):
@@ -2219,11 +2227,13 @@ relaxed property has what is left of the orbital gradient in first order;
 `zvector.kernel` warns above 1e-7. CFOUR's numbers do not move when its
 thresholds are tightened (SCF_CONV 13, CC_CONV 10, LINEQ_CONV 10 for the
 Z-vector equations: 0.808722476 again): the 7.5e-8 between the SCF dipoles
-is the difference of the two Hamiltonians, which E(SCF) shows as 1e-8 (the
-speed of light is the same, 137.0359991; with X2CKEY=SOATMX CFOUR's
-`xsox2catm` appears to make the X matrix atom by atom, which was not
-followed up; PySCF's own atomic approximation, `approx='ATOM1E'`, is 6e-7
-away in E(SCF)). The dipole operator has the
+of the first column is the geometry (above), not the Hamiltonian, as an
+earlier version of this text had it. The Hamiltonians are the same: the
+chain `xjoda`, `xsox2catm`, `xsox2chf` is X2C-1e with the molecular X
+matrix, like PySCF's `x2c.UHF` (X2CKEY=SOATMX adds the atomic mean-field
+spin-orbit integrals only if `xx2camf` has run and written them, and takes
+the X matrix of the atoms only with a `%iatmx` section; the speed of light
+is 137.0359991 in both). The dipole operator has the
 picture-change transformation of the X2C Hamiltonian
 (`rdm.dipole_integrals`, PySCF's `with_x2c.picture_change`); with the bare
 operator of the 2c AO basis, which the socutils code used, both dipoles of
@@ -2325,19 +2335,22 @@ the SCF to 5e-10 in its orbital gradient, the CCSD energy to 1e-11, lambda
 and t to 1e-9, the Z-vector equations to 1e-10; `bench/profile_t_relaxed.py`),
 dipole moments (z, a.u.) with the picture-change transformed operator:
 
-| | H2O/cc-pVDZ: CFOUR | zccsdt | H2O/cc-pVQZ: CFOUR | zccsdt |
-|---|---|---|---|---|
-| E(SCF) | -76.075431217 | -76.075431227 | -76.113956790 | -76.113956805 |
-| E_corr(CCSD) | -0.213384851 | -0.213384837 | -0.317289455 | -0.317289444 |
-| E(T) | -0.003063602 | -0.003063601 | -0.009267940 | -0.009267938 |
-| SCF dipole | 0.808722476 | 0.808722401 | 0.789013661 | 0.789013598 |
-| CCSD(T) dipole, relaxed | 0.760590014 | 0.760589981 | 0.744218715 | 0.744218681 |
-| its correlation part | -0.048132462 | -0.048132420 | -0.044794945 | -0.044794917 |
-| (T) alone (H2O/cc-pVDZ: against the relaxed CCSD dipole) | -0.005443146 | -0.005443137 | | |
+| | H2O/cc-pVDZ: CFOUR | CFOUR, geometry in bohr | zccsdt | H2O/cc-pVQZ: CFOUR | CFOUR, geometry in bohr | zccsdt |
+|---|---|---|---|---|---|---|
+| E(SCF) | -76.075431217 | -76.075431227 | -76.075431227 | -76.113956790 | -76.113956805 | -76.113956805 |
+| E_corr(CCSD) | -0.213384851 | -0.213384837 | -0.213384837 | -0.317289455 | -0.317289444 | -0.317289444 |
+| E(T) | -0.003063602 | -0.003063601 | -0.003063601 | -0.009267940 | -0.009267938 | -0.009267938 |
+| SCF dipole | 0.808722476 | 0.808722401 | 0.808722401 | 0.789013661 | 0.789013596 | 0.789013598 |
+| CCSD(T) dipole, relaxed | 0.760590014 | 0.760589981 | 0.760589981 | 0.744218715 | 0.744218680 | 0.744218681 |
+| its correlation part | -0.048132462 | -0.048132420 | -0.048132420 | -0.044794945 | -0.044794917 | -0.044794917 |
+| (T) alone (H2O/cc-pVDZ: against the relaxed CCSD dipole) | -0.005443146 | -0.005443141 | -0.005443137 | | | |
 
-The relaxed CCSD(T) dipoles agree to 3.3e-8 and 3.4e-8, their correlation
-parts to 4e-8 and 3e-8, the (T) part to 1e-8: as the SCF dipoles do (7.5e-8
-and 6.3e-8), i.e. within the difference of the two Hamiltonians.
+With the geometry in Angstrom (the first column of each basis set; CFOUR
+then has a molecule 2.1e-7 larger, see above) the relaxed CCSD(T) dipoles
+agree to 3.3e-8 and 3.4e-8 and the SCF dipoles to 7.5e-8 and 6.3e-8; with
+the same coordinates in bohr in both programs every number of H2O/cc-pVDZ
+agrees in the nine digits printed (CFOUR rerun on the login node, 4
+threads) and every number of H2O/cc-pVQZ to 2e-9 (job 31669000).
 For H2O/cc-pVDZ the finite difference of zccsdt's own energies, the SCF
 repeated in the field, gives 0.760589980. Before the SCF was converged in
 its orbital gradient (3e-8 left) the analytic value was 0.760590031 (see

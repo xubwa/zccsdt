@@ -40,7 +40,9 @@
 #   integrals - without xx2camf the Hamiltonian is X2C-1e; '%vircut\n100.0':
 #   no virtual spinors above 100 Hartree; frozen core: DROPMO=1>n in
 #   CFOUR_EXTRA, n Kramers pairs)
-# zccsdt: X2C-1e from PySCF (same orbital counts, not the same Hamiltonian),
+# zccsdt: X2C-1e from PySCF (the same Hamiltonian as this chain without
+#   xx2camf; with BASIS names CFOUR converts the Angstrom of the geometry
+#   with its own constant, 2e-7 off PySCF's: CFOUR_PYBASIS for comparisons),
 #   bench/profile_iter.py with ZC_METHOD=ccsd; ZC_NITER timed iterations
 #   (default 3; 0 skips zccsdt); ZC_ROOT: snapshot of the repository
 # The partition allows 4000 MB per core: --mem=30G keeps the allocation at the
