@@ -157,6 +157,22 @@ def main():
     print('  largest elements: z %.3e, occupied-occupied %.3e, virtual-virtual %.3e'
           % (abs(z).max(), abs((relaxed - unrelaxed)[:o, :o]).max(),
              abs((relaxed - unrelaxed)[o:, o:]).max()))
+    # the rotations among occupied and among virtual spinors, y = G / (e_q - e_p):
+    # how close the levels are that they connect
+    mo_e = zvector.full_space(mycc)[1]
+    for name, blk in (('occupied', slice(0, o)), ('virtual', slice(o, None))):
+        y = (relaxed - unrelaxed)[blk, blk]
+        de = abs(mo_e[blk][None, :] - mo_e[blk][:, None])
+        np.fill_diagonal(de, np.inf)
+        near = de < 1e-4
+        skipped = de < zvector.DEGENERATE
+        p, q = np.unravel_index(np.argmax(abs(y)), y.shape)
+        print('  %s pairs: largest |y| %.3e at an energy difference of %.3e; %d pairs closer '
+              'than 1e-4 (the closest that is rotated: %.1e), the largest |y| among them '
+              '%.3e; %d degenerate pairs, not rotated'
+              % (name, abs(y[p, q]), de[p, q], near.sum() // 2,
+                 de[near & ~skipped].min() if (near & ~skipped).any() else 0.0,
+                 abs(y[near]).max() if near.any() else 0.0, skipped.sum() // 2))
     total = wall['terms'] + wall['lambda'] + wall['relaxed']
     print('after the CCSD: %.1f s in all - %.1f CCSD iterations%s'
           % (total, total * len(cycles) / (t2 - t1),

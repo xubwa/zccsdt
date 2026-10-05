@@ -84,8 +84,25 @@ packed layout (rows that are written as a whole).  The other terms - on
 pairs the triples that are done give half of every sum, the time-reversed
 image the other half.
 
+The densities of (T) for the orbital gradient (``terms='gradient'``; the
+equations are in zccsd.lam_t.densities, their use in zccsd.orbgrad_t) are
+the derivatives of the same sums with respect to the integrals instead of
+t2, and A and B hold both: the two products of the batch transposed then
+run over all of A and of B,
+
+    Q = A^T M:   the rows of A[:, v:] = t2 give minus the density of <ma||jk>,
+    Y = M B:     the columns of B[:, :v] = t2 give the density of <bc||ek>,
+
+for v + o instead of v and o multiply-adds per element of M - the
+arithmetic of the forward product in both passes, so that the terms cost
+twice the products of the energy.  The density of <bc||jk> is the sum of
+the f term of lambda2 with t1[k, s] in the place of f[s, k].  The density
+of <bc||ek>, 8 o v^3 bytes, is added up by rows of pairs like A (in memory
+after the operands if it fits, else in the scratch file) and sorted into
+the layout of the stored <ke||bc> at the end.
+
 Timers (zccsdt.timing): 't.setup', 't.gemm', 't.kernel'; 't.lam.gemm' and
-'t.lam.add' for the two products of the Lambda terms.
+'t.lam.add' for the two products of the Lambda terms, 't.den.sort'.
 '''
 
 import ctypes

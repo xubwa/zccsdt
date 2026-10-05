@@ -14,6 +14,10 @@ the same.  The one-particle density has (T) terms as well (pyscf.cc
 orbital energies in the denominators of E(T), and a virtual-occupied block
 from the Fock matrix in the disconnected triples.
 
+For the orbital relaxation (zccsd.zvector) E(T) is also differentiated with
+respect to the integrals it is made of: densities() has the coefficients of
+<bc||ei>, <ma||jk>, <bc||jk> and f[a,i].
+
 The connected and the disconnected triples are formed here as full o^3 v^3
 arrays: the reference.  The code for molecules of any size is in
 zccsd.triples (kernel with terms=True: the same sums in the batches of the
