@@ -94,6 +94,9 @@ from zccsdt.timing import timer
 # lambda; and from the layouts of zccsd.orbgrad_t, exact up to rounding)
 DEGENERATE_DENSE = 1e-6
 DEGENERATE = 1e-9
+# kernel() warns if the SCF left more than this in the occupied-virtual block
+# of its Fock matrix (H2O/cc-pVDZ: 3e-8 there moved the dipole by 5e-8)
+SCF_GRADIENT = 1e-7
 
 
 def orbital_gradient(h, eri, dm1, dm2):
@@ -591,6 +594,15 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     if eris is None and mycc.eris is None:
         mycc.ao2mo(mycc.mo_coeff)
     C, mo_e, o, frozen = full_space(mycc)
+    # the equations assume the spinors of a converged SCF: what is left of its
+    # orbital gradient is in the relaxed density in first order
+    fock = np.asarray((mycc.eris if eris is None else eris).fock)
+    nact = o - frozen.size
+    fov = abs(fock[:nact, nact:]).max() if nact and fock.shape[0] > nact else 0.0
+    if fov > SCF_GRADIENT:
+        logger.warn(mycc, 'The Fock matrix of the SCF has occupied-virtual elements of %.1e: '
+                    'the relaxed density carries an error of that size. Converge the SCF '
+                    'further (PySCF: conv_tol_grad; its default is sqrt(conv_tol)).', fov)
     tg = None
     if with_t:
         own = (t1 is None and t2 is None and getattr(mycc, 'l1', None) is not None
