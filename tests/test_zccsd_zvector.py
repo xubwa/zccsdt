@@ -446,16 +446,17 @@ def test_orbital_gradient_within_plan(monkeypatch):
 def test_orbital_gradient_of_t_within_budget(monkeypatch, tmp_path):
     '''zccsd.orbgrad_t: what it allocates (tracemalloc follows numpy's
     allocations) next to the packed arrays and the densities it is given
-    stays within own_bytes and the slabs of the integral transformation, as
-    its kernel plans them from max_memory - with the density of <bc||ek> in
-    memory and in a scratch file, in one slab and in several; MemoryError
-    where a slab of one virtual spinor does not fit.  Random amplitudes and
-    densities with the symmetry of the Kramers pairs: the same result for
-    every budget, and without the reduction of the sum over the slabs.'''
+    stays within max_memory, as its kernel plans the contraction with
+    <bc||ea> in the AO basis - one occupied spinor and one shell of AO
+    integrals at a time, a few, all at once -, with the density of <bc||ek>
+    in memory and in a scratch file; MemoryError where one spinor and the
+    largest shell do not fit.  Random amplitudes and densities with the
+    symmetry of the Kramers pairs: the same result for every budget, and
+    without the reduction of the sums by time reversal.'''
     import tracemalloc
     from pyscf import lib
     from zccsdt import memory, scratch
-    from zccsdt.zccsd import ao2mo, kramers, orbgrad_t, triples
+    from zccsdt.zccsd import kramers, orbgrad_t, triples
     from zccsdt.zccsd import kernels as K
     monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
     monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
@@ -467,8 +468,8 @@ def test_orbital_gradient_of_t_within_budget(monkeypatch, tmp_path):
     cc.verbose = 0
     eris = cc.ao2mo()
     assert eris.kramers
-    o, v = eris.nocc, eris.fock.shape[0] - eris.nocc
-    npo, npv = K.npair(o), K.npair(v)
+    o, v, nao = eris.nocc, eris.fock.shape[0] - eris.nocc, mol.nao_nr()
+    npo, npv, npair = K.npair(o), K.npair(v), nao * (nao + 1) // 2
     rng = np.random.default_rng(7)
 
     def random(shape, pairs=()):
@@ -484,18 +485,21 @@ def test_orbital_gradient_of_t_within_budget(monkeypatch, tmp_path):
     scr = scratch.Scratch()
     g1m = scr.create('g1', g1.shape, np.complex128)
     g1m[:] = g1
-    slab = ao2mo.plan_slabs(mol, v, v, None, sort_arrays=0)
-    own, one = orbgrad_t.own_bytes(o, v), slab.need
-    assert one > 16 * v ** 3 and own > 4e6
-    cc.max_memory = 0.9 * (own + one) / 1e6
-    with pytest.raises(MemoryError, match='of the orbital gradient of \\(T\\)'):
+    ao_loc = mol.ao_loc_nr()
+    lmax = int((ao_loc[1:] - ao_loc[:-1]).max())
+    own = orbgrad_t.own_bytes(o, v, nao)
+    row, block = 32 * npair * nao, npair * lmax * (8 * nao + 32)
+    assert own > 4e6 and row > 1e6
+    cc.max_memory = (own + 0.9 * (row + block)) / 1e6
+    with pytest.raises(MemoryError, match='of one occupied spinor in the AO basis'):
         orbgrad_t.kernel(cc, eris, t1, t2p, terms, triples.Densities(g1, g2, g3))
-    ref, slabs = None, set()
-    for factor, dens in ((1.0, g1m), (1.0, g1), (3.0, g1), (8.0, g1m), (20.0, g1)):
-        budget = int(own + factor * one) + 1
+    ref, plans = None, set()
+    for extra, dens in ((row + block, g1m), (row + block, g1), (3 * row + 2 * block, g1),
+                        (8 * row, g1m), (40 * row, g1)):
+        budget = own + extra + 1
         cc.max_memory = budget / 1e6
-        plan = orbgrad_t.slab_plan(mol, cc.max_memory, o, v)
-        slabs.add(plan.nket)
+        plan = orbgrad_t.vvvv_plan(mol, cc.max_memory, o, v, o // 2)
+        plans.add(plan)
         coulomb = orbgrad.Coulomb(mol, 0)       # AO direct: the same for every budget
         tracemalloc.start()
         base = tracemalloc.get_traced_memory()[0]
@@ -503,14 +507,14 @@ def test_orbital_gradient_of_t_within_budget(monkeypatch, tmp_path):
                              coulomb=coulomb)
         peak = tracemalloc.get_traced_memory()[1] - base
         tracemalloc.stop()
-        print('x%-4.1f budget %6.1f MB  own %5.1f MB  slabs of %3d: %6.1f MB  peak %6.1f MB'
-              % (factor, budget / 1e6, own / 1e6, plan.nket, plan.work / 1e6, peak / 1e6))
-        assert peak <= own + plan.work and peak <= budget, (factor, peak, own, plan.work)
+        print('budget %6.1f MB  own %5.1f MB  %d occupied spinors, %3d AOs at a time  '
+              'peak %6.1f MB' % (budget / 1e6, own / 1e6, plan[0], plan[1], peak / 1e6))
+        assert peak <= budget, (extra, peak, budget)
         ref = G if ref is None else ref
         assert abs(G - ref).max() < 1e-11 and abs(ref).max() > 1e-3
-    assert len(slabs) > 2 and 1 in slabs
+    assert (1, lmax) in plans and (o // 2, nao) in plans and len(plans) >= 3
     scr.close()
-    # all of the slabs, without their time-reversed image
+    # all rows and all occupied spinors, without their time-reversed image
     eris.residual.kramers = False
     cc.max_memory = 100000
     G = orbgrad_t.kernel(cc, eris, t1, t2p, terms, triples.Densities(g1, g2, g3))

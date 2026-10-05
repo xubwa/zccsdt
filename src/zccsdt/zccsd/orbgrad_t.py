@@ -32,13 +32,22 @@ of this module):
 
 Every contraction is with integrals that the amplitude step keeps, but one:
 g1[(bc), e, i] with <bc||ea>, in the occupied-virtual block.  <ab||cd> is not
-kept: the integrals (ea|..) come from the integral transformation slab by
-slab with the virtual e as the first index (zccsd.ao2mo.slabs), are
-antisymmetrized and packed for one e, and meet the row e of every g1[i] - one
-pass over g1, and the (vv|vv) part of an integral transformation: o v^4 / 2
-multiply-adds and v N^4 for the half transformation.  With Kramers pairs the
-sum over e runs over the unbarred half and is completed by the time-reversed
-image.
+kept, and it is not made here either.  The sum over b > c and e of
+g1 <bc||ea> is sum_bce g1[b,c;e,i] (be|ca) with the antisymmetric g1, and
+with the spinors written out in the scalar AOs (spin components s, s')
+
+    D_i[(mu nu), s' la] = sum_s sum_bce C*[s mu,b] C[s nu,e] C*[s' la,c] g1[b,c;e,i]
+    X[i, a] = sum_{s' si} C[s' si,a] sum_{(mu nu), la} (mu nu|la si) D_i[(mu nu), s' la]:
+
+three virtual indices of the density of one occupied i are transformed to
+the AO basis (2 N v^3 and 2 N^2 v^2 multiply-adds, the first on the packed
+pairs), and all i are contracted with the AO integrals at once - one pass
+over the integrals, computed for ranges of the shells of la and not kept, 2
+o N^4 multiply-adds.  The cost goes with the number of occupied spinors, not
+with that of the virtual ones as an integral transformation would (H2O/
+cc-pVQZ, 10 + 220 spinors: 18.5 s with slabs (ea|..) of zccsd.ao2mo, the
+time of all of (T) with its densities).  With Kramers pairs the unbarred i
+are done and the rows of the barred ones are their time-reversed image.
 
 The occupied spinors of the integrals may be more than those of the
 amplitudes (``act``: frozen spinors, as occupied ones without amplitudes in
@@ -54,7 +63,9 @@ the Fock matrix is taken as E(T) has it - the orbital energies on its
 diagonal and f[i,a] -, not with what the SCF left elsewhere off the diagonal.
 
 Timers (zccsdt.timing): 'ogt.pairs', 'ogt.small', 'ogt.ovvv' (the pass over
-g1 and <ke||bc> by k), 'ogt.vvvv' (the slabs and the pass by e), 'ogt.fock'.
+g1 and <ke||bc> by k), 'ogt.rows' (the one by e), 'ogt.vvvv' (g1 to the AO
+basis: 'ogt.vvvv.ao', the AO integrals: 'ogt.vvvv.eri', their contraction),
+'ogt.fock'.
 '''
 
 import numpy as np
@@ -96,32 +107,115 @@ def pad(nocc, act, terms, dens):
     return (S1, S2, Goo, gvv, Dvo), G2, G3
 
 
-def own_bytes(nocc, nvir):
+def own_bytes(nocc, nvir, nao=0):
     '''Bytes of the arrays of gradient() besides the packed ones it is given
-    and the slabs of the integral transformation: a matrix on the occupied
-    pairs, the matrices on the spinors, and what the passes over g1 and
+    and those of the contraction with <bc||ea> (vvvv_plan): a matrix on the
+    occupied pairs, the matrices on the spinors, what the passes over g1 and
     <ke||bc> take for one occupied and one virtual index (rows that are
-    unpacked: orbgrad.UNPACK_BYTES at a time).'''
-    o, v = int(nocc), int(nvir)
+    unpacked: orbgrad.UNPACK_BYTES at a time), and the density of one
+    occupied spinor on its way to the AO basis (``nao`` scalar AOs).'''
+    o, v, nao = int(nocc), int(nvir), int(nao)
     npo, npv, n = K.npair(o), K.npair(v), o + v
+    ao = 16 * (nao * npv + 2 * nao * nao * v + nao * (nao + 1) * v)
     return (16 * (npo * npo + 2 * o ** 3 + 12 * n * n + 4 * o * v * v + (3 * o + v) * npv)
-            + 4 * orbgrad.UNPACK_BYTES)
+            + 4 * orbgrad.UNPACK_BYTES + ao)
 
 
-def slab_plan(mol, max_memory, nocc, nvir):
-    '''The ao2mo.Plan of the integrals (ea|..) with a virtual first index:
-    slabs within what max_memory leaves now next to the arrays of gradient().
-    MemoryError if one virtual spinor does not fit (16 v^3 bytes for its
-    slab).'''
-    from zccsdt.zccsd import ao2mo
+def vvvv_plan(mol, max_memory, nocc, nvir, nrows):
+    '''(occupied spinors per pass over the AO integrals, AOs of the third
+    index per block of integrals): the contraction of g1 with <bc||ea>
+    within what max_memory leaves now next to own_bytes.  The density of an
+    occupied spinor in the AO basis takes 32 N (N + 1) / 2 x N bytes, a
+    block of nl AOs of the integrals 8 N (N + 1) / 2 x N nl and as much of
+    the densities again.  MemoryError if one spinor and the largest shell do
+    not fit.'''
+    nao = mol.nao_nr()
+    npair = nao * (nao + 1) // 2
+    ao_loc = mol.ao_loc_nr()
+    lmax = int((ao_loc[1:] - ao_loc[:-1]).max())
     left = memory.budget(max_memory)
-    if left is not None:
-        left -= own_bytes(nocc, nvir)
-    try:
-        return ao2mo.plan_slabs(mol, nvir, nvir, left, sort_arrays=0)
-    except MemoryError as err:
-        raise MemoryError('%s (the integrals <bc||ea> of the orbital gradient of (T))'
-                          % err) from None
+    row = 32 * npair * nao
+    if left is None:
+        return int(nrows), nao
+    left -= own_bytes(nocc, nvir, nao)
+    need = row + npair * lmax * (8 * nao + 32)
+    if left < need:
+        raise MemoryError(
+            'the orbital gradient of (T) needs %s for the density of one occupied spinor in '
+            'the AO basis and the integrals of one shell (%d AO functions) next to %s of its '
+            'other arrays, %s are left of max_memory'
+            % (amps._size(need), nao, amps._size(own_bytes(nocc, nvir, nao)),
+               amps._size(max(left, 0))))
+    nk = int(max(1, min(nrows, (left - npair * lmax * (8 * nao + 32)) // row,
+                        max(1, left // 2 // row))))
+    nl = int(max(lmax, min(nao, (left - nk * row) // (npair * (8 * nao + 32 * nk)))))
+    return nk, nl
+
+
+def g1_vvvv(mol, C2, g1, rows, plan):
+    '''X[k, a] = sum_{b>c} sum_e g1[r, e, (bc)] <bc||ea> for the rows r =
+    rows[k] of g1 (the density of <bc||er>), AO direct (see the module);
+    C2[(spin, AO), a]: the virtual spinors.  ``plan`` = (rows per pass over
+    the AO integrals, AOs per block of them), as vvvv_plan gives it.'''
+    nao, v = mol.nao_nr(), C2.shape[1]
+    npair = nao * (nao + 1) // 2
+    ti, tj = np.tril_indices(nao)
+    diag = ti * (ti + 1) // 2 + ti == np.arange(npair)
+    Cs = [np.ascontiguousarray(C2[:nao]), np.ascontiguousarray(C2[nao:])]
+    Cc = [np.conj(x) for x in Cs]
+    C2h = np.ascontiguousarray(C2.conj().T)                     # [c, (s' la)]
+    ao_loc = mol.ao_loc_nr()
+    nk, nl = plan
+    blocks, k0 = [], 0                      # ranges of shells of at most nl AOs
+    while k0 < mol.nbas:
+        k1 = k0 + 1
+        while k1 < mol.nbas and ao_loc[k1 + 1] - ao_loc[k0] <= nl:
+            k1 += 1
+        blocks.append((k0, k1))
+        k0 = k1
+    X = np.empty((len(rows), v), dtype=np.complex128)
+    for r0 in range(0, len(rows), nk):
+        part = rows[r0:r0 + nk]
+        n = len(part)
+        # D[k, s', (mu nu), la], real and imaginary part
+        D = [np.empty((n, 2, npair, nao)) for _ in range(2)]
+        with timer('ogt.vvvv.ao'):
+            for k, r in enumerate(part):
+                Gk = np.asarray(g1[r])                          # [e, (b>c)]
+                P = np.zeros((nao, nao * v), dtype=np.complex128)       # [mu, (nu, c)]
+                for s in (0, 1):
+                    R = blas.gemm(Cs[s], Gk)                    # [nu, (b>c)]
+                    Ru = K.unpack_tril(R, v, 'apb').reshape(v, nao * v)         # [b, (nu, c)]
+                    del R
+                    blas.gemm(Cc[s], Ru, C=P, beta=1.0)
+                    del Ru
+                scratch.unmap(Gk)
+                P = P.reshape(nao, nao, v)
+                Ps = P[ti, tj]
+                Ps += P[tj, ti]
+                Ps[diag] *= 0.5
+                del P
+                Dk = blas.gemm(Ps, C2h).reshape(npair, 2, nao)          # [(mu nu), s', la]
+                del Ps
+                for s in (0, 1):
+                    D[0][k, s], D[1][k, s] = Dk[:, s].real, Dk[:, s].imag
+                del Dk
+        Z = [np.zeros((2 * n, nao)) for _ in range(2)]          # [(k, s'), si]
+        for k0, k1 in blocks:
+            l0, l1 = int(ao_loc[k0]), int(ao_loc[k1])
+            with timer('ogt.vvvv.eri'):
+                M = mol.intor('int2e', aosym='s2ij',
+                              shls_slice=(0, mol.nbas, 0, mol.nbas, k0, k1, 0, mol.nbas))
+            M = M.reshape(npair * (l1 - l0), nao)               # [((mu nu), la), si]
+            for x in (0, 1):
+                A = np.ascontiguousarray(D[x][:, :, :, l0:l1]).reshape(2 * n, npair * (l1 - l0))
+                blas.gemm(A, M, C=Z[x], beta=1.0)
+                del A
+            del M
+        del D
+        Zc = (Z[0] + 1j * Z[1]).reshape(n, 2 * nao)             # [k, (s' si)]
+        X[r0:r0 + n] = blas.gemm(Zc, np.ascontiguousarray(C2))
+    return X
 
 
 def kernel(mycc, eris, t1, t2, terms, dens, act=None, verbose=None, parts=None, coulomb=None):
@@ -133,9 +227,9 @@ def kernel(mycc, eris, t1, t2, terms, dens, act=None, verbose=None, parts=None, 
     the amplitudes among those of ``eris`` (default: all; t1, t2 are then
     given for the occupied spinors of ``eris``, zero where one is frozen,
     while ``terms`` and ``dens`` are those of the active ones).  Within
-    max_memory of ``mycc``: own_bytes and the slabs of the integral
-    transformation; nothing of the amplitude step is planned or kept (its
-    integrals are read as they are stored).'''
+    max_memory of ``mycc``: own_bytes and the arrays of vvvv_plan; nothing
+    of the amplitude step is planned or kept (its integrals are read as they
+    are stored).'''
     log = logger.new_logger(mycc, verbose)
     cput0 = (logger.process_clock(), logger.perf_counter())
     if getattr(eris, 'residual', None) is None:
@@ -148,22 +242,22 @@ def kernel(mycc, eris, t1, t2, terms, dens, act=None, verbose=None, parts=None, 
     del t2
     act = np.arange(o) if act is None else np.asarray(act)
     terms, g2, g3 = pad(o, act, terms, dens)
-    slabs = slab_plan(eris.mol, mycc.max_memory, o, v)
+    kr = bool(res.kramers and res.symmetric(t1, t2p))
+    plan = vvvv_plan(eris.mol, mycc.max_memory, o, v, act.size // 2 if kr else act.size)
     log.info('Orbital gradient of (T): %d occupied (%d with amplitudes) and %d virtual '
-             'spinors; the integrals <bc||ea> in slabs of %d virtual spinors', o, act.size, v,
-             slabs.nket)
-    out = gradient(mycc, eris, t1, t2p, terms, dens.g1, g2, g3, act, slabs, parts, coulomb)
+             'spinors; the density of <bc||ek> with <bc||ea> in the AO basis, %d occupied '
+             'spinors and %d of %d AOs at a time', o, act.size, v, plan[0], plan[1],
+             eris.mol.nao_nr())
+    out = gradient(mycc, eris, t1, t2p, terms, dens.g1, g2, g3, act, plan, parts, coulomb)
     log.timer('Orbital gradient of (T)', *cput0)
     return out
 
 
-def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, slabs, parts=None, coulomb=None):
+def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, plan, parts=None, coulomb=None):
     '''kernel() for t2 packed, the terms and the densities g2[m, a, (j>k)],
     g3[(j>k), (b>c)] of all occupied spinors of ``eris`` and g1[k, e, (b>c)]
-    of those at ``act``; the integrals are those of eris.residual, ``slabs``
-    the ao2mo.Plan of slab_plan.  ``parts``: a dict that gets Gnh by origin
-    (PARTS).'''
-    from zccsdt.zccsd import ao2mo
+    of those at ``act``; the integrals are those of eris.residual, ``plan``
+    that of vvvv_plan.  ``parts``: a dict that gets Gnh by origin (PARTS).'''
     res = eris.residual
     o, v = res.nocc, res.nvir
     n1, npo, npv, n = o * v, K.npair(o), K.npair(v), o + v
@@ -238,7 +332,9 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, slabs, parts=None, cou
             del gu, Om
         X[oc, oc] += T2oo.conj()
 
-    # ---- the pass over <ke||bc> and g1 by k
+    # ---- the pass over <ke||bc> and g1 by k (Kramers pairs: the unbarred k;
+    # every term is a sum over k, completed by its time-reversed image)
+    kr = bool(res.kramers and res.symmetric(t1, t2p))
     c6 = np.zeros((o, v), dtype=np.complex128)          # conjugates
     cvv = np.zeros((v, v), dtype=np.complex128)
     T1vo = np.zeros((v, o), dtype=np.complex128)
@@ -248,7 +344,7 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, slabs, parts=None, cou
     fstep = max(1, min(v, orbgrad.UNPACK_BYTES // (16 * npv)))
     ustep = max(1, min(v, orbgrad.UNPACK_BYTES // (16 * v * v)))
     with timer('ogt.ovvv'):
-        for k in range(o):
+        for k in range(o // 2 if kr else o):
             if pos[k] < 0:              # no density has a frozen k
                 continue
             Om = res.ovvv_p[k]                                          # [e, (b>c)]
@@ -286,44 +382,39 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, slabs, parts=None, cou
             del Ec, Ek
             scratch.unmap(Om)
             scratch.unmap(Gm)
-    G['g3'][oc, vi] -= c6.conj()
-    G['g2'][oc, vi] -= T2ov.T
-    X = G['g1']
-    X[vi, oc] += T1vo
-    X[vi, vi] += T1vv - cvv.conj().T
-    X[oc, vi] += T1ov
-
-    # ---- g1 by its rows e: with <bc||ea> from the slabs of the integral
-    # transformation, and with <bc||ei> = -conj(<ie||bc>) (all occupied i)
-    kr = bool(res.kramers and res.symmetric(t1, t2p))
-    hv = v // 2 if kr else v
-    nact = act.size
-    Tov = np.zeros((nact, v), dtype=np.complex128)
-    Too = np.zeros((nact, o), dtype=np.complex128)
-    nao = eris.nao_sph
-    Cv = eris.mo_ao_spin[:, o:]
-    H = np.empty((v, npv), dtype=np.complex128)
-    Ge = np.empty((nact, npv), dtype=np.complex128)
-    Oe = np.empty((o, npv), dtype=np.complex128)
-    with timer('ogt.vvvv'):
-        for e0, e1, g in ao2mo.slabs(eris.mol, Cv[:nao], Cv[nao:], (0, hv), (0, v), slabs):
-            for e in range(e0, e1):
-                # H[a, (b>c)] = (eb|ac) - (ec|ab) = conj(<bc||ea>)
-                H[:] = 0.0
-                K.asym_pack2(g[e - e0], 1.0, H, 'apb')
-                np.conj(H, out=H)
-                Ge[:] = g1[:, e, :]
-                blas.gemm(Ge, H.T, C=Tov, alpha=-1.0, beta=1.0)
-                np.conj(res.ovvv_p[:, e, :], out=Oe)
-                blas.gemm(Ge, Oe.T, C=Too, beta=1.0)
-        del g
+    c6, T2ov, T1vv = -c6.conj(), -T2ov.T, T1vv - cvv.conj().T
     if kr:
         from zccsdt.zccsd.kramers import image
+        c6, T2ov, T1vo, T1vv, T1ov = (x + image(x) for x in (c6, T2ov, T1vo, T1vv, T1ov))
+    G['g3'][oc, vi] += c6
+    G['g2'][oc, vi] += T2ov
+    X = G['g1']
+    X[vi, oc] += T1vo
+    X[vi, vi] += T1vv
+    X[oc, vi] += T1ov
+
+    # ---- g1 by its rows e, with <bc||ei> = -conj(<ie||bc>) for all occupied i
+    hv = v // 2 if kr else v
+    nact = act.size
+    Too = np.zeros((nact, o), dtype=np.complex128)
+    Ge = np.empty((nact, npv), dtype=np.complex128)
+    Oe = np.empty((o, npv), dtype=np.complex128)
+    with timer('ogt.rows'):
+        for e in range(hv):
+            Ge[:] = g1[:, e, :]
+            np.conj(res.ovvv_p[:, e, :], out=Oe)
+            blas.gemm(Ge, Oe.T, C=Too, beta=1.0)
+    del Ge, Oe
+    # ---- g1 with <bc||ea>, in the AO basis
+    with timer('ogt.vvvv'):
+        rows = np.arange(nact // 2 if kr else nact)
+        Tov = np.zeros((nact, v), dtype=np.complex128)
+        Tov[:rows.size] = -g1_vvvv(eris.mol, eris.mo_ao_spin[:, o:], g1, rows, plan)
+    if kr:
         Tov += image(Tov)
         Too += image(Too)
     X[act, o:] += Tov
     X[act, :o] += Too
-    del H, Ge, Oe
 
     # ---- the Fock matrix elements: f[a,i] with conj(dvo), e_i with -goo, e_a with gvv
     with timer('ogt.fock'):
