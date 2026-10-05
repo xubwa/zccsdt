@@ -23,9 +23,14 @@ from zccsdt.zccsd import DirectZCCSD, rdm                               # noqa: 
 def main():
     mol_name, basis = sys.argv[1:3]
     mol = gto.M(atom=GEOM[mol_name], basis=basis, spin=SPIN.get(mol_name, 0), verbose=0)
-    mf = x2c.UHF(mol).run(conv_tol=1e-11)
+    # the orbital gradient of the SCF to 1e-9: PySCF's default, sqrt(conv_tol),
+    # leaves 1e-6, and the dipoles (SCF and relaxed) then have 5e-8 of it
+    mf = x2c.UHF(mol)
+    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-9, 200
+    mf.kernel()
     mycc = DirectZCCSD(mf)
-    mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-11, 1e-8
+    mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-12, 1e-10
+    mycc.max_cycle = 200
     mycc.kernel()
     l1, l2 = mycc.solve_lambda()
     nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())

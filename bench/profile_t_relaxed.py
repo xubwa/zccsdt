@@ -12,7 +12,11 @@ usage: python bench/profile_t_relaxed.py MOLECULE BASIS
 X2C-1e spinors from PySCF (x2c.UHF), all electrons.
 environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              DirectZCCSD.kramers; ZC_CONV: the convergence of the CCSD energy
-             (default 1e-9; the amplitudes and lambda 100 times that);
+             (default 1e-9; the amplitudes and lambda 100 times that, the
+             Z-vector equations 10 times); ZC_SCF_CONV, ZC_SCF_GRAD: conv_tol
+             and conv_tol_grad of the SCF (default 1e-12 and 1e-8: PySCF's
+             default for the orbital gradient, sqrt(conv_tol), leaves 1e-6,
+             and a relaxed property has that error in first order);
              ZC_CCSD_CYCLES, ZC_LAMBDA_CYCLES: at most so many cycles (the
              times of the other phases do not depend on the convergence;
              the dipole then means nothing); ZC_T_ENERGY=0: without the run
@@ -48,7 +52,11 @@ def main():
     mol = gto.M(atom=GEOM[mol_name], basis=basis, spin=SPIN.get(mol_name, 0), verbose=0,
                 max_memory=maxmem)
     t0 = time.perf_counter()
-    mf = x2c.UHF(mol).run(conv_tol=min(1e-10, 0.1 * conv))
+    mf = x2c.UHF(mol)
+    mf.conv_tol = float(os.environ.get('ZC_SCF_CONV', 1e-12))
+    mf.conv_tol_grad = float(os.environ.get('ZC_SCF_GRAD', 1e-8))
+    mf.max_cycle = 200
+    mf.kernel()
     t_scf = time.perf_counter() - t0
     mycc = DirectZCCSD(mf)
     mycc.verbose, mycc.max_cycle = 0, int(os.environ.get('ZC_CCSD_CYCLES', 100))
@@ -68,9 +76,13 @@ def main():
           % (mol_name, basis, o, v, bool(eris.kramers), maxmem,
              os.environ.get('OMP_NUM_THREADS', '?')))
     print('matrix products: ' + blas.backend()[1])
-    print('SCF %.1f s; integrals %.1f s; CCSD %.1f s: %d cycles (%.2f s each), converged %s, '
-          'E_corr %.10f' % (t_scf, t1 - t0, t2 - t1, len(cycles),
-                            (t2 - t1) / max(len(cycles), 1), mycc.converged, mycc.e_corr))
+    fock = mf.get_fock()
+    C = mf.mo_coeff
+    occ = mf.mo_occ > 0
+    print('SCF %.1f s (converged %s, largest occupied-virtual element of its Fock matrix %.1e); '
+          'integrals %.1f s; CCSD %.1f s: %d cycles (%.2f s each), converged %s, E_corr %.10f'
+          % (t_scf, mf.converged, abs(C[:, ~occ].conj().T @ fock @ C[:, occ]).max(), t1 - t0,
+             t2 - t1, len(cycles), (t2 - t1) / max(len(cycles), 1), mycc.converged, mycc.e_corr))
     mycc.verbose = 4
 
     wall = {}
@@ -131,7 +143,7 @@ def main():
     watch.start()
     timing.reset()
     ta = time.perf_counter()
-    relaxed, unrelaxed, z = zvector.kernel(mycc, tol=1e-8, with_t=True)
+    relaxed, unrelaxed, z = zvector.kernel(mycc, tol=10 * conv, with_t=True)
     wall['relaxed'] = time.perf_counter() - ta
     watch.stop()
     print('relaxed density of CCSD(T) (the density of t and lambda, the orbital gradient, the '

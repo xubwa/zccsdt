@@ -17,7 +17,9 @@
 #   CFOUR_MAXCYC (default 50); CFOUR_PROGS: the programs to run (default: all
 #   five; 'xjoda xsox2catm xsox2chf xx2cvtran' stops after the integrals;
 #   with 'xx2chbar xx2clcc' after xx2cccsd also Hbar and the Lambda equations);
-#   CFOUR_CONV: CC_CONV, max residual element (default 7)
+#   CFOUR_CONV: CC_CONV, max residual element (default 7; the Lambda equations
+#   use it too); CFOUR_SCF_CONV: SCF_CONV, max change of the density (default
+#   10); the Z-vector equations: LINEQ_CONV (default 7) through CFOUR_EXTRA
 #   CFOUR_EXTRA: more keywords, comma separated (PROPS=FIRST_ORDER: xx2cccsd then
 #   also makes the (T) terms of the Lambda equations and of the densities, and
 #   'xx2chbar xx2clcc xx2cccdenocbp xx2czvec xsox2cprop' give the CCSD(T) dipole)
@@ -76,7 +78,7 @@ $geom
 *CFOUR(CALC=${CFOUR_CALC:-CCSD(T)},BASIS=SPECIAL
 SYM=OFF,COORDINATES=CARTESIAN,UNITS=ANGSTROM,CHARGE=0,MULT=1
 RELATIVISTIC=X2C1E,X2CKEY=SOATMX,ABCDTYPE=AOBASIS
-SCF_CONV=10,SCF_MAXCYC=200
+SCF_CONV=${CFOUR_SCF_CONV:-10},SCF_MAXCYC=200
 CC_CONV=${CFOUR_CONV:-7},CC_MAXCYC=${CFOUR_MAXCYC:-50}${CFOUR_EXTRA:+,$CFOUR_EXTRA}
 MEMORY_SIZE=${CFOUR_MEM_GB:-24},MEM_UNIT=GB)
 
