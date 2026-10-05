@@ -689,6 +689,31 @@ void zc_t_lam_hole(const void *y0, const void *y1, const void *y2, int m3, int64
     }
 }
 
+/* g2[j, s, (mn)] -= q[nv + j, (s - sa, (mn))] for all occupied j and
+ * sa <= s < sb: the rows of the product A^T M that belong to the t2 in A
+ * (q: no + nv rows of ld elements; complex, or its three real products) are
+ * minus the density of <js||mn>. */
+void zc_t_den_hole(const void *q0, const void *q1, const void *q2, int m3, int64_t ld,
+                   int64_t nv, int64_t no, int64_t npo, int64_t sa, int64_t sb, zc *g2)
+{
+    const int64_t nc = (sb - sa) * npo;
+    #pragma omp parallel for schedule(static) if(no * nc > 65536)
+    for (int64_t j = 0; j < no; j++) {
+        zc *d = g2 + (j * nv + sa) * npo;
+        const int64_t off = (nv + j) * ld;
+        if (m3) {
+            const double *d0 = (const double *)q0 + off, *d1 = (const double *)q1 + off;
+            const double *d2 = (const double *)q2 + off;
+            for (int64_t x = 0; x < nc; x++)
+                d[x] -= (d0[x] - d1[x]) + (d2[x] - d0[x] - d1[x]) * I;
+        } else {
+            const zc *q = (const zc *)q0 + off;
+            for (int64_t x = 0; x < nc; x++)
+                d[x] -= q[x];
+        }
+    }
+}
+
 /* dst[r, c] += y[r, c] for nrow rows and the first ncol of the ld columns of
  * y (complex, or its three real products): the product of the triples of a
  * batch with t2, added to the rows of the density of <bc||ei>. */

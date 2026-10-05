@@ -135,12 +135,13 @@ if K._lib is not None and hasattr(K._lib, 'zc_t_batch'):
     _HAVE_C = True
 else:
     _HAVE_C = False
-_HAVE_LAM = _HAVE_C and hasattr(K._lib, 'zc_t_den_sort')     # not in a library built before it
+_HAVE_LAM = _HAVE_C and hasattr(K._lib, 'zc_t_den_hole')     # not in a library built before it
 if _HAVE_LAM:
     for _f, _a in (('zc_t_batch_lam', K._lib.zc_t_batch.argtypes + [_P] * 6),
                    ('zc_t_lam_particle', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _I, _I, _P]),
                    ('zc_t_lam_hole', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _I, _I, _P]),
                    ('zc_t_den_rows', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _P]),
+                   ('zc_t_den_hole', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _I, _I, _I, _P]),
                    ('zc_t_den_sort', [_P, _I, _I, _I, _I, _I, _P])):
         getattr(K._lib, _f).argtypes, getattr(K._lib, _f).restype = _a, None
 
@@ -614,13 +615,16 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                                X[k][:, (sa - s0) * npo:(sb - s0) * npo],
                                rbuf[k][:wa * nc].reshape(wa, nc)) for k in range(nparts)]
             with timer('t.lam.add'):
-                if den:
-                    sums.g2[:, sa:sb] -= _complex([q[v:] for q in Q] if m3 else Q[0][v:]).reshape(
-                        o, sb - sa, npo)
                 if _HAVE_LAM and K.USE_C:
+                    if den:
+                        K._lib.zc_t_den_hole(*ptr(Q)[:3], int(m3), nc, v, o, npo, sa, sb,
+                                             K._c(sums.g2))
                     K._lib.zc_t_lam_particle(*ptr(Q)[:3], int(m3), nc, v, npo, sa, sb,
                                              K._c(sums.lt))
                     continue
+                if den:
+                    sums.g2[:, sa:sb] -= _complex([q[v:] for q in Q] if m3 else Q[0][v:]).reshape(
+                        o, sb - sa, npo)
                 Q = _complex([q[:v] for q in Q] if m3 else Q[0][:v]).reshape(v, sb - sa, npo)
                 for x in range(sa, sb):
                     sums.lt[K.npair(x):K.npair(x) + x] += Q[:x, x - sa]
