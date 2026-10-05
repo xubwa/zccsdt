@@ -467,7 +467,8 @@ def test_t_terms_peak_within_plan(kr, monkeypatch, tmp_path):
                 if lam_terms == 'gradient':
                     den = out[2]
                     g1_mapped.append(scratch.is_mapped(den.g1))
-                    flat += [np.array(den.g1), den.g2, den.g3]
+                    assert scratch.is_mapped(den.g2) == scratch.is_mapped(den.g3) == g1_mapped[-1]
+                    flat += [np.array(den.g1), np.array(den.g2), np.array(den.g3)]
                     den.close()
                 del out
                 for x, y in zip(flat, ref.setdefault(lam_terms, flat)):

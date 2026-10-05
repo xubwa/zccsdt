@@ -385,7 +385,7 @@ def active_pairs(act):
 
 
 def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coulomb=None,
-                    t_terms=None):
+                    t_terms=None, release=None):
     '''(G[a, x], G[i, c]): the blocks of the orbital gradient that the
     Z-vector equations of a CCSD with frozen occupied spinors need - the
     virtual spinors a with all occupied x, frozen and active, in the order of
@@ -426,7 +426,9 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
     index is frozen, meet the integrals of all occupied spinors
     (zccsd.orbgrad_t with ``act``), and so do the sources with t.  The
     blocks above get these terms, and two more are returned: (G[a, x],
-    G[i, c], G[i, j], G[a, b]) with i, j the active occupied spinors.'''
+    G[i, c], G[i, j], G[a, b]) with i, j the active occupied spinors.  These
+    terms are made first; ``release`` is then called (the caller lets go of
+    the sources and the densities before the steps of the Lagrangian).'''
     from zccsdt.zccsd import kernels as K
     log = logger.new_logger(mycc, verbose)
     C, mo_e, o, frozen = full_space(mycc)
@@ -451,7 +453,7 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
         mycc.l2 = None
     try:
         return _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log,
-                                coulomb, t_terms)
+                                coulomb, t_terms, release)
     finally:
         if own_t:
             mycc.t2 = K.unpack_t2(np.ascontiguousarray(T2p[rows_act]), oa, v)
@@ -460,7 +462,7 @@ def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coul
 
 
 def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulomb,
-                     t_terms=None):
+                     t_terms=None, release=None):
     '''gradient_frozen for the padded t and the packed lambda2 of the active
     spinors, l2a.'''
     import gc
@@ -513,6 +515,15 @@ def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulo
                           'occupied spinors)' % (err, o)) from None
     log.info('Orbital gradient with frozen spinors: all %d occupied spinors; %s', o,
              res.describe())
+    Gt = None
+    if t_terms is not None:
+        from zccsdt.zccsd import orbgrad_t
+        Gt = guarded(lambda: orbgrad_t.kernel(full, eris, T1, T2p, *t_terms, act=act,
+                                              verbose=log, coulomb=coulomb))
+        Gt = 0.5 * (Gt - Gt.conj().T)
+        t_terms = None
+        if release is not None:
+            release()
     prow = np.array([r for r, _ in res.pair_rows])
     psgn = np.array([g for _, g in res.pair_rows])
     av, bv = K.tril(v)
@@ -555,13 +566,8 @@ def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulo
     Gvo = 0.5 * Gnh
     Gvo[:, frozen] += 0.5 * P1.conj().T
     Gic = 0.5 * (Gic.T - Gci.conj().T)[act]
-    if t_terms is None:
+    if Gt is None:
         return Gvo, Gic
-    from zccsdt.zccsd import orbgrad_t
-    del L1, L2p
-    Gt = guarded(lambda: orbgrad_t.kernel(full, eris, T1, T2p, *t_terms, act=act, verbose=log,
-                                          coulomb=coulomb))
-    Gt = 0.5 * (Gt - Gt.conj().T)
     return (Gvo + Gt[o:, :o], Gic + Gt[np.ix_(act, frozen)], Gt[np.ix_(act, act)],
             np.ascontiguousarray(Gt[o:, o:]))
 
@@ -642,6 +648,7 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
         with timer('zv.density'):
             d1 = rdm.gamma1(t1, t2p, l1, l2p, **({} if budget is None else {
                 'pair_bytes': max(1, min(1 << 30, budget // 4))}))
+        held = []
         if with_t:
             with timer('zv.triples'):
                 terms, dens = _t_terms(mycc, mycc.eris if eris is None else eris, t1, t2p, tg)
@@ -649,39 +656,47 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
             doo[np.diag_indices(oa)] -= terms[2]
             dvv[np.diag_indices(v)] += terms[3]
             d1 = (doo, dov, dvo + terms[4], dvv)
+            # the sources and the densities go when the (T) terms of the gradient
+            # are made; the terms of the one-particle density stay with the CCSD
+            # object
+            held, small = [terms, dens], terms[2:]
+            del terms, dens, tg
         out = dm1 = gccsd_rdm._make_rdm1(mycc, d1, with_frozen=bool(frozen.size))
-        if not frozen.size:
-            with timer('zv.orbgrad'):
-                Gnh = orbgrad.kernel(mycc, mycc.eris if eris is None else eris, t1, t2p,
-                                     l1, l2p, verbose)
-            gvo = -0.5 * Gnh
-            if with_t:
-                from zccsdt.zccsd import orbgrad_t
-                try:
+
+        def release():
+            if held:
+                held.pop().close()
+                held.clear()
+                mycc._drop_t_terms()
+                mycc._t_density = small
+        try:
+            if not frozen.size:
+                if with_t:
+                    # first: nothing of it is needed for the Lagrangian's own part,
+                    # which takes the memory of an amplitude step
+                    from zccsdt.zccsd import orbgrad_t
                     with timer('zv.orbgrad_t'):
                         Gt = orbgrad_t.kernel(mycc, mycc.eris if eris is None else eris, t1,
-                                              t2p, terms, dens, verbose=verbose)
-                finally:
-                    dens.close()                    # the densities: 8 o v^3 bytes
-                    mycc._drop_t_terms()
-                    mycc._t_density = terms[2:]
-                Gt[o:, :o] += Gnh
-                Gt = 0.5 * (Gt - Gt.conj().T)
-                gvo, Goo, Gvv = -Gt[o:, :o], Gt[:o, :o], Gt[o:, o:]
-                del Gt, terms, dens
-        elif not with_t:
-            with timer('zv.orbgrad'):
-                Gvo, Gic = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose)
-        else:
-            try:
+                                              t2p, *held, verbose=verbose)
+                    release()
+                with timer('zv.orbgrad'):
+                    Gnh = orbgrad.kernel(mycc, mycc.eris if eris is None else eris, t1, t2p,
+                                         l1, l2p, verbose)
+                gvo = -0.5 * Gnh
+                if with_t:
+                    Gt[o:, :o] += Gnh
+                    Gt = 0.5 * (Gt - Gt.conj().T)
+                    gvo, Goo, Gvv = -Gt[o:, :o], Gt[:o, :o], Gt[o:, o:]
+                    del Gt
+            elif not with_t:
+                with timer('zv.orbgrad'):
+                    Gvo, Gic = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose)
+            else:
                 with timer('zv.orbgrad'):
                     Gvo, Gic, Goo, Gvv = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose,
-                                                         t_terms=(terms, dens))
-            finally:
-                dens.close()
-                mycc._drop_t_terms()
-                mycc._t_density = terms[2:]
-            del terms, dens
+                                                         t_terms=held, release=release)
+        finally:
+            release()
     finally:
         if own_t:
             mycc.t2 = K.unpack_t2(t2p, oa, v)

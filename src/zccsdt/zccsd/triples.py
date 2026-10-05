@@ -161,12 +161,12 @@ class Densities:
     (lam_t.densities has them as full arrays; here with the weight of the
     packed pairs):
 
-      g1[k, e, (b>c)]   of <bc||ek>, in the layout of the stored <ke||bc>:
-                        in memory or a mapped array of a scratch file;
+      g1[k, e, (b>c)]   of <bc||ek>, in the layout of the stored <ke||bc>;
       g2[m, a, (j>k)]   of <ma||jk>;
-      g3[(j>k), (b>c)]  of <bc||jk>, packed like t2.
+      g3[(j>k), (b>c)]  of <bc||jk>, packed like t2,
 
-    close() releases the scratch file.'''
+    in memory, or all three mapped arrays of a scratch file if the first
+    does not fit.  close() releases the scratch file.'''
 
     def __init__(self, g1, g2, g3, scr=None):
         self.g1, self.g2, self.g3, self._scr = g1, g2, g3, scr
@@ -174,6 +174,7 @@ class Densities:
     def close(self):
         self.g1 = None
         if self._scr is not None:
+            self.g2 = self.g3 = None
             self._scr.close()
             self._scr = None
 
@@ -787,4 +788,15 @@ def _densities(mycc, sums, kramers, max_memory, log):
         K.ksym_packed(g1.reshape(o * v, npv), (ko[:, None] * v + kv[None, :]).ravel(),
                       (so[:, None] * sv[None, :]).ravel(), *pair_maps(v))
     scratch.written(g1)
+    if scr is not None:
+        # memory is short: the other two wait in the scratch file as well (the
+        # Lambda equations are solved before they are used)
+        for name, x in (('g2', g2), ('g3', g3)):
+            y = scr.create(name, x.shape, np.complex128)
+            y[...] = x
+            scratch.written(y)
+            if name == 'g2':
+                g2 = y
+            else:
+                g3 = y
     return Densities(g1, g2, g3, scr)
