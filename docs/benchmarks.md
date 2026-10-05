@@ -2389,14 +2389,14 @@ others levels that spin-orbit coupling alone separates, down to 4e-8 and
 is the multiple of the energy difference that it should be, and the division
 makes nothing up.
 
-With `max_memory` 4000 MB (benzene, job 31611246 on c399, where the run
-with 24000 MB took the same 967.7 s after the CCSD as on c435): the pass
-over the triples with the sources and the densities takes 840.3 s with A
-and the density of <bc||ek> in scratch files (242.9 s for the energy alone),
-the Lambda equations 246.1 s, and the peak of the anonymous memory of the
-two is 3.79 GB; the relaxed density then takes 52.6 s with a peak of
-3.35 GB, 1139 s in all. The (T) terms of the gradient are made first and
-their arrays released - the Lagrangian's own part takes the memory of an
+With `max_memory` 4000 MB (benzene, the same job): the pass over the triples
+with the sources and the densities takes 833.9 s with A and the density of
+<bc||ek> in scratch files, the Lambda equations 249.6 s, and the peak of the
+anonymous memory of the two is 3.88 GB; the relaxed density then takes
+52.7 s with a peak of 3.76 GB, 1136.2 s in all after the CCSD (job 31611246
+on c399: 1139.0 s, peaks of 3.79 and 3.35 GB; the run with 24000 MB took
+967.7 s there). The (T) terms of the gradient are made first and their
+arrays released - the Lagrangian's own part takes the memory of an
 amplitude step -, and the two small densities wait in the scratch file of
 the large one while the Lambda equations are solved, whose plan was at its
 floor here (1.96 GB of 1.96 GB).
