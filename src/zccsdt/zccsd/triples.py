@@ -118,11 +118,13 @@ if K._lib is not None and hasattr(K._lib, 'zc_t_batch'):
     _HAVE_C = True
 else:
     _HAVE_C = False
-_HAVE_LAM = _HAVE_C and hasattr(K._lib, 'zc_t_batch_lam')    # not in a library built before it
+_HAVE_LAM = _HAVE_C and hasattr(K._lib, 'zc_t_den_sort')     # not in a library built before it
 if _HAVE_LAM:
-    for _f, _a in (('zc_t_batch_lam', K._lib.zc_t_batch.argtypes + [_P] * 5),
+    for _f, _a in (('zc_t_batch_lam', K._lib.zc_t_batch.argtypes + [_P] * 6),
                    ('zc_t_lam_particle', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _I, _I, _P]),
-                   ('zc_t_lam_hole', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _P])):
+                   ('zc_t_lam_hole', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _I, _I, _P]),
+                   ('zc_t_den_rows', [_P, _P, _P, ctypes.c_int, _I, _I, _I, _P]),
+                   ('zc_t_den_sort', [_P, _I, _I, _I, _I, _I, _P])):
         getattr(K._lib, _f).argtypes, getattr(K._lib, _f).restype = _a, None
 
 
@@ -136,14 +138,50 @@ def _complex(x):
 class _Sums:
     '''The (T) terms of the Lambda equations and of the density as they are
     added up over the triples: l1[i,a], dvo[a,i], the diagonals goo[i] and
-    gvv[a], and lt[(a>b), (i>j)], the terms of lambda2 transposed.'''
+    gvv[a], and lt[(a>b), (i>j)], the terms of lambda2 transposed.  With
+    ``densities``: g2[m, a, (j>k)] and g3[(b>c), (j>k)], the densities of
+    <ma||jk> and <bc||jk>; g1[(b>c), k, e], that of <bc||ek>, is given by
+    kernel(), which decides where it lives.'''
 
-    def __init__(self, o, v):
+    def __init__(self, o, v, densities=False):
         self.l1 = np.zeros((o, v), dtype=np.complex128)
         self.dvo = np.zeros((v, o), dtype=np.complex128)
         self.goo = np.zeros(o, dtype=np.complex128)
         self.gvv = np.zeros(v, dtype=np.complex128)
         self.lt = np.zeros((K.npair(v), K.npair(o)), dtype=np.complex128)
+        self.g1 = self.g2 = self.g3 = None
+        if densities:
+            self.g2 = np.zeros((o, v, K.npair(o)), dtype=np.complex128)
+            self.g3 = np.zeros((K.npair(v), K.npair(o)), dtype=np.complex128)
+
+
+class Densities:
+    '''The densities of (T) for the orbital gradient (zccsd.orbgrad_t), the
+    coefficients of the integrals in the first-order change of Re E(T)
+    (lam_t.densities has them as full arrays; here with the weight of the
+    packed pairs):
+
+      g1[k, e, (b>c)]   of <bc||ek>, in the layout of the stored <ke||bc>:
+                        in memory or a mapped array of a scratch file;
+      g2[m, a, (j>k)]   of <ma||jk>;
+      g3[(j>k), (b>c)]  of <bc||jk>, packed like t2.
+
+    close() releases the scratch file.'''
+
+    def __init__(self, g1, g2, g3, scr=None):
+        self.g1, self.g2, self.g3, self._scr = g1, g2, g3, scr
+
+    def close(self):
+        self.g1 = None
+        if self._scr is not None:
+            self._scr.close()
+            self._scr = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=None, sums=None):
@@ -187,7 +225,7 @@ def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=No
             K._lib.zc_t_batch(*args)
         else:
             K._lib.zc_t_batch_lam(*args, c(sums.l1), c(sums.dvo), c(sums.goo), c(sums.gvv),
-                                  c(sums.lt))
+                                  c(sums.lt), None if sums.g3 is None else c(sums.g3))
         return complex(out[0], out[1])
     p0, pa = b0 * (b0 - 1) // 2, a * (a - 1) // 2
     if sums is not None:        # the x as they are, to be written
@@ -229,6 +267,8 @@ def _t_batch(X1, c1, G1, g1, G2, a, b0, b1, t1, fvo, VpT, T2pT, eo, ev, terms=No
                     sums.l1[:, s] += sign * (Wc @ VpT[row])
                     sums.dvo[s] += sign * (Wc @ T2pT[row]).conj()
                     sums.lt[row] += sign * (fvo[s] @ Wc)
+                    if sums.g3 is not None:
+                        sums.g3[row] += sign * (t1[:, s] @ Wc)
                 third = ([x[b, :, c - b0] for x in G1w] if c >= b0
                          else [x[b - b0, :, c] for x in G2w])
                 for out, val in (([x[pbc - p0] for x in X1w], M),
@@ -296,12 +336,19 @@ def memory_need(nocc, nvir, three_m=True, terms=False):
     orbital): the least (T) can run in is their sum.  ``terms``: with the
     terms of the Lambda equations - their array takes the place of the third
     packed T2, and the products of the triples with the integrals need an
-    array for one virtual orbital or one pair.'''
+    array for one virtual orbital or one pair; 'gradient': with the
+    densities as well - a fourth packed array, the density of <ma||jk>, and
+    the products as wide as the operands (the density of <bc||ek> is in
+    memory only if there is room for it).'''
     npo, npv, xbytes = K.npair(nocc), K.npair(nvir), 24 if three_m else 16
-    floor = xbytes * nocc * npo * 3 * nvir
-    if terms:
+    fixed, floor = 48 * npo * npv, xbytes * nocc * npo * 3 * nvir
+    if terms == 'gradient':
+        n = nocc + nvir
+        fixed += 16 * npo * (npv + nocc * nvir)
+        floor += xbytes * max(n * npo, nocc * n)
+    elif terms:
         floor += xbytes * max(nvir * npo, nocc * nocc)
-    return 48 * npo * npv, floor
+    return fixed, floor
 
 
 def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=None,
@@ -320,9 +367,12 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
     terms of lambda1[i,a] and of lambda2 packed [(i>j), (a>b)] before the
     division by their denominators, and the terms of the density of
     zccsd.lam_t.gamma1 (about twice the time of E(T), a packed T2 more in
-    memory at the end).  ``terms`` may also be an object as _t_batch takes
-    it (the reference, one triple at a time); terms.kramers is set to what
-    is used here.'''
+    memory at the end).  ``terms='gradient'``: these and the densities of
+    (T) for the orbital gradient, (E(T), (l1, l2p, goo, gvv, dvo), Densities)
+    - the two products of the triples of a batch then run over all of A and
+    of B, the t2 in them as well as the integrals.  ``terms`` may also be an
+    object as _t_batch takes it (the reference, one triple at a time);
+    terms.kramers is set to what is used here.'''
     log = logger.new_logger(mycc, verbose)
     cput0 = (logger.process_clock(), logger.perf_counter())
     t1 = mycc.t1 if t1 is None else t1
@@ -331,9 +381,13 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
     o, v = t1.shape
     npo, npv = K.npair(o), K.npair(v)
     if o < 3 or v < 3:
-        if terms is True:
-            x = _Sums(o, v)
-            return 0.0, (x.l1, np.ascontiguousarray(x.lt.T), x.goo, x.gvv, x.dvo)
+        if terms is True or terms == 'gradient':
+            x = _Sums(o, v, True)
+            out = (x.l1, np.ascontiguousarray(x.lt.T), x.goo, x.gvv, x.dvo)
+            if terms is True:
+                return 0.0, out
+            return 0.0, out, Densities(np.zeros((o, v, npv), dtype=np.complex128), x.g2,
+                                       np.ascontiguousarray(x.g3.T))
         return 0.0
     mo_e = np.asarray(eris.mo_energy, dtype=np.float64)
     eo, ev = np.ascontiguousarray(mo_e[:o]), np.ascontiguousarray(mo_e[o:])
@@ -358,7 +412,8 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                          'all triples are done')
                 kramers = False
     hv = v // 2 if kramers else v                   # b runs over the unbarred virtuals
-    lam = terms is True
+    den = isinstance(terms, str) and terms == 'gradient'
+    lam = terms is True or den
     if lam:
         terms = None
     elif terms is not None:
@@ -366,7 +421,7 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
 
     # where the operands live: T2pT and VpT in memory; A and B in memory, the
     # smaller first, while they fit next to the smallest batch
-    fixed, floor = memory_need(o, v, m3, lam)
+    fixed, floor = memory_need(o, v, m3, 'gradient' if den else lam)
     n = v + o                                       # the joint index (e | m)
     shapes = {'A': (npv, o, n), 'B': (v, npo, n)}
     if budget is not None and budget < fixed + floor:
@@ -386,9 +441,23 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                                       hint=' or give the calculation more memory (max_memory)')
             ops[name] = tuple(scr.create('%s%d' % (name, k), shapes[name], dtype)
                               for k in range(nparts))
+    # the density of <bc||ek> as the batches add to it, [(b>c), k, e] like the
+    # rows of A: after the operands
+    g1 = None
+    if den:
+        size = 16 * npv * o * v
+        if left is None or size <= left:
+            g1 = np.zeros((npv, o, v), dtype=np.complex128)
+            left = None if left is None else left - size
+        else:
+            if scr is None:
+                scr = scratch.Scratch(prefix='zccsd_t_', what='the arrays of (T)',
+                                      hint=' or give the calculation more memory (max_memory)')
+            g1 = scr.create('g1', (npv, o, v), np.complex128)
     # the products of the terms of Lambda leave GEMM in an array of their own:
     # the least (one virtual, one pair), and an eighth of what there is more
-    rbytes = xbytes * max(v * npo, o * o) if lam else 0
+    wa, wb = (n, n) if den else (v, o)      # of A and of B: the columns of these products
+    rbytes = xbytes * max(wa * npo, o * wb) if lam else 0
     if left is None:
         rbytes = max(rbytes, REVERSE_BYTES) if lam else 0
         nbytes = BATCH_BYTES
@@ -427,6 +496,10 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
     if lam:
         log.info('(T): with the terms of the Lambda equations and of the density; their '
                  'products in blocks of %.1f MB', rbytes / 1e6)
+    if den:
+        log.info('(T): with the densities of the orbital gradient; that of <bc||ek>, %.2f GB, '
+                 '%s', 16e-9 * npv * o * v,
+                 'in a scratch file' if scratch.is_mapped(g1) else 'in memory')
     log.info('(T): matrix products on %s', blas.backend()[1])
 
     def blocks(nrow, per_row):
@@ -485,7 +558,8 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
     pool = [np.empty(cap, dtype=dtype) for _ in range(nparts)]
     sums = rbuf = None
     if lam:
-        sums = _Sums(o, v)
+        sums = _Sums(o, v, den)
+        sums.g1 = g1
         rbuf = [np.empty(rcap, dtype=dtype) for _ in range(nparts)]
 
     def products(rows, cols, off=0):
@@ -505,43 +579,58 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
         pairs r0 <= r < r1 of A times the virtuals s0 <= s < s1 of B, after the
         kernel has put the triples M in its place: Q[e, (s, (ij))], the sum
         over (r, k) of A[r, k, e] M, and Y[(r, i), j], the sum over
-        (s, (mn)) of M B[s, (mn), v + j], antisymmetrized into sums.lt.'''
+        (s, (mn)) of M B[s, (mn), v + j], antisymmetrized into sums.lt.  With
+        the densities both run over all of A and of B: the rows of Q for
+        A[r, k, v + j] = t2[k,j,r] are minus the density of <js||mn>, the
+        columns of Y for B[s, (mn), e] = t2[m,n,s,e] the density of <r||ei>.'''
         X = X if m3 else (X,)
         nr, ns = (r1 - r0) * o, (s1 - s0) * npo
         assert X[0].shape == (nr, ns)
         ptr = lambda x: [K._c(y, dtype) for y in x] + [None, None]  # noqa: E731
-        step = max(1, rcap // (v * npo))
+        step = max(1, rcap // (wa * npo))
         for sa in range(s0, s1, step):
             sb = min(s1, sa + step)
             nc = (sb - sa) * npo
             with timer('t.lam.gemm'):
-                Q = [blas.gemm(A[k][r0:r1].reshape(nr, n)[:, :v].T,
+                Q = [blas.gemm(A[k][r0:r1].reshape(nr, n)[:, :wa].T,
                                X[k][:, (sa - s0) * npo:(sb - s0) * npo],
-                               rbuf[k][:v * nc].reshape(v, nc)) for k in range(nparts)]
+                               rbuf[k][:wa * nc].reshape(wa, nc)) for k in range(nparts)]
             with timer('t.lam.add'):
+                if den:
+                    sums.g2[:, sa:sb] -= _complex([q[v:] for q in Q] if m3 else Q[0][v:]).reshape(
+                        o, sb - sa, npo)
                 if _HAVE_LAM and K.USE_C:
                     K._lib.zc_t_lam_particle(*ptr(Q)[:3], int(m3), nc, v, npo, sa, sb,
                                              K._c(sums.lt))
                     continue
-                Q = _complex(Q if m3 else Q[0]).reshape(v, sb - sa, npo)
+                Q = _complex([q[:v] for q in Q] if m3 else Q[0][:v]).reshape(v, sb - sa, npo)
                 for x in range(sa, sb):
                     sums.lt[K.npair(x):K.npair(x) + x] += Q[:x, x - sa]
                     e = np.arange(x + 1, v)
                     sums.lt[e * (e - 1) // 2 + x] -= Q[x + 1:, x - sa]
-        step = max(1, rcap // (o * o))
+        step = max(1, rcap // (o * wb))
         for ra in range(r0, r1, step):
             rb = min(r1, ra + step)
+            rows = (rb - ra) * o
             with timer('t.lam.gemm'):
                 Y = [blas.gemm(X[k][(ra - r0) * o:(rb - r0) * o],
-                               B[k][s0:s1].reshape(ns, n)[:, v:],
-                               rbuf[k][:(rb - ra) * o * o].reshape((rb - ra) * o, o))
-                     for k in range(nparts)]
+                               B[k][s0:s1].reshape(ns, n)[:, n - wb:],
+                               rbuf[k][:rows * wb].reshape(rows, wb)) for k in range(nparts)]
             with timer('t.lam.add'):
                 if _HAVE_LAM and K.USE_C:
-                    K._lib.zc_t_lam_hole(*ptr(Y)[:3], int(m3), o, ra, rb, K._c(sums.lt))
-                    continue
-                Y = _complex(Y if m3 else Y[0]).reshape(rb - ra, o, o)
-                sums.lt[ra:rb] += (Y - Y.transpose(0, 2, 1))[:, io, jo]
+                    K._lib.zc_t_lam_hole(*ptr(Y)[:3], int(m3), o, wb, wb - o, ra, rb,
+                                         K._c(sums.lt))
+                    if den:
+                        K._lib.zc_t_den_rows(*ptr(Y)[:3], int(m3), rows, wb, v,
+                                             K._c(sums.g1[ra:rb]))
+                else:
+                    Y = _complex(Y if m3 else Y[0]).reshape(rb - ra, o, wb)
+                    Yh = Y[:, :, wb - o:]
+                    sums.lt[ra:rb] += (Yh - Yh.transpose(0, 2, 1))[:, io, jo]
+                    if den:
+                        sums.g1[ra:rb] += Y[:, :, :v]
+                if den:
+                    scratch.written(sums.g1[ra:rb])
 
     def block(X, rows, cols):
         '''The rows and columns of the x of a product that one a uses.'''
@@ -626,14 +715,23 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
         et = 2.0 * et.real + 0j
     if abs(et.imag) > 1e-6:
         log.warn('Non-zero imaginary part found in the (T) energy %s', et)
+    # the operands and the arrays of the batches go, with the views of them
+    # that the loops left behind
     del A, B, ops, pool, rbuf
+    X1 = G1 = out = None                                            # noqa: F841
+    dens = None
+    if lam:
+        del T2pT, VpT           # two of the packed arrays: for the sums in their final layout
+    if den:
+        with timer('t.den.sort'):
+            dens = _densities(mycc, sums, kramers, max_memory, log)
+    del g1
     if scr is not None:
         scr.close()
     if lam:
         with timer('t.lam.add'):
             # lambda2 in its packed layout; the half of the sums that the
             # triples with a barred b would give
-            del T2pT, VpT
             l2p = np.ascontiguousarray(sums.lt.T)
             sums.lt = None
             out = [sums.l1, l2p, sums.goo, sums.gvv, sums.dvo]
@@ -646,4 +744,47 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=None, max_memory=None, three_m=
                     out[k] = out[k] + out[k][partner_signs(out[k].size)[0]].conj()
     log.timer('%s(T)' % mycc.__class__.__name__, *cput0)
     log.note('%s(T) correction = %.15g', mycc.__class__.__name__, et.real)
+    if den:
+        return et.real, tuple(out), dens
     return (et.real, tuple(out)) if lam else et.real
+
+
+def _densities(mycc, sums, kramers, max_memory, log):
+    '''The Densities of kernel() from its sums: the density of <bc||ek> from
+    the layout of the batches, [(b>c), k, e], into that of the stored
+    integrals, [k, e, (b>c)] - in memory if it takes no more than a quarter
+    of what max_memory leaves now, else a mapped array of a scratch file of
+    its own -, that of <bc||jk> transposed into the packed layout; with
+    Kramers pairs all three completed by their time-reversed image (the
+    triples that were done gave half of each).'''
+    g1a, g2, g3 = sums.g1, sums.g2, sums.g3
+    npv, o, v = g1a.shape
+    budget = memory.budget(mycc.max_memory if max_memory is None else max_memory)
+    scr = None
+    if budget is None or 16 * g1a.size <= budget // 4:
+        g1 = np.empty((o, v, npv), dtype=np.complex128)
+    else:
+        scr = scratch.Scratch(prefix='zccsd_td_', what='the density of (T)',
+                              hint=' or give the calculation more memory (max_memory)')
+        g1 = scr.create('g1', (o, v, npv), np.complex128)
+        log.info('(T): the density of <bc||ek>, %.2f GB, in a scratch file', 16e-9 * g1a.size)
+    step = max(1, min(npv, (64 << 20) // (16 * o * v)))
+    for q0 in range(0, npv, step):
+        q1 = min(npv, q0 + step)
+        if _HAVE_LAM and K.USE_C:
+            K._lib.zc_t_den_sort(K._c(g1a[q0:q1]), npv, o, v, q0, q1, K._c(g1))
+        else:
+            g1[:, :, q0:q1] = np.asarray(g1a[q0:q1]).transpose(1, 2, 0)
+        scratch.unmap(g1a[q0:q1])
+    sums.g1 = sums.g3 = None
+    g3 = np.ascontiguousarray(g3.T)
+    if kramers:
+        from zccsdt.zccsd.kramers import image, pair_maps, partner_signs
+        g2 = g2 + image(g2, pairs=(2,))
+        K.ksym_packed(g3, *pair_maps(o), *pair_maps(v))
+        # g1 on its rows (k, e): the partner is (Kk, Ke), the sign that of the two
+        (ko, so), (kv, sv) = partner_signs(o), partner_signs(v)
+        K.ksym_packed(g1.reshape(o * v, npv), (ko[:, None] * v + kv[None, :]).ravel(),
+                      (so[:, None] * sv[None, :]).ravel(), *pair_maps(v))
+    scratch.written(g1)
+    return Densities(g1, g2, g3, scr)

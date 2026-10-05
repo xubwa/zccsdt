@@ -335,7 +335,9 @@ def test_t_terms_in_batches(x2c_h2o, kr, monkeypatch):
     GEMMs, with the C and the numpy kernels, with and without occupied-
     virtual elements of the Fock matrix.  With Kramers pairs the kernel
     visits the triples with an unbarred b and every sum is completed by its
-    time-reversed image."""
+    time-reversed image.  The same variants with the densities of (T) for
+    the orbital gradient (terms='gradient': the two products over all of A
+    and of B) against lam_t.densities."""
     from zccsdt.zccsd import lam_t, triples
     mycc = DirectZCCSD(x2c_h2o, frozen=2)
     mycc.verbose, mycc.kramers = 0, kr
@@ -357,6 +359,13 @@ def test_t_terms_in_batches(x2c_h2o, kr, monkeypatch):
         ref = lam_t.by_triples(t1, t2, eris)
         e_ref = lam_t.energy(t1, t2, eris)
         assert min(abs(y).max() for y in ref) > 1e-3
+        # the densities with the weight of the packed pairs: g1[k, e, (b>c)],
+        # g2[m, a, (j>k)], g3[(j>k), (b>c)]
+        d1, d2, d3, df = lam_t.densities(t1, t2, eris)
+        (bv, cv), (jo, ko) = K.tril(v), K.tril(o)
+        dref = (2 * d1[bv, cv].transpose(2, 1, 0), 2 * d2[:, :, jo, ko],
+                4 * d3[bv, cv][:, jo, ko].T)
+        assert min(abs(y).max() for y in dref) > 1e-3 and abs(df - ref[4].conj()).max() < 1e-12
         e, got = lam_t.in_batches(mycc, eris, t1, t2)
         assert abs(e - e_ref) < 1e-10
         for x, y in zip(got, ref):
@@ -371,6 +380,14 @@ def test_t_terms_in_batches(x2c_h2o, kr, monkeypatch):
                     assert abs(e - e_ref) < 1e-10
                     for x, y in zip((l1, K.unpack_t2(l2p, o, v), goo, gvv, dvo), ref):
                         assert abs(x - y).max() < 1e-10
+                    e, (l1, l2p, goo, gvv, dvo), den = triples.kernel(
+                        mycc, eris, t1, t2, 0, three_m=m3, terms='gradient')
+                    assert abs(e - e_ref) < 1e-10
+                    for x, y in zip((l1, K.unpack_t2(l2p, o, v), goo, gvv, dvo), ref):
+                        assert abs(x - y).max() < 1e-10
+                    for x, y in zip((den.g1, den.g2, den.g3), dref):
+                        assert x.shape == y.shape and abs(x - y).max() < 1e-10
+                    den.close()
             monkeypatch.setattr(K, 'USE_C', have_c)
         monkeypatch.setattr(triples, 'BATCH_BYTES', 4 << 30)
         # the blocks of the two products: one virtual and one pair at a time
@@ -381,20 +398,30 @@ def test_t_terms_in_batches(x2c_h2o, kr, monkeypatch):
                                                      terms=True, max_memory=3 * need / 1e6)
         for x, y in zip((l1, K.unpack_t2(l2p, o, v), goo, gvv, dvo), ref):
             assert abs(x - y).max() < 1e-10
+        need = sum(triples.memory_need(o, v, False, 'gradient'))
+        e, _, den = triples.kernel(mycc, eris, t1, t2, 0, three_m=False, terms='gradient',
+                                   max_memory=3 * need / 1e6)
+        for x, y in zip((den.g1, den.g2, den.g3), dref):
+            assert abs(x - y).max() < 1e-10
+        den.close()
         monkeypatch.undo()
 
 
 @pytest.mark.parametrize('kr', [False, None])
 def test_t_terms_peak_within_plan(kr, monkeypatch, tmp_path):
     """What triples.kernel allocates, with and without the terms of the
-    Lambda equations, stays within max_memory (tracemalloc follows numpy's
+    Lambda equations and the densities of the orbital gradient, stays within
+    max_memory (tracemalloc follows numpy's
     allocations; t2 is given packed, as solve_lambda gives it): from the
     least - the operands in a scratch file, one virtual per batch - to
     everything in memory; MemoryError below the least.  What the plan does
     not know is small: Python's own objects (the list of a few thousand
     batches; a megabyte is allowed for them) and what the HDF5 library
     takes when its first file is opened (1 MiB, kept: done before the
-    measurements).  The results do not depend on the plan."""
+    measurements).  The results do not depend on the plan.  The density of
+    <bc||ek> is in memory where there is room for it - while the batches
+    add to it, and at the end (a quarter of what is left then) -, else in
+    a scratch file."""
     import tracemalloc
     from pyscf import lib
     from zccsdt import scratch
@@ -416,10 +443,10 @@ def test_t_terms_peak_within_plan(kr, monkeypatch, tmp_path):
         t1 = 0.5 * (t1 + kramers.image(t1))
         t2p = np.ascontiguousarray(0.5 * (t2p + kramers.image(t2p, pairs=(0, 1))))
     scratch.Scratch().close()
-    ref, mapped = {}, 0
-    for lam_terms in (None, True):
+    ref, mapped, g1_mapped = {}, 0, []
+    for lam_terms in (None, True, 'gradient'):
         for m3 in (False, True):
-            fixed, floor = triples.memory_need(o, v, m3, bool(lam_terms))
+            fixed, floor = triples.memory_need(o, v, m3, lam_terms or False)
             need = fixed + floor
             assert need > 5e6 and 16 * npo * npv > 1e6      # against the megabyte allowed
             operands = (24 if m3 else 16) * (npv * o + v * npo) * (v + o)
@@ -437,6 +464,15 @@ def test_t_terms_peak_within_plan(kr, monkeypatch, tmp_path):
                 assert peak <= budget + 1000000, (lam_terms, m3, factor, peak, budget)
                 mapped += budget < need + operands
                 flat = [out] if lam_terms is None else [out[0], *out[1]]
+                if lam_terms == 'gradient':
+                    den = out[2]
+                    g1_mapped.append(scratch.is_mapped(den.g1))
+                    flat += [np.array(den.g1), den.g2, den.g3]
+                    den.close()
+                del out
                 for x, y in zip(flat, ref.setdefault(lam_terms, flat)):
                     assert np.abs(x - y).max() < 1e-11
-    assert mapped >= 6 and abs(ref[None][0] - ref[True][0]) < 1e-12
+    assert mapped >= 8 and abs(ref[None][0] - ref[True][0]) < 1e-12
+    assert any(g1_mapped) and not all(g1_mapped)
+    for x, y in zip(ref[True], ref['gradient']):
+        assert np.abs(x - y).max() < 1e-11

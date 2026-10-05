@@ -309,14 +309,59 @@ static inline zc dotu(const zc *x, const zc *y, int64_t n)
     return sr + si * I;
 }
 
+/* For the three virtuals s = a, b, c of a triple with the vectors xa, xb, xc
+ * over the occupied spinors: x[k] conj(w[ijk]) to the pair (ij), -x[j] to
+ * (ik), x[i] to (jk) of the three rows buf[s, (pair)]; wv = conj(w[ij, k < j])
+ * over the denominator. */
+static inline void role_sums(const zc *wv, const zc *xa, const zc *xb, const zc *xc,
+                             int64_t i, int64_t j, int64_t npo, zc *buf)
+{
+    const int64_t pij = i * (i - 1) / 2 + j, oj = j * (j - 1) / 2, oi = i * (i - 1) / 2;
+    const zc xai = xa[i], xbi = xb[i], xci = xc[i];
+    const zc xaj = xa[j], xbj = xb[j], xcj = xc[j];
+    zc *f1 = buf, *f2 = buf + npo, *f3 = buf + 2 * npo;
+    f1[pij] += dotu(wv, xa, j);
+    f2[pij] += dotu(wv, xb, j);
+    f3[pij] += dotu(wv, xc, j);
+    for (int64_t k = 0; k < j; k++) {
+        const zc wc = wv[k];
+        f1[oi + k] -= xaj * wc;
+        f2[oi + k] -= xbj * wc;
+        f3[oi + k] -= xcj * wc;
+        f1[oj + k] += xai * wc;
+        f2[oj + k] += xbi * wc;
+        f3[oj + k] += xci * wc;
+    }
+}
+
+/* The three rows of role_sums to the rows (bc), -(ac), (ab) of out[(pair of
+ * virtuals), (pair)]: (bc) is the pair's own, (ac) and (ab) are shared with
+ * the other pairs of a. */
+static inline void role_rows(const zc *buf, zc *out, int64_t pbc, int64_t pac, int64_t pab,
+                             int64_t npo)
+{
+    zc *r = out + pbc * npo;
+    for (int64_t q = 0; q < npo; q++)
+        r[q] += buf[q];
+    #pragma omp critical(zc_t_lam_rows)
+    {
+        zc *rc = out + pac * npo, *rb = out + pab * npo;
+        for (int64_t q = 0; q < npo; q++) {
+            rc[q] -= buf[npo + q];
+            rb[q] += buf[2 * npo + q];
+        }
+    }
+}
+
 /* The arguments of zc_t_batch (X1, G1, G2 are overwritten), and the sums:
  * l1[i,a], dvo[a,i], goo[i], gvv[a] and lt[(a>b), (i>j)], which are added
- * to. */
+ * to; g3[(a>b), (i>j)] (or NULL): the density of <bc||jk>, the sum of
+ * lt with t1[k,s] in the place of f[s,k]. */
 void zc_t_batch_lam(void **X1p, int64_t s1, int64_t c1, void **G1p, int64_t n1, void **G2p,
                     int64_t n2, int m3, int64_t a, int64_t b0, int64_t b1, int64_t no,
                     int64_t nv, const zc *t1, const zc *fvo, const zc *VpT, const zc *T2pT,
                     const double *eo, const double *ev, double *out, zc *l1, zc *dvo,
-                    zc *goo, zc *gvv, zc *lt)
+                    zc *goo, zc *gvv, zc *lt, zc *g3)
 {
     const int64_t npo = no * (no - 1) / 2;
     const int64_t p0 = b0 * (b0 - 1) / 2, pa = a * (a - 1) / 2;
@@ -342,6 +387,7 @@ void zc_t_batch_lam(void **X1p, int64_t s1, int64_t c1, void **G1p, int64_t n1, 
         zc *la = acc, *lb = acc + no, *lc = acc + 2 * no;
         zc *da = acc + 3 * no, *db = acc + 4 * no, *dc = acc + 5 * no;
         zc *fr = has_f ? malloc(sizeof(zc) * 3 * npo) : NULL;   /* the f terms of the rows */
+        zc *tr = g3 ? malloc(sizeof(zc) * 3 * npo) : NULL;      /* the t1 terms of the rows */
         /* the sums of this thread */
         zc *l1t = calloc(no * ns, sizeof(zc)), *dvt = calloc(ns * no, sizeof(zc));
         zc *got = calloc(no, sizeof(zc)), *gvt = calloc(ns, sizeof(zc));
@@ -403,6 +449,8 @@ void zc_t_batch_lam(void **X1p, int64_t s1, int64_t c1, void **G1p, int64_t n1, 
             memset(acc, 0, sizeof(zc) * 6 * no);
             if (has_f)
                 memset(fr, 0, sizeof(zc) * 3 * npo);
+            if (g3)
+                memset(tr, 0, sizeof(zc) * 3 * npo);
             zc xs = 0.0;                                /* sum of conj(u) w / D^2 */
             const double eabc = ev[a] + ev[b] + ev[c];
             for (int64_t i = 2; i < no; i++)
@@ -474,25 +522,10 @@ void zc_t_batch_lam(void **X1p, int64_t s1, int64_t c1, void **G1p, int64_t n1, 
                         db[k] += wc * tacij;
                         dc[k] += wc * tabij;
                     }
-                    if (has_f) {
-                        /* f[s,k] conj(w[ijk]) to the pair (ij), -f[s,j] to (ik),
-                         * f[s,i] to (jk) */
-                        const zc fai = fa[i], fbi = fb[i], fci = fc[i];
-                        const zc faj = fa[j], fbj = fb[j], fcj = fc[j];
-                        zc *f1 = fr, *f2 = fr + npo, *f3 = fr + 2 * npo;
-                        f1[pij] += dotu(wv, fa, j);
-                        f2[pij] += dotu(wv, fb, j);
-                        f3[pij] += dotu(wv, fc, j);
-                        for (int64_t k = 0; k < j; k++) {
-                            const zc wc = wv[k];
-                            f1[oi + k] -= faj * wc;
-                            f2[oi + k] -= fbj * wc;
-                            f3[oi + k] -= fcj * wc;
-                            f1[oj + k] += fai * wc;
-                            f2[oj + k] += fbi * wc;
-                            f3[oj + k] += fci * wc;
-                        }
-                    }
+                    if (has_f)          /* f[s,k] conj(w[ijk]) */
+                        role_sums(wv, fa, fb, fc, i, j, npo, fr);
+                    if (g3)             /* t1[k,s] conj(w[ijk]) */
+                        role_sums(wv, ta, tb, tc, i, j, npo, tr);
                 }
             /* M vanishes where its single index is one of the pair: these Z
              * belong to no (ijk) */
@@ -552,21 +585,10 @@ void zc_t_batch_lam(void **X1p, int64_t s1, int64_t c1, void **G1p, int64_t n1, 
             gvt[b1] += conj(xs);
             gvt[b] += conj(xs);
             gvt[c] += conj(xs);
-            if (has_f) {
-                /* the row (bc) is this pair's own; (ac) and (ab) are shared
-                 * with the other pairs of a */
-                zc *r = lt + pbc * npo;
-                for (int64_t q = 0; q < npo; q++)
-                    r[q] += fr[q];
-                #pragma omp critical(zc_t_lam_rows)
-                {
-                    zc *rc = lt + (pa + c) * npo, *rb = lt + (pa + b) * npo;
-                    for (int64_t q = 0; q < npo; q++) {
-                        rc[q] -= fr[npo + q];
-                        rb[q] += fr[2 * npo + q];
-                    }
-                }
-            }
+            if (has_f)
+                role_rows(fr, lt, pbc, pa + c, pa + b, npo);
+            if (g3)
+                role_rows(tr, g3, pbc, pa + c, pa + b, npo);
         }
         #pragma omp critical(zc_t_lam_sums)
         {
@@ -590,6 +612,7 @@ void zc_t_batch_lam(void **X1p, int64_t s1, int64_t c1, void **G1p, int64_t n1, 
         free(wv);
         free(acc);
         free(fr);
+        free(tr);
         free(l1t);
         free(dvt);
         free(got);
@@ -636,32 +659,72 @@ void zc_t_lam_particle(const void *q0, const void *q1, const void *q2, int m3, i
     }
 }
 
-/* The product of the triples of a batch with <mn||js> - Y[(r - ra, i), j] for
- * the pairs ra <= r < rb of virtual spinors; complex, or its three real
- * products -, antisymmetrized over the occupied pair into lt[(a>b), (i>j)]:
- * lt[r, (ij)] += Y[(r, i), j] - Y[(r, j), i]. */
+/* The product of the triples of a batch with <mn||js> - Y[(r - ra, i), off + j]
+ * in rows of ld elements, for the pairs ra <= r < rb of virtual spinors;
+ * complex, or its three real products -, antisymmetrized over the occupied
+ * pair into lt[(a>b), (i>j)]: lt[r, (ij)] += Y[(r, i), j] - Y[(r, j), i]. */
 void zc_t_lam_hole(const void *y0, const void *y1, const void *y2, int m3, int64_t no,
-                   int64_t ra, int64_t rb, zc *lt)
+                   int64_t ld, int64_t off, int64_t ra, int64_t rb, zc *lt)
 {
     const int64_t npo = no * (no - 1) / 2;
     #pragma omp parallel for schedule(static) if((rb - ra) * no * no > 65536)
     for (int64_t r = ra; r < rb; r++) {
-        const int64_t off = (r - ra) * no * no;
+        const int64_t base = (r - ra) * no * ld + off;
         zc *row = lt + r * npo;
         if (m3) {
-            const double *d0 = (const double *)y0 + off, *d1 = (const double *)y1 + off;
-            const double *d2 = (const double *)y2 + off;
+            const double *d0 = (const double *)y0 + base, *d1 = (const double *)y1 + base;
+            const double *d2 = (const double *)y2 + base;
             for (int64_t i = 1; i < no; i++)
                 for (int64_t j = 0; j < i; j++) {
-                    const int64_t x = i * no + j, y = j * no + i;
+                    const int64_t x = i * ld + j, y = j * ld + i;
                     const double p1 = d0[x] - d0[y], p2 = d1[x] - d1[y], p3 = d2[x] - d2[y];
                     row[i * (i - 1) / 2 + j] += (p1 - p2) + (p3 - p1 - p2) * I;
                 }
         } else {
-            const zc *yy = (const zc *)y0 + off;
+            const zc *yy = (const zc *)y0 + base;
             for (int64_t i = 1; i < no; i++)
                 for (int64_t j = 0; j < i; j++)
-                    row[i * (i - 1) / 2 + j] += yy[i * no + j] - yy[j * no + i];
+                    row[i * (i - 1) / 2 + j] += yy[i * ld + j] - yy[j * ld + i];
         }
     }
+}
+
+/* dst[r, c] += y[r, c] for nrow rows and the first ncol of the ld columns of
+ * y (complex, or its three real products): the product of the triples of a
+ * batch with t2, added to the rows of the density of <bc||ei>. */
+void zc_t_den_rows(const void *y0, const void *y1, const void *y2, int m3, int64_t nrow,
+                   int64_t ld, int64_t ncol, zc *dst)
+{
+    #pragma omp parallel for schedule(static) if(nrow * ncol > 65536)
+    for (int64_t r = 0; r < nrow; r++) {
+        zc *d = dst + r * ncol;
+        if (m3) {
+            const double *d0 = (const double *)y0 + r * ld, *d1 = (const double *)y1 + r * ld;
+            const double *d2 = (const double *)y2 + r * ld;
+            for (int64_t x = 0; x < ncol; x++)
+                d[x] += (d0[x] - d1[x]) + (d2[x] - d0[x] - d1[x]) * I;
+        } else {
+            const zc *yy = (const zc *)y0 + r * ld;
+            for (int64_t x = 0; x < ncol; x++)
+                d[x] += yy[x];
+        }
+    }
+}
+
+/* dst[k, e, q] = src[q - q0, k, e] for the pairs q0 <= q < q1: the density of
+ * <bc||ek> from the layout of the batches (rows of pairs) into that of the
+ * stored integrals, [k, e, (b>c)] with npv pairs. */
+void zc_t_den_sort(const zc *src, int64_t npv, int64_t no, int64_t nv, int64_t q0, int64_t q1,
+                   zc *dst)
+{
+    #pragma omp parallel for schedule(static)
+    for (int64_t k = 0; k < no; k++)
+        for (int64_t qa = q0; qa < q1; qa += 64) {      /* a tile of pairs in the cache */
+            const int64_t qb = qa + 64 < q1 ? qa + 64 : q1;
+            for (int64_t e = 0; e < nv; e++) {
+                zc *d = dst + (k * nv + e) * npv;
+                for (int64_t q = qa; q < qb; q++)
+                    d[q] = src[((q - q0) * no + k) * nv + e];
+            }
+        }
 }

@@ -99,6 +99,27 @@ def gamma1(t1, t2, eris):
     return goo, gvv, dvo
 
 
+def densities(t1, t2, eris):
+    '''(d1[b,c,e,i], d2[m,a,j,k], d3[b,c,j,k], df[a,i]): the densities of (T)
+    for the orbital gradient - the coefficients of <bc||ei>, <ma||jk>,
+    <bc||jk> and of the Fock matrix elements f[a,i] in the first-order change
+    of the real part of E(T),
+
+        d Re E(T) = Re sum (d1 d<bc||ei> + d2 d<ma||jk> + d3 d<bc||jk> + df df[a,i])
+                    - sum_i goo[i] de_i + sum_a gvv[a] de_a
+
+    (goo, gvv of gamma1; df = conj(dvo)).  E(T) is not linear in the
+    integrals: with t3c, t3d the connected and the disconnected triples it is
+    conj(t3c + t3d) D t3c / 36, the integrals of t3c enter twice - through
+    conj(2 t3c + t3d), as t2 does in sources() - and those of t3d once.'''
+    t3c, t3d, _ = triples(t1, t2, eris)
+    m3, wc = (2 * t3c + t3d).conj(), t3c.conj()
+    return (0.25 * np.einsum('ijkabc,jkae->bcei', m3, t2),
+            -0.25 * np.einsum('ijkabc,imbc->majk', m3, t2),
+            0.25 * np.einsum('ijkabc,ia->bcjk', wc, t1),
+            0.25 * np.einsum('ijkabc,jkbc->ai', wc, t2))
+
+
 def by_triples(t1, t2, eris):
     '''(l1, l2, goo, gvv, dvo): the source terms of sources() before the
     division by the denominators (l1[i,a], l2[i,j,a,b]) and the density
