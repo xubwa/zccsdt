@@ -56,10 +56,30 @@ all MO integrals (orbital_gradient: a reference for small molecules) and
 its de-excitation half term by term (gradient_terms: the same), the
 response equation with AO-direct Fock builds (solve: for any size), the
 relaxed density (kernel: with the orbital gradient of zccsd.orbgrad, in the
-layouts of zccsd.amps and within max_memory; relaxed_rdm1_dense: from the
-full arrays, also with frozen occupied spinors).  Not here yet: frozen
-spinors without the full arrays, and the (T) terms, for which the
-occupied-occupied and virtual-virtual rotations do not drop out.
+layouts of zccsd.amps and within max_memory, also with frozen occupied
+spinors - gradient_frozen -; relaxed_rdm1_dense: from the full arrays).
+
+CCSD(T) (with_t).  E(T) is added to the Lagrangian, a function of t, of the
+integrals and of the orbital energies; lambda then solves the equations with
+the derivative of E(T) with respect to t as source terms (zccsd.lam_t).  The
+gradient has three more parts (gradient_t and gradient_nh from full arrays,
+zccsd.orbgrad_t in the layouts of the amplitude step):
+
+- E(T) with its densities, the coefficients of <bc||ei>, <ma||jk>, <bc||jk>,
+  f[a,i] and the orbital energies in its first-order change (one pass over
+  the triples makes them with the sources: zccsd.triples.kernel);
+- the excitation half Gnh[i, a], which is the source of lambda1 now;
+- the rotations among occupied and among virtual spinors.  They change t in
+  the Lagrangian (contractions of the sources with t) and the integrals in
+  E(T), and they do not drop out: E(T) has the orbital energies in its
+  denominators.  As for frozen spinors, they follow from the Fock matrix
+  staying diagonal: y_pq = G_pq / (e_q - e_p) goes into the density and its
+  Fock matrix to the right-hand side of the Z-vector equations.  G_pq is
+  (e_q - e_p) times the off-diagonal one-particle density of (T) - the
+  products of the triples, the derivative of E(T) with respect to an
+  off-diagonal element of the Fock matrix - exactly, for any amplitudes: the
+  division is safe down to the rounding of G, and between degenerate
+  spinors, where G vanishes, there is no rotation (DEGENERATE).
 '''
 
 import numpy as np

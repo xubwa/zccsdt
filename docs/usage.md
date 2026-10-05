@@ -200,6 +200,7 @@ mu = mycc.dip_moment()                  # its dipole moment, Debye (unit='AU')
 mycc.solve_lambda(with_t=True)          # CCSD(T): with the (T) terms; E(T) is in mycc.e_t
 mycc.make_rdm1(with_t=True)
 mycc.dip_moment(relaxed=True)           # with orbital relaxation (CCSD; Z-vector equations)
+mycc.dip_moment(with_t=True, relaxed=True)      # CCSD(T) with orbital relaxation
 ```
 
 The Lambda equations run on the integrals and within the memory plan of the
@@ -226,8 +227,22 @@ needs the memory of a CCSD step without frozen spinors (benzene/cc-pVDZ with
 a frozen core: 85 s instead of 24 s; if `max_memory` is short, the integrals
 of the active space are released, and `mycc.eris` is then `None` until
 `mycc.ao2mo()` is called again).
-`relaxed=True` together with `with_t=True` is not there yet (the orbital
-relaxation of the (T) terms; docs/benchmarks.md).
+`relaxed=True` together with `with_t=True` is the relaxed density of
+CCSD(T), the derivative of E(SCF) + E(CCSD) + E(T). Call it on the CCSD
+object as it is after `kernel()`: one pass over the triples then gives E(T),
+the sources of Lambda and the densities of (T) for the orbital gradient
+(`triples.kernel` with `terms='gradient'`), the Lambda equations of CCSD(T)
+are solved, and the gradient gets its (T) terms (`zccsd/orbgrad_t.py`).
+After `solve_lambda(with_t=True)` lambda is reused, but the pass over the
+triples is done once more for the densities; `solve_lambda(with_t='gradient')`
+keeps them. They are released when the relaxed density is made: the density
+of <bc||ek> has 8 o v^3 bytes (in memory if it takes no more than a quarter
+of what is left, else in a scratch file). Frozen occupied spinors are
+allowed. The relaxed density also has elements between different occupied
+and between different virtual spinors - (T) depends on the orbital
+energies -, except between spinors closer in energy than 1e-9
+(`zvector.DEGENERATE`: degenerate spinors, between which no rotation
+changes the energy).
 
 At `verbose >= 4` the log says where the integrals are (memory or scratch
 file), how the step is sliced, which BLAS does the matrix products and
