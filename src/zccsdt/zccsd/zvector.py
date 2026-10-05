@@ -160,7 +160,8 @@ def gradient_nh(fock, g, d2, d1, nocc):
     not depend on an integral; f = h + sum_k <pk||qk> over the ``nocc``
     occupied spinors.  A rotation takes a bra index y of an integral to x and
     a ket index x to minus y, and it rotates the occupied spinors of the Fock
-    operator (the term V).  The orbital gradient is (Gnh - Gnh^+) / 2.'''
+    operator (the term V).  The orbital gradient is (Gnh - Gnh^+) / 2.  (For
+    E(T), ``fock`` is t_fock: the Fock matrix as E(T) has it.)'''
     E = np.einsum
     n = fock.shape[0]
     bra = E('xqrs,yqrs->xy', d2, g) + E('pxrs,pyrs->xy', d2, g)
@@ -168,6 +169,17 @@ def gradient_nh(fock, g, d2, d1, nocc):
     occ = (np.arange(n) < nocc).astype(np.float64)
     V = E('pq,pyqx->yx', d1, g)
     return (bra - ket).T + fock @ d1.T - d1.T @ fock + V * (occ[None, :] - occ[:, None])
+
+
+def t_fock(fock, nocc):
+    '''The Fock matrix as E(T) has it: the orbital energies on the diagonal
+    and the occupied-virtual blocks.  What an SCF leaves off the diagonal of
+    the other two blocks (1e-8 at its convergence) is not in E(T), and with
+    it the occupied-occupied and virtual-virtual blocks of the gradient of
+    (T) would not be exact multiples of e_q - e_p.'''
+    out = np.diag(np.asarray(fock, dtype=np.complex128).diagonal().real).astype(np.complex128)
+    out[:nocc, nocc:], out[nocc:, :nocc] = fock[:nocc, nocc:], fock[nocc:, :nocc]
+    return out
 
 
 def t_densities(t1, t2, eris, nmo=None, nocc=None, act=None):
@@ -222,7 +234,7 @@ def gradient_t(t1, t2, fock, g, nocc):
     mo_e = fock.diagonal().real
     eris = types.SimpleNamespace(nocc=o, fock=fock, mo_energy=mo_e, ovvv=g[oc, vi, vi, vi],
                                  ooov=g[oc, oc, oc, vi], oovv=g[oc, oc, vi, vi])
-    Gnh = gradient_nh(fock, g, *t_densities(t1, t2, eris), o)
+    Gnh = gradient_nh(t_fock(fock, o), g, *t_densities(t1, t2, eris), o)
     s1, s2 = lam_t.sources(t1, t2, eris)
     eia = mo_e[:o, None] - mo_e[o:]
     s1 = s1 * eia
@@ -716,7 +728,8 @@ def relaxed_rdm1_dense(mycc, mf=None, l1=None, l2=None, tol=1e-9, verbose=None, 
         n = C.shape[1]
         g = eri.transpose(0, 2, 1, 3) - eri.transpose(0, 2, 3, 1)
         fock = h + np.einsum('pkqk->pq', g[:, :o, :, :o])
-        Gt = gradient_nh(fock, g, *t_densities(mycc.t1, mycc.t2, mycc.eris, n, o, act), o)
+        Gt = gradient_nh(t_fock(fock, o), g,
+                         *t_densities(mycc.t1, mycc.t2, mycc.eris, n, o, act), o)
         G = G + 0.5 * (Gt - Gt.conj().T)
         doo, dov, dvo, dvv = gccsd_rdm._gamma1_intermediates(mycc, mycc.t1, mycc.t2, l1, l2)
         goo, gvv, gvo = lam_t.gamma1(mycc.t1, mycc.t2, mycc.eris)

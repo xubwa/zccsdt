@@ -49,7 +49,9 @@ The result is Gnh[y, x] for all spinors; with Gnh[a, i] of zccsd.orbgrad
 added, the orbital gradient is (Gnh - Gnh^+) / 2.  Its occupied-occupied and
 virtual-virtual blocks are (e_q - e_p) y[p, q] exactly - y the off-diagonal
 one-particle density of (T), whatever the convergence of the amplitudes -,
-and vanish between degenerate spinors (zvector.kernel divides).
+and vanish between degenerate spinors (zvector.kernel divides).  For that
+the Fock matrix is taken as E(T) has it - the orbital energies on its
+diagonal and f[i,a] -, not with what the SCF left elsewhere off the diagonal.
 
 Timers (zccsdt.timing): 'ogt.pairs', 'ogt.small', 'ogt.ovvv' (the pass over
 g1 and <ke||bc> by k), 'ogt.vvvv' (the slabs and the pass by e), 'ogt.fock'.
@@ -332,9 +334,11 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, slabs, parts=None, cou
         if coulomb is None:
             coulomb = orbgrad.Coulomb(eris.mol, mycc.max_memory)
         V = orbgrad.fock_matrices(coulomb, eris.mo_ao_spin, (D,))[0]
-        fock = np.zeros((n, n), dtype=np.complex128)
-        fock[oc, oc], fock[oc, vi], fock[vi, oc], fock[vi, vi] = (res.foo, res.fov,
-                                                                  res.fov.conj().T, res.fvv)
+        # the Fock matrix as E(T) has it: the orbital energies and f[i,a] (what
+        # the SCF left off the diagonal elsewhere is not in E(T); with it the
+        # two blocks below would not be the multiples of e_q - e_p that they are)
+        fock = np.diag(np.asarray(res.mo_e, dtype=np.complex128))
+        fock[oc, vi], fock[vi, oc] = res.fov, res.fov.conj().T
         occ = (np.arange(n) < o).astype(np.float64)
         G['fock'] += fock @ D.T - D.T @ fock + V * (occ[None, :] - occ[:, None])
     if parts is not None:

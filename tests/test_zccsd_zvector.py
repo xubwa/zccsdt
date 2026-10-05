@@ -196,9 +196,9 @@ def test_orbital_gradient_of_ccsd_t(mol, kr):
         x = np.zeros_like(d2)
         x[sl] = d2[sl]
         ref[name] = zvector.gradient_nh(fock, g, x, zero1, o)
-    ref['fock'] = zvector.gradient_nh(fock, g, zero2, d1, o)
+    ref['fock'] = zvector.gradient_nh(zvector.t_fock(fock, o), g, zero2, d1, o)
     total = zvector.gradient_t(t1, t2, fock, g, o)
-    ref['sources'] = total - zvector.gradient_nh(fock, g, d2, d1, o)
+    ref['sources'] = total - zvector.gradient_nh(zvector.t_fock(fock, o), g, d2, d1, o)
     e_t, terms, dens = triples.kernel(mycc, eris, t1, t2, terms='gradient')
     parts = {}
     Gt = orbgrad_t.kernel(mycc, eris, t1, t2, terms, dens, parts=parts)
@@ -221,8 +221,8 @@ def test_orbital_gradient_of_ccsd_t(mol, kr):
         assert abs(G[blk, blk][same]).max() < 1e-15 and abs(G[blk, blk]).max() > 5e-6
         D = 0.5 * (D + D.conj().T)
         assert abs(D[same & ~np.eye(same.shape[0], dtype=bool)]).max() < 1e-12
-        # the Fock matrix of the SCF is diagonal to 1e-8 only
-        assert abs(G[blk, blk] - de * D)[~same].max() < 1e-10
+        # exactly: whatever the SCF left off the diagonal of its Fock matrix
+        assert abs(G[blk, blk] - de * D).max() < 1e-15
 
 
 @pytest.mark.parametrize('kr,frozen', [(False, 0), (None, 0), (False, 2), (None, 2)])
@@ -291,7 +291,7 @@ def test_orbital_gradient_of_ccsd_t_with_frozen_spinors(mol):
         x = np.zeros_like(d2)
         x[sl] = d2[sl]
         ref[name] = zvector.gradient_nh(fock, g, x, zero1, o)
-    ref['fock'] = zvector.gradient_nh(fock, g, zero2, d1, o)
+    ref['fock'] = zvector.gradient_nh(zvector.t_fock(fock, o), g, zero2, d1, o)
     # the sources with t, on the active spinors
     s1, s2 = lam_t.sources(t1, t2, mycc.eris)
     eia = mo_e[act][:, None] - mo_e[o:]
