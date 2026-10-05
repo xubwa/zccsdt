@@ -423,7 +423,7 @@ class DirectZCCSD(_zccsd.ZCCSD):
 
     _keys = {'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
              'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density', 'e_t',
-             '_l_with_t'}
+             '_l_with_t', '_t_gradient'}
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
                  ladder='ao', cderi=None, max_error=1e-5):
@@ -457,6 +457,7 @@ class DirectZCCSD(_zccsd.ZCCSD):
         self.e_hf = self.get_e_hf()
         if eris is None:
             eris = self.eris if self.eris is not None else self.ao2mo(self.mo_coeff)
+        self._drop_t_terms()                # those of other amplitudes
         self.converged, self.e_corr, self.t1, self.t2 = amps.kernel(
             self, eris, t1, t2, max_cycle=self.max_cycle, tol=self.conv_tol,
             tolnormt=self.conv_tol_normt, verbose=self.verbose, callback=self.callback)
@@ -472,33 +473,61 @@ class DirectZCCSD(_zccsd.ZCCSD):
         ``with_t``: for CCSD(T), with the (T) terms of the equations
         (zccsdt.zccsd.lam_t) from the batches of the (T) code
         (zccsdt.zccsd.triples.kernel with terms=True: about twice the time
-        of the (T) energy); self.e_t is set on the way.'''
+        of the (T) energy); self.e_t is set on the way.  ``with_t='gradient'``:
+        the densities of (T) for the orbital gradient are made in the same
+        pass and kept for the relaxed density (make_rdm1 with relaxed=True
+        asks for them; zccsdt.zccsd.zvector releases them).'''
         if not self._fixed_layouts():
             return _zccsd.ZCCSD.solve_lambda(self, t1, t2, l1, l2, eris)
         from zccsdt.zccsd import lam
         if eris is None:
             eris = self.eris if self.eris is not None else self.ao2mo(self.mo_coeff)
+        self._drop_t_terms()
+        gradient = isinstance(with_t, str) and with_t == 'gradient'
 
         def t_terms(t1, t2p):
             # the (T) terms of lambda over their denominators; those of the
             # density are kept for make_rdm1
-            from zccsdt.zccsd import kernels as K, triples
-            if getattr(eris, 'residual', None) is not None:
-                eris.residual.close()               # as in ccsd_t: W(mbej) and the AO
-            if getattr(eris, 'aoladder', None) is not None:
-                eris.aoladder.close()               # operators are made again for the steps
-            self.e_t, (s1, s2p, goo, gvv, dvo) = triples.kernel(
-                self, eris, t1, t2p, self.verbose, three_m=self.three_m, terms=True)
+            from zccsdt.zccsd import kernels as K
+            terms, dens = self.t_terms(eris, t1, t2p, gradient)
             eo, ev = (np.ascontiguousarray(x, dtype=np.float64)
                       for x in (eris.mo_energy[:eris.nocc], eris.mo_energy[eris.nocc:]))
-            self._t_density = (goo, gvv, dvo)
-            return s1 / (eo[:, None] - ev), K.div_packed(s2p, eo, ev)
+            l1t, l2t = terms[0] / (eo[:, None] - ev), K.div_packed(terms[1], eo, ev)
+            if gradient:
+                # the sources as the Lambda equations hold them, and the densities
+                self._t_gradient = (l1t, l2t, dens)
+            return l1t, l2t
 
         self.converged_lambda, self.l1, self.l2 = lam.kernel(
             self, eris, t1, t2, l1, l2, max_cycle=self.max_cycle, tol=self.conv_tol_normt,
             verbose=self.verbose, sources=t_terms if with_t else None)
         self._l_with_t = bool(with_t)       # which equations self.l1 and self.l2 solve
         return self.l1, self.l2
+
+    def t_terms(self, eris, t1, t2p, gradient=False):
+        '''((s1, s2p, goo, gvv, dvo), Densities or None): the (T) terms of
+        the Lambda equations (before the division by their denominators) and
+        of the one-particle density, with ``gradient`` the densities of the
+        orbital gradient as well, from zccsdt.zccsd.triples.kernel; self.e_t
+        is set, and the terms of the density are kept for make_rdm1.'''
+        from zccsdt.zccsd import triples
+        if getattr(eris, 'residual', None) is not None:
+            eris.residual.close()               # as in ccsd_t: W(mbej) and the AO
+        if getattr(eris, 'aoladder', None) is not None:
+            eris.aoladder.close()               # operators are made again for the steps
+        out = triples.kernel(self, eris, t1, t2p, self.verbose, three_m=self.three_m,
+                             terms='gradient' if gradient else True)
+        self.e_t, terms = out[:2]
+        self._t_density = terms[2:]
+        return terms, (out[2] if gradient else None)
+
+    def _drop_t_terms(self):
+        '''Forget the (T) terms of earlier amplitudes; the scratch file of
+        their densities is released.'''
+        kept = getattr(self, '_t_gradient', None)
+        if kept is not None:
+            kept[2].close()
+        self._t_gradient = self._t_density = None
 
     def make_rdm1(self, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False,
                   with_t=False, relaxed=False):

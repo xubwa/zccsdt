@@ -144,6 +144,127 @@ def test_relaxed_density_with_frozen_spinors(mol, kr):
     assert abs(dip[2] - (nuclear - derivative)) < 2e-7
 
 
+def ccsd_t_blocks(mol, mf, mycc):
+    '''(h, eri, g, fock) on the active spinors of the CCSD: h[p,q], (pq|rs),
+    <pq||rs> and the Fock matrix.'''
+    C, o = mycc.eris.mo_coeff, mycc.eris.nocc
+    h = C.conj().T @ mf.get_hcore() @ C
+    eri = mol.intor('int2e_spinor')
+    eri = np.einsum('mp,nq,mnls,lr,st->pqrt', C.conj(), C, eri, C.conj(), C, optimize=True)
+    g = eri.transpose(0, 2, 1, 3) - eri.transpose(0, 2, 3, 1)
+    return h, eri, g, h + np.einsum('pkqk->pq', g[:, :o, :, :o])
+
+
+@pytest.mark.parametrize('kr', [False, None])
+def test_orbital_gradient_of_ccsd_t(mol, kr):
+    '''The (T) terms of the orbital gradient.  The densities of (T) are the
+    derivatives of Re E(T) with respect to the integrals (central
+    differences in random directions).  zccsd.orbgrad_t, from the densities
+    of triples.kernel in the layouts of the amplitude step, against the full
+    arrays (zvector.gradient_nh, gradient_t), by origin and in all four
+    blocks.  The occupied-occupied and virtual-virtual blocks of the gradient
+    vanish between degenerate spinors and are (e_q - e_p) times the
+    off-diagonal one-particle density of (T), the products of the triples.'''
+    import types
+    from zccsdt.zccsd import lam_t, orbgrad_t, triples
+    mf = scf(mol)
+    mycc = ccsd(mf, kr)
+    eris, t1, t2 = mycc.eris, mycc.t1, mycc.t2
+    o, n = eris.nocc, eris.fock.shape[0]
+    oc, vi = slice(0, o), slice(o, n)
+    h, eri, g, fock = ccsd_t_blocks(mol, mf, mycc)
+    mo_e = eris.mo_energy
+
+    def blocks(g):
+        return types.SimpleNamespace(nocc=o, fock=fock, mo_energy=mo_e, ovvv=g[oc, vi, vi, vi],
+                                     ooov=g[oc, oc, oc, vi], oovv=g[oc, oc, vi, vi])
+    assert abs(lam_t.energy(t1, t2, blocks(g)) - mycc.ccsd_t()) < 1e-10
+    d2, d1 = zvector.t_densities(t1, t2, eris)
+    rng = np.random.default_rng(5)
+    for sl in ((vi, vi, vi, oc), (oc, vi, oc, oc), (vi, vi, oc, oc)):
+        dg = np.zeros_like(g)
+        dg[sl] = rng.standard_normal(d2[sl].shape) + 1j * rng.standard_normal(d2[sl].shape)
+        dg = dg - dg.transpose(1, 0, 2, 3)
+        dg = dg - dg.transpose(0, 1, 3, 2)
+        dg = dg + dg.transpose(2, 3, 0, 1).conj()           # an integral: <pq||rs> = <rs||pq>*
+        ep, em = [lam_t.energy(t1, t2, blocks(g + x * dg)) for x in (1e-5, -1e-5)]
+        analytic = np.einsum('pqrs,pqrs', d2[sl], dg[sl]).real
+        assert abs(analytic) > 1e-6 and abs((ep - em) / 2e-5 - analytic) < 1e-11
+    # by origin: one density at a time, the Fock matrix, the sources with t
+    ref, zero2, zero1 = {}, np.zeros_like(d2), np.zeros_like(d1)
+    for name, sl in (('g1', (vi, vi, vi, oc)), ('g2', (oc, vi, oc, oc)), ('g3', (vi, vi, oc, oc))):
+        x = np.zeros_like(d2)
+        x[sl] = d2[sl]
+        ref[name] = zvector.gradient_nh(fock, g, x, zero1, o)
+    ref['fock'] = zvector.gradient_nh(fock, g, zero2, d1, o)
+    total = zvector.gradient_t(t1, t2, fock, g, o)
+    ref['sources'] = total - zvector.gradient_nh(fock, g, d2, d1, o)
+    e_t, terms, dens = triples.kernel(mycc, eris, t1, t2, terms='gradient')
+    parts = {}
+    Gt = orbgrad_t.kernel(mycc, eris, t1, t2, terms, dens, parts=parts)
+    dens.close()
+    for name in orbgrad_t.PARTS:
+        assert abs(parts[name] - ref[name]).max() < 1e-11, name
+        # every origin has an occupied-virtual block; <bc||jk> and the sources
+        # (whose part is in zccsd.orbgrad) have no virtual-occupied one
+        assert abs(ref[name][oc, vi]).max() > 1e-5, name
+        assert (abs(ref[name][vi, oc]).max() > 1e-5) == (name in ('g1', 'g2', 'fock')), name
+    assert min(abs(ref['g1'][a, a]).max() for a in (oc, vi)) > 1e-4
+    assert abs(Gt - total).max() < 1e-11 and abs(total).max() > 1e-3
+    # the blocks that vanish without (T)
+    G = 0.5 * (total - total.conj().T)
+    t3c, t3d, _ = lam_t.triples(t1, t2, eris)
+    for blk, D in ((oc, -np.einsum('ijkabc,ljkabc->il', (t3c + t3d).conj(), t3c) / 12),
+                   (vi, np.einsum('ijkabc,ijkdbc->da', (t3c + t3d).conj(), t3c) / 12)):
+        de = mo_e[blk][None, :] - mo_e[blk][:, None]
+        same = abs(de) < 1e-8
+        assert abs(G[blk, blk][same]).max() < 1e-15 and abs(G[blk, blk]).max() > 5e-6
+        D = 0.5 * (D + D.conj().T)
+        assert abs(D[same & ~np.eye(same.shape[0], dtype=bool)]).max() < 1e-12
+        # the Fock matrix of the SCF is diagonal to 1e-8 only
+        assert abs(G[blk, blk] - de * D)[~same].max() < 1e-10
+
+
+@pytest.mark.parametrize('kr', [False, None])
+def test_relaxed_ccsd_t_density_is_energy_derivative(mol, kr):
+    '''CCSD(T): the relaxed density - lambda with the sources of (T), the
+    (T) terms of the density and of the orbital gradient, the rotations
+    among occupied and among virtual spinors, the Z-vector equations -
+    against the central difference of E(SCF) + E(CCSD) + E(T) with the SCF
+    repeated in the field; from the full arrays and from the layouts of the
+    amplitude step (zvector.kernel), in one pass over the triples.'''
+    mf = scf(mol)
+    mycc = ccsd(mf, kr)
+    C, o = mycc.eris.mo_coeff, mycc.eris.nocc
+    dense, unrelaxed, z = zvector.relaxed_rdm1_dense(mycc, mf, tol=1e-10, with_t=True)
+    assert mycc._l_with_t and mycc._t_gradient is None
+    relaxed, unrel2, z2 = zvector.kernel(mycc, mf=mf, tol=1e-10, with_t=True)
+    assert abs(unrel2 - unrelaxed).max() < 1e-12 and abs(relaxed - dense).max() < 2e-7
+    assert abs(relaxed - relaxed.conj().T).max() < 1e-12
+    # the rotations among occupied and among virtual spinors
+    assert abs((relaxed - unrelaxed)[:o, :o]).max() > 5e-6
+    assert abs((relaxed - unrelaxed)[o:, o:]).max() > 5e-6
+    V = mol.intor('int1e_r_spinor')[2]
+    Vmo = C.conj().T @ V @ C
+    eps = 1e-4
+    e = []
+    for m in (scf(mol, eps, V), scf(mol, -eps, V)):
+        cc = ccsd(m, kr)
+        e.append(m.e_tot + cc.e_corr + cc.ccsd_t())
+    derivative = (e[0] - e[1]) / (2 * eps)
+    assert abs(derivative - np.einsum('pq,qp', Vmo, dense).real) < 2e-7
+    assert abs(derivative - np.einsum('pq,qp', Vmo, relaxed).real) < 2e-7
+    assert abs(derivative - np.einsum('pq,qp', Vmo, unrelaxed).real) > 3e-4
+    # all of it from the CCSD object: lambda, the sources and the densities of
+    # (T) in one pass over the triples
+    fresh = ccsd(mf, kr)
+    nuclear = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())[2]
+    dip = fresh.dip_moment(with_t=True, relaxed=True, unit='AU', picture_change=False)
+    assert abs(dip[2] - (nuclear - derivative)) < 2e-7 and abs(dip[:2]).max() < 1e-7
+    assert fresh._l_with_t and fresh._t_gradient is None and abs(fresh.e_t - mycc.e_t) < 1e-10
+    assert abs(fresh.make_rdm1(with_t=True) - unrelaxed).max() < 1e-8
+
+
 def test_gamma1_equals_pyscf():
     '''The one-particle density intermediates from packed amplitudes against
     PySCF's on the full ones, random complex t and lambda.'''

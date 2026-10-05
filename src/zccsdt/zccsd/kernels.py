@@ -290,6 +290,16 @@ def div_packed(R, eo, ev):
     return R
 
 
+def mul_packed(R, eo, ev):
+    '''R[(i>j),(a>b)] *= eo[i] + eo[j] - ev[a] - ev[b]: div_packed undone,
+    row by row.'''
+    (io, jo), (av, bv) = tril(eo.size), tril(ev.size)
+    dv = np.asarray(ev, dtype=np.float64)[av] + np.asarray(ev, dtype=np.float64)[bv]
+    for p in range(R.shape[0]):
+        R[p] *= (eo[io[p]] + eo[jo[p]]) - dv
+    return R
+
+
 def t2p_matvec(t2p, F, out):
     '''out[i,a] += sum_me t2[i,m,a,e] F[m,e].'''
     o, v = F.shape
