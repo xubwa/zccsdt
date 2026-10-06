@@ -1251,7 +1251,11 @@ with 1 GB and with 4 GB.
 The plan holds the packed AO integrals of a range and the arrays of one
 block where it held three copies of the half transform of a range, so a
 batch of first orbitals may take half of the budget of the passes, not a
-third: fewer batches, and every batch computes the AO integrals. libcint's
+third: fewer batches, and every batch computes the AO integrals. A range
+of AO integrals takes 1 GB at most as well (7e0e7db; longer ranges save
+nothing: the pairs of AuH in 4.9 s in ranges of 826 and in 5.1 s in ranges
+of 2975 on the login node), so the passes do not fill a budget they do not
+need. libcint's
 data for the shells are made once for a transformation (PySCF makes them
 for every range: 5.5 ms each for AuH, 2.6 s for a pass in 479 ranges of
 100 AO pairs).
