@@ -190,7 +190,8 @@ def main():
         timers(prefix, max(w, wall['relaxed'] if not w else 0.0), 0.02 if w else 0.0)
     if frozen:
         # between frozen and active spinors (zccsd.orbgrad_frozen): the integrals
-        # with a frozen index are 'ao2mo.bra' and 'ao2mo.ket' inside it
+        # with a frozen index are 'ao2mo.bra' (of it 'ao2mo.fill': the AO
+        # integrals) and 'ao2mo.ket' inside it
         print('  all timers of the relaxed density above 0.5 %:')
         for name, w, calls in sorted(timing.report(), key=lambda x: -x[1]):
             if w >= 0.005 * wall['relaxed'] and not name.startswith('zv.'):

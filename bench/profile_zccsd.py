@@ -169,8 +169,9 @@ def main():
           % (t_ints, watch.anon / 1e6, maxmem))
     stages = [(k, t) for k, t, _ in timing.report() if k.startswith('ao2mo.')]
     if stages:
+        # ('fill': the AO integrals of the bra pass, a part of 'bra')
         print('  ' + '  '.join('%s %.2f s' % (k[6:], t) for k, t in stages)
-              + '  other %.2f s' % (t_ints - sum(t for _, t in stages)))
+              + '  other %.2f s' % (t_ints - sum(t for k, t in stages if k != 'ao2mo.fill')))
     nrr = {k[4:]: t for k, t, _ in timing.report() if k.startswith('nrr.')}
     if nrr:
         # pass 1: AO integrals and first half in C (r_e1), then the swap file;
