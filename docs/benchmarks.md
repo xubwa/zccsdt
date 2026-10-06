@@ -2668,8 +2668,9 @@ occupied and 240 frozen virtual spinors; zccsdt alone, job 31675252, c585,
 24 cores, `max_memory` 72000 MB) the relaxed CCSD(T) density takes 442.7 s
 with a peak of 65.9 GB: 282.9 s for the blocks with a frozen index - the
 integral transformation with 143 of the 286 frozen spinors as the first
-index 235 s (its first half 172 s: 1.2 s for a first index), the
-contractions and the arrays of the active space 48 s -, 63.3 s and 42.1 s
+index about 207 s (1.1 s for a first index in its first half, 0.4 s in the
+second), the contractions and the arrays of the active space 76 s -,
+63.3 s and 42.1 s
 for the gradient among the active spinors and its (T) terms, 53.4 s for the
 Z-vector equations. The CCSD takes 380.5 s there (26 cycles), (T) with the
 sources and the densities 544.2 s, the Lambda equations 468.2 s; 1455.0 s
