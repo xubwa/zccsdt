@@ -104,6 +104,85 @@ def test_integrals_equal_nrr_outcore(x2c_h2o, monkeypatch, tmp_path):
     assert abs(np.asarray(eris.vvvv_tril) - np.asarray(ref.vvvv_tril)).max() < 1e-12
 
 
+def test_slabs_equal_dense_within_plan(x2c_h2o, monkeypatch):
+    '''zccsd.ao2mo.slabs against the integrals transformed from the 4-index
+    AO array: batches of first orbitals, ranges of AO shell pairs and, within
+    a range, blocks of AO pairs (the last ones shorter).  What a
+    transformation allocates (tracemalloc follows numpy's allocations) stays
+    within its plan, down to the least that works.'''
+    import tracemalloc
+    from zccsdt import blas
+
+    def dense(mol, Ca, Cb, first, rest):
+        E = mol.intor('int2e')
+        f, q = slice(*first), slice(*rest)
+        half = sum(np.einsum('mi,nq,mnls->iqls', C[:, f].conj(), C[:, q], E, optimize=True)
+                   for C in (Ca, Cb))
+        return sum(np.einsum('iqls,lr,st->iqrt', half, C[:, q].conj(), C[:, q], optimize=True)
+                   for C in (Ca, Cb))
+
+    def run(mol, Ca, Cb, first, rest, plan, shape):
+        out = np.empty(shape, dtype=np.complex128)
+        for i0, i1, g in ao2mo.slabs(mol, Ca, Cb, first, rest, plan):
+            out[i0 - first[0]:i1 - first[0]] = g
+        return out
+
+    # the integrals, in passes of every kind
+    mol = x2c_h2o.mol
+    nao = mol.nao_nr()
+    Ca, Cb = ao2mo.spin_components(mol, x2c_h2o.mo_coeff)
+    nmo = Ca.shape[1]
+    kinds = set()
+    for first, rest in (((0, 10), (0, nmo)), ((3, 12), (10, nmo)), ((nmo - 6, nmo), (2, 20))):
+        ref = dense(mol, Ca, Cb, first, rest)
+        nfirst, nq = first[1] - first[0], rest[1] - rest[0]
+        for factor, pairs in ((None, None), (None, 7), (1.0, None), (1.0, 3), (1.3, 5), (3.0, 16)):
+            if pairs is not None:
+                monkeypatch.setattr(ao2mo, 'BRA_BYTES', pairs * ao2mo._bra_pair(nao, nq, 1))
+            need = ao2mo.plan_slabs(mol, nfirst, nq, sort_arrays=0).need
+            plan = ao2mo.plan_slabs(mol, nfirst, nq, None if factor is None else int(factor * need), 0)
+            assert plan.work <= plan.need * (factor or np.inf)
+            assert abs(run(mol, Ca, Cb, first, rest, plan, ref.shape) - ref).max() < 1e-12
+            block = ao2mo._bra_block(nao, nq, plan.nbra, plan.nkl)
+            kinds.add((plan.nbra < nfirst, plan.nket < plan.nbra, plan.nkl < nao * (nao + 1) // 2,
+                       block < plan.nkl, bool(plan.nkl % block)))
+            monkeypatch.undo()
+    assert len(kinds) >= 6 and (True, True, True, True, True) in kinds
+
+    # the arrays of a transformation against its plan, where they are large
+    # next to what the calls through ctypes leave for the garbage collector
+    # (PySCF's fill, nrr_fast: pointers, a few kB for each range of AO shell
+    # pairs whatever the size of the arrays; 0.22 MB at most here, where the
+    # half transform of one orbital takes 2 MB)
+    garbage = 1 << 19
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvtz', verbose=0)
+    mf = x2c.UHF(mol).run(conv_tol=1e-10)
+    nao = mol.nao_nr()
+    Ca, Cb = ao2mo.spin_components(mol, mf.mo_coeff)
+    nmo = Ca.shape[1]
+    first, rest = (3, 9), (40, nmo)
+    nfirst, nq = first[1] - first[0], rest[1] - rest[0]
+    ref = dense(mol, Ca, Cb, first, rest)
+    blas.gemm(np.eye(2), np.eye(2))                 # (what its first call imports)
+    blocked = 0
+    for factor, pairs in ((1.0, None), (1.0, 5), (1.5, None), (2.5, 40), (None, 100), (None, None)):
+        if pairs is not None:
+            monkeypatch.setattr(ao2mo, 'BRA_BYTES', pairs * ao2mo._bra_pair(nao, nq, 1))
+        need = ao2mo.plan_slabs(mol, nfirst, nq, sort_arrays=0).need
+        plan = ao2mo.plan_slabs(mol, nfirst, nq, None if factor is None else int(factor * need), 0)
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        out = run(mol, Ca, Cb, first, rest, plan, ref.shape)
+        peak = tracemalloc.get_traced_memory()[1] - base - out.nbytes
+        tracemalloc.stop()
+        assert abs(out - ref).max() < 1e-12
+        assert peak <= plan.work + garbage, (factor, pairs, peak, plan.work)
+        assert peak > 0.8 * plan.work, (factor, pairs, peak, plan.work)     # the plan is what is used
+        blocked += ao2mo._bra_block(nao, nq, plan.nbra, plan.nkl) < plan.nkl
+        monkeypatch.undo()
+    assert blocked >= 3
+
+
 def test_socutils_routes_kept(x2c_h2o, monkeypatch, tmp_path):
     '''ovvv from the AO integrals in every term, and the integrals through
     nrr_outcore: the same energies as the defaults.'''
@@ -477,6 +556,14 @@ def test_kernels_equal_numpy():
         same(T, T.T)
         A, B = rnd(4, 6), rnd(6, 5)                 # a complex product from three real ones
         same(K.combine3(*[a @ b for a, b in zip(K.split3(A), K.split3(B))]), A @ B)
+        # ... from blocks of the columns of the three, into such a block
+        P = rng.standard_normal((3, 4, 9))[:, :, 2:7]
+        for acc in (True, False):
+            C = rnd(4, 11)
+            ref = C.copy()
+            ref[:, 3:8] = 0.5 * ((P[0] - P[1]) + 1j * (P[2] - P[0] - P[1])) + (ref[:, 3:8] if acc else 0)
+            K.combine3(P[0], P[1], P[2], 0.5, C[:, 3:8], acc)
+            same(C, ref)
         same(T.reshape(o, v, o, v), K.unpack_t2(t2p, o, v).transpose(0, 2, 1, 3))
         # the antisymmetrizer by blocks of columns adds up to the formula
         x = rnd(n1, n1)

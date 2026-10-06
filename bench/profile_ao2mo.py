@@ -9,9 +9,11 @@ MOs, and (a b|c d) with four virtuals.
          fast; skipped when its half transform would take more than 16 GB
   fast   socutils' nrr_fast (lib/ao2mo: both passes in C, s4 AO symmetry,
          the cheaper index order); the second pass in batches of rows
-  slab   zccsdt.zccsd.ao2mo (the kernels of nrr_fast; the first index in
+  slab   zccsdt.zccsd.ao2mo (its own bra pass - real matrix products over
+         blocks of AO pairs -, the ket pass of nrr_fast; the first index in
          batches and the AO integrals in ranges of shell pairs, planned
-         within ZC_MAXMEM MB, default 24000)
+         within ZC_MAXMEM MB, default 24000; 'fill': the part of 'bra'
+         that the AO integrals take)
 
 usage: python bench/profile_ao2mo.py MOLECULE BASIS [METHODS] [BLOCKS]
   METHODS: comma separated from stock,fast,slab (default: all)

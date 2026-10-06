@@ -9,9 +9,15 @@ in the scalar AO basis,
 
 the AO integrals are real, have 8-fold symmetry and carry no spin.
 
-The transformation itself is nrr_fast of socutils (zccsdt.zccsd.nrr_fast):
-the bra pass on PySCF's s4 AO fill and the ket pass, both in C.  This module
-organizes it for a CCSD:
+The ket pass is that of nrr_fast of socutils (zccsdt.zccsd.nrr_fast), in C;
+the bra pass is here (_Bra): PySCF's s4 AO fill, and the two quarter
+transformations as real matrix products over whole blocks of AO pairs.
+(nrr_fast's own bra pass calls a kernel for every AO pair and spin
+component, each with three n x n arrays of its own to allocate and fill and
+with a product on a matrix of zeros - the real integrals taken as complex
+ones -, and its result has to be transposed for the ket pass: 2 to 3 times
+the time of this one, bench/profile_ao2mo.py.)  This module organizes both
+for a CCSD:
 
 - only the integrals that are needed are made: (ip|qr) with i occupied for
   the blocks of a CCSD with an AO-driven ladder (occupied_blocks), (ae|bf)
@@ -45,13 +51,15 @@ from dataclasses import dataclass
 
 import numpy as np
 from pyscf import lib
-from pyscf.ao2mo import outcore
+from pyscf.ao2mo import _ao2mo, outcore
 
-from zccsdt import memory, scratch
+from zccsdt import blas, memory, scratch
 from zccsdt.timing import timer
+from zccsdt.zccsd import kernels as K
 from zccsdt.zccsd import nrr_fast
 
 SLAB_BYTES = 4 << 30        # the largest slab of MO integrals
+BRA_BYTES = 1 << 30         # the arrays of a block of AO pairs in the bra pass, at most
 WORK_BYTES = 16 << 30       # what the passes use at most, however much there is
 STORE_SHARE = 1 / 3         # share of the budget for the integrals kept in memory
 BLOCKS = ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv')
@@ -109,7 +117,9 @@ def plan_slabs(mol, nfirst, nq, budget=None, sort_arrays=1):
 
     def work(nbra, nket, nkl):
         return (16 * npair * nq * nbra                       # half transform of a batch
-                + (8 * nao * nao + 48 * nq * nbra) * nkl     # AO integrals of a range, their half transform
+                + 8 * npair * nkl                            # AO integrals of a range, packed
+                + _bra_pair(nao, nq, nbra) * _bra_block(nao, nq, nbra, nkl)    # a block of them at work
+                + nao * (80 * nq + 48 * nbra)                # MO coefficients and their parts
                 + 16 * nq ** 3 * (nket + sort_arrays * min(nthr, nket)))    # slab and its sorting
 
     need = work(1, 1, pmax)
@@ -120,14 +130,105 @@ def plan_slabs(mol, nfirst, nq, budget=None, sort_arrays=1):
     w = WORK_BYTES if budget is None else min(int(budget), WORK_BYTES)
     nket = int(max(1, min(nfirst, w // 3 // (16 * nq ** 3 * (1 + sort_arrays)),
                           max(1, SLAB_BYTES // (16 * nq ** 3)))))
-    nbra = int(max(1, min(nfirst, w // 3 // (16 * npair * nq))))
+    # (half for the half transform: every batch computes the AO integrals)
+    nbra = int(max(1, min(nfirst, w // 2 // (16 * npair * nq))))
     nket = min(nket, nbra)
     while work(nbra, nket, pmax) > w and nbra > 1:
         nbra = max(1, nbra // 2)
         nket = min(nket, nbra)
-    rest = w - work(nbra, nket, 0)
-    nkl = int(max(pmax, min(npair, rest // (8 * nao * nao + 48 * nq * nbra))))
+    nkl = npair
+    if work(nbra, nket, nkl) > w:
+        rest = w - work(nbra, nket, 0)      # (that has one AO pair at work)
+        pair = _bra_pair(nao, nq, nbra)
+        nkl = rest // (8 * npair + pair)    # a range as one block
+        if nkl * pair > BRA_BYTES:          # ... or as several
+            nkl = (rest - BRA_BYTES) // (8 * npair)
+        nkl = int(max(pmax, min(npair, nkl)))
     return Plan(nbra, nket, nkl, work(nbra, nket, nkl), need, budget)
+
+
+def _bra_pair(nao, nq, nbra):
+    '''Bytes that one AO pair of a block of the bra pass takes: the integrals
+    unpacked to a square, their quarter transform for the batch of first
+    orbitals (three real parts for each of the two spin components), and the
+    three real products of one first orbital.'''
+    return 8 * nao * nao + 48 * nao * nbra + 24 * nq
+
+
+def _bra_block(nao, nq, nbra, nkl):
+    '''AO pairs per block of the bra pass, of the ``nkl`` of a range.'''
+    return int(max(1, min(nkl, BRA_BYTES // _bra_pair(nao, nq, nbra))))
+
+
+class _Bra:
+    '''The bra pass for batches of first orbitals i and the orbitals q:
+
+        vin[(i q), k] = sum_s sum_{mu nu} conj(C^s[mu,i]) C^s[nu,q] (mu nu|k)
+
+    for all AO pairs k = (la >= si), in the shell-block order of PySCF's s4
+    fill, which nrr_fast._e2 takes.  The AO integrals are computed for one
+    range of shell pairs at a time (``ranges``: of
+    pyscf.ao2mo.outcore.guess_shell_ranges) and are real and symmetric in
+    (mu nu); a block of them is unpacked to squares, and then
+
+    - quarter 1: one real GEMM for the whole block, G[(i s part), (k mu)] =
+      sum_nu B[(i s part), nu] (mu nu|k) with the real part, the imaginary
+      part and their sum of conj(C^s[:, i]) for both spin components;
+    - quarter 2: for each i, the complex product of C^s[:, q]^T with
+      G[i s]^T as three real GEMMs for each spin component, combined into
+      the rows (i q) of vin: nothing is transposed afterwards.
+
+    6 n (n + nq) real multiply-adds for an AO pair and a first orbital (n
+    AO functions).  The arrays of a block of AO pairs take BRA_BYTES at
+    most (or those of one AO pair), and they are allocated once for all
+    batches.'''
+
+    def __init__(self, mol, Cqa, Cqb, ranges, nbra):
+        self.mol, self.ranges = mol, ranges
+        nao, nq = Cqa.shape
+        self.nao, self.nq = nao, nq
+        self.npair = nao * (nao + 1) // 2
+        # (the data of libcint for the shells, made once for all ranges; no screening)
+        self.opt = _ao2mo.AO2MOpt(mol, 'int2e_sph')
+        nkl = max(r[2] for r in ranges)
+        self.block = _bra_block(nao, nq, nbra, nkl)
+        self.eri = np.empty((nkl, self.npair))
+        self.sq = np.empty((self.block, nao, nao))
+        self.G = np.empty((6 * nbra, self.block * nao))
+        self.P = np.empty((3, nq, self.block))
+        # C^s[:, q]^T: real part, imaginary part and their sum
+        self.A = [[np.ascontiguousarray(x) for x in (C.real.T, C.imag.T, C.real.T + C.imag.T)]
+                  for C in (Cqa, Cqb)]
+
+    def __call__(self, Cia, Cib):
+        mol, nao, nq, P = self.mol, self.nao, self.nq, self.P
+        bi = Cia.shape[1]
+        # conj(C^s[:, i]): the same three, [(i s part), nu]
+        B = np.empty((bi, 2, 3, nao))
+        for s, C in enumerate((Cia, Cib)):
+            B[:, s, 0], B[:, s, 1] = C.real.T, -C.imag.T
+            B[:, s, 2] = B[:, s, 0] + B[:, s, 1]
+        B = B.reshape(6 * bi, nao)
+        vin = np.empty((bi * nq, self.npair), dtype=np.complex128)
+        k0 = 0
+        for r in self.ranges:
+            with timer('ao2mo.fill'):
+                eri = _ao2mo.nr_e1fill('int2e_sph', r[:3], mol._atm, mol._bas, mol._env, 's4', 1,
+                                       self.opt, self.eri)[0]
+            for c0 in range(0, r[2], self.block):
+                c1 = min(r[2], c0 + self.block)
+                nb = c1 - c0
+                sq = lib.unpack_tril(eri[c0:c1], lib.SYMMETRIC, out=self.sq)
+                blas.gemm(B, sq.reshape(nb * nao, nao).T, C=self.G[:6 * bi, :nb * nao])
+                for i in range(bi):
+                    for part in range(3):
+                        for s in (0, 1):
+                            Gi = self.G[(2 * i + s) * 3 + part, :nb * nao].reshape(nb, nao)
+                            blas.gemm(self.A[s][part], Gi.T, C=P[part][:, :nb], beta=float(s))
+                    K.combine3(P[0][:, :nb], P[1][:, :nb], P[2][:, :nb], 1.0,
+                               vin[i * nq:(i + 1) * nq, k0 + c0:k0 + c1])
+            k0 += r[2]
+        return vin
 
 
 def slabs(mol, Ca, Cb, first, rest=None, plan=None):
@@ -144,21 +245,12 @@ def slabs(mol, Ca, Cb, first, rest=None, plan=None):
     Cqa = np.asarray(Ca[:, q0:q1], dtype=np.complex128, order='F')
     Cqb = np.asarray(Cb[:, q0:q1], dtype=np.complex128, order='F')
     ranges = outcore.guess_shell_ranges(mol, True, plan.nkl)
+    bra = _Bra(mol, Cqa, Cqb, ranges, min(plan.nbra, first[1] - first[0]))
     g = np.empty((plan.nket * nq, nq * nq), dtype=np.complex128)
     for b0 in range(first[0], first[1], plan.nbra):
         b1 = min(b0 + plan.nbra, first[1])
-        bi = b1 - b0
         with timer('ao2mo.bra'):
-            moa, mob = np.hstack((Ca[:, b0:b1], Cqa)), np.hstack((Cb[:, b0:b1], Cqb))
-            if len(ranges) == 1:
-                vin = lib.transpose(nrr_fast._e1_full(mol, moa, mob, (0, bi, bi, bi + nq)))
-            else:                   # the AO integrals of one range of shell pairs at a time
-                vin = np.empty((bi * nq, npair), dtype=np.complex128)
-                k0 = 0
-                for r in ranges:
-                    vin[:, k0:k0 + r[2]] = lib.transpose(
-                        nrr_fast._e1_full(mol, moa, mob, (0, bi, bi, bi + nq), klrange=r[:3]))
-                    k0 += r[2]
+            vin = bra(Ca[:, b0:b1], Cb[:, b0:b1])
         for i0 in range(b0, b1, plan.nket):
             i1 = min(i0 + plan.nket, b1)
             n = (i1 - i0) * nq
