@@ -190,6 +190,9 @@ def _sign(perm):
     return s
 
 
+_PATHS = {}
+
+
 def product(factors, arrays, nocc, rank, occ=None, vir=None):
     '''One representative product as a dense array over the external
     indices of ``rank``.  arrays: {'f': f[p,q], 'v': <pq||rs>, 't2': ...}
@@ -209,7 +212,11 @@ def product(factors, arrays, nocc, rank, occ=None, vir=None):
             if c in only:
                 a = np.take(a, only[c], axis=axis)
         ops.append(a)
-    return np.einsum(','.join(ix for _, ix in factors) + '->' + EXT[rank], *ops, optimize=True)
+    sub = ','.join(ix for _, ix in factors) + '->' + EXT[rank]
+    key = (sub,) + tuple(a.shape for a in ops)
+    if key not in _PATHS:               # (the search of the path takes longer than a small product)
+        _PATHS[key] = np.einsum_path(sub, *ops, optimize='optimal')[0]
+    return np.einsum(sub, *ops, optimize=_PATHS[key])
 
 
 def total(terms, arrays, nocc, rank, occ=None, vir=None):
