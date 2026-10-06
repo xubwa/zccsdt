@@ -1328,7 +1328,40 @@ the checksum of the gradient is the same in every run). Seconds:
   passes of the transformation do not depend on the slabs of the
   contractions.
 - Peak resident memory of the AuH runs: 51.1 GB before, 54.5 GB after
-  (`max_memory` 72000 MB).
+  (`max_memory` 72000 MB; with all AO integrals of a pass that fit in
+  memory, as b47c3c6 planned them).
+
+**The slabs of the gradient with a frozen index** (ace45a5). The 143
+slabs of the profile of AuH were the plan's doing: `slab_plan` looked for
+the number of frozen spinors of a slab by halving from all of them and
+then took what the passes of the transformation were planned with. Where
+the arrays of the contraction for half of the frozen spinors left only a
+little, that was one or two - with room for ten -, and at some sizes fewer
+spinors with more memory. It now takes the largest slab that fits, by
+bisection; `tests/test_zccsd_zvector.py` holds the plan to that over 80
+budgets (the old search was below it at 30 of them). With that and ranges
+of AO integrals of 1 GB (7e0e7db), the profile of AuH again: the tree of
+the table above and the new one in turn (job 31682660, c421, 24 cores, two
+rounds, `max_memory` 72000 MB). Seconds:
+
+| AuH/dyall.v3z, 143 first orbitals | b47c3c6 | 7e0e7db |
+|---|---|---|
+| gradient with a frozen index | 320.0, 320.3 | 150.2, 149.7 |
+| its slabs | 143 of one spinor | 13 of eleven |
+| contractions `ogf.t`, `ogf.ring` | 106.8, 89.7 | 14.3, 21.5 |
+| bra pass (of it the AO integrals), ket pass | 36.0 (12.9), 38.8 | 30.7 (10.5), 37.1 |
+| peak anonymous memory | 54.5 GB | 59.0 GB |
+| integral step of `DirectZCCSD` (its bra pass, AO integrals) | 32.7, 32.6 (7.7, 3.7) | 31.7, 31.7 (6.9, 2.8) |
+
+The run of job 31675252 had slabs of nine or ten: its budget happened to
+pass the old search. The shorter ranges of AO integrals (3225 AO pairs
+instead of 9938) take a fifth off the AO integrals and a seventh off the
+bra pass. HI/dyall.v3z with `max_memory` 12000 MB in the same job (16
+threads, without (T), the two trees in turn twice): the integral step
+peaks at 10.1 GB of anonymous memory instead of 11.6 GB and takes 16.6 and
+16.7 s instead of 18.2 and 17.1 s; the gradient with a frozen index has
+slabs of one spinor in both trees - nothing more fits -, 11.2 GB and 14.4
+to 15.4 s.
 
 **What is left in the transformation.** Measured on the login node with
 the scripts of that day - not benchmarks -, and none of it done:
