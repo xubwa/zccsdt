@@ -169,8 +169,6 @@ def main():
     print('Lambda equations of CCSD(T): %.1f s, converged %s; peak anonymous memory %.2f GB'
           % (wall['lambda'], mycc.converged_lambda, watch.anon / 1e6))
 
-    # (before the kernel: with frozen spinors and little memory it gives up the
-    # integrals of the active space, which have the spinors of the amplitudes)
     C, mo_e = zvector.full_space(mycc)[:2]
     watch = MemWatch()
     watch.start()
@@ -183,11 +181,21 @@ def main():
           'Z-vector equations): %.1f s, peak anonymous memory %.2f GB'
           % (wall['relaxed'], watch.anon / 1e6))
     timers('zv.', wall['relaxed'])
-    for prefix, key in (('og.', 'zv.orbgrad'), ('ogt.', 'zv.orbgrad_t')):
-        # with frozen spinors zv.orbgrad is all of gradient_frozen, orbgrad_t in it
+    for prefix, key in (('og.', 'zv.orbgrad'), ('ogt.', 'zv.orbgrad_t'),
+                        ('ogf.', 'zv.orbgrad_frozen')):
         w = dict((n, x) for n, x, _ in timing.report()).get(key, 0.0)
+        if not w and key == 'zv.orbgrad_frozen':
+            continue
         print('  %s: %.1f s' % (key[3:], w))
         timers(prefix, max(w, wall['relaxed'] if not w else 0.0), 0.02 if w else 0.0)
+    if frozen:
+        # between frozen and active spinors (zccsd.orbgrad_frozen): the integrals
+        # with a frozen index are 'ao2mo.bra' and 'ao2mo.ket' inside it
+        print('  all timers of the relaxed density above 0.5 %:')
+        for name, w, calls in sorted(timing.report(), key=lambda x: -x[1]):
+            if w >= 0.005 * wall['relaxed'] and not name.startswith('zv.'):
+                print('    %-18s %9.1f s  %5.1f %%  (%d calls)'
+                      % (name, w, 100 * w / wall['relaxed'], calls))
     o = o + frozen                      # the relaxed density: all spinors of the SCF
     print('  largest elements: z %.3e, occupied-occupied %.3e, virtual-virtual %.3e'
           % (abs(z).max(), abs((relaxed - unrelaxed)[:o, :o]).max(),

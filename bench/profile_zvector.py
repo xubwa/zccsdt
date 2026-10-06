@@ -12,8 +12,9 @@ environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              are not converged: for its time and memory only);
              ZC_ZVECTOR=0: without the Z-vector equations;
              ZC_FROZEN: so many frozen occupied spinors: the relaxed density
-             as a whole (zvector.kernel: the gradient on all spinors through
-             zvector.gradient_frozen, then the Z-vector equations).
+             as a whole (zvector.kernel: the gradient among the active
+             spinors, the blocks with a frozen index through
+             zccsd.orbgrad_frozen, then the Z-vector equations).
 '''
 import os
 import resource

@@ -56,8 +56,9 @@ all MO integrals (orbital_gradient: a reference for small molecules) and
 its de-excitation half term by term (gradient_terms: the same), the
 response equation with AO-direct Fock builds (solve: for any size), the
 relaxed density (kernel: with the orbital gradient of zccsd.orbgrad, in the
-layouts of zccsd.amps and within max_memory, also with frozen occupied
-spinors - gradient_frozen -; relaxed_rdm1_dense: from the full arrays).
+layouts of zccsd.amps and within max_memory, also with frozen occupied and
+frozen virtual spinors - zccsd.orbgrad_frozen -; relaxed_rdm1_dense: from the
+full arrays).
 
 CCSD(T) (with_t).  E(T) is added to the Lagrangian, a function of t, of the
 integrals and of the orbital energies; lambda then solves the equations with
@@ -85,7 +86,7 @@ zccsd.orbgrad_t in the layouts of the amplitude step):
 import numpy as np
 from pyscf.lib import logger
 
-from zccsdt import blas, memory
+from zccsdt import memory
 from zccsdt.cc.diis import DIIS
 from zccsdt.timing import timer
 
@@ -205,18 +206,19 @@ def t_fock(fock, nocc):
     return out
 
 
-def t_densities(t1, t2, eris, nmo=None, nocc=None, act=None):
+def t_densities(t1, t2, eris, nmo=None, nocc=None, act=None, vir=None):
     '''(d2[p,q,r,s], d1[p,q]): the densities of (T) (lam_t.densities and the
     diagonals of lam_t.gamma1) as gradient_nh takes them, full arrays over
     ``nmo`` spinors of which the first ``nocc`` are occupied and those at
-    ``act`` are the occupied spinors of the amplitudes (default: the spinors
-    of ``eris``, none frozen).  The reference for small molecules.'''
+    ``act`` and ``vir`` are the occupied and the virtual spinors of the
+    amplitudes (default: the spinors of ``eris``, none frozen).  The
+    reference for small molecules.'''
     from zccsdt.zccsd import lam_t
     o, v = t1.shape
     nocc = o if nocc is None else nocc
     nmo = nocc + v if nmo is None else nmo
     act = np.arange(o) if act is None else np.asarray(act)
-    vir = np.arange(nocc, nmo)
+    vir = np.arange(nocc, nmo) if vir is None else np.asarray(vir)
     g1, g2, g3, df = lam_t.densities(t1, t2, eris)
     goo, gvv, _ = lam_t.gamma1(t1, t2, eris)
     d2 = np.zeros((nmo,) * 4, dtype=np.complex128)
@@ -349,7 +351,8 @@ def full_space(mycc):
     all spinors of its SCF in the 2c AO basis - the active ones as the
     amplitudes have them (eris.mo_coeff: Kramers pairs), the frozen ones as
     the SCF has them, in the order of the SCF - their energies, the number
-    of occupied ones, and the indices of the frozen occupied ones.'''
+    of occupied ones, and the indices of the frozen occupied ones.  (The
+    frozen virtual ones: frozen_virtuals.)'''
     from pyscf.cc import ccsd
     eris = mycc.eris
     active = ccsd.get_frozen_mask(mycc)
@@ -358,218 +361,16 @@ def full_space(mycc):
     mo_e = np.array(mycc._scf.mo_energy, dtype=np.float64)
     mo_e[active] = eris.mo_energy
     occupied = mycc.mo_occ > 0
-    if (~active & ~occupied).any() or not occupied[:occupied.sum()].all():
-        raise NotImplementedError('Z-vector equations with frozen virtual spinors')
+    if not occupied[:occupied.sum()].all():
+        raise NotImplementedError('occupied spinors after virtual ones')
     return C, mo_e, int(occupied.sum()), np.flatnonzero(~active & occupied)
 
 
-def pad_amplitudes(nocc, nvir, act, x1, x2):
-    '''(y1[i,a], y2[(i>j), (a>b)]) for all ``nocc`` occupied spinors from the
-    amplitudes x1[i,a] and x2 ([i,j,a,b] or packed) of the active ones at the
-    positions ``act`` (ascending), zero where an index is frozen.'''
-    from zccsdt.zccsd import kernels as K
-    y1 = np.zeros((nocc, nvir), dtype=np.complex128)
-    y1[act] = x1
-    x2 = np.ascontiguousarray(x2, dtype=np.complex128)
-    y2 = np.zeros((K.npair(nocc), K.npair(nvir)), dtype=np.complex128)
-    y2[active_pairs(act)] = x2 if x2.ndim == 2 else K.pack_t2(x2)
-    return y1, y2
-
-
-def active_pairs(act):
-    '''The packed rows (i > j) of the pairs of active occupied spinors among
-    those of all occupied spinors.'''
-    from zccsdt.zccsd import kernels as K
-    ia, ja = K.tril(act.size)
-    return act[ia] * (act[ia] - 1) // 2 + act[ja]
-
-
-def gradient_frozen(mycc, t1=None, t2=None, l1=None, l2=None, verbose=None, coulomb=None,
-                    t_terms=None, release=None):
-    '''(G[a, x], G[i, c]): the blocks of the orbital gradient that the
-    Z-vector equations of a CCSD with frozen occupied spinors need - the
-    virtual spinors a with all occupied x, frozen and active, in the order of
-    full_space, and the active occupied i with the frozen c - for the
-    amplitudes t1[i,a], t2[i,j,a,b] and lambda of the active spinors, without
-    full arrays.
-
-    A frozen spinor is an occupied one whose amplitudes are zero: with t and
-    lambda padded by zeros, the Lagrangian of the frozen-core CCSD is that of
-    the CCSD of all spinors, and its orbital gradient comes from the code for
-    all spinors (the integrals are made once more, with the frozen spinors
-    among the occupied ones):
-
-      Gnh[a, x]   zccsd.orbgrad, for all occupied x;
-      Gnh[c, a]   = -rho1[c, a]: the lambda1 equation of a frozen c, which no
-                  amplitude makes vanish;
-      Gnh[c, i]   = sum rho[c ...] t[i ...],   Gnh[i, c] = -sum R[c ...] lambda[i ...]:
-                  a rotation among occupied spinors is a change of the
-                  amplitudes, and only those with a frozen index are not
-                  stationary,
-
-    with R and rho the residuals of the amplitude equations and of the Lambda
-    equations with one frozen index: one step of each on the padded
-    amplitudes (zccsd.amps, zccsd.lam).  G = (Gnh - Gnh^+) / 2.
-
-    Memory: the three phases are planned one by one within max_memory, for
-    all occupied spinors - at least what a step of the CCSD without frozen
-    spinors takes.  t2 and lambda2 of the CCSD object (the default) are
-    packed and released while this runs, lambda2 is padded only when the
-    Lambda step needs it, and if a plan does not fit next to the integrals
-    of the active space, those are released (mycc.eris = None: mycc.ao2mo()
-    makes them again when they are needed).
-
-    ``t_terms``: for CCSD(T), with lambda of CCSD(T) - the terms and the
-    Densities of zccsd.triples.kernel(terms='gradient') for the active
-    spinors.  E(T) is that of the active spinors and cannot be had from the
-    code for all spinors with zero amplitudes; its densities, zero where an
-    index is frozen, meet the integrals of all occupied spinors
-    (zccsd.orbgrad_t with ``act``), and so do the sources with t.  The
-    blocks above get these terms, and two more are returned: (G[a, x],
-    G[i, c], G[i, j], G[a, b]) with i, j the active occupied spinors.  These
-    terms are made first; ``release`` is then called (the caller lets go of
-    the sources and the densities before the steps of the Lagrangian).'''
-    from zccsdt.zccsd import kernels as K
-    log = logger.new_logger(mycc, verbose)
-    C, mo_e, o, frozen = full_space(mycc)
-    act = np.setdiff1d(np.arange(o), frozen)
-    v = C.shape[1] - o
-    oa, rows_act = act.size, active_pairs(act)
-
-    def packed(x):
-        x = np.ascontiguousarray(x, dtype=np.complex128)
-        return x if x.ndim == 2 else K.pack_t2(x)
-    # as lam.kernel: the arrays of the CCSD object are packed and released while
-    # this runs, and unpacked again at the end
-    own_t, own_l = t2 is None, l2 is None
-    T1, T2p = pad_amplitudes(o, v, act, mycc.t1 if t1 is None else t1,
-                             mycc.t2 if own_t else t2)
-    l1 = np.ascontiguousarray(mycc.l1 if l1 is None else l1, dtype=np.complex128)
-    l2a = packed(mycc.l2 if own_l else l2)          # of the active spinors, until it is needed
-    t2 = l2 = None
-    if own_t:
-        mycc.t2 = None
-    if own_l:
-        mycc.l2 = None
-    try:
-        return _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log,
-                                coulomb, t_terms, release)
-    finally:
-        if own_t:
-            mycc.t2 = K.unpack_t2(np.ascontiguousarray(T2p[rows_act]), oa, v)
-        if own_l:
-            mycc.l2 = K.unpack_t2(l2a, oa, v)
-
-
-def _gradient_frozen(mycc, C, mo_e, o, frozen, act, T1, T2p, l1, l2a, log, coulomb,
-                     t_terms=None, release=None):
-    '''gradient_frozen for the padded t and the packed lambda2 of the active
-    spinors, l2a.'''
-    import gc
-    from zccsdt.zccsd import amps, lam, orbgrad
-    from zccsdt.zccsd import kernels as K
-    v = C.shape[1] - o
-    eo, ev = mo_e[:o], mo_e[o:]
-    # the CCSD of all spinors, as they are: no frozen ones, no pairing of its own
-    full = mycc.__class__(mycc._scf, frozen=0, mo_coeff=C, mo_occ=mycc.mo_occ)
-    full.verbose, full.max_memory, full.kramers = mycc.verbose, mycc.max_memory, False
-    full.three_m, full.ao_ladder = mycc.three_m, mycc.ao_ladder
-    # what the CCSD keeps for its steps is made again when it is needed
-    if getattr(mycc.eris, 'residual', None) is not None:
-        mycc.eris.residual.close()
-        mycc.eris.residual = None
-    lad = getattr(mycc.eris, 'aoladder', None)          # the AO operators are the same
-
-    def guarded(f):
-        '''f(), once more without the integrals of the active space if it
-        does not fit next to them.'''
-        try:
-            return f()
-        except MemoryError:
-            if mycc.eris is None:
-                raise
-        # (outside the except block: what the failed attempt made is released
-        # with its traceback)
-        before = memory.resident()
-        mycc.eris = None
-        gc.collect()
-        log.info('Orbital gradient with frozen spinors: the integrals of the active space '
-                 'are released (max_memory): %.2f GB of %.2f GB in memory',
-                 (before - memory.resident()) / 1e9, before / 1e9)
-        return f()
-
-    def setup():
-        eris = full.ao2mo(C)
-        if lad is not None:
-            eris.aoladder.close()
-            eris.aoladder = lad
-        res = eris.residual = amps.Residual(eris, plan=False)
-        # one step of the amplitude equations: nothing of its own to set aside
-        res.replan(full.max_memory, 0, False, full.three_m)
-        return eris, res
-
-    try:
-        eris, res = guarded(setup)
-    except MemoryError as err:
-        raise MemoryError('%s (the orbital gradient with frozen spinors is that of all %d '
-                          'occupied spinors)' % (err, o)) from None
-    log.info('Orbital gradient with frozen spinors: all %d occupied spinors; %s', o,
-             res.describe())
-    Gt = None
-    if t_terms is not None:
-        from zccsdt.zccsd import orbgrad_t
-        Gt = guarded(lambda: orbgrad_t.kernel(full, eris, T1, T2p, *t_terms, act=act,
-                                              verbose=log, coulomb=coulomb))
-        Gt = 0.5 * (Gt - Gt.conj().T)
-        t_terms = None
-        if release is not None:
-            release()
-    prow = np.array([r for r, _ in res.pair_rows])
-    psgn = np.array([g for _, g in res.pair_rows])
-    av, bv = K.tril(v)
-
-    def with_frozen(x1new, x2new, x1, x2p, y2p):
-        '''For the residuals r = D (new - old) of a Jacobi step, with a
-        frozen first index c: r1[c, a], and sum_j sum_(a>b) r2[c,j,(ab)]
-        y2[i,j,(ab)] as [c, i].'''
-        r1 = (eo[frozen][:, None] - ev) * (x1new - x1)[frozen]
-        out = np.zeros((frozen.size, o), dtype=np.complex128)
-        cols = np.maximum(prow, 0).T                                    # [j, i]: the pair (i, j)
-        for k, c in enumerate(frozen):
-            rows = np.maximum(prow[c], 0)
-            d = (eo[c] + eo)[:, None] - (ev[av] + ev[bv])[None, :]
-            rc = psgn[c][:, None] * d * (x2new[rows] - x2p[rows])       # [j, (ab)]
-            m = blas.gemm(np.ascontiguousarray(rc), y2p.T)              # [j, (pairs)]
-            out[k] = np.einsum('ij,ji->i', psgn, m[np.arange(o)[:, None], cols])
-        return r1, out
-
-    t1n, t2n = res.update_packed(T1, T2p)
-    L1, L2p = pad_amplitudes(o, v, act, l1, l2a)
-    R1, RL = with_frozen(t1n, t2n, T1, T2p, L2p)
-    del t1n, t2n
-    # one step of the Lambda equations: its arrays, less the lambda2 that is
-    # here already (the plan counts three packed arrays of its own)
-    guarded(lambda: res.replan(full.max_memory, 0, False, full.three_m,
-                               reserve=max(0, lam.reserve_bytes(o, v) - L2p.nbytes)))
-    L = lam.Lambda(res, T1, T2p)
-    try:
-        l1n, l2n = L.update_packed(L1, L2p)
-    finally:
-        L.close()
-    P1, PT = with_frozen(l1n, l2n, L1, L2p, T2p)
-    del l1n, l2n, L
-    Gci = blas.gemm(P1, T1.T) + PT                      # [c, i], all occupied i
-    Gic = -(blas.gemm(R1, L1.T) + RL)                   # [c, i] holds Gnh[i, c]
-    Gnh = guarded(lambda: orbgrad.kernel(full, eris, T1, T2p, L1, L2p, log,
-                                         coulomb=coulomb))
-    res.close()
-    Gvo = 0.5 * Gnh
-    Gvo[:, frozen] += 0.5 * P1.conj().T
-    Gic = 0.5 * (Gic.T - Gci.conj().T)[act]
-    if Gt is None:
-        return Gvo, Gic
-    return (Gvo + Gt[o:, :o], Gic + Gt[np.ix_(act, frozen)], Gt[np.ix_(act, act)],
-            np.ascontiguousarray(Gt[o:, o:]))
+def frozen_virtuals(mycc):
+    '''The indices of the frozen virtual spinors among all spinors (the
+    order of full_space).'''
+    from pyscf.cc import ccsd
+    return np.flatnonzero(~ccsd.get_frozen_mask(mycc) & ~(mycc.mo_occ > 0))
 
 
 def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-9,
@@ -578,14 +379,21 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     basis of all spinors (full_space): the density of t and lambda from the
     packed amplitudes (zccsd.rdm), the orbital gradient of zccsd.orbgrad and
     the Z-vector equations (solve).  lambda: the arguments, else mycc.l1 and
-    mycc.l2 for the amplitudes of mycc, else it is solved for.  Frozen
-    occupied spinors: gradient_frozen for the gradient; the rotations between
-    them and the active occupied ones as in relaxed_rdm1_dense.
+    mycc.l2 for the amplitudes of mycc, else it is solved for.
+
+    Frozen spinors, occupied or virtual: zccsd.orbgrad is the gradient among
+    the active spinors; the blocks between a frozen and an active spinor are
+    those of zccsd.orbgrad_frozen (the integrals with one frozen index) and
+    the Fock matrix of the correlation part of the density, and between a
+    frozen virtual and a frozen occupied one that Fock matrix alone.  The
+    rotations between frozen and active spinors of the same kind follow from
+    the Fock matrix staying diagonal, as in relaxed_rdm1_dense, and the
+    Z-vector equations are those of all virtual with all occupied spinors.
 
     ``with_t``: for CCSD(T).  lambda is that of CCSD(T) - of the CCSD object
     if it has it, else solved for; l1 and l2 are not taken -, the density has
-    its (T) terms, and the gradient those of zccsd.orbgrad_t (with frozen
-    spinors through gradient_frozen), from the
+    its (T) terms, and the gradient those of zccsd.orbgrad_t (and of
+    zccsd.orbgrad_frozen with the densities of (T)), from the
     densities of (T): one pass over the triples gives them together with the
     sources of lambda (solve_lambda with with_t='gradient'; if lambda is
     there without them, the pass is done here).  The occupied-occupied and
@@ -600,6 +408,7 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     if eris is None and mycc.eris is None:
         mycc.ao2mo(mycc.mo_coeff)
     C, mo_e, o, frozen = full_space(mycc)
+    fvir = frozen_virtuals(mycc)
     # the equations assume the spinors of a converged SCF: what is left of its
     # orbital gradient is in the relaxed density in first order
     fock = np.asarray((mycc.eris if eris is None else eris).fock)
@@ -625,8 +434,12 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
                 or getattr(mycc, 'l2', None) is None or getattr(mycc, '_l_with_t', False)):
             mycc.solve_lambda(t1, t2, eris=eris)
         l1 = l2 = None
-    oa, v = o - frozen.size, C.shape[1] - o         # active occupied spinors
-    act = np.setdiff1d(np.arange(o), frozen)
+    n = C.shape[1]
+    act = np.setdiff1d(np.arange(o), frozen)        # the active spinors among all
+    vir = np.setdiff1d(np.arange(o, n), fvir)
+    oa, v = act.size, vir.size
+    both = np.concatenate((act, vir))
+    held_out = np.concatenate((frozen, fvir))
 
     def packed(x):
         x = np.ascontiguousarray(x, dtype=np.complex128)
@@ -642,7 +455,7 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
         mycc.t2 = None
     if own_l:
         mycc.l2 = None
-    Goo = Gvv = None
+    Gt = X = None
     try:
         budget = memory.budget(mycc.max_memory)
         with timer('zv.density'):
@@ -661,7 +474,7 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
             # object
             held, small = [terms, dens], terms[2:]
             del terms, dens, tg
-        out = dm1 = gccsd_rdm._make_rdm1(mycc, d1, with_frozen=bool(frozen.size))
+        dm1 = gccsd_rdm._make_rdm1(mycc, d1, with_frozen=bool(held_out.size))
 
         def release():
             if held:
@@ -670,31 +483,25 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
                 mycc._drop_t_terms()
                 mycc._t_density = small
         try:
-            if not frozen.size:
-                if with_t:
-                    # first: nothing of it is needed for the Lagrangian's own part,
-                    # which takes the memory of an amplitude step
-                    from zccsdt.zccsd import orbgrad_t
-                    with timer('zv.orbgrad_t'):
-                        Gt = orbgrad_t.kernel(mycc, mycc.eris if eris is None else eris, t1,
-                                              t2p, *held, verbose=verbose)
-                    release()
-                with timer('zv.orbgrad'):
-                    Gnh = orbgrad.kernel(mycc, mycc.eris if eris is None else eris, t1, t2p,
-                                         l1, l2p, verbose)
-                gvo = -0.5 * Gnh
-                if with_t:
-                    Gt[o:, :o] += Gnh
-                    Gt = 0.5 * (Gt - Gt.conj().T)
-                    gvo, Goo, Gvv = -Gt[o:, :o], Gt[:o, :o], Gt[o:, o:]
-                    del Gt
-            elif not with_t:
-                with timer('zv.orbgrad'):
-                    Gvo, Gic = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose)
-            else:
-                with timer('zv.orbgrad'):
-                    Gvo, Gic, Goo, Gvv = gradient_frozen(mycc, t1, t2p, l1, l2p, verbose,
-                                                         t_terms=held, release=release)
+            if with_t:
+                # first: nothing of it is needed for the Lagrangian's own part,
+                # which takes the memory of an amplitude step
+                from zccsdt.zccsd import orbgrad_t
+                with timer('zv.orbgrad_t'):
+                    Gt = orbgrad_t.kernel(mycc, mycc.eris if eris is None else eris, t1,
+                                          t2p, *held, verbose=verbose)
+            if held_out.size:
+                # the integrals with a frozen index meet the densities of (T) too
+                from zccsdt.zccsd import orbgrad_frozen
+                with timer('zv.orbgrad_frozen'):
+                    X = orbgrad_frozen.kernel(
+                        mycc, mycc.eris if eris is None else eris, t1, t2p, l1, l2p,
+                        np.vstack(mf.mol.sph2spinor_coeff()) @ C[:, held_out],
+                        held[1] if with_t else None, mo_e[held_out], verbose)
+            release()
+            with timer('zv.orbgrad'):
+                Gnh = orbgrad.kernel(mycc, mycc.eris if eris is None else eris, t1, t2p,
+                                     l1, l2p, verbose)
         finally:
             release()
     finally:
@@ -703,30 +510,78 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
         if own_l:
             mycc.l2 = K.unpack_t2(l2p, oa, v)
     t2p = l2p = None
-    # the Fock operator of the orbital Hessian: after the gradient, which has
-    # taken what memory there is
+    # the gradient among the active spinors, [occupied, virtual]
+    if with_t:
+        Gt[oa:, :oa] += Gnh
+        Ga = 0.5 * (Gt - Gt.conj().T)
+        del Gt
+    else:
+        Ga = np.zeros((oa + v,) * 2, dtype=np.complex128)
+        Ga[oa:, :oa], Ga[:oa, oa:] = 0.5 * Gnh, -0.5 * Gnh.conj().T
+    G = np.zeros((n, n), dtype=np.complex128)
+    G[np.ix_(both, both)] = Ga
+    # the Coulomb operator: after the gradient, which has taken what memory
+    # there is
     with timer('zv.veff'):
-        veff = scf_veff(mf, mycc.max_memory)
-    y = None
-    if frozen.size:
-        y = np.zeros(C.shape[1:] * 2, dtype=np.complex128)
-        yf = Gic / (mo_e[frozen][None, :] - mo_e[act][:, None])
-        y[np.ix_(act, frozen)], y[np.ix_(frozen, act)] = yf, yf.conj().T
-        gvo = -Gvo
-    if Goo is not None:
-        y = np.zeros(C.shape[1:] * 2, dtype=np.complex128) if y is None else y
-        for blk, Gb in ((act, Goo), (np.arange(o, o + v), Gvv)):
-            de = mo_e[blk][None, :] - mo_e[blk][:, None]            # e_q - e_p
-            ok = abs(de) > DEGENERATE
-            y[np.ix_(blk, blk)] = np.where(ok, Gb / np.where(ok, de, 1.0), 0.0)
+        coulomb = orbgrad.Coulomb(mf.mol, mycc.max_memory)
+        veff = scf_veff(mf, mycc.max_memory, coulomb)
+    if held_out.size:
+        # between frozen and active spinors: the integrals with a frozen index
+        # and the Fock matrix of the correlation part of the density
+        with timer('zv.veff'):
+            occ = (np.arange(n) < o).astype(np.float64)
+            c2 = np.vstack(mf.mol.sph2spinor_coeff()) @ C
+            V = orbgrad.fock_matrices(coulomb, c2, ((dm1 - np.diag(occ)).T,))[0]
+        Gf = X + (occ[both][None, :] - occ[held_out][:, None]) * V[np.ix_(held_out, both)]
+        G[np.ix_(held_out, both)], G[np.ix_(both, held_out)] = Gf, -Gf.conj().T
+        Gf = V[np.ix_(fvir, frozen)]
+        G[np.ix_(fvir, frozen)], G[np.ix_(frozen, fvir)] = Gf, -Gf.conj().T
+    del coulomb
     with timer('zv.solve'):
-        if y is not None:
-            gvo = gvo - C[:, o:].conj().T @ veff(C @ y @ C.conj().T) @ C[:, :o]
-            out = dm1 + y
-        conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose, veff=veff)
+        relaxed, z = _relax(mycc, mf, C, mo_e, o, G, dm1, (act, frozen, vir, fvir), with_t,
+                            DEGENERATE, tol, verbose, veff)
+    return relaxed, dm1, z
+
+
+def _relax(mycc, mf, C, mo_e, o, G, dm1, spaces, with_t, degenerate, tol, verbose, veff=None):
+    '''(relaxed density, z) from the orbital gradient G[y, x] of all spinors
+    and the density dm1: the rotations that follow from the Fock matrix
+    staying diagonal - between frozen and active spinors of the same kind
+    and, with (T), among the active occupied and among the active virtual
+    ones, none between spinors closer than ``degenerate`` -, y_pq = G_pq /
+    (e_q - e_p), go into the density and their Fock matrix to the right-hand
+    side of the Z-vector equations of all virtual with all occupied spinors.
+    ``spaces``: the indices of the active occupied, the frozen occupied, the
+    active virtual and the frozen virtual spinors.'''
+    act, frozen, vir, fvir = spaces
+    if veff is None:
+        veff = lambda dm: mf.get_veff(mf.mol, dm)                   # noqa: E731
+    y = np.zeros_like(G)
+    pairs = [(a, f) for a, f in ((act, frozen), (vir, fvir)) if f.size]
+    if with_t:
+        pairs += [(act, act), (vir, vir)]
+    for p, q in pairs:
+        de = mo_e[q][None, :] - mo_e[p][:, None]                    # e_q - e_p
+        ok = abs(de) > degenerate
+        Gpq = G[np.ix_(p, q)]
+        if p is not q and not ok.all() and abs(Gpq[~ok]).max() > 1e-8:
+            logger.warn(mycc, 'A frozen spinor is degenerate with an active one of its kind and '
+                        'the energy changes with their rotation (orbital gradient %.1e): the '
+                        'relaxed density is not defined. Freeze whole levels.',
+                        abs(Gpq[~ok]).max())
+        yb = np.where(ok, Gpq / np.where(ok, de, 1.0), 0.0)
+        y[np.ix_(p, q)] = yb
+        if p is not q:
+            y[np.ix_(q, p)] = yb.conj().T
+    gvo = -G[o:, :o]
+    out = np.array(dm1, dtype=np.complex128)
+    if pairs:
+        gvo = gvo - C[:, o:].conj().T @ veff(C @ y @ C.conj().T) @ C[:, :o]
+        out += y
+    conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose, veff=veff)
     if not conv:
         logger.warn(mycc, 'Z-vector equations not converged')
-    return relaxed_rdm1(out, z, o), dm1, z
+    return relaxed_rdm1(out, z, o), z
 
 
 def _t_terms(mycc, eris, t1, t2p, kept):
@@ -755,11 +610,16 @@ def relaxed_rdm1_dense(mycc, mf=None, l1=None, l2=None, tol=1e-9, verbose=None, 
     Fock matrix staying diagonal, f_ic = 0, not from an equation of their
     own: with y_ic = G_ic / (e_c - e_i) the density gets y in its (i, c) and
     conj(y) in its (c, i) elements, and the right-hand side of the Z-vector
-    equations the Fock matrix of the density Ci y Cc^+ + Cc y^+ Ci^+.'''
+    equations the Fock matrix of the density Ci y Cc^+ + Cc y^+ Ci^+.
+    Frozen virtual spinors: the same between them and the active virtual
+    ones; the Z-vector equations are those of all virtual with all occupied
+    spinors.'''
     from pyscf.cc import gccsd_rdm
     mf = mycc._scf if mf is None else mf
     C, mo_e, o, frozen = full_space(mycc)
+    fvir = frozen_virtuals(mycc)
     act = np.setdiff1d(np.arange(o), frozen)
+    vir = np.setdiff1d(np.arange(o, C.shape[1]), fvir)
     if l1 is None or l2 is None:
         l1, l2 = mycc.solve_lambda(with_t=with_t)
     dm1 = gccsd_rdm.make_rdm1(mycc, mycc.t1, mycc.t2, l1, l2)
@@ -776,32 +636,13 @@ def relaxed_rdm1_dense(mycc, mf=None, l1=None, l2=None, tol=1e-9, verbose=None, 
         g = eri.transpose(0, 2, 1, 3) - eri.transpose(0, 2, 3, 1)
         fock = h + np.einsum('pkqk->pq', g[:, :o, :, :o])
         Gt = gradient_nh(t_fock(fock, o), g,
-                         *t_densities(mycc.t1, mycc.t2, mycc.eris, n, o, act), o)
+                         *t_densities(mycc.t1, mycc.t2, mycc.eris, n, o, act, vir), o)
         G = G + 0.5 * (Gt - Gt.conj().T)
         doo, dov, dvo, dvv = gccsd_rdm._gamma1_intermediates(mycc, mycc.t1, mycc.t2, l1, l2)
         goo, gvv, gvo = lam_t.gamma1(mycc.t1, mycc.t2, mycc.eris)
         doo[np.diag_indices(act.size)] -= goo
-        dvv[np.diag_indices(n - o)] += gvv
+        dvv[np.diag_indices(vir.size)] += gvv
         dm1 = gccsd_rdm._make_rdm1(mycc, (doo, dov, dvo + gvo, dvv), with_frozen=True)
-    gvo = -G[o:, :o]
-    out = np.array(dm1, dtype=np.complex128)
-    y = np.zeros_like(out)
-    if frozen.size:
-        yf = G[np.ix_(act, frozen)] / (mo_e[frozen][None, :] - mo_e[act][:, None])
-        y[np.ix_(act, frozen)] = yf
-        y[np.ix_(frozen, act)] = yf.conj().T
-    if with_t:
-        # the rotations among the active occupied and among the virtual spinors
-        # (those between degenerate spinors do not change the energy)
-        for blk in (act, np.arange(o, C.shape[1])):
-            de = mo_e[blk][None, :] - mo_e[blk][:, None]            # e_q - e_p
-            ok = abs(de) > DEGENERATE_DENSE
-            y[np.ix_(blk, blk)] = np.where(ok, G[np.ix_(blk, blk)] / np.where(ok, de, 1.0), 0.0)
-    if frozen.size or with_t:
-        Y = C @ y @ C.conj().T
-        gvo = gvo - C[:, o:].conj().T @ mf.get_veff(mf.mol, Y) @ C[:, :o]
-        out += y
-    conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose)
-    if not conv:
-        logger.warn(mycc, 'Z-vector equations not converged')
-    return relaxed_rdm1(out, z, o), dm1, z
+    relaxed, z = _relax(mycc, mf, C, mo_e, o, G, dm1, (act, frozen, vir, fvir), with_t,
+                        DEGENERATE_DENSE, tol, verbose)
+    return relaxed, dm1, z

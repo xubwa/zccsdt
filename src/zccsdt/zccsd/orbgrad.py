@@ -58,8 +58,9 @@ index of <ma||ef> - of the stored integrals and of the <j~ e||ab> - run over
 the unbarred half and are completed by the time-reversed image.  The ladder
 does half of the pairs (amps).
 
-Frozen spinors are not known here: zvector.gradient_frozen runs this module
-on all spinors, with zero amplitudes for the frozen ones.
+Frozen spinors are not known here: this is the gradient among the active
+spinors.  The blocks between a frozen and an active spinor come from the
+integrals with one frozen index (zccsd.orbgrad_frozen).
 
 Timers (zccsdt.timing): 'og.pairs', 'og.ring' (the two products), 'og.ladder',
 'og.ovvv', 'og.dressed', 'og.fock', 'og.small'.

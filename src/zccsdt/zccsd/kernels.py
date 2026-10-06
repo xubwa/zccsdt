@@ -250,6 +250,21 @@ def asym_pack2(x, alpha, R, order='pab'):
     return R
 
 
+def asym_pack_view(x, alpha, R):
+    '''R[p,(a>b)] += alpha (x[a,p,b] - x[b,p,a]) for a block x[a,p,b] of a
+    larger C-ordered array (v x n x v; any strides along a and p, unit stride
+    along b): asym_pack2 in the layout 'apb' without a copy of the block.'''
+    v, n = x.shape[0], x.shape[1]
+    sa, sp, sb = x.strides
+    if (USE_C and x.dtype == np.complex128 and sb == 16 and sa > 0 and sp > 0
+            and sa % 16 == 0 and sp % 16 == 0):
+        _lib.zc_asym_pack2(x.ctypes.data, n, v, sp // 16, sa // 16, alpha, _c(R))
+        return R
+    av, bv = tril(v)
+    R += alpha * (x[av, :, bv] - x[bv, :, av]).T
+    return R
+
+
 def unpack_tril(xp, v, order='pab', out=None):
     '''The antisymmetric matrices of the rows of xp[p,(a>b)]: out[p,a,b]
     ('pab') or out[a,p,b] ('apb').'''

@@ -49,10 +49,10 @@ cc-pVQZ, 10 + 220 spinors: 18.5 s with slabs (ea|..) of zccsd.ao2mo, the
 time of all of (T) with its densities).  With Kramers pairs the unbarred i
 are done and the rows of the barred ones are their time-reversed image.
 
-The occupied spinors of the integrals may be more than those of the
-amplitudes (``act``: frozen spinors, as occupied ones without amplitudes in
-the code for all spinors, zvector.gradient_frozen): the densities are zero
-where an index is frozen, and the integrals carry it.
+Frozen spinors are not known here: E(T) is that of the active spinors, and
+this is its gradient among them.  The blocks between a frozen and an active
+spinor are in zccsd.orbgrad_frozen, from the integrals with one frozen index
+and the same densities.
 
 The result is Gnh[y, x] for all spinors; with Gnh[a, i] of zccsd.orbgrad
 added, the orbital gradient is (Gnh - Gnh^+) / 2.  Its occupied-occupied and
@@ -77,34 +77,6 @@ from zccsdt.zccsd import amps, orbgrad
 from zccsdt.zccsd import kernels as K
 
 PARTS = ('sources', 'g1', 'g2', 'g3', 'fock')
-
-
-def pad(nocc, act, terms, dens):
-    '''(terms, g2, g3) for ``nocc`` occupied spinors of which those at
-    ``act`` (ascending) have amplitudes: the sources and the one-particle
-    terms of zccsd.triples.kernel - (s1, s2p, goo, gvv, dvo) - and its
-    densities g2 and g3, zero where an occupied index is frozen.  (g1 is
-    read through ``act`` where it is used.)'''
-    from zccsdt.zccsd.zvector import active_pairs
-    s1, s2p, goo, gvv, dvo = terms
-    act = np.asarray(act)
-    if act.size == nocc:
-        return tuple(terms), dens.g2, dens.g3
-    v = gvv.size
-    rows = active_pairs(act)
-    S1 = np.zeros((nocc, v), dtype=np.complex128)
-    S1[act] = s1
-    S2 = np.zeros((K.npair(nocc), s2p.shape[1]), dtype=np.complex128)
-    S2[rows] = s2p
-    Goo = np.zeros(nocc, dtype=np.complex128)
-    Goo[act] = goo
-    Dvo = np.zeros((v, nocc), dtype=np.complex128)
-    Dvo[:, act] = dvo
-    G2 = np.zeros((nocc, v, K.npair(nocc)), dtype=np.complex128)
-    G2[np.ix_(act, np.arange(v), rows)] = dens.g2
-    G3 = np.zeros((K.npair(nocc), dens.g3.shape[1]), dtype=np.complex128)
-    G3[rows] = dens.g3
-    return (S1, S2, Goo, gvv, Dvo), G2, G3
 
 
 def own_bytes(nocc, nvir, nao=0):
@@ -218,18 +190,14 @@ def g1_vvvv(mol, C2, g1, rows, plan):
     return X
 
 
-def kernel(mycc, eris, t1, t2, terms, dens, act=None, verbose=None, parts=None, coulomb=None):
+def kernel(mycc, eris, t1, t2, terms, dens, verbose=None, parts=None, coulomb=None):
     '''Gnh[y, x], all spinors of ``eris`` ([occupied, virtual]): the (T)
     terms of the orbital gradient (see the module) for the amplitudes t1 and
     t2 (packed or not) and what zccsd.triples.kernel(terms='gradient')
     returned for them - ``terms`` = (s1, s2p, goo, gvv, dvo) and the
-    Densities ``dens``.  ``act``: the positions of the occupied spinors of
-    the amplitudes among those of ``eris`` (default: all; t1, t2 are then
-    given for the occupied spinors of ``eris``, zero where one is frozen,
-    while ``terms`` and ``dens`` are those of the active ones).  Within
-    max_memory of ``mycc``: own_bytes and the arrays of vvvv_plan; nothing
-    of the amplitude step is planned or kept (its integrals are read as they
-    are stored).'''
+    Densities ``dens``.  Within max_memory of ``mycc``: own_bytes and the
+    arrays of vvvv_plan; nothing of the amplitude step is planned or kept
+    (its integrals are read as they are stored).'''
     log = logger.new_logger(mycc, verbose)
     cput0 = (logger.process_clock(), logger.perf_counter())
     if getattr(eris, 'residual', None) is None:
@@ -240,24 +208,22 @@ def kernel(mycc, eris, t1, t2, terms, dens, act=None, verbose=None, parts=None, 
     t2 = np.ascontiguousarray(t2, dtype=np.complex128)
     t2p = t2 if t2.ndim == 2 else K.pack_t2(t2)
     del t2
-    act = np.arange(o) if act is None else np.asarray(act)
-    terms, g2, g3 = pad(o, act, terms, dens)
     kr = bool(res.kramers and res.symmetric(t1, t2p))
-    plan = vvvv_plan(eris.mol, mycc.max_memory, o, v, act.size // 2 if kr else act.size)
-    log.info('Orbital gradient of (T): %d occupied (%d with amplitudes) and %d virtual '
-             'spinors; the density of <bc||ek> with <bc||ea> in the AO basis, %d occupied '
-             'spinors and %d of %d AOs at a time', o, act.size, v, plan[0], plan[1],
-             eris.mol.nao_nr())
-    out = gradient(mycc, eris, t1, t2p, terms, dens.g1, g2, g3, act, plan, parts, coulomb)
+    plan = vvvv_plan(eris.mol, mycc.max_memory, o, v, o // 2 if kr else o)
+    log.info('Orbital gradient of (T): %d occupied and %d virtual spinors; the density of '
+             '<bc||ek> with <bc||ea> in the AO basis, %d occupied spinors and %d of %d AOs at '
+             'a time', o, v, plan[0], plan[1], eris.mol.nao_nr())
+    out = gradient(mycc, eris, t1, t2p, tuple(terms), dens.g1, dens.g2, dens.g3, plan, parts,
+                   coulomb)
     log.timer('Orbital gradient of (T)', *cput0)
     return out
 
 
-def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, plan, parts=None, coulomb=None):
-    '''kernel() for t2 packed, the terms and the densities g2[m, a, (j>k)],
-    g3[(j>k), (b>c)] of all occupied spinors of ``eris`` and g1[k, e, (b>c)]
-    of those at ``act``; the integrals are those of eris.residual, ``plan``
-    that of vvvv_plan.  ``parts``: a dict that gets Gnh by origin (PARTS).'''
+def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, plan, parts=None, coulomb=None):
+    '''kernel() for t2 packed, the terms and the densities g1[k, e, (b>c)],
+    g2[m, a, (j>k)], g3[(j>k), (b>c)]; the integrals are those of
+    eris.residual, ``plan`` that of vvvv_plan.  ``parts``: a dict that gets
+    Gnh by origin (PARTS).'''
     res = eris.residual
     o, v = res.nocc, res.nvir
     n1, npo, npv, n = o * v, K.npair(o), K.npair(v), o + v
@@ -266,8 +232,6 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, plan, parts=None, coul
     prow = np.array([r for r, _ in res.pair_rows])
     psgn = np.array([g for _, g in res.pair_rows])
     s1, s2p, goo, gvv, dvo = terms
-    pos = np.full(o, -1)
-    pos[act] = np.arange(act.size)
     G = {k: np.zeros((n, n), dtype=np.complex128) for k in PARTS}
     oc, vi = slice(0, o), slice(o, n)
 
@@ -319,7 +283,7 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, plan, parts=None, coul
         X = G['g2']
         en = res.ooov_en                                                # [i, e, (m>n)] = <mn||ie>
         T2oo = np.zeros((o, o), dtype=np.complex128)
-        for m in act:
+        for m in range(o):
             gm = g2[m]                                                  # [a, (jk)]
             Om = -psgn[:, m][:, None] * res.oooo_p[prow[:, m]]          # [i, (jk)] = <mi||jk>
             X[oc, vi] += blas.gemm(Om, gm.T)
@@ -345,8 +309,6 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, plan, parts=None, coul
     ustep = max(1, min(v, orbgrad.UNPACK_BYTES // (16 * v * v)))
     with timer('ogt.ovvv'):
         for k in range(o // 2 if kr else o):
-            if pos[k] < 0:              # no density has a frozen k
-                continue
             Om = res.ovvv_p[k]                                          # [e, (b>c)]
             # g3[(bc); i, k] with <bc||ak> = -conj(<ka||bc>)
             Gk = np.conj(psgn[k][:, None] * g3[prow[k]])                # [i, (bc)]
@@ -358,7 +320,7 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, plan, parts=None, coul
             blas.gemm(Ek, np.ascontiguousarray(gu.transpose(2, 0, 1)).reshape(n1, o),
                       C=T2ov, beta=1.0)
             del gu
-            Gm = g1[pos[k]]                                             # [e, (b>c)]
+            Gm = g1[k]                                                  # [e, (b>c)]
             # g1[(bc), a, k] with <bc||ik> = -conj(<ik||bc>)
             Ok = np.conj(psgn[k][:, None] * res.oovv_p[prow[k]])        # [i, (bc)]
             blas.gemm(Gm, Ok.T, C=T1vo, beta=1.0)
@@ -395,9 +357,8 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, plan, parts=None, coul
 
     # ---- g1 by its rows e, with <bc||ei> = -conj(<ie||bc>) for all occupied i
     hv = v // 2 if kr else v
-    nact = act.size
-    Too = np.zeros((nact, o), dtype=np.complex128)
-    Ge = np.empty((nact, npv), dtype=np.complex128)
+    Too = np.zeros((o, o), dtype=np.complex128)
+    Ge = np.empty((o, npv), dtype=np.complex128)
     Oe = np.empty((o, npv), dtype=np.complex128)
     with timer('ogt.rows'):
         for e in range(hv):
@@ -407,14 +368,14 @@ def gradient(mycc, eris, t1, t2p, terms, g1, g2, g3, act, plan, parts=None, coul
     del Ge, Oe
     # ---- g1 with <bc||ea>, in the AO basis
     with timer('ogt.vvvv'):
-        rows = np.arange(nact // 2 if kr else nact)
-        Tov = np.zeros((nact, v), dtype=np.complex128)
+        rows = np.arange(o // 2 if kr else o)
+        Tov = np.zeros((o, v), dtype=np.complex128)
         Tov[:rows.size] = -g1_vvvv(eris.mol, eris.mo_ao_spin[:, o:], g1, rows, plan)
     if kr:
         Tov += image(Tov)
         Too += image(Too)
-    X[act, o:] += Tov
-    X[act, :o] += Too
+    X[oc, vi] += Tov
+    X[oc, oc] += Too
 
     # ---- the Fock matrix elements: f[a,i] with conj(dvo), e_i with -goo, e_a with gvv
     with timer('ogt.fock'):
