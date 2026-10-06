@@ -2864,7 +2864,21 @@ for the gradient among the active spinors and its (T) terms, 53.4 s for the
 Z-vector equations. The CCSD takes 380.5 s there (26 cycles), (T) with the
 sources and the densities 544.2 s, the Lambda equations 468.2 s; 1455.0 s
 after the CCSD. With that many frozen spinors the integral transformation
-is what the relaxed density costs; CFOUR was not run for this one.
+was what the relaxed density cost - its first half, which `nrr_fast` does
+AO pair by AO pair, 171.8 s of it. CFOUR was not run for this one.
+
+The same run with that half as matrix products over blocks of AO pairs and
+the slabs of the frozen spinors as large as fit (7e0e7db;
+[the bra pass](#the-bra-pass-as-matrix-products-over-blocks-of-ao-pairs)
+has both on one node) is job 31682660 on c421, where the steps that did
+not change take 12 to 16% less (CCSD 321.3 s, (T) 474.7 s, the Lambda
+equations 411.9 s): the relaxed density in 275.4 s with the same peak of
+65.9 GB - the blocks with a frozen index 148.6 s, the gradient among the
+active spinors and its (T) terms 36.9 s and 34.4 s, the Z-vector equations
+54.8 s; the two halves of its transformations 40.9 s and 40.4 s where they
+were 171.8 s and 63.3 s -, the integral step of the CCSD in 29.7 s where
+it was 88.5 s, and 1162.0 s after the CCSD. The energies are those of the
+first run to 1e-10, the dipole moments to 7e-9 (each run has its own SCF).
 
 **Doublets, and what is odd under time reversal.** BaF (dyall.v2z on Ba,
 346 spinors; 48 frozen spinors, 17 correlated electrons; `kramers` is off
@@ -2991,6 +3005,25 @@ on c179) the peaks of anonymous memory are 8.2 GB in the CCSD iterations,
 9.8 GB in the relaxed density - the density of <bc||ek> (4.9 GB) in a
 scratch file, the integrals of one frozen spinor at a time -, the relaxed
 density takes 74.4 s and all after the CCSD 415.9 s: as with 48000 MB.
+
+With the bra pass of the integral transformation as matrix products over
+blocks of AO pairs and the slabs of the frozen spinors as large as fit
+(7e0e7db,
+[the bra pass](#the-bra-pass-as-matrix-products-over-blocks-of-ao-pairs))
+HI/dyall.v3z ran again, zccsdt alone, in job 31682660 on c421: 16 threads
+of a job with 24 cores, where the steps that did not change take 26 to 36%
+less than on c179 (CCSD 43.3 s, (T) with the sources and the densities
+200.7 s, the Lambda equations 56.9 s). The integral step takes 13.6 s
+(21.8 s on c179), the relaxed density 46.7 s (72.2 s) - the blocks with a
+frozen index 13.8 s (26.3 s), the gradient among the active spinors 11.1 s
+(17.4 s) - with a peak of 30.5 GB (28.3 GB), and all after the CCSD
+304.3 s. With `max_memory` 12000 MB: 15.5 s, 49.9 s and 337.0 s, and peaks
+of 7.9, 11.9, 8.6 and 11.4 GB in the four stages - the relaxed density
+takes more of what it is given than the 9.8 GB before. The values are
+those of the earlier runs (the relaxed dipole moment 0.188630575 and
+0.188630576). What of this is the code and what the node, the comparison
+on one node tells: 21.7 s to 18.0 s for the integral step and 22.4 s to
+19.9 s for the gradient with a frozen index (job 31677432).
 
 The first jobs of this section (HI with both basis sets, four jobs at a
 time on c042 and before the correction of the DIIS below) gave 241 s and
