@@ -1144,7 +1144,8 @@ the 4-index AO array. `zccsdt.zccsd.ao2mo` replaces both:
   version, 41735e2, had kernels of its own -- real GEMMs on AO integrals
   packed in memory -- which were 5-20% slower and are gone.) Since b47c3c6
   the bra pass is again one of zccsdt, real matrix products over blocks of
-  AO pairs, 2 to 3 times faster than that of `nrr_fast`
+  AO pairs: 1.7 to 2.3 times faster than that of `nrr_fast` with 8 cores,
+  2.3 to 2.6 times with 16 and 4 to 5 times with 24
   ([below](#the-bra-pass-as-matrix-products-over-blocks-of-ao-pairs)); the
   ket pass is still `nrr_fast`'s. The tables of this section are from
   before that, with both passes of `nrr_fast`.
@@ -1286,6 +1287,44 @@ take):
   cc-pVQZ) and 5.8 GB (benzene), where one call of `nrr_fast` has 2.5 and
   5.5 GB - the blocks and all AO integrals of a pass are in memory when the
   budget has room -; (ae|bf) 10.2 and 8.5 GB against 15.8 and 11.3 GB.
+
+**At the size of the heavy-element runs**: the integral step of
+`DirectZCCSD` and the gradient with a frozen index for random amplitudes
+(`bench/profile_frozen.py`), the tree before the change and the one after
+it in turn on one node with the spinors of one SCF (`bench/slurm_trees.sh`;
+the checksum of the gradient is the same in every run). Seconds:
+
+| HI/dyall.v3z, 18 + 324 active and 36 frozen spinors; 16 cores of c408, job 31677432, three rounds | before | after |
+|---|---|---|
+| integral step of `DirectZCCSD` | 22.0, 21.6, 21.7 | 18.0, 18.0, 18.0 |
+| - its bra pass (of it the AO integrals) | 4.9 | 1.9 (1.0) |
+| - ket pass, sorting into blocks, AO operators of the ladder | 7.1, 4.6, 2.8 | 7.1, 4.6, 2.8 |
+| gradient with a frozen index (18 first orbitals; with (T)) | 22.40, 22.38, 22.39 | 19.72, 19.97, 19.90 |
+| - its bra pass (of it the AO integrals) | 4.30 | 1.86 (0.98) |
+| - its ket pass | 7.14 | 7.13 |
+
+| AuH/dyall.v3z, 34 + 256 active, 46 + 240 frozen spinors; 24 cores of c089, job 31677433, two rounds | before | after |
+|---|---|---|
+| integral step of `DirectZCCSD` | 73.3, 72.9 | 37.1, 36.9 |
+| - its bra pass (of it the AO integrals) | 44.0 | 8.4 (3.9) |
+| - ket pass, AO operators of the ladder, sorting into blocks | 12.2, 7.5, 3.8 | 12.2, 7.4, 3.3 |
+| gradient with a frozen index (143 first orbitals; with (T)) | 357.0, 357.2 | 262.4, 262.5 |
+| - its bra pass (of it the AO integrals) | 124.8 in 5 passes | 30.3 in 4 passes (11.4) |
+| - its ket pass | 52.6 | 52.6 |
+
+- With 16 cores the bra pass is 2.3 to 2.6 times faster, with 24 cores 4.1
+  and 5.2 times: `nrr_fast`'s copies for every AO pair do not get faster
+  with more threads, the GEMMs do. The integral step of AuH takes half the
+  time, its gradient with a frozen index three quarters; for HI it is 17%
+  and 11% less.
+- In this profile the gradient of AuH runs in slabs of one first orbital
+  (143 slabs, where the run of job 31675252 had 15 for the same 143
+  spinors), and its contractions take three to five times as long as there
+  (`ogf.ring` 72 s against 21.6 s, `ogf.t` 62 s against 12.7 s). The two
+  passes of the transformation do not depend on the slabs of the
+  contractions.
+- Peak resident memory of the AuH runs: 51.1 GB before, 54.5 GB after
+  (`max_memory` 72000 MB).
 
 **What is left in the transformation.** Measured on the login node with
 the scripts of that day - not benchmarks -, and none of it done:
