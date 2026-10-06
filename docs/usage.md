@@ -251,6 +251,49 @@ energies -, except between spinors closer in energy than 1e-9
 (`zvector.DEGENERATE`: degenerate spinors, between which no rotation
 changes the energy).
 
+**Heavy elements, other properties, doublets.** The SCF objects of
+socutils work as they are, e.g. X2CAMF with Gaussian nuclei:
+
+```python
+from socutils.scf import spinor_hf
+
+mol = gto.M(atom='I 0 0 0; H 0 0 1.60', basis={'I': 'dyallv3z', 'H': 'unc-ccpvtz'},
+            nucmod='G', max_memory=48000)
+mf = spinor_hf.SCF(mol).x2camf(with_gaunt=True, with_breit=True)
+# (older socutils: mf = spinor_hf.SpinorSCF(mol);
+#  mf.with_x2c = socutils.somf.amf.SpinorX2CAMFHelper(mol, with_gaunt=True, with_breit=True))
+mf.conv_tol_grad = 1e-8
+mf.kernel()
+mycc = DirectZCCSD(mf, frozen=36)                       # the 36 lowest spinors
+mycc.kernel()
+dm = mycc.make_rdm1(with_t=True, relaxed=True, ao_repr=True)    # relaxed CCSD(T)
+value = numpy.einsum('pq,qp', operator, dm).real        # any one-electron operator
+```
+
+- `frozen` may be a list of spinors, also of virtual ones (those above an
+  orbital energy, say: CFOUR's `%vircut`): for the energies. The relaxed
+  density takes frozen occupied spinors only, and with them it costs a
+  CCSD step, a Lambda step and the integrals of *all* occupied spinors:
+  for HI (54 occupied spinors, 18 of them correlated, 378 spinors) 591 s of
+  the 1072 s after the CCSD on 16 cores.
+- An `operator` is a matrix in the 2c AO basis of the SCF (the j-adapted
+  spinors of PySCF). `dip_moment` has the dipole operator with PySCF's
+  picture change; an operator at a heavy nucleus should also have the
+  response of the X2C decoupling (0.4 % of an electric field gradient),
+  which socutils' property code has and CFOUR's files have:
+  `bench/cfour/props.py` reads the latter with `socutils.prop.cfour` and
+  compares all properties of CFOUR's `xsox2cprop` (docs/benchmarks.md,
+  "Heavy elements").
+- A doublet: the properties that are odd under time reversal (effective
+  electric field, hyperfine and g operators, ...) are those of the state
+  with the spin on the axis of a linear molecule. The SCF has to be in it:
+  a state with the spin off the axis is, with spin-orbit coupling, not a
+  solution, the Z-vector equations are nearly singular there, and the
+  relaxed density means nothing (the g operator shows the direction of the
+  spin). `bench/spinors.axial` takes the off-axis part out of a density
+  (the molecule on the z axis), from which the SCF then converges on the
+  axis.
+
 At `verbose >= 4` the log says where the integrals are (memory or scratch
 file), how the step is sliced, which BLAS does the matrix products and
 whether Kramers pairs are used.

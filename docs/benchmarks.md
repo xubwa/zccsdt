@@ -2439,6 +2439,242 @@ left to its batches: they now leave 32 MB of it (`triples.MARGIN_BYTES`),
 and the frozen case then has 3.89, 3.96, 3.53 and 3.75 GB (job 31626316,
 c056; 460.9 s after the CCSD).
 
+### Heavy elements: energies and properties against CFOUR, the same Hamiltonian
+
+The comparisons above are H2O and benzene, where spin-orbit coupling is 1e-5
+of everything and a dipole moment is the only property. Here the molecules
+have a heavy atom and are run as such molecules are run in practice: X2CAMF
+(the atomic mean-field two-electron spin-orbit integrals with the Gaunt and
+gauge terms - `%amfiMethod*` 0 1 1 0 for CFOUR's `xx2camf`,
+`amf.SpinorX2CAMFHelper(with_gaunt=True, with_breit=True)` of socutils on its
+`SpinorSCF`), Gaussian nuclei, uncontracted basis sets (dyall.v2z or
+dyall.v3z on the heavy atom, uncontracted cc-pVDZ or cc-pVTZ on H and F),
+frozen core. `bench/slurm_heavy.sh MOLECULE BASIS NCORE` runs CFOUR, zccsdt
+and the finite differences of zccsdt's own energy in one job;
+`bench/cfour/genbas.py` gives CFOUR the primitives and the coordinates of
+PySCF, in bohr. Thresholds: CFOUR SCF_CONV 10, CC_CONV 9, LINEQ_CONV 9;
+zccsdt 1e-9 for the orbital gradient of the SCF (socutils' SCF stops near
+it, at its 200 cycles), 1e-11 for the CCSD energy and 1e-9 for the norm of
+the change of t and lambda.
+
+**The Hamiltonians are the same.** HBr (dyall.v2z, 180 spinors; the login
+node), E(SCF) of `xsox2chf` and of socutils' SCF:
+
+| | CFOUR | socutils |
+|---|---|---|
+| X2C-1e (no `xx2camf`; PySCF's `x2c.UHF`) | -2605.148608584 | -2605.148608584 |
+| X2CAMF, `%amfiMethod*` 0 0 0 0 | -2605.137967599 | -2605.137967599 |
+| with the Gaunt term (0 1 0 0) | -2602.279212259 | -2602.279212259 |
+| with the Gaunt and gauge terms (0 1 1 0) | -2602.551505424 | -2602.551505424 |
+
+(the mean field of the Breit term is counted twice in these energies, in
+both programs alike). With 18 frozen spinors and the 68 virtual spinors above 50
+Hartree frozen (`%vircut`; `DirectZCCSD(mf, frozen=[...])`): E_corr
+-0.344666344603 against -0.3446663445, E(T) -0.004942875508 against
+-0.0049428755.
+
+**Properties: CFOUR's operators, zccsdt's densities.** `xsox2cprop` prints a
+trace of a density with an operator that `xsox2catm` has written to a file:
+electric dipole, electric field gradient, contact and effective density at
+the nuclei, the effective electric field of the electron EDM, the nuclear
+magnetic quadrupole and Schiff moment parameters, the nucleon-electron
+currents (PSNEC, SPNEC, TPNEC), the proton EDM parameter, magnetic hyperfine
+and g operators. `bench/cfour/props.py` reads these files with
+`socutils.prop.cfour` (socutils-git, `CFOUR_X2CPROP_INTERFACE.md`: the
+picture change of the files includes the response of the X2C decoupling,
+which PySCF's `picture_change` does not have - 0.4 % of an electric field
+gradient) and traces them with the SCF density and with the relaxed
+CCSD(T) density of zccsdt (`bench/profile_t_relaxed.py` with ZC_DENSITIES;
+zccsdt runs in CFOUR's frame, from its `MOL` file). The numbers then differ
+by the densities alone, and they do so for the operators that live at the
+heavy nucleus, about which a dipole moment says little. What CFOUR prints
+as "unrelaxed" is not the density of t and lambda at fixed spinors and is
+not compared.
+
+HI, 36 frozen spinors (the iodine core up to 4p), 18 correlated electrons,
+all virtual spinors (zccsdt has no relaxed density with frozen virtual
+spinors); the electronic part of each property, atomic units:
+
+| | dyall.v2z + cc-pVDZ, 256 spinors: CFOUR | zccsdt | dyall.v3z + cc-pVTZ, 378 spinors: CFOUR | zccsdt |
+|---|---|---|---|---|
+| E(SCF) | -7103.7494861694 | -7103.7494861695 | -7103.7698661701 | -7103.7698661702 |
+| E_corr(CCSD) | -0.2335934881 | -0.2335934882 | -0.2964571116 | -0.2964571115 |
+| E(T) | -0.0040191218 | -0.0040191218 | -0.0083460825 | -0.0083460825 |
+| *relaxed CCSD(T) density:* | | | | |
+| contact density at I | 244692.3575179 | 244692.3575171 | 247659.8368054 | 247659.8368049 |
+| electric field gradient at I, zz | 11.4100599689 | 11.4100599584 | 10.8169064159 | 10.8169064099 |
+| electric field gradient at H, zz | -3.6306081956 | -3.6306081956 | -3.6531469177 | -3.6531469177 |
+| proton EDM parameter | 8.4543188102 | 8.4543187893 | 8.1537692990 | 8.1537692074 |
+| PSNEC at I, z | 68040.84147 | 68040.84021 | 104167.68502 | 104167.68197 |
+| Schiff moment parameter at I, z | -25160.58733 | -25160.58674 | -8084.04576 | -8084.04709 |
+| TPNEC at I | -2.9182088783 | -2.9182088527 | -3.2837239813 | -3.2837239242 |
+| dipole, z | 1.5122790790 | 1.5122790785 | 1.5485033236 | 1.5485033240 |
+| *SCF density:* | | | | |
+| PSNEC at I, z | 75912.32466 | 75912.32350 | 117963.16504 | 117963.16180 |
+| Schiff moment parameter at I, z | -28119.74795 | -28119.74741 | -9177.55047 | -9177.55228 |
+
+Energies agree to 1e-10. With the relaxed CCSD(T) density the contact
+density agrees to 3e-12 and 2e-12 of its value, the field gradient at
+iodine to 9e-10 and 6e-10, the dipole to 4e-10 and 3e-10, the proton EDM
+parameter to 3e-9 and 1e-8, PSNEC to 2e-8 and 3e-8, the Schiff moment
+parameter to 2e-8 and 2e-7 - and the last two, the most singular operators
+at the nucleus, differ by as much with the SCF densities: that is the
+convergence of the two SCF programs (CFOUR's stopped at its 200 cycles for
+the larger basis, socutils' at an orbital gradient of 1e-9), not the
+coupled-cluster densities. What vanishes for a closed shell comes out as
+noise (the magnetic quadrupole moment parameter 4e-5, where BaF below has
+443). The finite
+differences of zccsdt's energy (the SCF repeated in the field of CFOUR's
+dipole operator, 2e-3 and 4e-3 a.u., Richardson) give the relaxed CCSD(T)
+dipole to 2.0e-9 (-0.224854820 analytic, -0.224854822) and 4.3e-9
+(-0.188630575, -0.188630579).
+
+AuH (dyall.v3z, 576 spinors; 46 frozen spinors - up to 4d -, 34 correlated
+electrons; the 240 virtual spinors above 100 Hartree frozen, 256 left), the
+energies alone:
+
+| | CFOUR | zccsdt |
+|---|---|---|
+| E(SCF) | -18985.40794527 | -18985.40794528 |
+| E_corr(CCSD) | -1.0661960694 | -1.0661960702 |
+| E(T) | -0.0337222615 | -0.0337222616 |
+
+CFOUR needs 58 GB for this CCSD (`xx2cccsd` ended with a segmentation
+fault under MEMORY_SIZE 48 GB, job 31668185; `xsox2chf` had 66 GB resident);
+zccsdt ran it under `max_memory` 48000 MB with a peak of 31 GB of anonymous
+memory, and with 72000 MB with a peak of 43 GB.
+
+**Doublets, and what is odd under time reversal.** BaF (dyall.v2z on Ba,
+346 spinors; 48 frozen spinors, 17 correlated electrons; `kramers` is off
+for an open shell, the general code runs) and BeH (uncontracted cc-pVDZ, all
+electrons) as the small case. The effective electric field, the magnetic
+quadrupole moment parameter, the hyperfine and g operators and SPNEC vanish
+for a closed shell; for a doublet they depend on which state of the Kramers
+pair the SCF holds - and CFOUR's SCF, from its own guess, ends with the spin
+off the axis of the molecule: 34 degrees for BeH, 23 degrees for BaF (the g
+operator shows it: 0.278 and -0.416 along x and z for BeH, where the state
+on the axis has 0 and -0.5006; every axial property is then the cosine of
+the angle times its value). Without spin-orbit coupling such a state is as
+good a solution of the SCF, and in it the two programs agree like for a
+closed shell (BeH, zccsdt started from the density of CFOUR's spinors: the
+effective field -0.0001485508 in both, the others to 1e-8 of their size).
+With spin-orbit coupling it is not a solution: the state of BaF with the
+spin on the axis is 1.7e-8 Hartree lower, CFOUR's SCF does not converge (600
+cycles leave a density change of 1e-7), its CCSD takes 52 cycles and its
+Lambda equations 58, and the orbital relaxation has a nearly singular
+direction, the rotation of the spin (the largest element of the Z-vector
+9.5e-2, against 1.8e-3 on the axis). In that state (job 31668987) the two
+programs still agree in the energies (1e-10) and in the properties of the
+SCF density, but not in those of the relaxed density - the effective field
+0.928 (CFOUR) against 1.001, the contact density at Ba 0.18 apart of
+318569.6 - and the g vector of the relaxed density is longer than a spin
+allows (0.536 and 0.513; 0.5005 on the axis): neither number means anything.
+
+So for a doublet `bench/cfour/props.py guess` hands CFOUR the density of the
+SCF of zccsdt with the symmetry of the axis (`bench/spinors.axial`: the
+blocks between spinor AOs of different m_j taken out, the SCF converged
+again; written as `drguess` and `diguess`, which `xsox2chf` starts from),
+and zccsdt then starts from the density of CFOUR's spinors, so that both
+hold the same partner. CFOUR's SCF of BaF converges in 79 cycles, its CCSD
+in 25 (job 31671656, c539, 16 cores). Electronic parts, atomic units:
+
+| BaF | CFOUR | zccsdt | difference |
+|---|---|---|---|
+| E(SCF) | -8219.9591602568 | -8219.9591602562 | 6e-10 |
+| E_corr(CCSD) | -0.3680354126 | -0.3680354126 | < 1e-10 |
+| E(T) | -0.0081754685 | -0.0081754685 | < 1e-10 |
+| *relaxed CCSD(T) density:* | | | |
+| effective electric field | -1.2077991813 | -1.2077991852 | 3.9e-9 |
+| magnetic quadrupole moment parameter | -442.7971819 | -442.7971807 | 1.2e-6 |
+| hyperfine operator at Ba, z (KB) | 9.3289222250 | 9.3289222508 | 2.6e-8 |
+| SPNEC at Ba | 0.8972861080 | 0.8972861300 | 2.2e-8 |
+| g operator, z | -0.5004901013 | -0.5004901015 | 2e-10 |
+| contact density at Ba | 318569.5543730 | 318569.5543726 | 4.2e-7 |
+| electric field gradient at Ba, zz | -3.0545961412 | -3.0545961366 | 4.5e-9 |
+| proton EDM parameter | -0.9758659771 | -0.9758659628 | 1.4e-8 |
+| PSNEC at Ba, z | -26108.78722 | -26108.78560 | 1.6e-3 |
+| Schiff moment parameter at Ba, z | 8491.63448 | 8491.63387 | 6.0e-4 |
+| dipole, z | 5.6621343870 | 5.6621343876 | 5e-10 |
+| *SCF density:* | | | |
+| effective electric field | -1.2065384684 | -1.2065384730 | 4.7e-9 |
+| PSNEC at Ba, z | -29749.19509 | -29749.19340 | 1.7e-3 |
+| Schiff moment parameter at Ba, z | 9664.36202 | 9664.36138 | 6.5e-4 |
+
+On the axis everything agrees: the effective electric field to 3e-9 of its
+value (1.2078 a.u. are 6.21 GV/cm), the other properties that are odd under
+time reversal to 3e-9 - 3e-8, the even ones as for HI, PSNEC and the Schiff
+moment parameter again by what the SCF densities already differ. The same
+for BeH on the axis (the effective field -0.0001818959 with the SCF density
+and -0.0001787144 with the relaxed one, in both programs). The finite
+differences of zccsdt's energy on the axis, the SCF repeated in the field
+of the operator (job 31668987, the state from zccsdt's own guess), give the
+g operator along z to 5.6e-9 (-0.500490101 analytic) and the effective
+electric field to 1.4e-6 (-1.207799187 analytic, -1.207800582) - which is
+the error of the
+differences, not of the density: with the SCF density, where the trace is
+exact, they are 1.4e-6 off as well (the step of 1e-5 is large for an
+operator with such elements at the nucleus: the energy changes by 2e-3 in
+second order and by 1e-5 in first). The part of the correlation is
+-0.0012607118 from the densities and -0.0012607113 from the differences
+(-0.01855 from CCSD and +0.01729 from (T)).
+A state off the axis cannot be checked this way: in the field it is not
+stationary, and the SCF and the CCSD crawl along the rotation of the spin
+without converging.
+
+Times of this job (c539, 16 cores, no other job of mine on the node; CFOUR
+first), seconds: CCSD 199.2 (25 cycles) against 73.3 (28); (T) with the
+sources and the densities 672.7 against 206.6 (the (T) energy alone 55.8);
+Hbar and the Lambda equations 73.0 + 245.7 against 82.4; densities, orbital
+gradient and Z-vector equations 155.1 + 77.8 against 543.0; all after the
+CCSD 1224.3 against 832.0.
+
+**Times.** Rough: the four jobs of 2026-10-05 ran at the same time on one
+node (c042), so every program had the others' load next to it; CFOUR first,
+zccsdt after it, in each job. Seconds:
+
+| | HI, 256 spinors (18 + 202), 8 cores: CFOUR | zccsdt | HI, 378 spinors (18 + 324), 16 cores: CFOUR | zccsdt |
+|---|---|---|---|---|
+| CCSD (cycles) | 85.5 (14) | 42.8 (33) | 218.6 (15) | 165.5 (44) |
+| (T) energy alone | | 18.1 | | 80.6 |
+| (T) with the sources and the densities | 330.0 | 66.1 | 1369.3 | 298.2 |
+| Hbar and the Lambda equations | 43.1 + 83.6 | 42.1 | 137.6 + 286.4 | 159.4 |
+| densities, orbital gradient, Z-vector equations | 69.5 + 30.9 | 241.3 | 272.2 + 85.8 | 614.0 |
+| all after the CCSD | 557.1 | 349.4 | 2151.3 | 1071.6 |
+
+AuH (job 31671002, 24 cores, one other job of mine on the node): CCSD
+1502.0 s in 25 cycles against 347.3 s in 27, the (T) energy 1460.1 s against
+175.0 s.
+
+Two things in these numbers are zccsdt's own:
+
+- *The cycles of the CCSD* (33 and 44 where CFOUR has 14 and 15; 68 for AuH
+  in the first job). The DIIS equations were solved as in `pyscf.lib.diis`,
+  with the eigenvalues of the bordered matrix below 1e-14 left out - an
+  absolute threshold. Once the errors are below 1e-7 all overlaps of error
+  vectors are below it, and what is left of the equations gives the mean of
+  the stored vectors: from there on the iteration converged slower than
+  without extrapolation (HBr: 0.82 per cycle against 0.64). The overlaps are
+  now divided by the largest one (`cc/diis.py`, commit 19f00e6): 16 cycles
+  in the place of 28 for HBr, 15 for 30 (H2O, uncontracted cc-pVDZ), 19 for
+  51 (the BeH doublet), 27 for 68 (AuH, the job above). The jobs of the
+  table ran before that. With thresholds of 1e-9 in the energy and 1e-7 in
+  the norm, as in all runs of the earlier sections, the iteration never
+  reached that regime.
+- *The relaxed density with frozen spinors* (241 s and 614 s, of which 227 s
+  and 591 s are `gradient_frozen`; CFOUR's `xx2cccdenocbp` and `xx2czvec`
+  together 100 s and 358 s). `gradient_frozen` treats a frozen spinor as an
+  occupied one with zero amplitudes: it makes the integrals of all occupied
+  spinors once more (54 here, for 18 with amplitudes) and does one step of
+  the amplitude equations, one of the Lambda equations and the orbital
+  gradient in that space. For H2O or benzene that is a few spinors more; a
+  heavy atom pays for its whole core, and the step that is 6.6 to 7.5 times
+  faster than CFOUR's without frozen spinors is 1.7 to 2.4 times slower
+  here. What is needed are the blocks of the gradient with one frozen index,
+  from integrals with one frozen index - the same contractions with that
+  index in the AO basis would give the frozen virtual spinors too, which the
+  relaxed density does not have at all (`zvector.full_space` raises
+  NotImplementedError; the energies take them). Not done.
+
 ## Correctness references
 
 | Reference | Agreement | Test |
