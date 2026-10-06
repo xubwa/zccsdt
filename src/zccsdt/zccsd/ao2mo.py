@@ -59,7 +59,8 @@ from zccsdt.zccsd import kernels as K
 from zccsdt.zccsd import nrr_fast
 
 SLAB_BYTES = 4 << 30        # the largest slab of MO integrals
-BRA_BYTES = 1 << 30         # the arrays of a block of AO pairs in the bra pass, at most
+BRA_BYTES = 1 << 30         # the arrays of a block of AO pairs in the bra pass, at most;
+                            # and the AO integrals of a range, packed
 WORK_BYTES = 16 << 30       # what the passes use at most, however much there is
 STORE_SHARE = 1 / 3         # share of the budget for the integrals kept in memory
 BLOCKS = ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv')
@@ -136,14 +137,18 @@ def plan_slabs(mol, nfirst, nq, budget=None, sort_arrays=1):
     while work(nbra, nket, pmax) > w and nbra > 1:
         nbra = max(1, nbra // 2)
         nket = min(nket, nbra)
-    nkl = npair
+    # the AO integrals of a range take BRA_BYTES at most: a longer range
+    # saves nothing (4.9 s for the pairs of AuH in ranges of 826, 5.1 s in
+    # ranges of 2975), and what the passes do not need stays free
+    top = int(max(pmax, min(npair, BRA_BYTES // (8 * npair))))
+    nkl = top
     if work(nbra, nket, nkl) > w:
         rest = w - work(nbra, nket, 0)      # (that has one AO pair at work)
         pair = _bra_pair(nao, nq, nbra)
         nkl = rest // (8 * npair + pair)    # a range as one block
         if nkl * pair > BRA_BYTES:          # ... or as several
             nkl = (rest - BRA_BYTES) // (8 * npair)
-        nkl = int(max(pmax, min(npair, nkl)))
+        nkl = int(max(pmax, min(top, nkl)))
     return Plan(nbra, nket, nkl, work(nbra, nket, nkl), need, budget)
 
 

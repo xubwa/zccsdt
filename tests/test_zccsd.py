@@ -162,6 +162,7 @@ def test_slabs_equal_dense_within_plan(x2c_h2o, monkeypatch):
     nmo = Ca.shape[1]
     first, rest = (3, 9), (40, nmo)
     nfirst, nq = first[1] - first[0], rest[1] - rest[0]
+    npair, pmax = nao * (nao + 1) // 2, int(np.diff(mol.ao_loc_nr()).max()) ** 2
     ref = dense(mol, Ca, Cb, first, rest)
     blas.gemm(np.eye(2), np.eye(2))                 # (what its first call imports)
     blocked = 0
@@ -176,6 +177,8 @@ def test_slabs_equal_dense_within_plan(x2c_h2o, monkeypatch):
         peak = tracemalloc.get_traced_memory()[1] - base - out.nbytes
         tracemalloc.stop()
         assert abs(out - ref).max() < 1e-12
+        # (a range of AO integrals no longer than BRA_BYTES of them, or one shell pair)
+        assert 8 * npair * plan.nkl <= max(ao2mo.BRA_BYTES, 8 * npair * pmax)
         assert peak <= plan.work + garbage, (factor, pairs, peak, plan.work)
         assert peak > 0.8 * plan.work, (factor, pairs, peak, plan.work)     # the plan is what is used
         blocked += ao2mo._bra_block(nao, nq, plan.nbra, plan.nkl) < plan.nkl
