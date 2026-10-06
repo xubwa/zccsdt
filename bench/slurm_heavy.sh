@@ -26,8 +26,13 @@
 #     (default 24000; CFOUR's MEMORY_SIZE is HV_CFOUR_GB, default 24);
 #   HV_T_ENERGY=0: zccsdt without the run of the (T) energy alone
 #   HV_MULT=2: a doublet (CFOUR: MULT=2, REFERENCE=UHF; zccsdt: the spin of
-#     bench/spinors.py), run twice by zccsdt: in the state of CFOUR's SCF,
-#     and with the spin on the axis of the molecule
+#     bench/spinors.py).  CFOUR's SCF then starts from the density of the
+#     SCF of zccsdt with the spin on the axis of the molecule (drguess,
+#     diguess): its own guess ends in a state with the spin off the axis,
+#     which with spin-orbit coupling is not a solution of the SCF - it does
+#     not converge, and the relaxed density of such a state means nothing
+#     (BaF: 23 degrees off after 600 cycles).  HV_GUESS=0: CFOUR's own
+#     guess; zccsdt then runs twice, in CFOUR's state and on the axis.
 #   HV_SOCUTILS: the directory with socutils-git as 'socutils' (default
 #     ~/apps/socutils-git-env; it has prop/cfour.py, which reads CFOUR's
 #     operators). With CFOUR and the properties, all one-electron properties
@@ -79,9 +84,12 @@ if [ "${HV_CFOUR:-1}" != 0 ]; then
     compare=1
     post="PYTHONPATH=$socutils:$root/src:\$PYTHONPATH python $root/bench/cfour/props.py pack $mol $basis $scr/cfour_ops.npz $keep/geometry.txt"
   fi
+  guess=
+  [ "${HV_MULT:-1}" != 1 ] && [ "${HV_GUESS:-1}" = 1 ] && \
+    guess="ZC_NUCMOD=G ZC_HAM=$ham ZC_SCF=socutils ZC_AXIAL=1 PYTHONPATH=$socutils:$root/src:\$PYTHONPATH python $root/bench/cfour/props.py guess $mol $basis $keep/geometry.txt"
   ZC_ROOT=$root ZC_NITER=0 CFOUR_PYBASIS=$basis CFOUR_SCF_CONV=10 CFOUR_CONV=9 \
     CFOUR_MAXCYC=100 CFOUR_MEM_GB=${HV_CFOUR_GB:-24} CFOUR_EXTRA="$extra" \
-    CFOUR_MULT=${HV_MULT:-1} CFOUR_KEEP=$keep CFOUR_POST="$post" \
+    CFOUR_MULT=${HV_MULT:-1} CFOUR_KEEP=$keep CFOUR_POST="$post" CFOUR_GUESS="$guess" \
     CFOUR_SECTIONS="$sections" CFOUR_PROGS="$progs" bash $root/bench/cfour/slurm_x2ccc.sh $mol:$label
   # zccsdt in the frame of CFOUR: its operators are in it
   [ -s $keep/geometry.txt ] && export ZC_GEOMETRY=$keep/geometry.txt
@@ -105,13 +113,17 @@ zccsdt() {      # $1: file for the output; $2: 0 without the (T) energy alone
   fi
 }
 
-if [ "${HV_MULT:-1}" != 1 ] && [ -f $scr/cfour_ops.npz ]; then
-  # A doublet has a Kramers partner, and every state between the two is as
-  # good a solution of the SCF: what is odd under time reversal depends on
-  # which one a program holds. First the state of CFOUR, from the density of
-  # its SCF, for the comparison; then the state with the spin on the axis of
-  # the molecule, which is the one a property is defined for and the one the
-  # finite differences need.
+if [ "${HV_MULT:-1}" != 1 ] && [ -f $scr/cfour_ops.npz ] && [ "${HV_GUESS:-1}" = 1 ]; then
+  # a doublet, CFOUR's SCF started on the axis: from its density, the same
+  # Kramers partner
+  export ZC_AXIAL=1
+  echo "=== zccsdt $mol/$basis $ham, from the density of CFOUR's SCF  $(date)  scratch $scr"
+  ZC_DM0=$scr/cfour_ops.npz:SCFDM zccsdt zccsdt.out ${HV_T_ENERGY:-1}
+elif [ "${HV_MULT:-1}" != 1 ] && [ -f $scr/cfour_ops.npz ]; then
+  # CFOUR's own guess: first its state, from the density of its SCF, then
+  # the state with the spin on the axis of the molecule, which is the one a
+  # property that is odd under time reversal is defined for and the one the
+  # finite differences need
   echo "=== zccsdt $mol/$basis $ham, from the density of CFOUR's SCF  $(date)  scratch $scr"
   ZC_DM0=$scr/cfour_ops.npz:SCFDM zccsdt zccsdt_cfour_state.out ${HV_T_ENERGY:-1}
   export ZC_AXIAL=1

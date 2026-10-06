@@ -12,6 +12,12 @@ usage: python bench/cfour/props.py pack MOLECULE BASIS OPERATORS.npz GEOMETRY
          the spinor basis of PySCF, the density of CFOUR's SCF (SCFDM, for
          ZC_DM0) and CFOUR's geometry (its frame, bohr; a file for
          ZC_GEOMETRY of bench/spinors.py)
+       python bench/cfour/props.py guess MOLECULE BASIS GEOMETRY
+         in the directory of a CFOUR run, after xjoda: the SCF of
+         bench/spinors.py in CFOUR's frame (with its environment: ZC_HAM,
+         ZC_NUCMOD, ZC_SCF, ZC_AXIAL), its density as the files drguess and
+         diguess that xsox2chf starts from - a doublet with the spin on the
+         axis of the molecule, which CFOUR's own guess does not give
        python bench/cfour/props.py compare OPERATORS.npz DENSITIES.npz XSOX2CPROP.OUT
          DENSITIES.npz: scf, unrelaxed, relaxed in the spinor AO basis
          (bench/profile_t_relaxed.py with ZC_DENSITIES); the SCF and the
@@ -120,7 +126,51 @@ def pack(mol_name, basis, out, geometry):
         print("CFOUR's SCF spinors: largest deviation from orthonormality %.1e"
               % abs(c.conj().T @ s1 @ c - np.eye(n2c)).max())
         ops[SCFDM] = co @ co.conj().T
+        if os.path.isfile('drguess') and os.path.isfile('diguess'):
+            d = store.rotation.conj().T @ cfour_density() @ store.rotation
+            print("drguess/diguess of CFOUR against the density of its spinors: %.1e; against "
+                  'its transpose: %.1e' % (abs(d - ops[SCFDM]).max(), abs(d - ops[SCFDM].T).max()))
     np.savez(out, **ops)
+
+
+def record(path, a):
+    '''One record of a Fortran sequential file with the doubles ``a``
+    (CFOUR's wfile).'''
+    a = np.ascontiguousarray(a, dtype=np.float64)
+    mark = np.array([a.nbytes], dtype=np.int32).tobytes()
+    with open(path, 'wb') as f:
+        f.write(mark + a.tobytes() + mark)
+
+
+def cfour_density(path_r='drguess', path_i='diguess'):
+    '''The density of the files drguess and diguess, as a complex matrix in
+    CFOUR's basis.'''
+    def read(path):
+        with open(path, 'rb') as f:
+            f.seek(4)
+            return np.frombuffer(f.read()[:-4], dtype=np.float64)
+    re, im = read(path_r), read(path_i)
+    n = int(round(np.sqrt(re.size)))
+    return (re + 1j * im).reshape(n, n).T
+
+
+def guess(mol_name, basis, geometry):
+    from socutils.tools.label import Labels
+    atoms = read_mol()
+    with open(geometry, 'w') as f:
+        f.write('\n'.join('%s %.15f %.15f %.15f' % (s, *xyz) for s, xyz in atoms) + '\n')
+    os.environ['ZC_GEOMETRY'] = geometry
+    mol = spinors.molecule(mol_name, basis)
+    mf = spinors.scf(mol, 1e-12, 1e-9)
+    # the density C_occ C_occ^+ in CFOUR's basis (alpha, then beta, of the
+    # scalar AOs), column-major like its own drguess and diguess (those of a
+    # run of xsox2chf, rotated back, are the density of its spinors)
+    c = Labels.spinor_cfour2pyscf(mol)
+    d = c @ mf.make_rdm1() @ c.conj().T
+    record('drguess', d.real.T.ravel())
+    record('diguess', d.imag.T.ravel())
+    print('SCF of zccsdt for the guess of xsox2chf: E(SCF) %.10f, converged %s; drguess and '
+          'diguess written' % (mf.e_tot, mf.converged))
 
 
 def printed(path):
@@ -230,5 +280,7 @@ def compare(ops_file, den_file, prop_out):
 if __name__ == '__main__':
     if sys.argv[1] == 'pack':
         pack(*sys.argv[2:6])
+    elif sys.argv[1] == 'guess':
+        guess(*sys.argv[2:5])
     else:
         compare(*sys.argv[2:5])

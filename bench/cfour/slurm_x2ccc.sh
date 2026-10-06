@@ -29,6 +29,8 @@
 #   with the damping an open shell needs to converge)
 #   CFOUR_POST: a command run in the directory of the CFOUR run after its
 #   programs, before the directory is removed (bench/cfour/props.py pack)
+#   CFOUR_GUESS: a command run there before xsox2chf (bench/cfour/props.py
+#   guess: the files drguess and diguess, the density its SCF starts from)
 #   CFOUR_PYBASIS: a PySCF basis name, or 'heavy,light' (bench/spinors.py):
 #   the geometry (any molecule of bench/spinors.py) and the basis then come
 #   from PySCF's data (bench/cfour/genbas.py writes the GENBAS entries; the
@@ -117,6 +119,8 @@ $(printf '%b' "${CFOUR_SECTIONS:-}")
 ZEOF
   echo "=== CFOUR $mol/$basis  $(date)  run dir $run (kept: $keep)"
   for p in ${CFOUR_PROGS:-xjoda xsox2catm xsox2chf xx2cvtran xx2cccsd}; do
+    [ $p = xsox2chf ] && [ -n "$CFOUR_GUESS" ] && \
+      (eval "$CFOUR_GUESS") 2>&1 | grep -v "plugins found\|PYSCF_EXT_PATH\|^/home/"
     # xx2camf is C++: where the libstdc++ of the environment is too old for
     # it, the one of the Python installation is loaded first
     pre=
