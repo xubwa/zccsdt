@@ -2467,11 +2467,12 @@ node), E(SCF) of `xsox2chf` and of socutils' SCF:
 | with the Gaunt term (0 1 0 0) | -2602.279212259 | -2602.279212259 |
 | with the Gaunt and gauge terms (0 1 1 0) | -2602.551505424 | -2602.551505424 |
 
-(the mean field of the Breit term is counted twice in these energies, in
-both programs alike). With 18 frozen spinors and the 68 virtual spinors above 50
-Hartree frozen (`%vircut`; `DirectZCCSD(mf, frozen=[...])`): E_corr
--0.344666344603 against -0.3446663445, E(T) -0.004942875508 against
--0.0049428755.
+(with the Gaunt term the energy is 2.9 Hartree above the one without it:
+that is what the atomic mean field of this term adds through the
+one-electron operator, in both programs alike). With 18 frozen spinors and
+the 68 virtual spinors above 50 Hartree frozen (`%vircut`;
+`DirectZCCSD(mf, frozen=[...])`): E_corr -0.344666344603 against
+-0.3446663445, E(T) -0.004942875508 against -0.0049428755.
 
 **Properties: CFOUR's operators, zccsdt's densities.** `xsox2cprop` prints a
 trace of a density with an operator that `xsox2catm` has written to a file:
