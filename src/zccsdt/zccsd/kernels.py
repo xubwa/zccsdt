@@ -24,6 +24,7 @@ _SIGNATURES = {
     'zc_diff_norm2': [_P, _P, _I],
     'zc_split3': [_P, _I, _I, _I, _P, _P, _P],
     'zc_combine3': [_P, _P, _P, _I, _D, ctypes.c_int, _P],
+    'zc_combine3_ld': [_P, _P, _P, _I, _I, _I, _D, ctypes.c_int, _P, _I],
     'zc_ring_cols3': [_P, _I, _I, _I, _I, _P, _P, _P],
     'zc_outer_pp': [_P, _P, _I, _I, _D, _P],
     'zc_ring_cols': [_P, _I, _I, _I, _I, _P],
@@ -71,6 +72,13 @@ def _c(a, dtype=np.complex128):
     '''The address of an array the C side reads or writes in place.'''
     assert a.dtype == dtype and a.flags.c_contiguous, (a.dtype, a.flags.c_contiguous)
     return a.ctypes.data
+
+
+def _rows(a, itemsize):
+    '''Is ``a`` a block of rows of unit stride in a row-major array of that
+    item size?'''
+    return (a.ndim == 2 and a.itemsize == itemsize and a.strides[1] == itemsize
+            and a.strides[0] >= a.shape[1] * itemsize and a.strides[0] % itemsize == 0)
 
 
 @functools.lru_cache(maxsize=None)
@@ -132,12 +140,21 @@ def split3(x):
 
 
 def combine3(p1, p2, p3, alpha=1.0, C=None, acc=False):
-    '''C (+)= alpha A B from p1 = Ar Br, p2 = Ai Bi, p3 = (Ar + Ai)(Br + Bi).'''
+    '''C (+)= alpha A B from p1 = Ar Br, p2 = Ai Bi, p3 = (Ar + Ai)(Br + Bi).
+    The four may be blocks of columns of larger row-major matrices (the
+    three products with the same leading dimension).'''
     if C is None:
         C, acc = np.empty(p1.shape, dtype=np.complex128), False
-    if USE_C:
+    if USE_C and all(x.flags.c_contiguous for x in (p1, p2, p3, C)):
         _lib.zc_combine3(_c(p1, np.float64), _c(p2, np.float64), _c(p3, np.float64), p1.size,
                          alpha, int(acc), _c(C))
+        return C
+    if USE_C and C.ndim == 2 and _rows(C, 16) and all(
+            x.dtype == np.float64 and x.shape == C.shape and _rows(x, 8)
+            and x.strides[0] == p1.strides[0] for x in (p1, p2, p3)):
+        _lib.zc_combine3_ld(p1.ctypes.data, p2.ctypes.data, p3.ctypes.data, C.shape[0],
+                            C.shape[1], p1.strides[0] // 8, alpha, int(acc), C.ctypes.data,
+                            C.strides[0] // 16)
         return C
     val = alpha * ((p1 - p2) + 1j * (p3 - p1 - p2))
     if acc:

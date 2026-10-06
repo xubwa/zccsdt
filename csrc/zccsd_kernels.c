@@ -86,6 +86,23 @@ void zc_combine3(const double *p1, const double *p2, const double *p3, int64_t n
     }
 }
 
+/* zc_combine3 for m rows of n elements that are blocks of larger row-major
+ * arrays: the rows of the three products ldp elements apart, those of c ldc
+ * apart (the columns of one range of a matrix that is filled range by range). */
+void zc_combine3_ld(const double *p1, const double *p2, const double *p3, int64_t m, int64_t n,
+                    int64_t ldp, double alpha, int acc, zc *c, int64_t ldc)
+{
+    #pragma omp parallel for schedule(static)
+    for (int64_t r = 0; r < m; r++) {
+        const double *a = p1 + r * ldp, *b = p2 + r * ldp, *d = p3 + r * ldp;
+        zc *x = c + r * ldc;
+        for (int64_t k = 0; k < n; k++) {
+            const zc val = alpha * ((a[k] - b[k]) + (d[k] - a[k] - b[k]) * I);
+            x[k] = acc ? x[k] + val : val;
+        }
+    }
+}
+
 /* ---------------------------------------------------------------- amplitudes */
 
 /* R[(i>j), (a>b)] += fac (x[i,a] y[j,b] - x[i,b] y[j,a] - x[j,a] y[i,b] + x[j,b] y[i,a]):

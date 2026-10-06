@@ -108,7 +108,9 @@ def gemm(A, B, C=None, alpha=1.0, beta=0.0):
         tb, ldb = _ld(B)
         al = np.array(alpha, dtype=dtype)
         be = np.array(beta, dtype=dtype)
-        p = lambda x: x.ctypes.data_as(ctypes.c_void_p)
+        # (the address: data_as() leaves a reference cycle for the garbage
+        # collector with every call)
+        p = lambda x: ctypes.c_void_p(x.ctypes.data)          # noqa: E731
         i = ctypes.c_int64
         getattr(lib, 'zc_gemm_' + _SFX[np.dtype(dtype)])(
             ctypes.c_int(ta), ctypes.c_int(tb), i(m), i(n), i(k), p(al), p(A),
@@ -136,7 +138,7 @@ def gemm_slices(A, B, C, alpha=1.0, beta=0.0):
     lib = _clib()
     if lib is not None and hasattr(lib, 'zc_gemm_slices_d') and nb and m and n and k:
         al, be = np.array(alpha, dtype=np.float64), np.array(beta, dtype=np.float64)
-        p = lambda x: x.ctypes.data_as(ctypes.c_void_p)       # noqa: E731
+        p = lambda x: ctypes.c_void_p(x.ctypes.data)          # noqa: E731
         i = ctypes.c_int64
         lib.zc_gemm_slices_d(ctypes.c_int(0), i(nb), i(m), i(n), i(k), p(al), p(A), i(k),
                              p(B), i(n), i(nb * n), p(be), p(C), i(m * n), i(n))
