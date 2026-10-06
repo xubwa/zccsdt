@@ -520,30 +520,42 @@ def batch_bytes(nocc, nvir, nb, with_t=False):
 
 def slab_plan(mol, left, nocc, nvir, nfirst, with_t=False):
     '''The ao2mo.Plan of the slabs (f q|r s) of ``nfirst`` frozen spinors
-    within ``left`` bytes (None: no limit known): as many of them at a time
-    as fit with the arrays of contract() for them.  MemoryError if one does
+    within ``left`` bytes (None: no limit known): the most of them at a time
+    that fit with the arrays of contract() for them.  MemoryError if one does
     not.'''
     from zccsdt.zccsd import ao2mo
-    nq, nk = int(nocc) + int(nvir), max(1, int(nfirst))
-    while True:
+    nq, nfirst = int(nocc) + int(nvir), max(1, int(nfirst))
+
+    def plan_of(nk):
+        '''The plan with slabs of ``nk`` frozen spinors; MemoryError where
+        the passes for them do not fit next to the arrays of contract().'''
         own = batch_bytes(nocc, nvir, nk, with_t)
+        plan = ao2mo.plan_slabs(mol, nfirst, nq, None if left is None else max(0, left - own),
+                                sort_arrays=0)
+        if plan.nket < nk:
+            raise MemoryError
+        plan.work += own - 16 * nq ** 3 * (plan.nket - nk)
+        plan.nket = nk
+        return plan
+
+    try:
+        best = plan_of(1)
+    except MemoryError as err:
+        raise MemoryError('%s (the integrals with a frozen index of the orbital gradient, '
+                          'next to %s for what one frozen spinor is contracted with)'
+                          % (err, amps._size(batch_bytes(nocc, nvir, 1, with_t)))) from None
+    # A larger slab leaves less for the passes: the largest that fits, by
+    # bisection up to what a slab holds at most.  (Halving from all frozen
+    # spinors down to what the rest of the budget allowed ended at one or two
+    # where ten fit: 143 slabs for AuH with 30 GB left.)
+    lo, hi = 1, ao2mo.plan_slabs(mol, nfirst, nq, None, sort_arrays=0).nket
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
         try:
-            plan = ao2mo.plan_slabs(mol, nfirst, nq, None if left is None else max(0, left - own),
-                                    sort_arrays=0)
-        except MemoryError as err:
-            if nk > 1:
-                nk = max(1, nk // 2)
-                continue
-            raise MemoryError('%s (the integrals with a frozen index of the orbital gradient, '
-                              'next to %s for what one frozen spinor is contracted with)'
-                              % (err, amps._size(own))) from None
-        if plan.nket > nk:
-            plan.work -= 16 * nq ** 3 * (plan.nket - nk)
-            plan.nket = nk
-        if plan.nket == nk:
-            plan.work += own
-            return plan
-        nk = plan.nket
+            best, lo = plan_of(mid), mid
+        except MemoryError:
+            hi = mid - 1
+    return best
 
 
 def gradient(mycc, eris, t1, t2p, l1, l2p, Cf, dens=None, parts=None, slabs=None):

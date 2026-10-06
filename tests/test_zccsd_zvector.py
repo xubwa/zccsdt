@@ -660,3 +660,36 @@ def test_orbital_gradient_with_a_frozen_index_within_budget(monkeypatch, tmp_pat
     X = orbgrad_frozen.kernel(cc, eris, t1, t2p, l1, l2p, Cf, dens)
     assert abs(X - ref).max() < 1e-10
     scr.close()
+
+
+def test_slabs_of_a_frozen_index_as_large_as_fit(monkeypatch):
+    '''zccsd.orbgrad_frozen.slab_plan: the most frozen spinors in a slab that
+    fit with the arrays of their contraction, within the bytes that are left
+    - more of them with more bytes, and never fewer than fit (a search by
+    halves from all frozen spinors ended at one where ten fit, and the
+    contractions took three to five times as long).'''
+    from zccsdt.zccsd import ao2mo, orbgrad_frozen
+    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='cc-pvdz', verbose=0)
+    o, v, nf = 8, 40, 14
+    nq = o + v
+    monkeypatch.setattr(ao2mo, 'SLAB_BYTES', 9 * 16 * nq ** 3)      # a slab holds 9 at most
+    least = (ao2mo.plan_slabs(mol, nf, nq, None, sort_arrays=0).need
+             + orbgrad_frozen.batch_bytes(o, v, 1, True))
+    with pytest.raises(MemoryError, match='one frozen spinor is contracted with'):
+        orbgrad_frozen.slab_plan(mol, int(0.99 * least), o, v, nf, True)
+    seen, last = set(), 0
+    for factor in np.geomspace(1.0, 60.0, 80):
+        left = int(factor * least)
+        plan = orbgrad_frozen.slab_plan(mol, left, o, v, nf, True)
+        nk = plan.nket
+        assert plan.work <= left and last <= nk <= 9, (factor, nk, last)
+        if nk < 9:      # one more does not fit
+            more = left - orbgrad_frozen.batch_bytes(o, v, nk + 1, True)
+            try:
+                assert ao2mo.plan_slabs(mol, nf, nq, max(0, more), sort_arrays=0).nket <= nk
+            except MemoryError:
+                pass
+        seen.add(nk)
+        last = nk
+    assert seen == set(range(1, 10))
+    assert orbgrad_frozen.slab_plan(mol, None, o, v, nf, True).nket == 9
