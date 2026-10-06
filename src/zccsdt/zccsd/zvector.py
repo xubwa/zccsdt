@@ -434,6 +434,7 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
                 or getattr(mycc, 'l2', None) is None or getattr(mycc, '_l_with_t', False)):
             mycc.solve_lambda(t1, t2, eris=eris)
         l1 = l2 = None
+    eris = mycc.eris if eris is None else eris
     n = C.shape[1]
     act = np.setdiff1d(np.arange(o), frozen)        # the active spinors among all
     vir = np.setdiff1d(np.arange(o, n), fvir)
@@ -464,7 +465,7 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
         held = []
         if with_t:
             with timer('zv.triples'):
-                terms, dens = _t_terms(mycc, mycc.eris if eris is None else eris, t1, t2p, tg)
+                terms, dens = _t_terms(mycc, eris, t1, t2p, tg)
             doo, dov, dvo, dvv = d1
             doo[np.diag_indices(oa)] -= terms[2]
             dvv[np.diag_indices(v)] += terms[3]
@@ -488,20 +489,18 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
                 # which takes the memory of an amplitude step
                 from zccsdt.zccsd import orbgrad_t
                 with timer('zv.orbgrad_t'):
-                    Gt = orbgrad_t.kernel(mycc, mycc.eris if eris is None else eris, t1,
-                                          t2p, *held, verbose=verbose)
+                    Gt = orbgrad_t.kernel(mycc, eris, t1, t2p, *held, verbose=verbose)
             if held_out.size:
                 # the integrals with a frozen index meet the densities of (T) too
                 from zccsdt.zccsd import orbgrad_frozen
                 with timer('zv.orbgrad_frozen'):
                     X = orbgrad_frozen.kernel(
-                        mycc, mycc.eris if eris is None else eris, t1, t2p, l1, l2p,
+                        mycc, eris, t1, t2p, l1, l2p,
                         np.vstack(mf.mol.sph2spinor_coeff()) @ C[:, held_out],
                         held[1] if with_t else None, mo_e[held_out], verbose)
             release()
             with timer('zv.orbgrad'):
-                Gnh = orbgrad.kernel(mycc, mycc.eris if eris is None else eris, t1, t2p,
-                                     l1, l2p, verbose)
+                Gnh = orbgrad.kernel(mycc, eris, t1, t2p, l1, l2p, verbose)
         finally:
             release()
     finally:

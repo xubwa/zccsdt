@@ -43,6 +43,7 @@
 #     place of the dipole operator, each with its step: 'UTM10Z:1e-3
 #     SOX2CEFD:1e-6' (the magnetic moment along z, the effective electric
 #     field: operators that are odd under time reversal, for a doublet)
+#   HV_TAG: a name for this run, where one job has several of a molecule
 #   ZC_ROOT: snapshot of the repository
 # Thresholds: CFOUR SCF_CONV 10, CC_CONV 9, LINEQ_CONV 9; zccsdt 1e-9 in the
 # orbital gradient of the SCF, 1e-11 in the CCSD energy (1e-9 in t, lambda).
@@ -76,7 +77,7 @@ if [ $cprops = 1 ]; then
   extra="$extra,PROPS=FIRST_ORDER"
 fi
 scr=/tmp/zccsdt_heavy_${SLURM_JOB_ID:-local$$}
-keep=/home/xwang405/.claude/jobs/7ba4fcf7/tmp/heavy/${mol}_${label}_${SLURM_JOB_ID:-local$$}
+keep=/home/xwang405/.claude/jobs/7ba4fcf7/tmp/heavy/${mol}_${label}_${SLURM_JOB_ID:-local$$}${HV_TAG:+_$HV_TAG}
 mkdir -p $scr $keep
 socutils=${HV_SOCUTILS:-/home/xwang405/apps/socutils-git-env}
 compare=0

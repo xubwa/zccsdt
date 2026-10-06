@@ -72,9 +72,8 @@ def make_rdm1(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, ao_repr=False
     of all spinors, zvector.full_space), or in the 2c AO basis with the
     frozen spinors (``ao_repr``).  lambda is solved for if it is not given.'''
     if relaxed:
-        # neither the amplitudes nor the integrals of the CCSD object are taken
-        # here: zvector.kernel packs the first and releases the full arrays while
-        # it runs, and with frozen spinors it may have to give up the second
+        # the amplitudes of the CCSD object are not taken here: zvector.kernel
+        # packs them and releases the full arrays while it runs
         from zccsdt.zccsd import zvector
         if eris is None and mycc.eris is None:
             mycc.ao2mo(mycc.mo_coeff)
