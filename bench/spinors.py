@@ -16,7 +16,9 @@ environment: ZC_GEOMETRY: a file with 'symbol x y z' per atom in bohr, in
              (socutils.somf.amf.SpinorX2CAMFHelper; the flags as CFOUR's
              %amfiMethod: average of configurations, Gaunt, gauge term,
              two-electron picture change of the scalar part);
-             ZC_SCF: pyscf (default) | socutils
+             ZC_SCF: pyscf (default) | socutils;
+             ZC_SPINORS=FILE.npz: the spinors of the SCF, kept for the next
+             runs (scf)
 '''
 import os
 import sys
@@ -102,13 +104,8 @@ def hamiltonian():
     return name, flags
 
 
-def scf(mol, conv_tol=1e-10, conv_tol_grad=1e-8, field=None, dm0=None, max_cycle=200):
-    '''The converged spinor SCF of ``mol``.  ``field``: a matrix in the basis
-    of the spinor AOs added to the one-electron Hamiltonian (finite
-    differences of a property).  The energy of a heavy molecule is not
-    defined to 1e-12 - its last digits change from one iteration to the next -,
-    so ``conv_tol`` has a floor and the orbital gradient tells the
-    convergence.'''
+def mean_field(mol, field=None):
+    '''The spinor SCF object of ZC_SCF and ZC_HAM for ``mol``, not run.'''
     name, flags = hamiltonian()
     if os.environ.get('ZC_SCF', 'pyscf') == 'socutils':
         from socutils.scf import spinor_hf
@@ -125,6 +122,39 @@ def scf(mol, conv_tol=1e-10, conv_tol_grad=1e-8, field=None, dm0=None, max_cycle
     if field is not None:
         h0 = mf.get_hcore()
         mf.get_hcore = lambda *args: h0 + field
+    return mf
+
+
+def _spinors_key(mol):
+    '''What the spinors of a file belong to.'''
+    atoms = ';'.join('%s %.8f %.8f %.8f' % ((a,) + tuple(x)) for a, x in mol._atom)
+    return '|'.join((atoms, repr(mol.basis), repr(mol.nucmod), '%d %d %d' % (mol.nao_nr(), mol.nelectron, mol.spin),
+                     os.environ.get('ZC_HAM', 'x2c1e'), os.environ.get('ZC_SCF', 'pyscf')))
+
+
+def scf(mol, conv_tol=1e-10, conv_tol_grad=1e-8, field=None, dm0=None, max_cycle=200):
+    '''The converged spinor SCF of ``mol``.  ``field``: a matrix in the basis
+    of the spinor AOs added to the one-electron Hamiltonian (finite
+    differences of a property).  The energy of a heavy molecule is not
+    defined to 1e-12 - its last digits change from one iteration to the next -,
+    so ``conv_tol`` has a floor and the orbital gradient tells the
+    convergence.
+
+    ZC_SPINORS: a file (.npz) for the spinors of the SCF without a field:
+    written after the SCF where it is not there, and read in the place of an
+    SCF where it is.  Every run of the SCF returns another mixture of the
+    two spinors of each Kramers pair, so what is defined in the basis of the
+    spinors - an amplitude, the random amplitudes of a profile - is the
+    same in two runs only with the same spinors.'''
+    mf = mean_field(mol, field)
+    saved = os.environ.get('ZC_SPINORS') if field is None else None
+    if saved and os.path.exists(saved):
+        z = np.load(saved)
+        if str(z['key']) != _spinors_key(mol):
+            raise ValueError('%s has the spinors of another molecule, basis or Hamiltonian' % saved)
+        mf.mo_coeff, mf.mo_energy, mf.mo_occ = z['mo_coeff'], z['mo_energy'], z['mo_occ']
+        mf.e_tot, mf.converged = float(z['e_tot']), bool(z['converged'])
+        return mf
     if dm0 is None and os.environ.get('ZC_DM0'):
         path, key = os.environ['ZC_DM0'].rsplit(':', 1)
         dm0 = np.load(path)[key]
@@ -135,4 +165,9 @@ def scf(mol, conv_tol=1e-10, conv_tol_grad=1e-8, field=None, dm0=None, max_cycle
     mf.kernel(dm0=dm0)
     if os.environ.get('ZC_AXIAL') == '1':
         mf.kernel(dm0=axial(mol, mf.make_rdm1()))
+    if saved:
+        tmp = '%s.%d.npz' % (saved, os.getpid())        # (whole or not there for another run)
+        np.savez(tmp, mo_coeff=mf.mo_coeff, mo_energy=mf.mo_energy, mo_occ=mf.mo_occ,
+                 e_tot=mf.e_tot, converged=mf.converged, key=_spinors_key(mol))
+        os.replace(tmp, saved)
     return mf
