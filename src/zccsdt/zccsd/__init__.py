@@ -23,8 +23,9 @@ says what was changed):
   lib/libzc_zccsd.so) with their numpy equivalents.
 - aoladder: the two AO operators of the ladder of amps, kept as triangles
   or made from the AO integrals in every iteration (integral-direct).
-- ao2mo: the integrals of both classes for a two-component reference on
-  nrr_fast, within max_memory: slabs of the first MO index that are
+- ao2mo: the integrals of both classes for a two-component reference,
+  within max_memory: the bra pass as real matrix products over blocks of AO
+  pairs, the ket pass of nrr_fast; slabs of the first MO index that are
   antisymmetrized into their blocks at once, the blocks that do not fit
   mapped from a scratch file (the route of socutils' cc through nrr_outcore
   stays as ZCCSD.ao2mo_outcore).

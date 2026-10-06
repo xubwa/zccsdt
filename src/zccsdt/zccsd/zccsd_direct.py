@@ -6,8 +6,8 @@
 # the imports of socutils.cc, get_ovvv (for (T)) moved here from
 # eom_zccsd_direct.py, the EOM entry points left out.
 # Changed since: the integrals of ladder='ao' come from zccsdt.zccsd.ao2mo
-# (slabs of the first occupied index, transformed by socutils' nrr_fast,
-# within max_memory: what does not fit is mapped from a scratch file) and
+# (slabs of the first occupied index, their ket pass that of socutils'
+# nrr_fast, within max_memory: what does not fit is mapped from a scratch file) and
 # ovvv is stored by default (DirectZCCSD.ovvv_direct = True: evaluated from the
 # AO integrals in every term, as in socutils).  The amplitude equations are
 # those of zccsdt.zccsd.amps (packed pairs, fixed layouts, the same

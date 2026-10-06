@@ -5,9 +5,9 @@
 # author, as the starting point of the spinor CCSD(T) of zccsdt.  Only the
 # imports of socutils.cc changed.
 # Changed since: for a two-component reference the integrals come from
-# zccsdt.zccsd.ao2mo (_make_eris_slab: slabs transformed by socutils'
-# nrr_fast within max_memory, <ab||ef> packed directly, what does not fit
-# mapped from a scratch file); ZCCSD.ao2mo_outcore = True, an
+# zccsdt.zccsd.ao2mo (_make_eris_slab: slabs within max_memory, their ket
+# pass that of socutils' nrr_fast, <ab||ef> packed directly, what does not
+# fit mapped from a scratch file); ZCCSD.ao2mo_outcore = True, an
 # erifile or a four-component reference keep the route of socutils through
 # nrr_outcore and HDF5 (_make_eris_outcore).  Two debugging prints removed.
 #
