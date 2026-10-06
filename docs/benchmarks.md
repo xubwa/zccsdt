@@ -1219,11 +1219,12 @@ GB: the copied iteration is not planned (large einsum temporaries).
 `nrr_fast` does the first half of the transformation AO pair by AO pair. For
 every pair (la si) of a range and for each of the two spin components of the
 spinors its kernel (`AO2MOmmm_nrr_iltj`) is called once: it allocates four
-work arrays, copies the n x n real integrals (mu nu|la si) three times - as
-a complex matrix with zeros for the imaginary part, split for a product by
-three real ones -, multiplies (three n x n x i GEMMs, one of them on the
-zeros) and transforms the second index (three more); the two spin
-components are added, and the whole result is transposed for the ket pass.
+work arrays, fills three n x n arrays from the real integrals
+(mu nu|la si) - the real part, an imaginary part of zeros and their sum,
+for a product by three real ones -, multiplies (three n x n x i GEMMs, one
+of them on the zeros) and transforms the second index (three more); the
+two spin components are added, and the whole result is transposed for the
+ket pass.
 An AO pair so costs the same copies whether one first orbital is
 transformed or thirty: HI/dyall.v3z (n = 189, 342 spinors, 8 threads; the
 login node, not a benchmark) 2.7 s for one first orbital, 3.5 s for 6, 4.4 s
