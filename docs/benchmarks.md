@@ -1142,7 +1142,12 @@ the 4-index AO array. `zccsdt.zccsd.ao2mo` replaces both:
   `zccsd/nrr_fast.py`): the bra pass on PySCF's s4 AO fill, the ket pass on
   the shell-block packing, the cheaper index order, all in C. (A first
   version, 41735e2, had kernels of its own -- real GEMMs on AO integrals
-  packed in memory -- which were 5-20% slower and are gone.)
+  packed in memory -- which were 5-20% slower and are gone.) Since b47c3c6
+  the bra pass is again one of zccsdt, real matrix products over blocks of
+  AO pairs, 2 to 3 times faster than that of `nrr_fast`
+  ([below](#the-bra-pass-as-matrix-products-over-blocks-of-ao-pairs)); the
+  ket pass is still `nrr_fast`'s. The tables of this section are from
+  before that, with both passes of `nrr_fast`.
 - **Organization**: only the integrals a CCSD needs, (ip|qr) with i
   occupied and, for `ZCCSD`, (ae|bf); the first MO index in batches; every
   slab antisymmetrized into its blocks (or packed <ab||ef> rows) at once.
@@ -1207,6 +1212,114 @@ and 94.3 s per iteration for the three molecules (with the ovvv terms from
 the AO integrals, as copied: 2.3 s, 22.6 s, 127 s on c329); `ZCCSD` 1.48 s,
 10.7 s and 92.9 s; CFOUR 0.32 s, 2.75 s, 26.7 s. Peak RSS for benzene 24-27
 GB: the copied iteration is not planned (large einsum temporaries).
+
+#### The bra pass as matrix products over blocks of AO pairs
+
+`nrr_fast` does the first half of the transformation AO pair by AO pair. For
+every pair (la si) of a range and for each of the two spin components of the
+spinors its kernel (`AO2MOmmm_nrr_iltj`) is called once: it allocates four
+work arrays, copies the n x n real integrals (mu nu|la si) three times - as
+a complex matrix with zeros for the imaginary part, split for a product by
+three real ones -, multiplies (three n x n x i GEMMs, one of them on the
+zeros) and transforms the second index (three more); the two spin
+components are added, and the whole result is transposed for the ket pass.
+An AO pair so costs the same copies whether one first orbital is
+transformed or thirty: HI/dyall.v3z (n = 189, 342 spinors, 8 threads; the
+login node, not a benchmark) 2.7 s for one first orbital, 3.5 s for 6, 4.4 s
+for 18, and 1.2 s more for the transposition; the AO integrals are 1.0 s of
+each.
+
+`zccsd.ao2mo._Bra` (b47c3c6) works on blocks of AO pairs (`BRA_BYTES`, 1 GB
+of arrays): the packed integrals of a block are unpacked to squares; the
+first quarter is one real GEMM for the whole block and all first orbitals
+of the batch - six rows for each: the real part, the imaginary part and
+their sum of its coefficients, for both spin components -; the second
+quarter is, for each first orbital, the complex product as three real GEMMs
+per spin component, combined straight into the rows (i q) of the half
+transform (`zc_combine3_ld`). Nothing is copied for a product and nothing
+transposed after it: 6 n (n + nq) real multiply-adds for an AO pair and a
+first orbital, at 18-20 G per second and thread on the login node, the
+rate of large GEMMs there.
+The numbers are those of `nrr_fast` to 1e-14 (H2O) and 3e-12 (HI and AuH
+sizes), and `tests/test_zccsd.py` has the slabs against the integrals from
+the 4-index AO array for batches, ranges and blocks of every kind. By the
+size of the blocks (HI as above, 18 first orbitals, without the AO
+integrals): 5.2 s with 16 MB, 2.5 s with 64 MB, 2.0 s with 256 MB, 1.7 s
+with 1 GB and with 4 GB.
+
+The plan holds the packed AO integrals of a range and the arrays of one
+block where it held three copies of the half transform of a range, so a
+batch of first orbitals may take half of the budget of the passes, not a
+third: fewer batches, and every batch computes the AO integrals. libcint's
+data for the shells are made once for a transformation (PySCF makes them
+for every range: 5.5 ms each for AuH, 2.6 s for a pass in 479 ranges of
+100 AO pairs).
+What a transformation allocates is 1.0001 to 1.02 times its plan in the
+test (H2O/cc-pVTZ), the excess being pointers of calls through ctypes that
+wait for the garbage collector.
+
+**The transformations of the table above again** (job 31677431, c716, 8
+cores, CFOUR's chain first; `nrr_fast` is socutils' own, as it is called
+there; in parentheses the part of the bra pass that PySCF's AO integrals
+take):
+
+| Seconds | H2O/cc-pVTZ | H2O/cc-pVQZ | C6H6/cc-pVDZ |
+|---|---|---|---|
+| (ip\|qr): CFOUR `xx2cvtran`, transformation (+ sorting) | 0.27 (+ 0.03) | 2.49 (+ 0.14) | 8.50 (+ 0.89) |
+| socutils `nrr_fast`, bra + ket | 0.07 + 0.09 | 0.83 + 1.19 | 1.97 + 4.50 |
+| zccsdt slabs, bra + ket | 0.05 (0.02) + 0.08 | 0.50 (0.30) + 1.03 | 1.12 (0.54) + 4.07 |
+| (ae\|bf): socutils `nrr_fast`, bra + ket | 0.38 + 0.68 | 7.17 + 20.74 | 5.33 + 9.75 |
+| zccsdt slabs, bra + ket | 0.19 (0.02) + 0.64 | 3.15 (0.30) + 18.75 | 2.79 (0.54) + 9.17 |
+
+- The bra pass is 1.7 to 2.3 times faster than `nrr_fast`'s (1.4 times for
+  the ten occupied spinors of H2O/cc-pVTZ), the whole transformation 1.2 to
+  1.3 times: (ip|qr) of benzene 5.3 s, against 6.5 s with `nrr_fast` and
+  8.5 s (+ 0.9 s) in CFOUR; (ae|bf) of H2O/cc-pVQZ 22.0 s against 27.9 s.
+  The second runs of benzene and of H2O/cc-pVQZ in the job repeat every
+  number to 0.1 s.
+- With ten first orbitals the AO integrals are 60% of the new bra pass,
+  with 186 or 220 of them 10-20%.
+- The ket pass is the same kernel in both rows and 6-13% faster in the
+  slabs, which give it one output buffer for all slabs where the script
+  calls `nrr_fast.ket_transform` with a new array for every batch of rows.
+- Peak anonymous memory with `max_memory` 24000 MB: (ip|qr) 4.2 GB (H2O/
+  cc-pVQZ) and 5.8 GB (benzene), where one call of `nrr_fast` has 2.5 and
+  5.5 GB - the blocks and all AO integrals of a pass are in memory when the
+  budget has room -; (ae|bf) 10.2 and 8.5 GB against 15.8 and 11.3 GB.
+
+**What is left in the transformation.** Measured on the login node with
+the scripts of that day - not benchmarks -, and none of it done:
+
+- *The ket pass* is now two thirds to five sixths of a transformation.
+  `nrr_fast` runs it at 15-17 G real multiply-adds per second and thread
+  with 8 threads and at 9-11 G with 24 (AuH size: n = 288, 290 spinors).
+  The same products as GEMMs over blocks of rows - the third quarter one
+  GEMM for a block of rows, the fourth one sequential GEMM for a row on
+  each thread - run at 24-25 G and 20-21 G in a prototype: the products
+  alone take 1/1.7 and 1/2.25 of the time of `nrr_fast`'s pass. The other
+  steps of the prototype (the rows unpacked by numpy, the parts of the
+  intermediate for the product by three real ones through two kernels)
+  take as long again; with one threaded pass for each, an estimate of 1.25
+  times (8 threads) to 1.55 times (24) for the pass. A threshold of 32 MB
+  for mmap in malloc gives `nrr_fast`'s ket pass 1.2 times with 8 threads -
+  its kernels allocate for every row - and nothing with 24.
+- *The AO integrals* are a third of the bra pass with 27 first orbitals at
+  the size of AuH (0.7 of 2.1 s with 8 threads, 0.38 of 1.0 s with 24, for
+  15% of the AO pairs). PySCF's fill for a transformation
+  (`AO2MOnr_e1fill_drv`) keeps 12 of the 24 threads busy - its parallel
+  loop is over the shells of one index -; the same rows from its other
+  driver (`getints4c`, parallel over shell pairs) take 0.18 s instead of
+  0.38 s with 24 threads and 0.53 s instead of 0.64 s with 8. They come in
+  another order of the AO pairs, which the ket pass of `nrr_fast` does not
+  take.
+- *Zeros.* For a linear molecule on the z axis 85.5% (HI/dyall.v3z) and
+  87.6% (AuH) of the AO integrals of the fill are exact zeros, for benzene
+  in its plane 48.1%. (Schwarz screening, which neither `nrr_fast` nor the
+  slabs use, takes 0-6% off the fill.) With spinors of a definite m_j,
+  16.2% (HI/dyall.v3z), 12.7% (AuH) and 17.2% (BaF/dyall.v2z) of the
+  integrals (pq|rs) are allowed, m_q - m_p + m_s - m_r = 0, and of the
+  amplitudes likewise. Nothing in zccsdt uses this; it would change every
+  array of the coupled cluster, not only the transformation.
 
 ### The amplitude equations of `DirectZCCSD` on packed amplitudes (`zccsd/amps.py`)
 
