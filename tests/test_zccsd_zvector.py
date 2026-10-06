@@ -589,7 +589,7 @@ def test_orbital_gradient_with_a_frozen_index_within_budget(monkeypatch, tmp_pat
     reduction to half of the frozen spinors.'''
     import tracemalloc
     from pyscf import lib
-    from zccsdt import memory
+    from zccsdt import memory, scratch
     from zccsdt.zccsd import amps, ao2mo, kramers, orbgrad_frozen, triples
     from zccsdt.zccsd import kernels as K
     monkeypatch.setattr(lib.param, 'TMPDIR', str(tmp_path))
@@ -617,6 +617,12 @@ def test_orbital_gradient_with_a_frozen_index_within_budget(monkeypatch, tmp_pat
                         random((npo, npv), (0, 1)))
     dens = triples.Densities(random((o, v, npv), (2,)), random((o, v, npo), (2,)),
                              random((npo, npv), (0, 1)))
+    # the density of <bc||ek> in a scratch file, as the pass over the triples
+    # leaves it when it does not fit
+    scr = scratch.Scratch()
+    g1m = scr.create('g1', dens.g1.shape, np.complex128)
+    g1m[:] = dens.g1
+    mapped = triples.Densities(g1m, dens.g2, dens.g3)
     # the least: the amplitude step with its W in a scratch file, and one
     # frozen spinor of the half that is done
     kept, reserve = orbgrad_frozen.own_bytes(o, v)[0], orbgrad_frozen.reserve_bytes(o, v)
@@ -633,7 +639,9 @@ def test_orbital_gradient_with_a_frozen_index_within_budget(monkeypatch, tmp_pat
         cc.max_memory = budget / 1e6
         tracemalloc.start()
         base = tracemalloc.get_traced_memory()[0]
-        X = orbgrad_frozen.kernel(cc, eris, t1, t2p, l1, l2p, Cf, dens, mo_energy=mo_e[P])
+        X = orbgrad_frozen.kernel(cc, eris, t1, t2p, l1, l2p, Cf,
+                                  mapped if factor in (1.0, 1.6, 5.0) else dens,
+                                  mo_energy=mo_e[P])
         peak = tracemalloc.get_traced_memory()[1] - base
         tracemalloc.stop()
         plan = eris.residual.plan
@@ -651,3 +659,4 @@ def test_orbital_gradient_with_a_frozen_index_within_budget(monkeypatch, tmp_pat
     cc.max_memory = 100000
     X = orbgrad_frozen.kernel(cc, eris, t1, t2p, l1, l2p, Cf, dens)
     assert abs(X - ref).max() < 1e-10
+    scr.close()

@@ -67,7 +67,7 @@ def main():
     t_lam = time.perf_counter() - t0
     print('Lambda %.1f s, converged %s' % (t_lam, mycc.converged_lambda))
 
-    del eris        # the CCSD object has them: the frozen path may have to release them
+    del eris
     watch = MemWatch()
     watch.start()
     timing.reset()
@@ -79,7 +79,7 @@ def main():
     t_og = time.perf_counter() - t0
     watch.stop()
     print('%s: %.1f s, largest element %.3e, peak anonymous memory %.2f GB'
-          % ('relaxed density (gradient on all spinors and Z-vector equations)' if frozen
+          % ('relaxed density (gradient with the frozen spinors and Z-vector equations)' if frozen
              else 'orbital gradient', t_og, abs(G).max(), watch.anon / 1e6))
     for name, w, calls in timing.report():
         if name.startswith('og.'):
