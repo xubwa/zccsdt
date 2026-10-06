@@ -23,6 +23,30 @@ def test_matches_pyscf(dtype):
         x = b
 
 
+@pytest.mark.parametrize('dtype', [np.float64, np.complex128])
+def test_small_errors_are_extrapolated(dtype):
+    '''Error vectors far below 1e-7 (overlaps below 1e-14, the absolute
+    threshold of pyscf.lib.diis for dependent vectors, with which the
+    extrapolation turns into the mean of the stored vectors): a linear map
+    with five eigenvalues is solved by a subspace of six vectors.'''
+    rng = np.random.default_rng(1)
+    n = 300
+    q = np.linalg.qr(rng.standard_normal((n, n)))[0].astype(dtype)
+    if dtype == np.complex128:
+        q = np.linalg.qr(rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)))[0]
+    A = (q * rng.choice([0.9, 0.5, -0.3, 0.7, -0.8], n)) @ q.conj().T
+    b = rng.standard_normal(n).astype(dtype)
+    exact = np.linalg.solve(np.eye(n) - A, b)
+    x = exact + 1e-8 * rng.standard_normal(n)
+    plain = x.copy()
+    d = DIIS(space=6)
+    for it in range(9):
+        x = np.concatenate(d.update([(A @ x + b)[:100], (A @ x + b)[100:]]))
+        plain = A @ plain + b
+    assert abs(plain - exact).max() > 1e-10             # the iteration alone: 0.9 per step
+    assert abs(x - exact).max() < 1e-13
+
+
 def _run(d, dtype, nit, api, seed=3):
     '''nit DIIS steps on a two-part vector (sizes 50 and 700); returns the
     extrapolated vectors.  api: 'classic' (update only), 'errors' (explicit
