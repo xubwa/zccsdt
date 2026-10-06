@@ -257,10 +257,27 @@ class DIIS:
         H[n - 1, :] = sum(d)
         H[:, n - 1] = np.conj(H[n - 1, :])
         self.H = H
-        B = np.zeros((n + 1, n + 1), dtype=dtype)
+        # The overlaps relative to the largest one: the coefficients do not
+        # depend on the scale of H, the threshold for dependent error vectors
+        # does.  With an absolute one (pyscf.lib.diis has 1e-14) all of H is
+        # below it once the errors are below 1e-7, and what is left of the
+        # equations gives the mean of the stored vectors - slower than no
+        # extrapolation at all (HBr: 0.82 per cycle from 1e-8 on, against
+        # 0.64 without DIIS).
+        scale = abs(np.diag(H)).max()
+        Hs = H / scale if scale > 0 else H
+        # Overlaps that are real to the rounding - those of vectors that are
+        # symmetric under time reversal (Kramers pairs) - give real
+        # coefficients: a real combination of such vectors is symmetric
+        # again, while the imaginary parts that the rounding of a nearly
+        # dependent system leaves in the coefficients broke the symmetry at
+        # 1e-11.
+        if np.iscomplexobj(Hs) and abs(Hs.imag).max() < 1e-10:
+            Hs = Hs.real
+        B = np.zeros((n + 1, n + 1), dtype=Hs.dtype)
         B[0, 1:] = B[1:, 0] = 1
-        B[1:, 1:] = H
-        g = np.zeros(n + 1, dtype=dtype)
+        B[1:, 1:] = Hs
+        g = np.zeros(n + 1, dtype=Hs.dtype)
         g[0] = 1
         w, v = scipy.linalg.eigh(B)
         if np.any(abs(w) < 1e-14):
