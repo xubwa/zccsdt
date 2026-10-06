@@ -113,6 +113,8 @@ def scf(mol, conv_tol=1e-10, conv_tol_grad=1e-8, field=None, dm0=None, max_cycle
     if os.environ.get('ZC_SCF', 'pyscf') == 'socutils':
         from socutils.scf import spinor_hf
         mf = spinor_hf.SpinorSCF(mol)
+        # (on its own it has the nonrelativistic one-electron Hamiltonian)
+        mf.with_x2c = x2c.x2c.SpinorX2CHelper(mol)
     else:
         mf = x2c.UHF(mol)
     if name == 'x2camf':

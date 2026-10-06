@@ -253,6 +253,71 @@ void zc_asym_pack2(const zc *x, int64_t np, int64_t nv, int64_t sp, int64_t sa,
     }
 }
 
+/* R[p, (a>b)] = x[p,a,b] - x[p,b,a]: zc_asym_pack2 that writes R instead of
+ * adding to it (pages of R that have not been touched are touched here, by
+ * the threads). */
+void zc_asym_pack2_set(const zc *x, int64_t np, int64_t nv, int64_t sp, int64_t sa, zc *R)
+{
+    const int64_t npv = nv * (nv - 1) / 2;
+    #pragma omp parallel
+    {
+        zc *D = malloc(sizeof(zc) * nv * nv);
+        #pragma omp for schedule(static)
+        for (int64_t p = 0; p < np; p++) {
+            for (int64_t a = 0; a < nv; a++)
+                memcpy(D + a * nv, x + p * sp + a * sa, sizeof(zc) * nv);
+            zc *r = R + p * npv;
+            for (int64_t a = 1; a < nv; a++) {
+                const zc *d = D + a * nv;
+                for (int64_t b = 0; b < a; b++)
+                    r[b] = d[b] - D[b * nv + a];
+                r += a;
+            }
+        }
+        free(D);
+    }
+}
+
+/* out[f, a] += sum_r sum_c M_r[a, c] q[f, r, c], M_r the antisymmetric matrix
+ * of the packed row G[r, (a>c)]: nr rows and nf vectors per row, the element
+ * (f, r, c) of q at q[f sf + r sr + c].  Nothing is unpacked: a packed element
+ * meets two elements of every vector. */
+void zc_tril_matvec(const zc *G, int64_t nr, int64_t nv, const zc *q, int64_t nf,
+                    int64_t sf, int64_t sr, zc *out)
+{
+    const int64_t npv = nv * (nv - 1) / 2;
+    #pragma omp parallel
+    {
+        zc *acc = calloc((size_t)(nf * nv), sizeof(zc));
+        #pragma omp for schedule(static)
+        for (int64_t r = 0; r < nr; r++) {
+            const zc *g = G + r * npv;
+            for (int64_t f = 0; f < nf; f++) {
+                const zc *x = q + f * sf + r * sr;
+                zc *y = acc + f * nv;
+                const zc *ga = g;
+                for (int64_t a = 1; a < nv; a++) {
+                    const zc xa = x[a];
+                    double re = 0.0, im = 0.0;
+                    #pragma omp simd reduction(+:re, im)
+                    for (int64_t c = 0; c < a; c++) {
+                        const zc p = ga[c] * x[c];
+                        re += creal(p);
+                        im += cimag(p);
+                        y[c] -= ga[c] * xa;
+                    }
+                    y[a] += re + im * I;
+                    ga += a;
+                }
+            }
+        }
+        #pragma omp critical
+        for (int64_t k = 0; k < nf * nv; k++)
+            out[k] += acc[k];
+        free(acc);
+    }
+}
+
 /* R[p, (a>b)] += alpha x[p,a,b] for np matrices x whose element (p, a, b)
  * is x[p sp + a sa + b]: sp = nv nv, sa = nv for the layout [p, a, b],
  * sp = nv, sa = np nv for [a, p, b]. */

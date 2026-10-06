@@ -33,6 +33,8 @@ _SIGNATURES = {
     'zc_add_rows_k': [_P, _I, _P, _P, _P, _P, _I, _P, _P],
     'zc_asym_pack2': [_P, _I, _I, _I, _I, _D, _P],
     'zc_pack_tril_add': [_P, _I, _I, _I, _I, _D, _P],
+    'zc_asym_pack2_set': [_P, _I, _I, _I, _I, _P],
+    'zc_tril_matvec': [_P, _I, _I, _P, _I, _I, _I, _P],
     'zc_unpack_tril': [_P, _I, _I, _I, _I, _P],
     'zc_pack_t2': [_P, _I, _I, _P],
     'zc_unpack_t2': [_P, _I, _I, _P],
@@ -250,19 +252,35 @@ def asym_pack2(x, alpha, R, order='pab'):
     return R
 
 
-def asym_pack_view(x, alpha, R):
-    '''R[p,(a>b)] += alpha (x[a,p,b] - x[b,p,a]) for a block x[a,p,b] of a
-    larger C-ordered array (v x n x v; any strides along a and p, unit stride
-    along b): asym_pack2 in the layout 'apb' without a copy of the block.'''
+def asym_pack_view(x, R):
+    '''R[p,(a>b)] = x[a,p,b] - x[b,p,a] for a block x[a,p,b] of a larger
+    C-ordered array (v x n x v; any strides along a and p, unit stride along
+    b): the antisymmetric part of the planes of the block, packed, without a
+    copy of the block.'''
     v, n = x.shape[0], x.shape[1]
     sa, sp, sb = x.strides
     if (USE_C and x.dtype == np.complex128 and sb == 16 and sa > 0 and sp > 0
             and sa % 16 == 0 and sp % 16 == 0):
-        _lib.zc_asym_pack2(x.ctypes.data, n, v, sp // 16, sa // 16, alpha, _c(R))
+        _lib.zc_asym_pack2_set(x.ctypes.data, n, v, sp // 16, sa // 16, _c(R))
         return R
     av, bv = tril(v)
-    R += alpha * (x[av, :, bv] - x[bv, :, av]).T
+    R[:] = (x[av, :, bv] - x[bv, :, av]).T
     return R
+
+
+def tril_matvec(G, q, out):
+    '''out[f, a] += sum_r sum_c M_r[a,c] q[f,r,c], M_r the antisymmetric
+    matrix of the packed row G[r, (a>c)]; q[f, r, c] may be a block of a
+    larger C-ordered array (unit stride along c).  The packed rows are read
+    as they are.'''
+    nr, (nf, v) = G.shape[0], out.shape
+    sf, sr, sc = q.strides
+    if (USE_C and q.dtype == np.complex128 and sc == 16 and sf >= 0 and sr >= 0
+            and sf % 16 == 0 and sr % 16 == 0):
+        _lib.zc_tril_matvec(_c(G), nr, v, q.ctypes.data, nf, sf // 16, sr // 16, _c(out))
+        return out
+    out += np.einsum('rac,frc->fa', unpack_tril(np.ascontiguousarray(G), v, 'pab'), q)
+    return out
 
 
 def unpack_tril(xp, v, order='pab', out=None):

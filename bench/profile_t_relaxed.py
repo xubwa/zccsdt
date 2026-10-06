@@ -26,8 +26,8 @@ environment: ZC_MAXMEM: max_memory in MB (default 24000); ZC_KRAMERS: 0 or 1:
              the dipole then means nothing); ZC_T_ENERGY=0: without the run
              of the (T) energy alone; ZC_FROZEN: so many frozen occupied
              spinors; ZC_VIRCUT: the virtual spinors above this orbital
-             energy (Hartree) frozen as well (CFOUR's %vircut) - the
-             energies only, as with ZC_RELAXED=0; ZC_DENSITIES: a file for
+             energy (Hartree) frozen as well (CFOUR's %vircut);
+             ZC_RELAXED=0: the energies only; ZC_DENSITIES: a file for
              the densities in the spinor AO basis (scf, unrelaxed, relaxed;
              for bench/cfour/props.py).
 '''
@@ -66,7 +66,7 @@ def main():
     frozen = int(os.environ.get('ZC_FROZEN', 0))
     vircut = float(os.environ.get('ZC_VIRCUT', np.inf))
     high = [p for p, e in enumerate(mf.mo_energy) if e > vircut and mf.mo_occ[p] == 0]
-    energies_only = bool(high) or os.environ.get('ZC_RELAXED', '1') == '0'
+    energies_only = os.environ.get('ZC_RELAXED', '1') == '0'
     mycc = DirectZCCSD(mf, frozen=list(range(frozen)) + high if high else frozen)
     mycc.verbose, mycc.max_cycle = 0, int(os.environ.get('ZC_CCSD_CYCLES', 100))
     mycc.conv_tol, mycc.conv_tol_normt = conv, 100 * conv

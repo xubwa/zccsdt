@@ -7,7 +7,9 @@ SCF, added to its one-electron Hamiltonian.
 
 usage: python bench/check_relaxed_ff.py MOLECULE BASIS [EPS]
   MOLECULE, BASIS and the environment as bench/profile_t_relaxed.py
-  (ZC_FROZEN, ZC_NUCMOD, ZC_HAM, ZC_SCF, ZC_MAXMEM); EPS: default 2e-3
+  (ZC_FROZEN, ZC_VIRCUT, ZC_NUCMOD, ZC_HAM, ZC_SCF, ZC_MAXMEM); EPS: default
+  2e-3.  With ZC_VIRCUT the virtual spinors above the cutoff are counted
+  without the field, and as many of the highest are frozen in it.
 environment: ZC_ANALYTIC: the analytic dipole (z, a.u.) of another run to
              compare with (then only the SCF is run without the field);
              without it the dipole is computed here first.
@@ -34,12 +36,18 @@ def main():
     eps = float(sys.argv[3]) if len(sys.argv) > 3 else 2e-3
     maxmem = float(os.environ.get('ZC_MAXMEM', 24000))
     frozen = int(os.environ.get('ZC_FROZEN', 0))
+    vircut = float(os.environ.get('ZC_VIRCUT', np.inf))
+    nhigh = []
     mol = spinors.molecule(mol_name, basis, max_memory=maxmem)
 
     def energy(field=None, dm0=None, scf_only=False):
         t0 = time.perf_counter()
         mf = spinors.scf(mol, 1e-12, 1e-9, field, dm0)
-        mycc = DirectZCCSD(mf, frozen=frozen)
+        if not nhigh:
+            nhigh.append(int(np.count_nonzero((mf.mo_energy > vircut) & (mf.mo_occ == 0))))
+        nmo = mf.mo_energy.size
+        high = list(np.argsort(mf.mo_energy, kind='stable')[nmo - nhigh[0]:])
+        mycc = DirectZCCSD(mf, frozen=list(range(frozen)) + sorted(high) if high else frozen)
         mycc.verbose, mycc.max_cycle = 0, 200
         mycc.conv_tol, mycc.conv_tol_normt = 1e-11, 1e-9
         if scf_only:
@@ -56,8 +64,9 @@ def main():
     # be the same Kramers partner for what is odd under time reversal)
     saved = np.load(os.environ['ZC_DENSITIES']) if os.environ.get('ZC_DENSITIES') else None
     mf0, cc0, e0, wall = energy(dm0=saved['scf'] if saved is not None else None, scf_only=given)
-    print('%s/%s  %d spinors, %d electrons  frozen %d  Hamiltonian %s  %s nuclei  SCF of %s'
-          % (mol_name, basis, mol.nao_2c(), mol.nelectron, frozen,
+    print('%s/%s  %d spinors, %d electrons  frozen %d occupied, %d virtual  Hamiltonian %s  '
+          '%s nuclei  SCF of %s'
+          % (mol_name, basis, mol.nao_2c(), mol.nelectron, frozen, nhigh[0],
              os.environ.get('ZC_HAM', 'x2c1e'), 'Gaussian' if mol.nucmod else 'point',
              os.environ.get('ZC_SCF', 'pyscf')))
     print('without the field: E(SCF) %.10f' % e0[0] + ('' if given else

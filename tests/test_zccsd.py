@@ -457,6 +457,20 @@ def test_kernels_equal_numpy():
                                            npo, nao, 'xpy'))):
             (a, _), (b, _) = both(f, *args)
             same(a, b)
+        # blocks of larger arrays, read in place: the planes of a slab of
+        # integrals, packed, and vectors with a stride on the packed rows
+        x = rnd(v + 2, npo + 1, v + 3)[1:1 + v, 1:, 2:2 + v]
+        q = rnd(3, npo, 2, v)[:, :, 1, :]
+        out = []
+        for use in (True, False):
+            K.USE_C = use
+            out.append((K.asym_pack_view(x, np.empty((npo, npv), dtype=complex)),
+                        K.tril_matvec(t2p, q, np.zeros((3, v), dtype=complex))))
+        K.USE_C = HAVE_C
+        same(*out)
+        (av, bv), U = K.tril(v), K.unpack_tril(t2p, v, 'pab')
+        same(out[0][0], (x[av, :, bv] - x[bv, :, av]).T)
+        same(out[0][1], np.einsum('rac,frc->fa', U, q))
         # pack and unpack are inverses; the ring layout of t2 is symmetric
         same(K.pack_t2(K.unpack_t2(t2p, o, v)), t2p)
         T = K.ring_cols(t2p, o, v)

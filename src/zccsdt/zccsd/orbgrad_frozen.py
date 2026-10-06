@@ -67,6 +67,7 @@ PARTS = ('oooo', 'ooov', 'oovv', 'ovvo', 'ovvv', 'vvvv', 'g1', 'g2', 'g3')
 # The weights of the packed densities of (T) (zccsd.triples.Densities) against
 # the full arrays of lam_t.densities: g1[k,e,(b>c)], g2[m,a,(j>k)], g3[(j>k),(b>c)]
 T_WEIGHTS = (2.0, 2.0, 4.0)
+G1_BYTES = 2 << 30      # rows of the density of <bc||ek>, and of m, in one product
 
 
 class Active:
@@ -225,7 +226,7 @@ class Active:
             u[:, :, k, k] += l1[:, :, None]
             u = np.ascontiguousarray(u)
             self.uc_ajk = np.ascontiguousarray(u.conj().reshape(o, v * o * o).T)    # [(a j k), i]
-            self.u_jbk = np.ascontiguousarray(u.transpose(0, 1, 3, 2)).reshape(o * v * o, o)
+            self.u_kjb = np.ascontiguousarray(u.transpose(3, 0, 1, 2)).reshape(o * o * v, o)
             self.u_ijk = np.ascontiguousarray(u.transpose(0, 2, 3, 1)).reshape(o ** 3, v)
             self.uc_ijb = np.ascontiguousarray(u.conj().transpose(2, 0, 1, 3)).reshape(o * o * v, o)
             del u
@@ -242,15 +243,9 @@ class Active:
 
     def pairs_matvec(self, Pp, Q):
         '''out[f, a] = sum_(kl) sum_c P[(kl), a, c] Q[f, (kl), c] for the
-        packed Pp[(k>l), (a>c)]: its rows unpacked a few at a time.'''
-        v, nb = self.v, Q.shape[0]
-        out = np.zeros((nb, v), dtype=np.complex128)
-        for p0, p1 in self.pblocks:
-            U = K.unpack_tril(Pp[p0:p1], v, 'apb').reshape(v, (p1 - p0) * v)   # [a, (p c)]
-            blas.gemm(np.ascontiguousarray(Q[:, p0:p1]).reshape(nb, (p1 - p0) * v), U.T,
-                      C=out, beta=1.0)
-            del U
-        return out
+        packed Pp[(k>l), (a>c)].'''
+        out = np.zeros((Q.shape[0], self.v), dtype=np.complex128)
+        return K.tril_matvec(Pp, Q, out)
 
     def g2_pa(self, g2):
         '''The density g2[m, a, (j>k)] of (T) as [(m (jk)), a].'''
@@ -269,12 +264,14 @@ class Active:
         self.res.close()
 
 
-def contract(act, S, X, dens=None):
+def contract(act, S, X, dens=None, work=None):
     '''The slab S[f, q, r, s] = (f q|r s) of a batch of frozen spinors f with
     the active ones [occupied, virtual] in its other three places: X[part][f,
     x] += its contraction with the densities of the Active ``act`` and, for
     CCSD(T), with those of zccsd.triples (``dens``).  What it allocates next
-    to the slab is counted by batch_bytes.'''
+    to the slab is counted by batch_bytes; ``work``: a dict that keeps the
+    largest of these arrays from one batch to the next (pages that have been
+    touched once).'''
     o, v, t1, l1 = act.o, act.v, act.t1, act.l1
     nb, n = S.shape[:2]
     n1, npo, npv = o * v, K.npair(o), K.npair(v)
@@ -283,7 +280,6 @@ def contract(act, S, X, dens=None):
     t1c, l1c = t1.conj(), l1.conj()
     t1T = np.ascontiguousarray(t1.T)
     E = np.einsum
-    ustep = max(1, min(v, orbgrad.UNPACK_BYTES // (16 * v * v)))
 
     def add(part, x, occupied, fac=1.0):
         X[part][:, oc if occupied else vi] += fac * x
@@ -301,13 +297,13 @@ def contract(act, S, X, dens=None):
                                     - Sooo.transpose(0, 1, 3, 2))[:, io, jo])  # [f, (x>y), k]
         del Y
         # Q5[f, j, (a>b)] = (f a|j b) - (f b|j a)
-        Q5 = np.zeros((nb, o, npv), dtype=np.complex128)
-        q16 = np.empty((nb, v), dtype=np.complex128)
+        Q5 = np.empty((nb, o, npv), dtype=np.complex128)
         P16 = np.empty((nb, o, o, v), dtype=np.complex128)      # 1/2 sum_c Q5[i,(c x)] t1[k,c]
+        q16 = np.zeros((nb, v), dtype=np.complex128)            # sum_ib Q5[i,(c b)] t1[i,b]
         for k in range(nb):
-            K.asym_pack_view(S[k, vi, oc, vi], 1.0, Q5[k])
+            K.asym_pack_view(S[k, vi, oc, vi], Q5[k])
+            K.tril_matvec(Q5[k], t1[None], q16[k:k + 1])
             U = K.unpack_tril(Q5[k], v, 'pab')                  # [i, c, x]
-            q16[k] = E('icb,ib->c', U, t1)
             P16[k] = blas.gemm(U.reshape(n1, v), t1T,
                                alpha=-0.5).reshape(o, v, o).transpose(2, 0, 1)
             del U
@@ -323,8 +319,10 @@ def contract(act, S, X, dens=None):
         # ---- what dovvo has besides m
         Q46tc = blas.gemm(Q46.reshape(nb * n1, v), t1c.T).reshape(nb, v, o, o)     # [f, a, j, k]
         add('ovvo', blas.gemm(Q46tc.reshape(nb, v * o * o), act.uc_ajk), True, 0.5)
-        x = E('fajb,ka->fjbk', Q46, t1)
-        add('ovvo', blas.gemm(x.reshape(nb, o * v * o), act.u_jbk), True, 0.5)
+        x = np.empty((nb, o, n1), dtype=np.complex128)                              # [f, k, (j b)]
+        for k in range(nb):
+            blas.gemm(t1, Q46[k].reshape(v, n1), C=x[k])
+        add('ovvo', blas.gemm(x.reshape(nb, o * n1), act.u_kjb), True, 0.5)
         x = blas.gemm(R10.reshape(nb * o * o, v), t1T).reshape(nb, o ** 3)          # [f, (i j k)]
         add('ovvo', blas.gemm(x, act.u_ijk), False, 0.5)
         x = blas.gemm(R10.reshape(nb, o * n1), act.uc_ijb)                          # [f, k]
@@ -332,25 +330,32 @@ def contract(act, S, X, dens=None):
 
         # ---- the density of three virtual indices, its part tv x t1
         tvc = act.tv.conj()
-        add('ovvv', -blas.gemm(E('fbic,bc->fi', Q46, tvc), t1c), False)
-        add('ovvv', blas.gemm(E('fbic,ic->fb', Q46, t1c), tvc), False)
+        x = np.matmul(Q46, tvc[:, :, None])[..., 0].sum(axis=1)                     # [f, i]
+        add('ovvv', -blas.gemm(x, t1c), False)
+        x = blas.gemm(Q46.reshape(nb * v, n1), t1c.reshape(n1, 1)).reshape(nb, v)
+        add('ovvv', blas.gemm(x, tvc), False)
         add('ovvv', blas.gemm(q16, act.tv.T), False)
         del x, q16
 
     # ---- A[b, (a>c)] = (f a|b c) - (f c|b a) and its products
     with timer('ogf.vvv'):
-        A3p = np.zeros((nb, v, npv), dtype=np.complex128)
-        # A3t[f, b, a, k] = sum_c A[b,a,c] t1[k,c]
-        A3t = np.empty((nb, v, v, o), dtype=np.complex128)
+        work = {} if work is None else work
+        if work.get('A3p') is None or work['A3p'].shape[0] < nb:
+            work['A3p'] = np.empty((nb, v, npv), dtype=np.complex128)
+            work['A3t'] = np.empty((nb, o, v, v), dtype=np.complex128)
+        A3p, A3t = work['A3p'][:nb], work['A3t'][:nb]
+        # A3t[f, k, b, a] = sum_c A[b,a,c] t1[k,c]; FA[f, a] = sum_bc A[b,a,c] tv[b,c]
         FA = np.zeros((nb, v), dtype=np.complex128)
         for k in range(nb):
-            K.asym_pack_view(S[k, o:, o:, o:], 1.0, A3p[k])
-            for b0 in range(0, v, ustep):
-                b1 = min(v, b0 + ustep)
-                U = K.unpack_tril(A3p[k, b0:b1], v, 'pab')      # [b, a, c]
-                A3t[k, b0:b1] = blas.gemm(U.reshape((b1 - b0) * v, v), t1T).reshape(b1 - b0, v, o)
-                FA[k] += E('bac,bc->a', U, act.tv[b0:b1])
-                del U
+            Sk = S[k]
+            K.asym_pack_view(Sk[o:, o:, o:], A3p[k])
+            K.tril_matvec(A3p[k], act.tv[None], FA[k:k + 1])
+            # the virtual index of t1 in the last place of the slab and in the
+            # first: products with whole rows of the slab, nothing unpacked
+            x = blas.gemm(t1, Sk.reshape(n * n, n)[:, o:].T).reshape(o, n, n)   # [k, q, r]
+            y = blas.gemm(t1, Sk[o:].reshape(v, n * n)).reshape(o, n, n)        # [k, r, s]
+            np.subtract(x[:, o:, o:].transpose(0, 2, 1), y[:, o:, o:], out=A3t[k])
+            del x, y, Sk
         A2 = A3p.reshape(nb * v, npv)
         LT = blas.gemm(A2, act.tau.T).reshape(nb, v, npo)       # sum_(ac) A[b,(ac)] tau[(kl),(ac)]
         LL = blas.gemm(A2, act.l2c.T).reshape(nb, v, npo)       # the same with conj(lambda2)
@@ -410,9 +415,16 @@ def contract(act, S, X, dens=None):
 
         def rows(x):
             return np.ascontiguousarray(x).reshape(nb, -1)
+        # (a few occupied k at a time: the rows of a mapped m are let go again)
+        kstep = max(1, min(o, G1_BYTES // (16 * v * n1)))
+        for k0 in range(0, o, kstep):
+            k1 = min(o, k0 + kstep)
+            mb = np.asarray(act.m[k0 * v:k1 * v])
+            blas.gemm(Qf, mb.reshape(k1 - k0, v * n1).T, C=ob[:, k0:k1])
+            scratch.unmap(mb)
+            del mb
         for k in range(o):
             mk = np.asarray(act.m[k * v:(k + 1) * v])           # [b, (i a)]
-            blas.gemm(Qf, mk.reshape(v * n1, 1), C=ob[:, k:k + 1])
             blas.gemm(rows(R10[:, k]), mk.T, C=od[0], beta=1.0)
             blas.gemm(rows(P16[:, k]), mk.T, C=od[1], beta=1.0)
             mr = mk.reshape(n1, v)                              # [(b i), a]
@@ -420,7 +432,7 @@ def contract(act, S, X, dens=None):
             blas.gemm(rows(Q46tc[:, :, :, k]).conj(), mr, C=oa[1], beta=1.0)
             mp = np.ascontiguousarray(mk.reshape(v, o, v).transpose(1, 0, 2)).reshape(o, v * v)
             blas.gemm(rows(Q46[:, :, k, :].transpose(0, 2, 1)).conj(), mp.T, C=og[0], beta=1.0)
-            blas.gemm(rows(A3t[:, :, :, k]), mp.T, C=og[1], beta=1.0)
+            blas.gemm(rows(A3t[:, k]), mp.T, C=og[1], beta=1.0)
             scratch.unmap(mk)
             del mk, mr, mp
         K.copy(Q46, Q46, conj=True)
@@ -447,18 +459,17 @@ def contract(act, S, X, dens=None):
         Bv = np.zeros((nb, v), dtype=np.complex128)
         Kv = np.zeros((nb, v), dtype=np.complex128)
         Ko = np.empty((nb, o), dtype=np.complex128)
-        for k in range(o):
-            Gk = np.asarray(g1[k])                              # [e, (b>c)]
-            blas.gemm(Q5[:, k], Gk.T, C=Kv, beta=1.0)
-            blas.gemm(Af, Gk.reshape(v * npv, 1), C=Ko[:, k:k + 1])
-            for e0 in range(0, v, ustep):
-                e1 = min(v, e0 + ustep)
-                U = K.unpack_tril(np.ascontiguousarray(Gk[e0:e1]), v, 'apb')    # [a, e, c]
-                blas.gemm(np.ascontiguousarray(Q46[:, e0:e1, k, :]).reshape(nb, (e1 - e0) * v),
-                          U.reshape(v, (e1 - e0) * v).T, C=Bv, beta=1.0)
-                del U
-            scratch.unmap(Gk)
-            del Gk
+        # (a few occupied k at a time: the rows of a mapped g1 are let go again)
+        kstep = max(1, min(o, G1_BYTES // (16 * v * npv)))
+        for k0 in range(0, o, kstep):
+            k1 = min(o, k0 + kstep)
+            Gb = np.asarray(g1[k0:k1])                          # [k, e, (b>c)]
+            blas.gemm(Af, Gb.reshape(k1 - k0, v * npv).T, C=Ko[:, k0:k1])
+            for k in range(k0, k1):
+                blas.gemm(Q5[:, k], Gb[k - k0].T, C=Kv, beta=1.0)
+                K.tril_matvec(Gb[k - k0], Q46[:, :, k, :], Bv)
+            scratch.unmap(Gb)
+            del Gb
         add('g1', Bv + Kv.conj(), False, 1.0 / w1)
         add('g1', Ko.conj(), True, -1.0 / w1)
         del A3p, Af
@@ -502,8 +513,9 @@ def batch_bytes(nocc, nvir, nb, with_t=False):
     npo, npv = K.npair(o), K.npair(v)
     per = 16 * (v * npv + o * npv + 5 * o * v * v + 8 * o * o * v + 8 * npo * v + 2 * o ** 3
                 + 4 * v * v)
-    fixed = 16 * (2 * o * v * v + 2 * o * o * v + (4 * o ** 3 * v if with_t else 0))
-    return int(nb) * per + fixed + 3 * orbgrad.UNPACK_BYTES
+    fixed = 16 * (2 * o * v * v + 2 * o * o * v + 2 * o * (o + v) ** 2
+                  + (4 * o ** 3 * v if with_t else 0))
+    return int(nb) * per + fixed
 
 
 def slab_plan(mol, left, nocc, nvir, nfirst, with_t=False):
@@ -550,10 +562,10 @@ def gradient(mycc, eris, t1, t2p, l1, l2p, Cf, dens=None, parts=None, slabs=None
     with timer('ogf.setup'):
         act = Active(res, t1, t2p, l1, l2p)
     Cd = np.hstack((Cf, eris.mo_ao_spin))
-    S = None
+    S, work = None, {}
     for f0, f1, S in ao2mo.slabs(eris.mol, Cd[:nao], Cd[nao:], (0, nf), (nf, nf + n), slabs):
-        contract(act, S, {k: x[f0:f1] for k, x in X.items()}, dens)
-    del S
+        contract(act, S, {k: x[f0:f1] for k, x in X.items()}, dens, work)
+    del S, work
     act.close()
     return X
 

@@ -20,7 +20,8 @@
 #     Gaunt, gauge, two-electron picture change -, default '0 1 1 0' (the
 #     Breit term in the atomic mean field); 'none': X2C-1e, without xx2camf
 #   HV_VIRCUT: virtual spinors above this orbital energy (Hartree) frozen
-#     too: the energies only (zccsdt has no relaxed density with them)
+#     too (CFOUR: %vircut).  CFOUR then runs for its energies unless
+#     HV_CFOUR_PROPS=1 (its property programs with %vircut are not checked)
 #   HV_PROPS=0: the energies only; HV_CFOUR=0: without CFOUR; HV_FF=0:
 #     without the finite differences; HV_MAXMEM: max_memory of zccsdt in MB
 #     (default 24000; CFOUR's MEMORY_SIZE is HV_CFOUR_GB, default 24);
@@ -57,7 +58,8 @@ echo "host $(hostname)  $(date)  threads $OMP_NUM_THREADS  root $root"
 lscpu | grep 'Model name'
 echo "$mol $basis: $ncore frozen Kramers pairs; atomic mean field: $amf; virtual cutoff: ${HV_VIRCUT:-none}"
 
-props=${HV_PROPS:-1}; [ -n "$HV_VIRCUT" ] && props=0
+props=${HV_PROPS:-1}; cprops=$props
+[ -n "$HV_VIRCUT" ] && cprops=${HV_CFOUR_PROPS:-0}
 progs="xjoda"; sections=; ham=x2c1e
 if [ "$amf" != none ]; then
   set -- $amf
@@ -69,7 +71,7 @@ fi
 progs="$progs xsox2catm xsox2chf xx2cvtran xx2cccsd"
 extra="NUC_MODEL=GAUSSIAN,LINEQ_CONV=9"
 [ $ncore -gt 0 ] && extra="$extra,DROPMO=1>$ncore"
-if [ $props = 1 ]; then
+if [ $cprops = 1 ]; then
   progs="$progs xx2chbar xx2clcc xx2cccdenocbp xx2czvec xsox2cprop"
   extra="$extra,PROPS=FIRST_ORDER"
 fi
@@ -80,7 +82,7 @@ socutils=${HV_SOCUTILS:-/home/xwang405/apps/socutils-git-env}
 compare=0
 if [ "${HV_CFOUR:-1}" != 0 ]; then
   post=
-  if [ $props = 1 ]; then
+  if [ $cprops = 1 ]; then
     compare=1
     post="PYTHONPATH=$socutils:$root/src:\$PYTHONPATH python $root/bench/cfour/props.py pack $mol $basis $scr/cfour_ops.npz $keep/geometry.txt"
   fi
