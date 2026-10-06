@@ -220,13 +220,11 @@ orbital gradient of the CCSD Lagrangian is evaluated in the layouts of the
 amplitude step and within `max_memory` (`zccsd/orbgrad.py`: about three
 CCSD iterations), the Z-vector equations take a few Fock builds. The result
 is the density in the basis of all spinors of the SCF (`ao_repr=True`: in
-the 2c AO basis). Frozen occupied spinors are allowed: the gradient is then
-taken from the code for all spinors with zero amplitudes for the frozen
-ones, which makes the integrals once more with all occupied spinors and
-needs the memory of a CCSD step without frozen spinors (benzene/cc-pVDZ with
-a frozen core: 85 s instead of 24 s; if `max_memory` is short, the integrals
-of the active space are released, and `mycc.eris` is then `None` until
-`mycc.ao2mo()` is called again).
+the 2c AO basis). Frozen spinors, occupied and virtual, are allowed: the
+blocks of the gradient between a frozen and an active spinor come from the
+integrals with one frozen index (`zccsd/orbgrad_frozen.py`: an integral
+transformation with the frozen spinors as the first index, contracted slab
+by slab within `max_memory`; with Kramers pairs half of them).
 A relaxed density is the derivative of the energy only for the spinors of
 a converged SCF, and it has what is left of the orbital gradient in first
 order: PySCF stops at `conv_tol_grad`, by default sqrt(conv_tol), which left
@@ -271,11 +269,17 @@ value = numpy.einsum('pq,qp', operator, dm).real        # any one-electron opera
 ```
 
 - `frozen` may be a list of spinors, also of virtual ones (those above an
-  orbital energy, say: CFOUR's `%vircut`): for the energies. The relaxed
-  density takes frozen occupied spinors only, and with them it costs a
-  CCSD step, a Lambda step and the integrals of *all* occupied spinors:
-  for HI (54 occupied spinors, 18 of them correlated, 378 spinors) 591 s of
-  the 1072 s after the CCSD on 16 cores.
+  orbital energy, say: CFOUR's `%vircut`), for the energies and for the
+  relaxed density alike. The frozen spinors cost the relaxed density an
+  integral transformation with them as the first index: for HI (54 occupied
+  spinors, 18 of them correlated, 378 spinors) 26 s of its 72 s, and 434 s
+  after the CCSD in all, on 16 cores. Freeze whole levels: a frozen spinor
+  that is degenerate with an active one of its kind leaves the relaxed
+  density undefined (a warning).
+- With most virtual spinors dropped, CFOUR's own relaxed properties are not
+  the derivative of its energy (`docs/benchmarks.md`, "Frozen virtual
+  spinors"): a difference from CFOUR with an aggressive `%vircut` is to be
+  checked with finite differences before it is taken for an error here.
 - An `operator` is a matrix in the 2c AO basis of the SCF (the j-adapted
   spinors of PySCF). `dip_moment` has the dipole operator with PySCF's
   picture change; an operator at a heavy nucleus should also have the

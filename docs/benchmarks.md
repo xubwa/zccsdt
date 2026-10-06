@@ -2114,19 +2114,45 @@ step:
   of those of a step that are not made here; a slab of the <j~ e||ab>
   (16 v^3 bytes) has to fit, m goes to a scratch file if that makes room.
 
-*Frozen occupied spinors.* A frozen spinor is an occupied one whose
-amplitudes are zero: with t and lambda padded, the Lagrangian of the
-frozen-core CCSD is that of the CCSD of all spinors, and
-`zvector.gradient_frozen` takes the gradient from the code for all spinors -
-Gnh[a,x] from `orbgrad` for all occupied x; the lambda1 residual of the
-frozen spinors for the excitation half, which no amplitude makes vanish; and
-the rotations between frozen and active occupied spinors from the residuals,
-with one frozen index, of one step of the amplitude equations and one of the
-Lambda equations (a rotation among occupied spinors is a change of the
-amplitudes). The integrals are made once more with all occupied spinors.
-The rotations between frozen and active occupied spinors themselves follow
-from the Fock matrix staying diagonal (y_ic = G_ic / (e_c - e_i) in the
-density, its Fock matrix on the right-hand side of the equations).
+*Frozen spinors.* The Lagrangian of a CCSD with frozen spinors has integrals
+over the active spinors only (and the Fock matrix, which has all occupied
+spinors in its density), and a rotation between a frozen spinor f and an
+active one x puts f into one index of every integral. With D the
+two-particle density of the active space without its one-particle terms
+(the convention of `pyscf.cc.gccsd_rdm`) and n the occupation numbers,
+
+    G[f, x] = sum_qrs (f q|r s) D[x, q, r, s] + (n_x - n_f) V[f, x],
+
+V the Fock matrix of the correlation part of the one-particle density; a
+frozen virtual and a frozen occupied spinor have V alone between them.
+`zccsd/orbgrad_frozen.py` makes the first term from the integrals with one
+frozen index: slabs (f q|r s) of the integral transformation with the
+frozen spinors as the first index, each batch contracted as it comes. The
+density is not formed. Its blocks with at most two virtual indices are
+arrays of the active space, the largest of the size of t2 - the product m
+of lambda2 and t2 in the ring layout, and the density of <ij||ab> packed
+like t2; the block with three virtual indices is a sum of products of these
+with t1 and lambda1, the one with four is lambda2 times tau, and both meet
+the slab through A[b, (a>c)] = (f a|b c) - (f c|b a) times tau and times
+lambda2 (v^3 o^2 / 4 multiply-adds for a frozen spinor, the largest term)
+and through slabs whose virtual index is contracted with t1 first. With the
+frozen index in the first place of the integral the same contractions serve
+frozen occupied and frozen virtual spinors: the relaxed density has both,
+and the Z-vector equations are those of all virtual with all occupied
+spinors. With Kramers pairs the frozen spinors are rotated into pairs, half
+of them are done, the rows of their partners are the time-reversed image
+and the result is rotated back. The rotations between frozen and active
+spinors of a kind follow from the Fock matrix staying diagonal
+(y_pq = G_pq / (e_q - e_p) in the density, its Fock matrix on the
+right-hand side of the equations).
+
+Until 83bbdec the gradient was taken from the code for all spinors, a
+frozen spinor as an occupied one with zero amplitudes: the integrals of all
+occupied spinors once more, one step of the amplitude equations, one of the
+Lambda equations and the orbital gradient in that space, without Kramers
+pairs. That is a few spinors more for H2O or benzene and the whole core for
+a heavy atom (the times of both are below and in the section on heavy
+elements), and it had no frozen virtual spinors.
 
 *Fock matrices.* The two of the gradient and those of the orbital Hessian
 are J - K of the bare Coulomb operator on the scalar AO integrals
@@ -2142,9 +2168,13 @@ occupied-occupied and virtual-virtual blocks (1e-11); every block of
 `orbgrad` against `gradient_terms` (1e-11); the relaxed dipole against the
 central difference of E(SCF) + E_corr with the SCF repeated in the field
 (3e-8, where the unrelaxed density is off by 2e-3), all electrons and with
-two frozen spinors; the three blocks of `gradient_frozen` against the
-gradient from the full densities (1e-8: the convergence of lambda, 5e-10,
-4e-14); for H2O/cc-pVTZ the same gradient under ten memory plans (m mapped
+two frozen occupied spinors, with four frozen virtual ones and with both;
+the parts of `orbgrad_frozen` against the full density of PySCF block by
+block (1e-13; with Kramers pairs 1e-10, the symmetry of the amplitudes),
+and its peak memory against `max_memory` from the least budget up (m in a
+scratch file, the integrals of one frozen spinor at a time; MemoryError
+below it); for H2O/cc-pVTZ the gradient of the active spinors under ten
+memory plans (m mapped
 or in memory, one to ten blocks), its allocations within the budget of the
 plan (tracemalloc), and the Kramers reductions against the plain sums
 (1e-10).
@@ -2184,18 +2214,23 @@ reductions and with the Fock builds of the SCF object (job 31603549) the
 gradient took 31.3 s and the equations 12.3 s.
 
 With 12 frozen spinors (benzene/cc-pVDZ, 30 active occupied spinors, a CCSD
-iteration of 3.43 s; job 31606686) the relaxed density takes 85.1 s with a
-peak of 15.5 GB: the integrals with all 42 occupied spinors, one step of
-the amplitude equations, the intermediates and one step of the Lambda
-equations, the gradient itself (31 s, without Kramers pairs: the frozen
-spinors are not paired), the Z-vector equations. That is 25 iterations of
-the frozen-core CCSD, and 3.6 times what the relaxed density of the same
-molecule takes without frozen spinors. With `max_memory` 4000 MB it takes
-142.8 s with a peak of 3.70 GB: the three phases are planned one by one for
-all occupied spinors, the unpacked amplitudes are released, and the
-integrals of the active space are given up when a phase does not fit next
-to them (they were here: 1.2 GB; `mycc.ao2mo()` makes them again). What it
-needs at least is what a step of the CCSD of all spinors needs.
+iteration of 3.91 s; job 31674782, c684) the relaxed density takes 23.1 s
+with a peak of 7.4 GB: 11.2 s for the gradient among the active spinors,
+7.7 s for the blocks with a frozen index (4.9 s of it the arrays of the
+active space - the two o^3 v^3 products once more -, the integrals with six
+of the twelve frozen spinors as the first index and their contraction the
+rest), 3.9 s for the Z-vector equations and their Fock operator. That is 6
+iterations of the frozen-core CCSD, and less than the relaxed density of
+the same molecule without frozen spinors takes on that node (27.6 s). With
+`max_memory` 4000 MB it takes 25.4 s with a peak of 3.50 GB (m in a scratch
+file, the integrals of the frozen spinors in five passes).
+
+Taken from the code for all spinors (until 83bbdec; job 31606686) it took
+85.1 s with a peak of 15.5 GB - the integrals with all 42 occupied spinors,
+one step of the amplitude equations, the intermediates and one step of the
+Lambda equations, the gradient itself without Kramers pairs -, and 142.8 s
+under 4000 MB, where the integrals of the active space had to be given up
+for the phases to fit.
 
 Values, against CFOUR (`xx2cccdenocbp`, `xx2czvec`, `xsox2cprop` after the
 Lambda equations; job 31600371, H2O/cc-pVDZ, all electrons, CC_CONV=9;
@@ -2302,10 +2337,12 @@ v N^4, 18.5 s for H2O/cc-pVQZ in a rough run on the shared node, against
 1.3 s. With Kramers pairs the sums over k and over e run over the unbarred
 half and are completed by the time-reversed image.
 
-Frozen occupied spinors: E(T) is that of the active spinors and cannot be
-had from the code for all spinors with zero amplitudes; `orbgrad_t` runs on
-the integrals of all occupied spinors with the densities and the sources of
-the active ones, zero where an index is frozen, inside `gradient_frozen`.
+Frozen spinors: E(T) is that of the active spinors, and `orbgrad_t` is its
+gradient among them. The blocks with a frozen index are in
+`orbgrad_frozen`: with Gnh of `zvector.gradient_nh`, a frozen index is a bra
+or a ket index of the integrals of the three densities, and G[f, x] gets
+(B[f, x] + conj(K[f, x])) / 2 with the two contractions, from the same
+slabs (f q|r s) as the CCSD part.
 
 Checks (`tests/test_zccsd_zvector.py`, `tests/test_zccsd_lambda.py`;
 H2O/6-31G with and without Kramers pairs unless noted): the densities
@@ -2315,12 +2352,14 @@ in all variants of the batches - one batch, ranges of a, one virtual per
 batch, ZGEMM and three real GEMMs, the C and the numpy kernels, f_ov,
 Kramers pairs (1e-10); every origin of `orbgrad_t` (the sources, the three
 densities, the Fock matrix) in all four blocks against the full arrays
-(1e-11), also with two frozen spinors; the occupied-occupied and
+(1e-11), and the three densities in the blocks with a frozen index
+(`orbgrad_frozen`, 1e-13); the occupied-occupied and
 virtual-virtual blocks against (e_q - e_p) times the products of the triples
 (1e-15); the relaxed density against the central difference of E(SCF) +
 E(CCSD) + E(T) with the SCF repeated in the field (5e-8, where the density
 at fixed spinors is off by 6e-4), from the full arrays and from
-`zvector.kernel`, with and without two frozen spinors; allocations within
+`zvector.kernel`, with and without two frozen occupied spinors, with four
+frozen virtual ones and with both; allocations within
 `max_memory` for the pass over the triples (C2H4/6-31G, from the least to
 everything in memory, the density of <bc||ek> in memory and mapped) and for
 `orbgrad_t` (H2O/cc-pVTZ, one occupied spinor and one shell of AO integrals
@@ -2419,7 +2458,13 @@ With 12 frozen spinors (benzene/cc-pVDZ, 30 active occupied spinors; job
 sources and the densities 311.1 s, the Lambda equations 62.7 s, and the
 relaxed density 110.6 s - the orbital gradient with the integrals of all 42
 occupied spinors as for CCSD (85 s there), now with the (T) terms -, 484.4 s
-after the CCSD with a peak of 16.2 GB.
+after the CCSD with a peak of 16.2 GB. With the integrals with one frozen
+index instead (`orbgrad_frozen`; job 31674782, c684): the CCSD 54.8 s, (T)
+with the sources and the densities 291.3 s, the Lambda equations 61.2 s,
+and the relaxed density 29.3 s - 11.1 s the gradient among the active
+spinors, 5.8 s its (T) terms, 8.2 s the blocks with a frozen index -,
+381.8 s after the CCSD with a peak of 12.2 GB (in the pass over the
+triples; 9.3 GB in the relaxed density).
 
 Under 4000 MB that case showed 4.90 GB of anonymous memory during the
 Lambda equations (job 31612966, sampled by phase; 4.02 GB in the pass over
@@ -2437,7 +2482,9 @@ CCSD), and with all electrons 3.40, 3.82, 3.13 and 3.35 GB (960.3 s after
 the CCSD on that node). The pass over the triples had given all of what was
 left to its batches: they now leave 32 MB of it (`triples.MARGIN_BYTES`),
 and the frozen case then has 3.89, 3.96, 3.53 and 3.75 GB (job 31626316,
-c056; 460.9 s after the CCSD).
+c056; 460.9 s after the CCSD). With `orbgrad_frozen` (job 31674782, c684) it
+has 3.92, 3.97, 3.50 and 3.54 GB, the relaxed density takes 38.3 s in the
+place of 152.6 s, and all after the CCSD 386.1 s.
 
 ### Heavy elements: energies and properties against CFOUR, the same Hamiltonian
 
@@ -2493,8 +2540,8 @@ as "unrelaxed" is not the density of t and lambda at fixed spinors and is
 not compared.
 
 HI, 36 frozen spinors (the iodine core up to 4p), 18 correlated electrons,
-all virtual spinors (zccsdt has no relaxed density with frozen virtual
-spinors); the electronic part of each property, atomic units:
+all virtual spinors (frozen virtual spinors: below); the electronic part of
+each property, atomic units:
 
 | | dyall.v2z + cc-pVDZ, 256 spinors: CFOUR | zccsdt | dyall.v3z + cc-pVTZ, 378 spinors: CFOUR | zccsdt |
 |---|---|---|---|---|
@@ -2544,6 +2591,75 @@ CFOUR needs 58 GB for this CCSD (`xx2cccsd` ended with a segmentation
 fault under MEMORY_SIZE 48 GB, job 31668185; `xsox2chf` had 66 GB resident);
 zccsdt ran it under `max_memory` 48000 MB with a peak of 31 GB of anonymous
 memory, and with 72000 MB with a peak of 43 GB.
+
+**Frozen virtual spinors.** The relaxed density takes them since 83bbdec
+(`zccsd/orbgrad_frozen.py`: a frozen virtual spinor is a frozen index of the
+integrals like a frozen occupied one). CFOUR drops the virtual spinors
+above an orbital energy (`%vircut`, in Hartree) and has them in its relaxed
+density too. HI/dyall.v2z again (36 frozen occupied spinors, 202 virtual
+ones), the virtual spinors above 100 Hartree frozen (108 of them, 94 left;
+runs on the login node, for the values): E_corr -0.233379868251 against
+-0.2333798682, E(T) -0.004013981778 against -0.0040139818, and the relaxed
+CCSD(T) density with CFOUR's operators
+
+| | CFOUR | zccsdt | difference | of the SCF densities |
+|---|---|---|---|---|
+| contact density at I | 244700.5466785320 | 244700.5466775852 | -9.5e-7 | -1.0e-6 |
+| EFG at I, zz | 11.4098784725 | 11.4098784731 | 5.7e-10 | -4.5e-9 |
+| pEDM | 8.4546794434 | 8.4546794585 | 1.5e-8 | -2.0e-8 |
+| PSNEC at I, z | 68043.30436 | 68043.30340 | -9.6e-4 | -1.1e-3 |
+| Schiff moment parameter at I, z | -25161.54418 | -25161.54373 | 4.6e-4 | 4.8e-4 |
+| dipole, z | 1.5122562197 | 1.5122562199 | 1.9e-10 | -5.8e-10 |
+
+as without frozen virtual spinors: what is left is what the two SCF
+densities differ by. The finite differences of zccsdt's own energy, the SCF
+repeated in the field and the same number of the highest virtual spinors
+frozen in it, give the relaxed CCSD(T) dipole to 2.6e-9 for HBr/dyall.v2z
+(18 frozen occupied and 86 frozen virtual spinors of 180; 0.380064358
+analytic, 0.380064361) and to 2.9e-9 for HI with the virtual spinors above
+20 Hartree frozen (144 of them, 58 left; -0.224787038, -0.224787041).
+
+*Where CFOUR's relaxed density with `%vircut` is not the derivative of its
+energy.* With that cutoff of 20 Hartree the two programs agree in the
+energies (E_corr -0.224578427506 against -0.2245784275, E(T)
+-0.003752903014 against -0.0037529030) and in everything from the SCF
+density, and differ in the relaxed densities: the dipole 1.5118216231
+(CFOUR) against 1.5123468608, the contact density at I 244700.5225 against
+244700.5156, the EFG 11.39585 against 11.39257 - a few per mille to a few
+per cent of what the correlation contributes (the same numbers from the
+login node and from job 31674655 on c179). The same at the CCSD level:
+
+| virtual spinors frozen above (Hartree) | frozen, active | relaxed CCSD dipole z: CFOUR | zccsdt | difference | EFG at I, zz: difference | contact density at I: difference |
+|---|---|---|---|---|---|---|
+| 1000 | 72, 130 | 1.5105253760 | 1.5105253767 | 7.2e-10 | -1.9e-9 | -9.5e-7 |
+| 100 | 108, 94 | 1.5105020878 | 1.5105020888 | 9.7e-10 | 1.5e-9 | -9.4e-7 |
+| 50 | 124, 78 | 1.5105527524 | 1.5105527533 | 8.6e-10 | 8.0e-11 | -1.0e-6 |
+| 30 | 134, 68 | 1.5104976282 | 1.5104976286 | 4.4e-10 | -2.5e-9 | -1.1e-6 |
+| 20 | 144, 58 | 1.5101803614 | 1.5105763384 | 4.0e-4 | -3.3e-3 | -6.3e-3 |
+
+CFOUR's own energies decide which is the derivative: `ZFIELD=n` adds
+-n x 1e-7 times its dipole operator to the one-electron Hamiltonian of
+`xsox2chf`, and central differences of its energies at 0.002 and 0.004 a.u.
+(Richardson) with the cutoff of 20 Hartree give 1.510576339 for CCSD and
+1.512346861 for CCSD(T): zccsdt's analytic values to 2e-9, and 4.0e-4 and
+5.3e-4 from what CFOUR's `xx2cccdenocbp`, `xx2czvec` and `xsox2cprop` print.
+A small case shows it in seconds (H2O, uncontracted cc-pVDZ, X2C-1e,
+Gaussian nuclei, DROPMO=1>1, CCSD(T); the electronic dipole):
+
+| `%vircut` | frozen, active virtual spinors | CFOUR, property programs | CFOUR, differences of its energies | zccsdt, analytic | zccsdt analytic - differences of its energies |
+|---|---|---|---|---|---|
+| 5 | 28, 42 | -0.1995839208 | | -0.1995839210 | 1.4e-10 |
+| 2 | 46, 24 | -0.2014707536 | -0.203227367 | -0.2032273667 | -8.8e-10 |
+| 1 | 62, 8 | -0.1125612938 | | -0.2274084099 | -4.7e-10 |
+
+So CFOUR's relaxed properties are right while enough virtual spinors stay
+active, and wrong - without a message - once most of them are dropped;
+its energies are right throughout. No term of the response of the frozen
+virtual spinors is what is missing: left out one at a time in zccsdt, none
+gives CFOUR's numbers, and all of them together move the dipole of HI by
+3e-5, less than a tenth of the difference. (From reading its source, not verified:
+`x2cccdenocbp/eomccini.f90` sizes a work array with
+`max(ndropvir,ndrop)*nu*nu*(nu+1)/2`, marked `!???????`.)
 
 **Doublets, and what is odd under time reversal.** BaF (dyall.v2z on Ba,
 346 spinors; 48 frozen spinors, 17 correlated electrons; `kramers` is off
@@ -2622,31 +2738,63 @@ A state off the axis cannot be checked this way: in the field it is not
 stationary, and the SCF and the CCSD crawl along the rotation of the spin
 without converging.
 
-Times of this job (c539, 16 cores, no other job of mine on the node; CFOUR
-first), seconds: CCSD 199.2 (25 cycles) against 73.3 (28); (T) with the
-sources and the densities 672.7 against 206.6 (the (T) energy alone 55.8);
-Hbar and the Lambda equations 73.0 + 245.7 against 82.4; densities, orbital
-gradient and Z-vector equations 155.1 + 77.8 against 543.0; all after the
-CCSD 1224.3 against 832.0.
+**Times.** One job for each comparison, CFOUR first and zccsdt after it on
+the same node and the same 16 cores; seconds. For each molecule the first
+two columns are from before the gradient with a frozen index
+(`zccsd/orbgrad_frozen.py`, 83bbdec), the last two with it:
 
-**Times.** Rough: the four jobs of 2026-10-05 ran at the same time on one
-node (c042), so every program had the others' load next to it; CFOUR first,
-zccsdt after it, in each job. Seconds:
-
-| | HI, 256 spinors (18 + 202), 8 cores: CFOUR | zccsdt | HI, 378 spinors (18 + 324), 16 cores: CFOUR | zccsdt |
+| HI/dyall.v3z, 378 spinors (18 + 324 active, 36 frozen) | CFOUR, c403 | zccsdt, job 31673516 | CFOUR, c179 | zccsdt, job 31674655 |
 |---|---|---|---|---|
-| CCSD (cycles) | 85.5 (14) | 42.8 (33) | 218.6 (15) | 165.5 (44) |
-| (T) energy alone | | 18.1 | | 80.6 |
-| (T) with the sources and the densities | 330.0 | 66.1 | 1369.3 | 298.2 |
-| Hbar and the Lambda equations | 43.1 + 83.6 | 42.1 | 137.6 + 286.4 | 159.4 |
-| densities, orbital gradient, Z-vector equations | 69.5 + 30.9 | 241.3 | 272.2 + 85.8 | 614.0 |
-| all after the CCSD | 557.1 | 349.4 | 2151.3 | 1071.6 |
+| CCSD (cycles) | 294.0 (15) | 51.9 (17) | 322.5 (15) | 60.5 (17) |
+| (T) energy alone | | 63.5 | | 76.9 |
+| (T) with the sources and the densities | 2042.3 | 238.9 | 2129.1 | 272.7 |
+| Hbar and the Lambda equations | 169.1 + 393.7 | 70.3 | 181.9 + 401.2 | 88.9 |
+| densities, orbital gradient, Z-vector equations | 336.9 + 94.2 | 595.0 | 353.8 + 96.6 | 72.2 |
+| all after the CCSD | 3036.2 | 904.2 | 3162.6 | 433.8 |
+| peak anonymous memory of the relaxed density | | 40.8 GB | | 28.3 GB |
 
-AuH (job 31671002, 24 cores, one other job of mine on the node): CCSD
-1502.0 s in 25 cycles against 347.3 s in 27, the (T) energy 1460.1 s against
-175.0 s.
+| BaF/dyall.v2z, 346 spinors (17 + 281 active, 48 frozen; a doublet, no Kramers pairs) | CFOUR, c539 | zccsdt, job 31671656 | CFOUR, c179 | zccsdt, job 31674655 |
+|---|---|---|---|---|
+| CCSD (cycles) | 199.2 (25) | 73.3 (28) | 272.5 (25) | 87.4 (28) |
+| (T) energy alone | | 55.8 | | 78.0 |
+| (T) with the sources and the densities | 672.7 | 206.6 | 1064.6 | 263.5 |
+| Hbar and the Lambda equations | 73.0 + 245.7 | 82.4 | 99.3 + 369.0 | 116.6 |
+| densities, orbital gradient, Z-vector equations | 155.1 + 77.8 | 543.0 | 217.3 + 99.2 | 84.8 |
+| all after the CCSD | 1224.3 | 832.0 | 1849.4 | 464.9 |
+| peak anonymous memory of the relaxed density | | 40.5 GB | | 23.9 GB |
 
-Two things in these numbers are zccsdt's own:
+The two jobs are not the same conditions: on c179 the HI comparison ran
+first and BaF after it in one job, and CFOUR's steps for BaF took 28 to
+58 % longer than on c539, zccsdt's 19 to 41 %. No other job was on the
+node; the NUMA node of the job's 16 cores had 7 GB of free memory during
+CFOUR's last step (the other one 30 GB), so pages from the other node are
+my guess at the cause, not something measured. For HI a second job of mine
+(benzene, 8 cores) ran on c179 for
+the first 14 minutes, through CFOUR's SCF, its CCSD iterations and the
+start of its (T) step; it was cancelled then. What the tables show either
+way: the relaxed density with frozen spinors, 595 s and 543 s, is 72 s and
+85 s, and all after the CCSD is 7.3 and 4.0 times faster than in CFOUR on
+the node of the run (3.4 and 1.5 times before). The values of the new runs
+are those of the tables above to the difference of the SCF densities (HI:
+the contact density -5.8e-7 with -5.7e-7 from the SCF, the dipole -1.5e-9;
+BaF: the effective electric field -1.2077991878 against -1.2077991835, the
+magnetic quadrupole moment parameter -3.0e-6 with -2.3e-6 from the SCF).
+
+With `max_memory` 12000 MB (HI/dyall.v3z again, zccsdt alone, in the job
+on c179) the peaks of anonymous memory are 8.2 GB in the CCSD iterations,
+11.8 GB in the pass over the triples, 8.7 GB in the Lambda equations and
+9.8 GB in the relaxed density - the density of <bc||ek> (4.9 GB) in a
+scratch file, the integrals of one frozen spinor at a time -, the relaxed
+density takes 74.4 s and all after the CCSD 415.9 s: as with 48000 MB.
+
+The first jobs of this section (HI with both basis sets, four jobs at a
+time on c042 and before the correction of the DIIS below) gave 241 s and
+614 s for the relaxed density of HI with 256 and 378 spinors, where CFOUR's
+two programs took 100 s and 358 s. AuH (job 31671002, 24 cores, one other
+job of mine on the node): CCSD 1502.0 s in 25 cycles against 347.3 s in 27,
+the (T) energy 1460.1 s against 175.0 s.
+
+Two things in the first numbers were zccsdt's own:
 
 - *The cycles of the CCSD* (33 and 44 where CFOUR has 14 and 15; 68 for AuH
   in the first job). The DIIS equations were solved as in `pyscf.lib.diis`,
@@ -2657,24 +2805,34 @@ Two things in these numbers are zccsdt's own:
   without extrapolation (HBr: 0.82 per cycle against 0.64). The overlaps are
   now divided by the largest one (`cc/diis.py`, commit 19f00e6): 16 cycles
   in the place of 28 for HBr, 15 for 30 (H2O, uncontracted cc-pVDZ), 19 for
-  51 (the BeH doublet), 27 for 68 (AuH, the job above). The jobs of the
-  table ran before that. With thresholds of 1e-9 in the energy and 1e-7 in
-  the norm, as in all runs of the earlier sections, the iteration never
-  reached that regime.
-- *The relaxed density with frozen spinors* (241 s and 614 s, of which 227 s
-  and 591 s are `gradient_frozen`; CFOUR's `xx2cccdenocbp` and `xx2czvec`
-  together 100 s and 358 s). `gradient_frozen` treats a frozen spinor as an
-  occupied one with zero amplitudes: it makes the integrals of all occupied
-  spinors once more (54 here, for 18 with amplitudes) and does one step of
-  the amplitude equations, one of the Lambda equations and the orbital
-  gradient in that space. For H2O or benzene that is a few spinors more; a
-  heavy atom pays for its whole core, and the step that is 6.6 to 7.5 times
-  faster than CFOUR's without frozen spinors is 1.7 to 2.4 times slower
-  here. What is needed are the blocks of the gradient with one frozen index,
-  from integrals with one frozen index - the same contractions with that
-  index in the AO basis would give the frozen virtual spinors too, which the
-  relaxed density does not have at all (`zvector.full_space` raises
-  NotImplementedError; the energies take them). Not done.
+  51 (the BeH doublet), 17 for 44 (HI), 27 for 68 (AuH). With thresholds of
+  1e-9 in the energy and 1e-7 in the norm, as in all runs of the earlier
+  sections, the iteration never reached that regime.
+- *The relaxed density with frozen spinors.* Of the 595 s for HI, 583 s
+  were the orbital gradient from the code for all spinors
+  (`zvector.gradient_frozen`): a frozen spinor as an occupied one with zero
+  amplitudes, so the integrals of all occupied spinors once more (54, for 18
+  with amplitudes), one step of the amplitude equations (about 145 s), one
+  of the Lambda equations (159 s) and the orbital gradient in that space
+  (208 s), none of it with Kramers pairs - the frozen spinors were not
+  paired. For H2O or benzene that is a few spinors more; a heavy atom pays
+  for its whole core, and the step that is 6.6 to 7.5 times faster than
+  CFOUR's without frozen spinors was 1.4 to 2.3 times slower with them.
+  What is needed are the blocks of the gradient with one frozen index, and
+  those need the integrals with one frozen index alone (the section on the
+  Z-vector equations has the formula): of the 72.2 s now, 26.3 s are these
+  blocks - the integral transformation with 18 of the 36 frozen spinors as
+  the first index about 12 s, the arrays of the active space 4.5 s, the
+  contractions the rest -, 17.4 s and 15.7 s the gradient among the active
+  spinors and its (T) terms, 12.2 s the Z-vector equations with their Fock
+  builds. A first version of the contractions took three times as long as
+  the integral transformation (numpy.einsum without BLAS, the packed
+  density of <bc||ek> unpacked for every occupied index of every batch,
+  slices with a stride over whole arrays, a matrix-vector product per
+  occupied index that reads an array of the size of the batch): 14a9cd2
+  has the packed rows read as they are (`zc_tril_matvec`) and one product
+  per pass. The frozen virtual spinors came with it: they are frozen
+  indices of the same integrals.
 
 ## Correctness references
 
