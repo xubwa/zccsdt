@@ -2652,6 +2652,8 @@ Gaussian nuclei, DROPMO=1>1, CCSD(T); the electronic dipole):
 | 2 | 46, 24 | -0.2014707536 | -0.203227367 | -0.2032273667 | -8.8e-10 |
 | 1 | 62, 8 | -0.1125612938 | | -0.2274084099 | -4.7e-10 |
 
+(`bench/cfour/finite_field.sh MOL BASIS NCORE VIRCUT` runs these four
+energies of CFOUR and prints the differences.)
 So CFOUR's relaxed properties are right while enough virtual spinors stay
 active, and wrong - without a message - once most of them are dropped;
 its energies are right throughout. No term of the response of the frozen
@@ -2660,6 +2662,19 @@ gives CFOUR's numbers, and all of them together move the dipole of HI by
 3e-5, less than a tenth of the difference. (From reading its source, not verified:
 `x2cccdenocbp/eomccini.f90` sizes a work array with
 `max(ndropvir,ndrop)*nu*nu*(nu+1)/2`, marked `!???????`.)
+
+At the size of AuH (dyall.v3z, 576 spinors: 34 + 256 active, 46 frozen
+occupied and 240 frozen virtual spinors; zccsdt alone, job 31675252, c585,
+24 cores, `max_memory` 72000 MB) the relaxed CCSD(T) density takes 442.7 s
+with a peak of 65.9 GB: 282.9 s for the blocks with a frozen index - the
+integral transformation with 143 of the 286 frozen spinors as the first
+index 235 s (its first half 172 s: 1.2 s for a first index), the
+contractions and the arrays of the active space 48 s -, 63.3 s and 42.1 s
+for the gradient among the active spinors and its (T) terms, 53.4 s for the
+Z-vector equations. The CCSD takes 380.5 s there (26 cycles), (T) with the
+sources and the densities 544.2 s, the Lambda equations 468.2 s; 1455.0 s
+after the CCSD. With that many frozen spinors the integral transformation
+is what the relaxed density costs; CFOUR was not run for this one.
 
 **Doublets, and what is odd under time reversal.** BaF (dyall.v2z on Ba,
 346 spinors; 48 frozen spinors, 17 correlated electrons; `kramers` is off
