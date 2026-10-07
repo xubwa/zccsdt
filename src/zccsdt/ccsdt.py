@@ -987,7 +987,7 @@ class GCCSDT(UCCSDT):
             if (self.real_spinors and not isinstance(mf, _Given) and self._kind() == 'spinor'
                     and self.mo_coeff is mf.mo_coeff and self.mo_occ is mf.mo_occ):
                 from zccsdt import eris
-                ax = eris.axial_spinors(mf)
+                ax = eris.axial_spinors(mf, with_mj=True)
                 if ax is not None:
                     part = np.zeros(len(ax[1]), dtype=np.int64)
                     for k, idx in enumerate(self._active()):
@@ -996,6 +996,7 @@ class GCCSDT(UCCSDT):
                     first[ax[1]] = part
                     if (first[ax[1]] == part).all():
                         out = ax[0]
+                        self._axial_mj = ax[2]
             self._axial_cache = (key, out)
         return self._axial_cache[1]
 
@@ -1054,9 +1055,13 @@ class GCCSDT(UCCSDT):
         # (the columns: frozen occupied first, the dropped virtual ones left out)
         cols = np.concatenate((fo, o, v))
         real = self._axial()
-        return eris.from_scf(self._scf, mo_coeff=(np.asarray(self.mo_coeff) if real is None else real)[:, cols],
-                             mo_occ=np.asarray(self.mo_occ)[cols], frozen=len(fo), packed_vvvv=True,
-                             max_memory=self.max_memory, real=real is not None)
+        out = eris.from_scf(self._scf, mo_coeff=(np.asarray(self.mo_coeff) if real is None else real)[:, cols],
+                            mo_occ=np.asarray(self.mo_occ)[cols], frozen=len(fo), packed_vvvv=True,
+                            max_memory=self.max_memory, real=real is not None)
+        if real is not None:
+            # the symmetry label of the axis: 2 m_j, which adds without a modulus
+            out.labels = np.round(2 * self._axial_mj[np.concatenate((o, v))]).astype(np.int64)
+        return out
 
     def _amplitude_lines(self, eris):
         from zccsdt.scratch import is_mapped

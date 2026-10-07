@@ -198,6 +198,9 @@ def container(x, packed_vvvv=True, source='spinors in Kramers pairs'):
         out._vvvv_pp = np.ascontiguousarray(g[a[:, None], a[None, :], b[:, None], b[None, :]]
                                             - g[a[:, None], b[None, :], b[:, None], a[None, :]])
     out.spinors, out.dirac = idx, x
+    if set(np.unique(x.abelian)) <= {1, 2}:
+        # the two fermion irreps of C2 (1E, 2E) as the labels +1 and -1 that add modulo 4
+        out.labels, out.modulus = np.where(np.asarray(x.abelian)[idx] == 1, 1, -1).astype(np.int64), 4
     return out
 
 

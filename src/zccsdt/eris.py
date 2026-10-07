@@ -37,6 +37,8 @@ class ERIs:
     source: str = ''
     spin_occ: np.ndarray = None    # 0/1 = alpha/beta per spin orbital (alpha first),
     spin_vir: np.ndarray = None    # only for pure-spin orbitals and spin_order=True
+    labels: np.ndarray = None      # symmetry label per spinor, occupied then virtual: an integer
+    modulus: int = 0               # that adds (zccsdt.cc.sectors); 0: no modulus (2 m_j)
 
     @property
     def nmo(self):
@@ -76,6 +78,7 @@ def drop_virtuals(eris, nvir):
     out = ERIs(nocc=no, fock=np.ascontiguousarray(fock[np.ix_(idx, idx)]), mo_energy=e[idx].copy(),
                e_hf=eris.e_hf, e_nuc=eris.e_nuc, source=eris.source,
                spin_occ=eris.spin_occ, spin_vir=None if eris.spin_vir is None else np.asarray(eris.spin_vir)[keep],
+               labels=None if eris.labels is None else np.asarray(eris.labels)[idx], modulus=eris.modulus,
                **{k: cut(k) for k in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv')})
     pp = getattr(eris, '_vvvv_pp', None)
     if pp is not None:
@@ -306,7 +309,7 @@ def spinor_jz(mol):
     return np.array(out)
 
 
-def axial_spinors(mf, mo_coeff=None, mo_energy=None, mo_occ=None, tol=1e-7):
+def axial_spinors(mf, mo_coeff=None, mo_energy=None, mo_occ=None, tol=1e-7, with_mj=False):
     '''The spinors of a linear molecule on the z axis as eigenfunctions of
     j_z with real coefficients: (C, level).  C[:, p] is in the place of
     mo_coeff[:, p] - the spinors of a degenerate level of one occupation
@@ -318,7 +321,9 @@ def axial_spinors(mf, mo_coeff=None, mo_energy=None, mo_occ=None, tol=1e-7):
 
     None if the spinors are not of that kind: another molecule or another
     orientation, an SCF solution without the symmetry of the axis (an open
-    shell whose spin is not on the axis), GHF spin orbitals.'''
+    shell whose spin is not on the axis), GHF spin orbitals.
+
+    ``with_mj``: (C, level, mj) with the m_j of every spinor.'''
     if _orbital_kind(mf) != 'spinor':
         return None
     C = np.array(mf.mo_coeff if mo_coeff is None else mo_coeff)
@@ -363,7 +368,7 @@ def axial_spinors(mf, mo_coeff=None, mo_energy=None, mo_occ=None, tol=1e-7):
                 C[:, v] -= C[:, o] @ (C[:, o].T @ S.real @ C[:, v])
             w, U = np.linalg.eigh(C[:, sel].T @ S.real @ C[:, sel])
             C[:, sel] = C[:, sel] @ (U / np.sqrt(w)) @ U.T
-    return C, level
+    return (C, level, mj) if with_mj else (C, level)
 
 
 def _orbital_kind(mf):
