@@ -973,7 +973,8 @@ class GCCSDT(UCCSDT):
     _subtitle = 'CCSDT on spin orbitals or spinors (GHF, X2C), real or complex'
     _frozen_unit = 2
     real_spinors = True
-    symmetry = True         # use the labels of the spinors where the integrals have them ((Q))
+    symmetry = True         # use the symmetry labels of the spinors where the integrals have them
+    _block_iterations = True    # ... in the iterations too: T3 in blocks, the spinors in the order of the labels
     _keys = UCCSDT._keys | {'real_spinors', 'symmetry'}
 
     def _axial(self):
@@ -1056,7 +1057,7 @@ class GCCSDT(UCCSDT):
         # (the columns: frozen occupied first, the dropped virtual ones left out)
         cols = np.concatenate((fo, o, v))
         real = self._axial()
-        if real is not None and self.symmetry:
+        if real is not None and self.symmetry and self._block_iterations:
             # the spinors of one label next to each other (by energy inside a label): the
             # blocks of the amplitudes are ranges then
             two_m = np.round(2 * self._axial_mj).astype(np.int64)
@@ -1069,7 +1070,7 @@ class GCCSDT(UCCSDT):
         if real is not None:
             # the symmetry label of the axis: 2 m_j, which adds without a modulus
             out.labels = np.round(2 * self._axial_mj[cols[len(fo):]]).astype(np.int64)
-            out.use_labels = bool(self.symmetry)
+            out.use_labels = bool(self.symmetry and self._block_iterations)
         return out
 
     def _amplitude_lines(self, eris):
@@ -1174,6 +1175,7 @@ class GCCSDTQ(GCCSDT):
 ''' + CCSDTBase.__doc__
 
     _title = 'GCCSDTQ'
+    _block_iterations = False   # (the T4 equation is not in blocks yet; (Q) and (P) are)
     _subtitle = 'CCSDTQ on spin orbitals or spinors (GHF, X2C), real or complex'
     _stages = Q_STAGES
     _keys = GCCSDT._keys | {'t4', 'e_ccsdt', 'ccsdt_run', 'e_p'}
@@ -1193,7 +1195,8 @@ class GCCSDTQ(GCCSDT):
         if t1 is None or t2 is None or t3 is None:
             cc3 = GCCSDT(self._scf, self.frozen, self.mo_coeff, self.mo_occ)
             for key in ('verbose', 'stdout', 'max_memory', 'conv_tol', 'conv_tol_normt', 'max_cycle',
-                        'diis_space', 'diis_file', 'incore_complete', 'real_spinors'):
+                        'diis_space', 'diis_file', 'incore_complete', 'real_spinors', 'symmetry',
+                        '_block_iterations'):
                 setattr(cc3, key, getattr(self, key))
             cc3.kernel()
             self.ccsdt_run, self._eris, self.e_ccsdt = cc3, cc3._eris, cc3.e_tot
@@ -1280,7 +1283,7 @@ class GCCSDTQ(GCCSDT):
         or spinors (zccsdt.cc.pentuples; canonical orbitals); returns E(P)
         and stores e_p and e_tot_p, the energy of CCSDTQ(P).'''
         from math import comb
-        from zccsdt.cc import ccsdt_opt, pentuples
+        from zccsdt.cc import ccsdt_opt, pentuples, pentuples_sym
         log = logger.new_logger(self)
         pr = _Printer(log)
         t2 = self.t2 if t2 is None else t2
@@ -1299,17 +1302,32 @@ class GCCSDTQ(GCCSDT):
         if no < 5 or nv < 5:
             self.e_p = 0.0
         else:
-            pl = pentuples.plan(no, nv, np.dtype(dtype).itemsize, memory.budget(self.max_memory))
-            pr.kv('memory', '%s besides T3, T4 and the integrals' % _size(pl.need), indent=3)
-            filed = [name for name, on in (('the second-order quadruples', pl.y4_file),
-                                           ('the six-index intermediate', pl.xv_file)) if on]
-            pr.kv('plan', 'products in %d and %d batches of columns; T2 T2 T2 intermediate for %s%s'
-                  % (-(-comb(nv, 3) // pl.cols23), -(-comb(nv, 4) // pl.cols14),
-                     'all occupied quadruples' if pl.store_xq else 'the quadruples of one pentuple at a time',
-                     '; memory is short - %s in a scratch file' % ' and '.join(filed) if filed else ''),
-                  indent=3)
-            with _PeakMemory() as peak, timing.timer(ROOT_P):
-                self.e_p = pentuples.kernel(eris, t2, t3, t4, plan_=pl)
+            budget = memory.budget(self.max_memory)
+            spl = None
+            if self.symmetry and pentuples_sym.available(eris):
+                try:
+                    spl = pentuples_sym.plan(eris, np.dtype(dtype).itemsize, budget)
+                except MemoryError:     # (the dense code has plans for less)
+                    pass
+            if spl is not None:
+                sec = spl.sectors
+                pr.kv('symmetry', '%d labels of the virtual spinors%s: the products in blocks'
+                      % (len(sec.vlab), ' modulo %d' % sec.modulus if sec.modulus else ' (2 m_j)'), indent=3)
+                pr.kv('memory', '%s besides T3, T4 and the integrals' % _size(spl.need), indent=3)
+                with _PeakMemory() as peak, timing.timer(ROOT_P):
+                    self.e_p = pentuples_sym.kernel(eris, t2, t3, t4, plan_=spl)
+            else:
+                pl = pentuples.plan(no, nv, np.dtype(dtype).itemsize, budget)
+                pr.kv('memory', '%s besides T3, T4 and the integrals' % _size(pl.need), indent=3)
+                filed = [name for name, on in (('the second-order quadruples', pl.y4_file),
+                                               ('the six-index intermediate', pl.xv_file)) if on]
+                pr.kv('plan', 'products in %d and %d batches of columns; T2 T2 T2 intermediate for %s%s'
+                      % (-(-comb(nv, 3) // pl.cols23), -(-comb(nv, 4) // pl.cols14),
+                         'all occupied quadruples' if pl.store_xq else 'the quadruples of one pentuple at a time',
+                         '; memory is short - %s in a scratch file' % ' and '.join(filed) if filed else ''),
+                      indent=3)
+                with _PeakMemory() as peak, timing.timer(ROOT_P):
+                    self.e_p = pentuples.kernel(eris, t2, t3, t4, plan_=pl)
             w, c, k = timing.since(snap0)[(ROOT_P,)]
         pr.kv('E(P)', '%20.12f' % self.e_p, indent=3)
         pr.kv('E(CCSDTQ(P))', '%20.12f' % self.e_tot_p, indent=3)
