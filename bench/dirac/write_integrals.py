@@ -30,9 +30,12 @@ elif kind == 'x2c':
     mf.kernel()
     e = np.sort(mf.mo_energy)
     print('X2C SCF converged: %s; largest splitting of a Kramers pair %.1e' % (mf.converged, abs(e[1::2] - e[::2]).max()))
+    if not mf.converged:
+        raise SystemExit('the SCF did not converge')
 else:
     raise SystemExit(__doc__)
 x = dirac.integrals(mf, frozen, nvir)
 n = dirac.write(out, x)
 print('E(SCF) = %.12f; %d spinors (%d occupied), %d integrals in %s/MRCONEE, MDCINT'
       % (mf.e_tot, len(x.energy), x.nelec.sum(), n, out))
+print('energies of the occupied pairs:', np.array2string(x.energy[:x.nelec[0]], precision=5, max_line_width=200))

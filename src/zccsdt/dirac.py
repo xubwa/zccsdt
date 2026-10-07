@@ -373,10 +373,10 @@ def integrals(mf, frozen=0, nvir=None, mo_coeff=None, mo_energy=None, tol=1e-9):
     energy, then their partners - the layout of DIRAC for a real group.
     ``frozen``: the lowest spinors (an even number) go into the core energy
     and the one-electron matrix; ``nvir``: the number of virtual spinors
-    kept (the lowest; default all).  The two-electron integrals are made as
-    one array (pq|rs) from the AO integrals: for the sizes of high-order
-    CC.'''
-    from zccsdt.eris import _mo_chemist, _orbital_kind
+    kept (the lowest; default all).  The two-electron integrals are one
+    array (pq|rs) over the active spinors - for the sizes of high-order CC -
+    made by PySCF's integral transformation.'''
+    from zccsdt.eris import _chem_block, _mo_chemist, _orbital_kind
     if frozen % 2 or (nvir or 0) % 2:
         raise ValueError('spinors are frozen and dropped in pairs: %d, %s' % (frozen, nvir))
     Cu, Cb, e = kramers_pairs(mf, mo_coeff, mo_energy)
@@ -400,7 +400,11 @@ def integrals(mf, frozen=0, nvir=None, mo_coeff=None, mo_energy=None, tol=1e-9):
         heff = hcore + vhf
         e_core += float(np.einsum('ij,ji->', hcore + 0.5 * vhf, dm).real)
     h = C.conj().T @ heff @ C
-    g = _mo_chemist(mf.mol, C, _orbital_kind(mf))
+    kind = _orbital_kind(mf)
+    if kind == 'ghf' and np.iscomplexobj(C):
+        g = _mo_chemist(mf.mol, C, kind)
+    else:
+        g = _chem_block(mf.mol, kind, C, C, C, C)
     im = max(abs(np.imag(h)).max(), abs(np.imag(g)).max())
     if im < tol:
         h, g = np.ascontiguousarray(np.real(h)), np.ascontiguousarray(np.real(g))

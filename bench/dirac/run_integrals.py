@@ -25,6 +25,10 @@ run3 = cc.ccsdt_run if full else cc
 e_q = cc.ccsdt_q()
 if what == 'ccsdtq(p)':
     cc.ccsdtq_p()
+print('correlation energies: CCSDT %.12f  CCSDT[Q] %.12f  CCSDT(Q) %.12f' % (
+    run3.e_corr, run3.e_corr + run3.e_q5, run3.e_corr + e_q)
+    + ('  CCSDTQ %.12f' % cc.e_corr if full else '')
+    + ('  CCSDTQ(P) %.12f' % (cc.e_corr + cc.e_p) if what == 'ccsdtq(p)' else ''))
 print('E(CCSDT)     = %.12f' % run3.e_tot)
 print('E(CCSDT[Q])  = %.12f' % (run3.e_tot + run3.e_q5))
 print('E(CCSDT(Q))  = %.12f' % (run3.e_tot + e_q))
