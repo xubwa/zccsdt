@@ -182,18 +182,26 @@ def energy(fock, g, nocc, d1, d2):
 def one_index(h, v, d1, d2):
     '''G[x,y] = sum h'[p,q] d1[p,q] + 1/4 sum v'[p,q,r,s] d2[p,q,r,s] with
     h' = [h, x+ y], the integrals one-index transformed by x+ y: a ket
-    index y takes the values of x, a bra index x minus those of y.'''
+    index y takes the values of x, a bra index x minus those of y.
+    G[a,i] is dL/dt1[i,a] with the dressed integrals and densities;
+    for Hermitian integrals the orbital gradient of the Hermitian
+    densities, zccsdt.zccsd.zvector.orbital_gradient, is
+    Gz[y,x] = -1/2 (G[x,y] - conj(G[y,x])).'''
     G = h.T @ d1 - d1 @ h.T
     G += 0.5 * (np.einsum('pqxs,pqys->xy', v, d2) - np.einsum('yqrs,xqrs->xy', v, d2))
     return G
 
 
 def orbital_gradient(fock, g, nocc, amps, lams, dressed=False):
-    '''Gnh[a,i] = <0| (1 + Lambda) exp(-T) [H, a+_i a_a] exp(T) |0>: the
+    '''Gnh[a,i] = <0| (1 + Lambda) exp(-T) [a+_i a_a, H] exp(T) |0>: the
     Lagrangian with the integrals one-index transformed by the
-    de-excitation a+_i a_a, at fixed t and lambda (zccsdt.zccsd.zvector:
-    Gnh[a,i], twice the orbital gradient G[a,i] for converged t and
-    lambda).
+    de-excitation a+_i a_a, at fixed t and lambda - Gnh[a,i] of
+    zccsdt.zccsd.zvector, a bra index i taking the values of a and a ket
+    index a minus those of i.  For converged t and lambda the other half,
+    Gnh[i,a], and the blocks among occupied and among virtual spin
+    orbitals vanish, and the orbital gradient of the Hermitian densities
+    (zvector.orbital_gradient with those of pyscf_rdms) is
+    G[a,i] = 1/2 Gnh[a,i], G[i,a] = -conj(G[a,i]).
 
     ``dressed``: from the table of the dressed basis alone
     (lambda_terms.GRADIENT), which is the same for converged t and lambda -
@@ -204,7 +212,7 @@ def orbital_gradient(fock, g, nocc, amps, lams, dressed=False):
         return L.gradient(_arrays(fock, g, nocc, amps, lams), nocc)
     d1, d2 = densities(amps, lams, nocc)
     h = fock - np.einsum('piqi->pq', g[:, :nocc, :, :nocc])
-    return one_index(h, g, d1, d2)[:nocc, nocc:].T
+    return -one_index(h, g, d1, d2)[:nocc, nocc:].T
 
 
 # ------------------------------------------------------------- (Q)_Lambda

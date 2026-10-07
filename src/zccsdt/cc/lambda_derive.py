@@ -26,11 +26,11 @@ Three derivatives of it, each by a rule on the index strings:
   d/dt1[i,a] h~ = [h~, a+_a a_i], a one-index transformation of them, a
   virtual bra index taking minus the values of i and an occupied ket index
   the values of a (one_index).  The dressed Fock matrix contains
-  sum_m <pm||qm>~ and gets <pi||qa>~ besides; E0 gives f~[i,a].  The same
-  with the de-excitation a+_i a_a - an occupied bra index takes minus the
-  values of a, a virtual ket index those of i, the Fock matrix gets
-  -<pa||qi>~, E0 gives -f~[a,i] - is the orbital gradient in the dressed
-  basis.
+  sum_m <pm||qm>~ and gets <pi||qa>~ besides; E0 gives f~[i,a].  The
+  orbital gradient of the dressed basis is the transformation by the
+  de-excitation, with the sign of zccsdt.zccsd.zvector, [a+_i a_a, h~]: an
+  occupied bra index takes the values of a, a virtual ket index minus
+  those of i, the Fock matrix gets <pa||qi>~, E0 gives f~[a,i].
 
 The Lambda equations are derived a second time by Wick's theorem alone
 (lambda_by_wick, zccsdt.cc.wick.derive_left), without the table of the
@@ -259,10 +259,11 @@ def lambda_by_differentiation(rank):
 
 def one_index(excitation):
     '''L with the dressed integrals one-index transformed by a+_a a_i
-    (``excitation``: dL/dt1[i,a], external letters 'ia') or by a+_i a_a
-    (the orbital gradient of the dressed basis, external letters 'ai').'''
+    (``excitation``: [h~, a+_a a_i], dL/dt1[i,a], external letters 'ia') or
+    by a+_i a_a ([a+_i a_a, h~], the orbital gradient of the dressed basis,
+    external letters 'ai').'''
     I, A = 'i', 'a'                         # (the terms are in upper case meanwhile)
-    terms = [(Fraction(1), (('f', 'ia'),), 'ia')] if excitation else [(Fraction(-1), (('f', 'ai'),), 'ai')]
+    terms = [(Fraction(1), (('f', 'ia'),), 'ia')] if excitation else [(Fraction(1), (('f', 'ai'),), 'ai')]
     ext = 'ia' if excitation else 'ai'
     for coef, factors in lagrangian():
         factors = _fresh(factors)
@@ -275,9 +276,9 @@ def one_index(excitation):
             elif excitation and not bra and occ:
                 sign, here, there = 1, A, I
             elif not excitation and bra and occ:
-                sign, here, there = -1, A, I
+                sign, here, there = 1, A, I
             elif not excitation and not bra and not occ:
-                sign, here, there = 1, I, A
+                sign, here, there = -1, I, A
             else:
                 continue
             new = []
@@ -291,7 +292,7 @@ def one_index(excitation):
             p, q = ix
             v = ('v', p + I + q + A) if excitation else ('v', p + A + q + I)
             new = [v if y == x else f for y, f in enumerate(factors)]
-            terms.append(((1 if excitation else -1) * coef, tuple(_lower(new)), ext))
+            terms.append((coef, tuple(_lower(new)), ext))
     return collect(terms, antisym=False)[ext]
 
 
@@ -356,7 +357,7 @@ def tables():
     return lam, densities(), one_index(excitation=False)
 
 
-if __name__ == '__main__':
+def print_tables():
     lam, dens, grad = tables()
     print('LAMBDA = {')
     for rank, terms in lam.items():
@@ -372,3 +373,7 @@ if __name__ == '__main__':
         print('    ],')
     print('}\n')
     _print_list('GRADIENT', grad)
+
+
+if __name__ == '__main__':
+    print_tables()

@@ -39,15 +39,18 @@ transformation that dresses the integrals (zccsdt.cc.lambda_ref.densities).
 
 GRADIENT: the orbital gradient in the dressed basis,
 
-    G[a,i] = <0| (1 + Lambda) exp(-T) [H~, a+_i a_a] exp(T) |0>,
+    G[a,i] = <0| (1 + Lambda) exp(-T) [a+_i a_a, H~] exp(T) |0>,
     H~ = exp(-T1) H exp(T1),   T = T2 + T3,
 
 L with the dressed integrals one-index transformed by the de-excitation
-a+_i a_a, as ``coefficient * product``, external letters a i.  For converged
-t and lambda it is the derivative of the Lagrangian with respect to the
-rotation of the bare orbitals a+_i a_a, Gnh[a,i] of zccsdt.zccsd.zvector
-(lambda_ref.orbital_gradient has the relation).  LAMBDA[1] is the same
-thing with the excitation a+_a a_i.
+a+_i a_a (an occupied bra index takes the values of a, a virtual ket index
+minus those of i), as ``coefficient * product``, external letters a i.  For
+converged t and lambda it is the same transformation of the bare
+integrals, Gnh[a,i] of zccsdt.zccsd.zvector: twice its orbital gradient
+G[a,i], the right-hand side of the Z-vector equations
+(lambda_ref.orbital_gradient).  gradient_blocks() has the terms by the
+block of integrals.  LAMBDA[1] is the same thing with the excitation
+a+_a a_i and the other sign.
 
 Where the terms come from (zccsdt.cc.lambda_derive): the Lambda equations
 from Wick's theorem (zccsdt.cc.wick.derive_left: 37 + 35 + 16 terms), and a
@@ -239,87 +242,87 @@ DENSITY = {
 }
 
 GRADIENT = [
-    _t(1, 'l1_me', 'f_af', 't2_imef'),
-    _t(-1, 'l1_me', 'f_ni', 't2_mnae'),
-    _t('-1/2', 'l1_me', 'v_aefg', 't2_imfg'),
-    _t(-1, 'l1_me', 'v_aeim'),
-    _t('1/2', 'l1_me', 'v_anfg', 't3_imnefg'),
-    _t(1, 'l1_me', 'v_anfi', 't2_mnef'),
-    _t(-1, 'l1_me', 'v_anfm', 't2_inef'),
-    _t(-1, 'l1_me', 'v_enfi', 't2_mnaf'),
-    _t('1/2', 'l1_me', 'v_nofi', 't3_mnoaef'),
-    _t('-1/2', 'l1_me', 'v_noim', 't2_noae'),
-    _t('-1/4', 'l2_mnef', 'f_ag', 't3_imnefg'),
-    _t('1/2', 'l2_mnef', 'f_am', 't2_inef'),
-    _t('1/2', 'l2_mnef', 'f_ei', 't2_mnaf'),
-    _t('1/4', 'l2_mnef', 'f_oi', 't3_mnoaef'),
-    _t('-1/4', 'l2_mnef', 'v_aegh', 't3_imnfgh'),
-    _t('-1/2', 'l2_mnef', 'v_aegi', 't2_mnfg'),
-    _t(1, 'l2_mnef', 'v_aegm', 't2_infg'),
-    _t('-1/4', 'l2_mnef', 'v_aogh', 't2_imef', 't2_nogh'),
-    _t(1, 'l2_mnef', 'v_aogh', 't2_imeg', 't2_nofh'),
-    _t('-1/4', 'l2_mnef', 'v_aogh', 't2_imgh', 't2_noef'),
-    _t('-1/8', 'l2_mnef', 'v_aogh', 't2_ioef', 't2_mngh'),
-    _t('1/2', 'l2_mnef', 'v_aogh', 't2_ioeg', 't2_mnfh'),
-    _t('1/4', 'l2_mnef', 'v_aogi', 't3_mnoefg'),
-    _t('-1/2', 'l2_mnef', 'v_aogm', 't3_inoefg'),
-    _t('-1/2', 'l2_mnef', 'v_aoim', 't2_noef'),
-    _t('-1/4', 'l2_mnef', 'v_aomn', 't2_ioef'),
-    _t('-1/4', 'l2_mnef', 'v_efgi', 't2_mnag'),
-    _t('-1/2', 'l2_mnef', 'v_eogi', 't3_mnoafg'),
-    _t(1, 'l2_mnef', 'v_eoim', 't2_noaf'),
-    _t(-1, 'l2_mnef', 'v_jogi', 't2_jnaf', 't2_moeg'),
-    _t('1/2', 'l2_mnef', 'v_jogi', 't2_jnag', 't2_moef'),
-    _t('-1/4', 'l2_mnef', 'v_jogi', 't2_joae', 't2_mnfg'),
-    _t('-1/8', 'l2_mnef', 'v_jogi', 't2_joef', 't2_mnag'),
-    _t('1/4', 'l2_mnef', 'v_jogi', 't2_joeg', 't2_mnaf'),
-    _t('1/4', 'l2_mnef', 'v_joim', 't3_jnoaef'),
-    _t('1/4', 'l3_mnoefg', 'f_ah', 't2_imef', 't2_nogh'),
-    _t('1/12', 'l3_mnoefg', 'f_am', 't3_inoefg'),
-    _t('1/12', 'l3_mnoefg', 'f_ei', 't3_mnoafg'),
-    _t('1/4', 'l3_mnoefg', 'f_ji', 't2_jmef', 't2_noag'),
-    _t('-1/8', 'l3_mnoefg', 'v_aebh', 't2_imfg', 't2_nobh'),
-    _t('1/2', 'l3_mnoefg', 'v_aebh', 't2_imfh', 't2_nobg'),
-    _t('1/12', 'l3_mnoefg', 'v_aehi', 't3_mnofgh'),
-    _t('-1/4', 'l3_mnoefg', 'v_aehm', 't3_inofgh'),
-    _t('-1/4', 'l3_mnoefg', 'v_aemn', 't2_iofg'),
-    _t('1/24', 'l3_mnoefg', 'v_ajbh', 't2_ijef', 't3_mnobgh'),
-    _t('1/12', 'l3_mnoefg', 'v_ajbh', 't2_ijeh', 't3_mnobfg'),
-    _t('1/24', 'l3_mnoefg', 'v_ajbh', 't2_imbh', 't3_jnoefg'),
-    _t('-1/8', 'l3_mnoefg', 'v_ajbh', 't2_imef', 't3_jnobgh'),
-    _t('-1/4', 'l3_mnoefg', 'v_ajbh', 't2_imeh', 't3_jnobfg'),
-    _t('-1/24', 'l3_mnoefg', 'v_ajbh', 't2_jmbh', 't3_inoefg'),
-    _t('1/8', 'l3_mnoefg', 'v_ajbh', 't2_jmef', 't3_inobgh'),
-    _t('1/4', 'l3_mnoefg', 'v_ajbh', 't2_jmeh', 't3_inobfg'),
-    _t('-1/24', 'l3_mnoefg', 'v_ajbh', 't2_mnbh', 't3_ijoefg'),
-    _t('1/4', 'l3_mnoefg', 'v_ajbh', 't2_mneh', 't3_ijobfg'),
-    _t('-1/4', 'l3_mnoefg', 'v_ajhi', 't2_jmef', 't2_nogh'),
-    _t('-1/4', 'l3_mnoefg', 'v_ajhm', 't2_ijef', 't2_nogh'),
-    _t('1/2', 'l3_mnoefg', 'v_ajhm', 't2_inef', 't2_jogh'),
-    _t('1/2', 'l3_mnoefg', 'v_ajhm', 't2_ineh', 't2_jofg'),
-    _t('1/12', 'l3_mnoefg', 'v_ajim', 't3_jnoefg'),
-    _t('-1/12', 'l3_mnoefg', 'v_ajmn', 't3_ijoefg'),
-    _t('1/12', 'l3_mnoefg', 'v_efhi', 't3_mnoagh'),
-    _t('-1/4', 'l3_mnoefg', 'v_efim', 't2_noag'),
-    _t('1/2', 'l3_mnoefg', 'v_ejhi', 't2_jmaf', 't2_nogh'),
-    _t('1/4', 'l3_mnoefg', 'v_ejhi', 't2_jmfg', 't2_noah'),
-    _t('-1/2', 'l3_mnoefg', 'v_ejhi', 't2_jmfh', 't2_noag'),
-    _t('-1/4', 'l3_mnoefg', 'v_ejim', 't3_jnoafg'),
-    _t('1/24', 'l3_mnoefg', 'v_jkhi', 't2_jkae', 't3_mnofgh'),
-    _t('1/24', 'l3_mnoefg', 'v_jkhi', 't2_jkef', 't3_mnoagh'),
-    _t('1/24', 'l3_mnoefg', 'v_jkhi', 't2_jkeh', 't3_mnoafg'),
-    _t('-1/4', 'l3_mnoefg', 'v_jkhi', 't2_jmae', 't3_knofgh'),
-    _t('1/12', 'l3_mnoefg', 'v_jkhi', 't2_jmah', 't3_knoefg'),
-    _t('-1/4', 'l3_mnoefg', 'v_jkhi', 't2_jmef', 't3_knoagh'),
-    _t('-1/4', 'l3_mnoefg', 'v_jkhi', 't2_jmeh', 't3_knoafg'),
-    _t('1/8', 'l3_mnoefg', 'v_jkhi', 't2_mnae', 't3_jkofgh'),
-    _t('-1/24', 'l3_mnoefg', 'v_jkhi', 't2_mnah', 't3_jkoefg'),
-    _t('1/8', 'l3_mnoefg', 'v_jkhi', 't2_mneh', 't3_jkoafg'),
-    _t('-1/8', 'l3_mnoefg', 'v_jkim', 't2_jkef', 't2_noag'),
-    _t('1/2', 'l3_mnoefg', 'v_jkim', 't2_jnae', 't2_kofg'),
-    _t(-1, 'f_ai'),
-    _t('-1/2', 'v_amef', 't2_imef'),
-    _t('-1/2', 'v_mnei', 't2_mnae'),
+    _t(-1, 'l1_me', 'f_af', 't2_imef'),
+    _t(1, 'l1_me', 'f_ni', 't2_mnae'),
+    _t('1/2', 'l1_me', 'v_aefg', 't2_imfg'),
+    _t(1, 'l1_me', 'v_aeim'),
+    _t('-1/2', 'l1_me', 'v_anfg', 't3_imnefg'),
+    _t(-1, 'l1_me', 'v_anfi', 't2_mnef'),
+    _t(1, 'l1_me', 'v_anfm', 't2_inef'),
+    _t(1, 'l1_me', 'v_enfi', 't2_mnaf'),
+    _t('-1/2', 'l1_me', 'v_nofi', 't3_mnoaef'),
+    _t('1/2', 'l1_me', 'v_noim', 't2_noae'),
+    _t('1/4', 'l2_mnef', 'f_ag', 't3_imnefg'),
+    _t('-1/2', 'l2_mnef', 'f_am', 't2_inef'),
+    _t('-1/2', 'l2_mnef', 'f_ei', 't2_mnaf'),
+    _t('-1/4', 'l2_mnef', 'f_oi', 't3_mnoaef'),
+    _t('1/4', 'l2_mnef', 'v_aegh', 't3_imnfgh'),
+    _t('1/2', 'l2_mnef', 'v_aegi', 't2_mnfg'),
+    _t(-1, 'l2_mnef', 'v_aegm', 't2_infg'),
+    _t('1/4', 'l2_mnef', 'v_aogh', 't2_imef', 't2_nogh'),
+    _t(-1, 'l2_mnef', 'v_aogh', 't2_imeg', 't2_nofh'),
+    _t('1/4', 'l2_mnef', 'v_aogh', 't2_imgh', 't2_noef'),
+    _t('1/8', 'l2_mnef', 'v_aogh', 't2_ioef', 't2_mngh'),
+    _t('-1/2', 'l2_mnef', 'v_aogh', 't2_ioeg', 't2_mnfh'),
+    _t('-1/4', 'l2_mnef', 'v_aogi', 't3_mnoefg'),
+    _t('1/2', 'l2_mnef', 'v_aogm', 't3_inoefg'),
+    _t('1/2', 'l2_mnef', 'v_aoim', 't2_noef'),
+    _t('1/4', 'l2_mnef', 'v_aomn', 't2_ioef'),
+    _t('1/4', 'l2_mnef', 'v_efgi', 't2_mnag'),
+    _t('1/2', 'l2_mnef', 'v_eogi', 't3_mnoafg'),
+    _t(-1, 'l2_mnef', 'v_eoim', 't2_noaf'),
+    _t(1, 'l2_mnef', 'v_jogi', 't2_jnaf', 't2_moeg'),
+    _t('-1/2', 'l2_mnef', 'v_jogi', 't2_jnag', 't2_moef'),
+    _t('1/4', 'l2_mnef', 'v_jogi', 't2_joae', 't2_mnfg'),
+    _t('1/8', 'l2_mnef', 'v_jogi', 't2_joef', 't2_mnag'),
+    _t('-1/4', 'l2_mnef', 'v_jogi', 't2_joeg', 't2_mnaf'),
+    _t('-1/4', 'l2_mnef', 'v_joim', 't3_jnoaef'),
+    _t('-1/4', 'l3_mnoefg', 'f_ah', 't2_imef', 't2_nogh'),
+    _t('-1/12', 'l3_mnoefg', 'f_am', 't3_inoefg'),
+    _t('-1/12', 'l3_mnoefg', 'f_ei', 't3_mnoafg'),
+    _t('-1/4', 'l3_mnoefg', 'f_ji', 't2_jmef', 't2_noag'),
+    _t('1/8', 'l3_mnoefg', 'v_aebh', 't2_imfg', 't2_nobh'),
+    _t('-1/2', 'l3_mnoefg', 'v_aebh', 't2_imfh', 't2_nobg'),
+    _t('-1/12', 'l3_mnoefg', 'v_aehi', 't3_mnofgh'),
+    _t('1/4', 'l3_mnoefg', 'v_aehm', 't3_inofgh'),
+    _t('1/4', 'l3_mnoefg', 'v_aemn', 't2_iofg'),
+    _t('-1/24', 'l3_mnoefg', 'v_ajbh', 't2_ijef', 't3_mnobgh'),
+    _t('-1/12', 'l3_mnoefg', 'v_ajbh', 't2_ijeh', 't3_mnobfg'),
+    _t('-1/24', 'l3_mnoefg', 'v_ajbh', 't2_imbh', 't3_jnoefg'),
+    _t('1/8', 'l3_mnoefg', 'v_ajbh', 't2_imef', 't3_jnobgh'),
+    _t('1/4', 'l3_mnoefg', 'v_ajbh', 't2_imeh', 't3_jnobfg'),
+    _t('1/24', 'l3_mnoefg', 'v_ajbh', 't2_jmbh', 't3_inoefg'),
+    _t('-1/8', 'l3_mnoefg', 'v_ajbh', 't2_jmef', 't3_inobgh'),
+    _t('-1/4', 'l3_mnoefg', 'v_ajbh', 't2_jmeh', 't3_inobfg'),
+    _t('1/24', 'l3_mnoefg', 'v_ajbh', 't2_mnbh', 't3_ijoefg'),
+    _t('-1/4', 'l3_mnoefg', 'v_ajbh', 't2_mneh', 't3_ijobfg'),
+    _t('1/4', 'l3_mnoefg', 'v_ajhi', 't2_jmef', 't2_nogh'),
+    _t('1/4', 'l3_mnoefg', 'v_ajhm', 't2_ijef', 't2_nogh'),
+    _t('-1/2', 'l3_mnoefg', 'v_ajhm', 't2_inef', 't2_jogh'),
+    _t('-1/2', 'l3_mnoefg', 'v_ajhm', 't2_ineh', 't2_jofg'),
+    _t('-1/12', 'l3_mnoefg', 'v_ajim', 't3_jnoefg'),
+    _t('1/12', 'l3_mnoefg', 'v_ajmn', 't3_ijoefg'),
+    _t('-1/12', 'l3_mnoefg', 'v_efhi', 't3_mnoagh'),
+    _t('1/4', 'l3_mnoefg', 'v_efim', 't2_noag'),
+    _t('-1/2', 'l3_mnoefg', 'v_ejhi', 't2_jmaf', 't2_nogh'),
+    _t('-1/4', 'l3_mnoefg', 'v_ejhi', 't2_jmfg', 't2_noah'),
+    _t('1/2', 'l3_mnoefg', 'v_ejhi', 't2_jmfh', 't2_noag'),
+    _t('1/4', 'l3_mnoefg', 'v_ejim', 't3_jnoafg'),
+    _t('-1/24', 'l3_mnoefg', 'v_jkhi', 't2_jkae', 't3_mnofgh'),
+    _t('-1/24', 'l3_mnoefg', 'v_jkhi', 't2_jkef', 't3_mnoagh'),
+    _t('-1/24', 'l3_mnoefg', 'v_jkhi', 't2_jkeh', 't3_mnoafg'),
+    _t('1/4', 'l3_mnoefg', 'v_jkhi', 't2_jmae', 't3_knofgh'),
+    _t('-1/12', 'l3_mnoefg', 'v_jkhi', 't2_jmah', 't3_knoefg'),
+    _t('1/4', 'l3_mnoefg', 'v_jkhi', 't2_jmef', 't3_knoagh'),
+    _t('1/4', 'l3_mnoefg', 'v_jkhi', 't2_jmeh', 't3_knoafg'),
+    _t('-1/8', 'l3_mnoefg', 'v_jkhi', 't2_mnae', 't3_jkofgh'),
+    _t('1/24', 'l3_mnoefg', 'v_jkhi', 't2_mnah', 't3_jkoefg'),
+    _t('-1/8', 'l3_mnoefg', 'v_jkhi', 't2_mneh', 't3_jkoafg'),
+    _t('1/8', 'l3_mnoefg', 'v_jkim', 't2_jkef', 't2_noag'),
+    _t('-1/2', 'l3_mnoefg', 'v_jkim', 't2_jnae', 't2_kofg'),
+    _t(1, 'f_ai'),
+    _t('1/2', 'v_amef', 't2_imef'),
+    _t('1/2', 'v_mnei', 't2_mnae'),
 ]
 
 
@@ -384,3 +387,20 @@ def density(arrays, nocc):
 def gradient(arrays, nocc):
     '''G[a,i] of the table GRADIENT.'''
     return total(GRADIENT, arrays, nocc, 'ai')
+
+
+def gradient_blocks():
+    '''{block: [(coefficient, factors)]}: the terms of GRADIENT by the
+    block of dressed integrals in them - 'f.vo' for f[a,m], 'vo.vv' for
+    <am||ef> (the pairs of a block as the table has them: 'vv', 'vo' or
+    'oo').  With the integral taken out of a term, what is left is a
+    contraction of the densities of DENSITY with one index free; these
+    are all the contractions of densities with integrals that the orbital
+    gradient needs.'''
+    out = {}
+    for coef, factors in GRADIENT:
+        kind, ix = next(f for f in factors if f[0] in ('f', 'v'))
+        cls = ''.join('o' if c in OCC else 'v' for c in ix)
+        key = 'f.' + cls if kind == 'f' else cls[:2] + '.' + cls[2:]
+        out.setdefault(key, []).append((coef, factors))
+    return out
