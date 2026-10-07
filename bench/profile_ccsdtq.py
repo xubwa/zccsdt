@@ -12,6 +12,9 @@ usage: python bench/profile_ccsdtq.py MOLECULE BASIS KIND [NITER] [FROZEN]
   ZC_P=1: the (P) correction after the iterations (with the amplitudes as
           they are then: its cost does not depend on them);
           ZC_P_MAXMEM: max_memory of that step
+  ZC_Q=1: the (Q) correction of the CCSDT step
+  ZC_REAL=0: the spinors as the SCF left them (complex) also for a linear
+          molecule on the z axis (default: adapted to m_j, real)
 '''
 import os
 import sys
@@ -41,10 +44,13 @@ def main():
     cc = zccsdt.GCCSDTQ(mf, frozen=frozen or None)
     for x in (cc3, cc):
         x.verbose = 4
+        x.real_spinors = os.environ.get('ZC_REAL', '1') != '0'
         x.conv_tol, x.conv_tol_normt = 1e-10, 1e-7
         if os.environ.get('ZC_MAXMEM'):
             x.max_memory = float(os.environ['ZC_MAXMEM'])
     cc3.kernel()
+    if os.environ.get('ZC_Q'):
+        cc3.ccsdt_q()
     if niter:
         cc.max_cycle = niter
     cc._eris = cc3._eris
