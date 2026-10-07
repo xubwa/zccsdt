@@ -142,17 +142,19 @@ def _columns(no, nv, isz, batch_bytes):
             cols(nA, nP * nP, RING_PASSES), cols(nI, nQ * nQ, nI))
 
 
-def memory(no, nv, isz, batch_bytes=None):
+def memory(no, nv, isz, batch_bytes=None, r4=True, xv=True):
     '''Bytes that residual() allocates at most (its results included: the
     residual of T4 is one of them), for products of ``batch_bytes`` per
-    batch - the largest of its stages, each counted array by array.'''
+    batch - the largest of its stages, each counted array by array.
+    ``r4`` / ``xv`` False: the residual of T4 / the six-index intermediate
+    Xv are given to it (arrays of a scratch file) and not counted.'''
     batch_bytes = batch_bytes or BATCH_BYTES
     nP, nQ, nI3, nA3, nI, nA = _sizes(no, nv)
     c22, c13, cring, chh, cpp = _columns(no, nv, isz, batch_bytes)
     ov, n, nmv = no * nv, no + nv, max(no - 3, 1) * nv
     # the layouts of T2 and of the integrals, the results
     small = 3 * nP * nQ + 2 * no * no * nQ + 2 * nP * nv * nv + nP * nv * no + nv * no * nQ + n * n
-    res = nI * nA + nI3 * nA3 + nP * nQ
+    res = (nI * nA if r4 else 0) + nI3 * nA3 + nP * nQ
     t3 = no * nP * nA3 + 2 * nP * ov * nQ                   # T3 by rows, T3 on two groups, Z
     g = no * no * nP * nQ
     hs = nv * no * nI3 * nv
@@ -161,7 +163,7 @@ def memory(no, nv, isz, batch_bytes=None):
     wsmall = no ** 4 + 2 * no * no * nP + 3 * ov * ov + 2 * nP * nP + 2 * nP * ov
     first = small + res + t3 + g + w3 + no * nP * nv
     kept = small + res + t3 + y3 + xo + w3 + nP * ov + wsmall      # after the intermediates
-    xv = nP * nv * nA3
+    xv = nP * nv * nA3 if xv else 0
     rows_w = min(nQ, max(1, batch_bytes // (2 * isz * nv * nv)))
     stages = [
         first + 3 * nv * nP * nQ + 2 * no * nv * nv,                            # the pass over T3
@@ -211,11 +213,13 @@ class _Pool:
         self.arrays.clear()
 
 
-def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
+def residual(t2, T3, T4, ints, batch_bytes=None, only=None, out=None, xv=None):
     '''(R4, the T4 terms of R3, the T4 term of R2), all packed, from
     t2[i,j,a,b], the packed T3 [C(no,3), C(nv,3)] and T4 [C(no,4), C(nv,4)]
     and the dressed integrals ``ints`` (Dressed).  ``only``: the pieces to
-    evaluate (tests), of PIECES.'''
+    evaluate (tests), of PIECES.  ``out``: the array of R4, and ``xv``: that
+    of the intermediate Xv [C(no,2), nv, C(nv,3)] - arrays of a scratch file
+    when memory is short (T4 may be one as well); default: new arrays.'''
     def want(*pieces):
         return only is None or any(p in only for p in pieces)
     batch_bytes = batch_bytes or BATCH_BYTES
@@ -270,7 +274,11 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
     t2_xp = c_(t2[:, :, a2, b2])                                        # [i, m, (ab)]
     t2_px = c_(t2[i2, j2])                                              # [(ij), a, e]
 
-    R4 = np.zeros((nI, nA), dtype=dtype)
+    if out is None:
+        R4 = np.zeros((nI, nA), dtype=dtype)
+    else:
+        assert out.shape == (nI, nA) and out.dtype == dtype and out.flags.c_contiguous
+        R4 = P.zero(out)
     R3 = np.zeros((nI3, nA3), dtype=dtype)
     R2 = np.zeros((nP, nQ), dtype=dtype)
 
@@ -352,7 +360,11 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
     # ---- the part of Xv without T4, for all pairs: [(kl), e, (bcd)]
     if want('b2'):
         with timer('t4.xv'):
-            Xv = np.zeros((nP, nv, nA3), dtype=dtype)
+            if xv is None:
+                Xv = np.zeros((nP, nv, nA3), dtype=dtype)
+            else:
+                assert xv.shape == (nP, nv, nA3) and xv.dtype == dtype and xv.flags.c_contiguous
+                Xv = P.zero(xv)
             oovo_t = c_(oovo_pp.transpose(2, 1, 0))                             # [l, e, (mn)]
             vovv_ed = c_(vovv.transpose(2, 0, 1, 3)).reshape(nv * nv, no * nv)  # [(e d), (m f)]
             Wr_k = c_(Wr.transpose(3, 2, 1, 0)).reshape(no, nv * nv, no)        # [k, (e b), m]

@@ -264,11 +264,24 @@ def test_solver_plan():
     assert not incore.diis_file and incore.need > full.need + 15 * full.t4
     budgets = np.linspace(full.floor, incore.need * 1.05, 80)
     plans = [ccsdtq.plan(no, nv, isz, int(b)) for b in budgets]
+    files = lambda p: (p.t4_file, p.xv_file, p.r4_file)
     for a, b in zip(plans, plans[1:]):
         assert a.batch_bytes <= b.batch_bytes and a.diis_file >= b.diis_file
+        # out of the scratch file one after the other: the residual, Xv, T4 - then the batches grow
+        assert all(x >= y for x, y in zip(files(a), files(b))) and files(b) in (
+            (True, True, True), (True, True, False), (True, False, False), (False, False, False))
+        assert not b.t4_file or b.batch_bytes == plans[0].batch_bytes
     assert all(p.need <= b for p, b in zip(plans, budgets))
     assert plans[0].batch_bytes < 1.05 * T.min_batch_bytes(no, nv, isz) and plans[0].diis_file
+    assert files(plans[0]) == (True, True, True) and files(plans[-1]) == (False, False, False)
+    assert len({files(p) for p in plans}) == 4 and not any(files(full)) and not any(files(incore))
     assert plans[-1].batch_bytes == T.BATCH_BYTES and not plans[-1].diis_file
+    # everything in memory, whatever the budget: its own floor
+    assert incore.floor > full.floor + 16 * full.t4
+    with pytest.raises(MemoryError, match='CCSDTQ needs'):
+        ccsdtq.plan(no, nv, isz, incore.floor - 1, incore_complete=True)
+    tight = ccsdtq.plan(no, nv, isz, incore.floor, incore_complete=True)
+    assert not any(files(tight)) and not tight.diis_file and tight.batch_bytes < T.BATCH_BYTES
     # (the largest batch that fits: within the step of the search)
     mid = plans[len(plans) // 4]
     assert mid.need > 0.9 * budgets[len(plans) // 4] or mid.batch_bytes == T.BATCH_BYTES
@@ -319,3 +332,20 @@ def test_solver_memory():
         del r
     assert pl.diis_file and pl.batch_bytes < full.batch_bytes
     assert abs(energies[0] - energies[1]) < 1e-12
+    # at the floor T4, its residual and the six-index intermediate are arrays of a scratch
+    # file, a little above it only T4 and the intermediate: the same energy, and the arrays
+    # in ordinary memory within the plan
+    low = [ccsdtq.plan(no, nv, 8, int(b), step_bytes=step) for b in (full.floor, full.floor + 1.2 * full.t4)]
+    assert (low[0].t4_file, low[0].xv_file, low[0].r4_file) == (True, True, True)
+    assert (low[1].t4_file, low[1].xv_file, low[1].r4_file) == (True, True, False)
+    for pl in low:
+        gc.collect()
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        r = ccsdtq.kernel(eris, ccsdtq.Options(max_cycle=3, plan=pl), t1=r3.t1, t2=r3.t2, t3=r3.t3)
+        peak = tracemalloc.get_traced_memory()[1] - base
+        tracemalloc.stop()
+        assert peak <= pl.need - 0.9 * step, (peak, pl)
+        assert abs(r.e_corr - energies[0]) < 1e-12 and isinstance(r.t4, np.memmap)
+        assert abs(np.asarray(r.t4)).max() > 1e-4               # (still there after the file is closed)
+        del r

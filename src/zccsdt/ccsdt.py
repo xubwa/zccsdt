@@ -1192,8 +1192,11 @@ class GCCSDTQ(GCCSDT):
         pr.kv('memory', self._budget_text())
         plan = self.plan if isinstance(self.plan, ccsdtq.Plan) else ccsdtq.plan_for(
             eris, dtype, self.max_memory, self.diis_space, self.incore_complete)
-        pr.kv('memory plan', 'needs %s next to the integrals: T4, its residual and the six-index '
-              'intermediate in memory' % _size(plan.need))
+        filed = [name for name, on in (('T4', plan.t4_file), ('the six-index intermediate', plan.xv_file),
+                                       ('the residual of T4', plan.r4_file)) if on]
+        pr.kv('memory plan', 'needs %s next to the integrals: %s' % (
+            _size(plan.need), 'T4, its residual and the six-index intermediate in memory' if not filed
+            else 'memory is short - %s in a scratch file' % ', '.join(filed)))
         pr.kv('batches', 'products of the T4 equation in batches of %s%s'
               % (_size(plan.batch_bytes), '' if plan.mem_mb in (None, 2000.0) else
                  '; the CCSDT step with buffers of %.0f MB' % plan.mem_mb), indent=3)

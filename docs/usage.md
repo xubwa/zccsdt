@@ -212,10 +212,13 @@ taken as they are (complex).
   counts orbitals per spin, as in the CCSDT class of that reference.
 - What does not fit: the plans of the three steps follow `max_memory` (the
   products in more batches, DIIS vectors in the scratch file,
-  intermediates for a few indices at a time); T4 itself, its residual and
-  the six-index intermediate of the T4 equation are held in memory, and
-  below that the calculation stops with a MemoryError that says how much
-  is missing.
+  intermediates for a few indices at a time).  If T4, its residual and the
+  six-index intermediate of the T4 equation do not fit either, they become
+  arrays of a scratch file - T4 first, then the intermediate, then the
+  residual - which the operating system pages in and out: slow, but the
+  calculation runs; the report says which.  Below the floor (the batches
+  of the products at their smallest) it stops with a MemoryError that says
+  how much is missing.
 
 ### Integrals from another program, and for another program
 

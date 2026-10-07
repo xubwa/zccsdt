@@ -24,6 +24,7 @@ import numpy as np
 from zccsdt import memory
 from zccsdt.cc import ccsd, ccsdt_opt, solver, t4engine, t4pack as P
 from zccsdt.cc.diis import DIIS, INCORE_SIZE
+from zccsdt.scratch import Scratch
 from zccsdt.timing import timer
 
 
@@ -55,6 +56,9 @@ class Plan:
     floor: int                  # the least that a calculation takes
     t4: int                     # bytes of T4
     mem_mb: float = None        # batch buffers of the CCSDT step (None: as the options say)
+    r4_file: bool = False       # the residual of T4 in a scratch file
+    xv_file: bool = False       # the six-index intermediate of the engine in the scratch file
+    t4_file: bool = False       # T4 in the scratch file
 
 
 def _dressed_bytes(no, nv, isz):
@@ -67,68 +71,83 @@ def _dressed_bytes(no, nv, isz):
 def plan(nocc, nvir, isz, budget=None, diis_space=8, incore_complete=False, step_bytes=0, step_need=None,
          mem_mb=2000.0):
     '''The Plan for ``budget`` bytes of ordinary memory (None: no limit).
-    T4, its residual and the six-index intermediate Xv of the engine are
-    held in memory: that, with the smallest batches, the smallest buffers of
-    the CCSDT step and the DIIS vectors in the scratch file, is the floor
-    (MemoryError below it).  From there the batches of the engine grow, up
-    to their default; then the buffers of the CCSDT step, up to ``mem_mb``;
+
+    With enough memory T4, its residual and the six-index intermediate Xv
+    of the engine are held in memory.  With less they are arrays of a
+    scratch file, which the operating system pages in and out - T4 first
+    (the engine only reads it), then Xv, then the residual, which every
+    product adds to: slow, and what there is for when nothing else fits.
+    The floor (MemoryError below it) is the batches of the engine at their
+    smallest, what it makes of T3, and the CCSDT step with its smallest
+    buffers.  Above the three arrays the batches of the engine grow, up to
+    their default; then the buffers of the CCSDT step, up to ``mem_mb``;
     with what is left then the DIIS vectors of T4 stay in memory
-    (``incore_complete``: in any case) - one after the other, so that no
-    part of a plan shrinks when the budget grows.  What the CCSDT step
-    takes: ``step_need(mem_mb)`` bytes (its own plan for these buffers), or
-    ``step_bytes`` whatever the buffers.'''
-    t4 = isz * comb(nocc, 4) * comb(nvir, 4)
+    (``incore_complete``: everything in memory in any case) - one after the
+    other, so that no part of a plan shrinks when the budget grows.  What
+    the CCSDT step takes: ``step_need(mem_mb)`` bytes (its own plan for
+    these buffers), or ``step_bytes`` whatever the buffers.'''
+    nI, nA = comb(nocc, 4), comb(nvir, 4)
+    t4 = isz * nI * nA
     t3 = isz * comb(nocc, 3) * comb(nvir, 3)
+    xv = isz * comb(nocc, 2) * nvir * comb(nvir, 3)
     if step_need is None:
         def step_need(mb):
             return step_bytes
     least_mb = min(mem_mb, STEP_MB)
     step_lo = step_need(least_mb)
-    rest_fixed = t4 + t3 + _dressed_bytes(nocc, nvir, isz)
+    rest_fixed = t3 + _dressed_bytes(nocc, nvir, isz)
     lo, top = t4engine.min_batch_bytes(nocc, nvir, isz), t4engine.BATCH_BYTES
     top = max(lo, top)
     diis = 2 * diis_space * (t4 + t3)
-    pinned = diis if incore_complete else 0
-    floor = step_lo + rest_fixed + t4engine.memory(nocc, nvir, isz, lo) + pinned
 
-    def engine(batch):
-        return t4engine.memory(nocc, nvir, isz, batch)
+    def engine(batch, r4=True, xv_in=True):
+        return t4engine.memory(nocc, nvir, isz, batch, r4, xv_in)
+    # the least with the three arrays in the file, then with the residual, Xv and T4 in memory
+    f0 = step_lo + rest_fixed + engine(lo, False, False)
+    f_r4, f_xv, f_t4 = f0 + t4, f0 + t4 + xv, f0 + 2 * t4 + xv
+    floor = f_t4 + diis if incore_complete else f0
+    r4_file = xv_file = t4_file = False
     if budget is None:
         batch, mb = top, mem_mb
-        on_file = not incore_complete and comb(nocc, 4) * comb(nvir, 4) >= INCORE_SIZE
+        on_file = not incore_complete and nI * nA >= INCORE_SIZE
     else:
         if budget < floor:
             raise MemoryError(
                 'CCSDTQ needs %.0f MB besides the integrals for %d occupied and %d virtual spin orbitals '
-                '(T4 and its residual: %.0f MB each); %.0f MB are left'
-                % (floor / 1e6, nocc, nvir, t4 / 1e6, budget / 1e6))
-        rest = budget - step_lo - rest_fixed - pinned
-        # the largest batch that fits: memory() grows with it
-        if engine(top) <= rest:
-            batch = top
-        else:
-            batch, hi = lo, top
-            while hi - batch > max(1 << 16, batch // 64):
-                mid = (batch + hi) // 2
-                if engine(mid) <= rest:
-                    batch = mid
-                else:
-                    hi = mid
-        mb = least_mb
-        if batch == top and mem_mb > least_mb:
-            room = rest - engine(top) + step_lo
-            if step_need(mem_mb) <= room:
-                mb = mem_mb
+                '%s(T4 and its residual: %.0f MB each); %.0f MB are left'
+                % (floor / 1e6, nocc, nvir, '' if incore_complete else
+                   'with T4, its residual and the six-index intermediate in scratch files ', t4 / 1e6, budget / 1e6))
+        r4_file, xv_file, t4_file = budget < f_r4, budget < f_xv, budget < f_t4
+        batch, mb, on_file = lo, least_mb, True
+        if not t4_file:
+            rest = budget - step_lo - rest_fixed - t4 - (diis if incore_complete else 0)
+            # the largest batch that fits: memory() grows with it
+            if engine(top) <= rest:
+                batch = top
             else:
-                a, b = least_mb, mem_mb
-                for _ in range(24):
-                    mid = 0.5 * (a + b)
-                    a, b = (mid, b) if step_need(mid) <= room else (a, mid)
-                mb = a
-        on_file = not incore_complete and not (
-            batch == top and mb == mem_mb and step_need(mb) + rest_fixed + engine(batch) + diis <= budget)
-    need = step_need(mb) + rest_fixed + engine(batch) + (0 if on_file else diis)
-    return Plan(int(batch), bool(on_file), int(need), int(floor), int(t4), float(mb))
+                hi = top
+                while hi - batch > max(1 << 16, batch // 64):
+                    mid = (batch + hi) // 2
+                    if engine(mid) <= rest:
+                        batch = mid
+                    else:
+                        hi = mid
+            if batch == top and mem_mb > least_mb:
+                room = rest - engine(top) + step_lo
+                if step_need(mem_mb) <= room:
+                    mb = mem_mb
+                else:
+                    a, b = least_mb, mem_mb
+                    for _ in range(24):
+                        mid = 0.5 * (a + b)
+                        a, b = (mid, b) if step_need(mid) <= room else (a, mid)
+                    mb = a
+            on_file = not incore_complete and not (
+                batch == top and mb == mem_mb and step_need(mb) + rest_fixed + t4 + engine(batch) + diis <= budget)
+    need = (step_need(mb) + rest_fixed + (0 if t4_file else t4) + engine(batch, not r4_file, not xv_file)
+            + (0 if on_file else diis))
+    return Plan(int(batch), bool(on_file), int(need), int(floor), int(t4), float(mb), bool(r4_file), bool(xv_file),
+                bool(t4_file))
 
 
 def plan_for(eris, dtype, max_memory=None, diis_space=8, incore_complete=False, mem_mb=2000.0):
@@ -179,7 +198,6 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     nI3, nA3, nI, nA = comb(nocc, 3), comb(nvir, 3), comb(nocc, 4), comb(nvir, 4)
     t1, t2 = t1.astype(dtype), t2.astype(dtype)
     T3 = np.zeros(nI3 * nA3, dtype=dtype) if t3 is None else np.array(t3, dtype=dtype).ravel()
-    T4 = np.zeros((nI, nA), dtype=dtype) if t4 is None else np.array(t4, dtype=dtype).reshape(nI, nA)
     mo_e = np.asarray(eris.mo_energy)
     eo, ev = mo_e[:nocc], mo_e[nocc:]
     d2 = eo[P.tuples(nocc, 2)].sum(axis=1)[:, None] - ev[P.tuples(nvir, 2)].sum(axis=1)[None, :]
@@ -187,6 +205,24 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     eo4, ev4 = eo[P.tuples(nocc, 4)].sum(axis=1), P.tuple_sums(ev, 4)
     pl = opts.plan or plan_for(eris, dtype, opts.max_memory, opts.diis_space, opts.incore_complete, opts.mem_mb)
     mem_mb = opts.mem_mb if pl.mem_mb is None else pl.mem_mb
+    # T4, and with too little memory T4, the intermediate Xv and the residual as arrays of a
+    # scratch file (new file space reads as zeros)
+    scr = r4_buf = xv_buf = None
+    if pl.t4_file or pl.r4_file or pl.xv_file:
+        scr = Scratch(prefix='zccsdt_t4_', what='T4, its residual and the six-index intermediate',
+                      hint=' or give the calculation more memory (max_memory)')
+        if pl.r4_file:
+            r4_buf = scr.create('r4', (nI, nA), dtype)
+        if pl.xv_file:
+            xv_buf = scr.create('xv', (comb(nocc, 2), nvir, comb(nvir, 3)), dtype)
+    if pl.t4_file:
+        T4 = scr.create('t4', (nI, nA), dtype)
+        if t4 is not None:
+            src = np.asarray(t4).reshape(nI, nA)
+            for I in range(nI):
+                T4[I] = src[I]
+    else:
+        T4 = np.zeros((nI, nA), dtype=dtype) if t4 is None else np.array(t4, dtype=dtype).reshape(nI, nA)
     step = solver.Options(mem_mb=mem_mb)                        # (of the CCSDT step: no level shift)
     step_plan = ccsdt_opt.plan_for(eris, dtype, solver.Options(mem_mb=mem_mb, incore_complete=True))
     adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=not pl.diis_file,
@@ -201,7 +237,7 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
             with timer('ccsdtq.dress'):
                 ints = t4engine.Dressed.from_eris(eris, t1)
             with timer('ccsdtq.t4'):
-                R4, r3, r2 = t4engine.residual(t2, T3, T4, ints, pl.batch_bytes)
+                R4, r3, r2 = t4engine.residual(t2, T3, T4, ints, pl.batch_bytes, out=r4_buf, xv=xv_buf)
             del ints
             with timer('ccsdtq.update'):
                 t2n = t2n + P.unpack(r2 / d2, nocc, nvir, 2)
@@ -239,5 +275,7 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
                 break
     finally:
         adiis.close()
+        if scr is not None:
+            scr.close()                 # (a mapped T4 stays valid: the file is unlinked, not gone)
     return Result(e_corr=float(np.real(e_old)), e_tot=eris.e_hf + float(np.real(e_old)), converged=conv,
                   ncycle=cycle + 1, t1=t1, t2=t2, t3=T3, t4=T4, timings=timings, plan=pl)
