@@ -35,6 +35,14 @@ add_library(zc_psym SHARED psym.c)
 target_compile_options(zc_psym PRIVATE -O3 -march=native -fcx-limited-range)
 target_link_libraries(zc_psym PUBLIC OpenMP::OpenMP_C m)
 set_target_properties(zc_psym PROPERTIES
+
+# the T4 equation of CCSDTQ in blocks of a symmetry label
+# (zccsdt/cc/t4engine_sym.py): its matrix products go through the GEMM of
+# zc_ccsdt_t3, which is passed in - no BLAS is linked here
+add_library(zc_t4sym SHARED t4sym.c)
+target_compile_options(zc_t4sym PRIVATE -O3 -march=native -fcx-limited-range)
+target_link_libraries(zc_t4sym PUBLIC OpenMP::OpenMP_C m)
+set_target_properties(zc_t4sym PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
 
 # kernels of the spinor CCSD amplitude equations (zccsdt/zccsd/amps.py) and of
