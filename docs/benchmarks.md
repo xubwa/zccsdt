@@ -3273,6 +3273,30 @@ symmetry, no spin.
   zccsdt with its defaults (batches of 1 GB, the DIIS vectors of T4 in
   memory; less with `max_memory`, at the prices of the next section).
 
+### (Q) in symmetry sectors
+
+A linear molecule on the z axis: every spinor has the label 2 m_j, and the
+products of (Q) are formed in the blocks that the labels allow
+(`zccsdt.cc.quadruples_sym`; on by default where the integrals carry
+labels, `symmetry`).  HBr, X2C, 28 frozen, all virtual spinors; c-node of
+job 31718597, 8 cores, the two codes one after the other on the same
+amplitudes, zccsdt 03c2889.
+
+| | Active spinors | Dense | Sectors | Ratio | Peak memory: dense, sectors |
+|---|---|---|---|---|---|
+| cc-pVTZ-DK | 8 + 78 | 4.47 s | 1.35 s | 3.3 | 1.3 GB, 0.6 GB |
+| cc-pVQZ-DK | 8 + 160 | 94.8 s | 13.5 s | 7.0 | 12.9 GB, 4.5 GB |
+
+- E[Q] and E(Q) of the two codes differ by less than 1e-17 Eh.
+- The multiplications of the products in blocks are 2 % (TZ) and 1.5 % (QZ)
+  of the dense count; the time is a third and a seventh.  3.8 and 5.6 of the
+  8 cores are busy in the sector code, 6.9 and 7.6 in the dense one: the
+  blocks are picked and stacked in Python on one thread.
+- CCSDT itself is still dense: 0.69 s (TZ) and 11.6 s (QZ) per iteration,
+  so that the iterations are now nearly all of a CCSDT(Q) calculation.
+- Other labels: +1 and -1 modulo 4 (the two fermion irreps of C2) for
+  integrals in Kramers pairs (`zccsdt.dirac`); the same code, not timed.
+
 ### Complex spinors, larger cases, less memory
 
 zccsdt alone, the same node and batch (jobs 31703734 and 31703874), 8
