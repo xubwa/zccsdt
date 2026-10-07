@@ -108,7 +108,7 @@ def _fixed(no, nv, isz):
     # the tables of the occupied tuples and of their splits, the sums of orbital energies
     tables = comb(no, 4) * 210 + 9 * (no * nI3 + nP * nP + no * nP) + 51 * nI3 + 8 * nA
     work = 8 * (nv + no) * nQ + 6 * no * (nv + nA3) + 3 * nA              # stacked operands, r and z
-    xo = 3 * no * no * nP * nv * nv
+    xo = no * nP * (nQ + no) + nP * nv * nv + 3 * nI3 * nQ + 2 * nP * nQ
     return isz * (amps + ints) + tables + SLACK, isz * work, isz * xo
 
 
@@ -118,10 +118,11 @@ def _variable(no, nv, isz, cols22, cols13, xv, rows):
 
 
 def plan(no, nv, isz, budget=None, batch_bytes=None):
-    '''The Plan for ``budget`` bytes (None: no limit): first the products in
-    PASSES batches of columns, then Xv for all x at once, then the products
-    in fewer batches (of ``batch_bytes`` at most), then more rows per step
-    of Xv.  MemoryError below the floor: PASSES batches and Xv for three x.'''
+    '''The Plan for ``budget`` bytes (None: no limit).  The floor - below it
+    MemoryError - is the products in PASSES batches of columns and Xv for
+    three x; from there first Xv for more x, up to all, then the products in
+    fewer batches (of ``batch_bytes`` at most), then more rows per step of
+    the formation of Xv.'''
     batch_bytes = batch_bytes or BATCH_BYTES
     nP, nQ, nI3, nA3, nA = _sizes(no, nv)
     base, work, xo = _fixed(no, nv, isz)
@@ -139,17 +140,22 @@ def plan(no, nv, isz, budget=None, batch_bytes=None):
         if budget < floor:
             raise MemoryError('(Q) needs %.0f MB besides T3 and the integrals for %d occupied and %d '
                               'virtual spin orbitals; %.0f MB are left' % (floor / 1e6, no, nv, budget / 1e6))
+        # one after the other, each to its top before the next starts (so that
+        # no part of a plan shrinks when the budget grows)
         rest = budget - base - least
         per_x = isz * nv * (nA3 + 2 * nv)
         xv = int(min(xfull, 3 + rest // per_x))
-        rest -= (xv - 3) * per_x
-        # the two products grow together, by the same fraction of what they lack
-        lack = isz * (nQ * (top22 - min22) + nv * (top13 - min13))
-        frac = 1.0 if lack <= rest else rest / lack
-        cols22 = int(min22 + frac * (top22 - min22))
-        cols13 = int(min13 + frac * (top13 - min13))
-        rest -= isz * (nQ * (cols22 - min22) + nv * (cols13 - min13))
-        rows = int(max(1, min(top_rows, 1 + rest // (isz * nv * nv * (1 + xv)))))
+        cols22, cols13, rows = min22, min13, 1
+        if xv == xfull:
+            rest -= (xv - 3) * per_x
+            # the two products grow together, by the same fraction of what they lack
+            lack = isz * (nQ * (top22 - min22) + nv * (top13 - min13))
+            if rest >= lack:
+                cols22, cols13 = top22, top13
+                rows = int(min(top_rows, 1 + (rest - lack) // (isz * nv * nv * (1 + xv))))
+            else:
+                cols22 = int(min22 + rest / lack * (top22 - min22))
+                cols13 = int(min13 + rest / lack * (top13 - min13))
     return explicit_plan(no, nv, isz, cols22, cols13, xv, rows)
 
 
@@ -203,13 +209,21 @@ class Quadruples:
         self.t2_xp = np.ascontiguousarray(t2[:, :, a2, b2], dtype=dtype)                # [i, m, (ab)]
         self.t2_px = np.ascontiguousarray(t2[i2, j2].transpose(0, 2, 1), dtype=dtype)   # [(ij), e, a]
         with timer('q.xo'):
-            G = 0.5 * _E('mnJ,nlQ->mlJQ', np.asarray(eris.oooo)[:, :, i2, j2], self.t2_xp)
-            K = _E('mdel,Jce->mlJcd', np.asarray(eris.ovvo), t2[i2, j2])
-            G += (K - K.transpose(0, 1, 2, 4, 3))[..., a2, b2]
-            del K
-            # [m, l, (jk), (cd)] -> [(jkl), m, (cd)]
-            self.Xo = np.ascontiguousarray(P.fold(G, P.split(no, 1, 2), 1, 2), dtype=dtype)
-            del G
+            # Xo[(jkl), m, (cd)], for one m at a time: G[l, (jk), (cd)] and P(l/jk) of it
+            self.Xo = np.empty((comb(no, 3), no, nQ), dtype=dtype)
+            oooo_t = np.ascontiguousarray(np.asarray(eris.oooo)[:, :, i2, j2].transpose(0, 2, 1), dtype=dtype)
+            ovvo = np.asarray(eris.ovvo)
+            t2_pc = np.ascontiguousarray(t2[i2, j2], dtype=dtype).reshape(len(i2) * nv, nv)     # [(jk) c, e]
+            G = np.empty((no, len(i2), nQ), dtype=dtype)
+            for m in range(no):
+                for l in range(no):
+                    # sum_e t(jk,ce) <md||el> as [(jk), c, d], then c < d of its antisymmetric part
+                    K = gemm(t2_pc, np.ascontiguousarray(ovvo[m, :, :, l].T, dtype=dtype)).reshape(-1, nv, nv)
+                    np.subtract(K[:, a2, b2], K[:, b2, a2], out=G[l])
+                    # + 1/2 sum_n <mn||jk> t(nl,cd)
+                    gemm(oooo_t[m], self.t2_xp[:, l], G[l], alpha=0.5, beta=1.0)
+                self.Xo[:, m] = P.fold(G, self.so12, 0, 1)
+            del G, K, oooo_t, t2_pc
         # the work arrays of one quadruple (after the arrays that Xo is formed with)
         self.w22 = np.empty(nQ * pl.cols22, dtype=dtype)
         self.z = np.empty(nA, dtype=dtype)
