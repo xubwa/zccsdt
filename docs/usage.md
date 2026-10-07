@@ -162,8 +162,9 @@ e_p = myq.ccsdtq_p()                    # (P): e_p, e_tot_p = E(CCSDTQ(P))
 ```
 
 All of it works on spin orbitals or spinors without spin blocks, with real
-or complex integrals, and uses no point-group symmetry.  T3 and T4 are
-stored on their unique blocks (i<j<k(<l), a<b<c(<d)).
+or complex integrals.  T3 and T4 are stored on their unique blocks
+(i<j<k(<l), a<b<c(<d)); the symmetry that is used is that of a linear
+molecule (below).
 
 `frozen` is a number - the lowest occupied spinors - or, as in PySCF, a list
 of spinor indices: the occupied ones in it are frozen and the virtual ones
@@ -191,7 +192,24 @@ closed shells and to open shells whose SCF kept the symmetry of the axis
 (the doublet of BeH from `pyscf.x2c.UHF` on the axis did not); for every
 other molecule and orientation, or with `real_spinors = False`, the
 spinors are taken as they are and the calculation is complex - the general
-case, and the one the timings of `docs/benchmarks.md` are about.
+case, and the one most timings of `docs/benchmarks.md` are about.
+
+With these spinors every one of them has a label that adds, 2 m_j, and an
+integral or an amplitude vanishes unless the labels of its upper indices sum
+to those of its lower ones.  The classes use that (`symmetry`, default
+`True`): the spinors are put in the order of their labels, T3 and T4 are
+stored and the equations of CCSDT and CCSDTQ are worked in the blocks that
+conserve the label (`zccsdt.cc.t3engine`, `t4engine_sym`, `ccsdtq_sym`), and
+(Q) and (P) form their products in those blocks (`quadruples_sym`,
+`pentuples_sym`).  The report says so (`T4 ... in the blocks of the
+labels`, `symmetry ... the products in blocks`); the energies are those of
+the dense code, which `symmetry = False` runs.  Where the blocks do not fit
+the memory, the dense code with its plans is taken.  Integrals in Kramers
+pairs from `zccsdt.dirac` carry the two labels of C2 (modulo 4): (Q) and (P)
+use them, the iterations do not.  What is not used: the pairing of the
+amplitudes of a closed shell under time reversal, and the point groups of
+other molecules (their spinors would have to come from an SCF that keeps the
+symmetry).
 
 - **(Q)** (`zccsdt.cc.quadruples`) is the correction of Bomble, Stanton,
   Kallay and Gauss for canonical Hartree-Fock orbitals: `e_q5` is its
@@ -309,13 +327,14 @@ everything in the directory they run in.  What is read: `JOBARC` and
 
 - `ABCDTYPE=STANDARD`: only then does `xx2cvtran` transform and write
   `<ab||cd>` (`moinpppp`); with `ABCDTYPE=AOBASIS` CFOUR's CCSD contracts
-  the AO integrals and the file is never made.  **This needs an
-  `xx2cvtran` built from sources that contain `x2cvtran/vsort.f90` and
-  `vtranso2.f90`.**  The binary installed in `~/apps/cfour-x2cso/bin`
-  (April 2026) is older than these files of its source tree (August 2026):
-  it takes the AO path whatever `ABCDTYPE` says and writes no `moinpppp`,
-  and `from_cfour()` then stops with a message that says so.  Everything
-  else is in the files of that binary too.
+  the AO integrals and the file is never made.  It needs an `xx2cvtran`
+  built from sources that contain `x2cvtran/vsort.f90` and `vtranso2.f90`
+  (the x2cso branch since August 2026; `~/apps/cfour-x2cso/bin` was rebuilt
+  from it on 2026-10-07): an older binary takes the AO path whatever
+  `ABCDTYPE` says, and `from_cfour()` then stops with a message that says
+  so.  Checked with the rebuilt programs for H2O / STO-3G: `<ab||cd>` of the
+  file against PySCF's integrals over CFOUR's spinors to 6e-15, and CCSD
+  solved here on the files equal to `xx2cccsd` (-0.049502919581 Eh).
 - `SYM=OFF`, `RELATIVISTIC=X2C1E`, `X2CKEY=SOATMX`, `BASIS=SPECIAL` with
   one line per atom after the keywords, as for CFOUR's own CCSD.
 - frozen core as `DROPMO=1>n` (n Kramers pairs), virtual spinors above an

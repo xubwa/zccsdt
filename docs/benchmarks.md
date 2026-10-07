@@ -3330,6 +3330,35 @@ node was shared with other jobs (load 40).
   latter only the allowed elements are computed), Xo and the layouts of T2
   and of the integrals with two virtual indices.
 
+### CCSDT and CCSDTQ in blocks of the labels
+
+The iterations with T3 and T4 stored on the blocks that conserve 2 m_j
+(`zccsdt.cc.t3engine` for any number of classes; `t4engine_sym`,
+`ccsdtq_sym`), against the dense iterations, to convergence, the energies
+equal to 1e-15 Eh (CCSDT) and 4e-12 Eh (CCSDTQ, two separately converged
+runs).  HBr, X2C, 28 frozen, c387 (2 x Xeon Gold 6248R), 8 cores; CCSDT in
+job 31722389 (zccsdt 37f6f07), CCSDTQ in job 31725936 (e8501eb), dense
+first or second in the same job.
+
+| | Active spinors | CCSDT iteration: dense, blocks | T3 elements: dense, blocks | CCSDTQ iteration: dense, blocks | Peak memory of CCSDTQ: dense, blocks |
+|---|---|---|---|---|---|
+| cc-pVDZ-DK | 8 + 28 | | 183,456; 31,820 | 0.59 s, 0.20 s | 1.1 GB, 0.4 GB |
+| cc-pVTZ-DK, 38 virtual | 8 + 38 | | | 1.58 s, 0.36 s | 3.4 GB, 0.6 GB |
+| cc-pVTZ-DK | 8 + 78 | 0.85 s, 0.36 s | 4.26 M; 0.62 M | 33.9 s, 3.37 s | 21.1 GB, 4.1 GB |
+| cc-pVQZ-DK | 8 + 160 | 13.8 s, 2.58 s | 37.5 M; 4.70 M | not run; 70.7 s | -; 14.3 GB |
+
+- Ratios: 2.4 and 5.3 for the CCSDT iteration (TZ, QZ), 2.9, 4.4 and 10.1
+  for the CCSDTQ iteration.  The QZ line of CCSDTQ is three iterations of
+  the block code alone: the dense one does not fit 30 GB there.
+- The whole CCSDT(Q) at QZ: 16 iterations and (Q) in 58 s for 327 s.
+- What is still dense in both: the CCSD part, the T1 dressing of the
+  integrals and the intermediates of T2 (the size of T2 times a few
+  indices) - at TZ they are most of a CCSDT iteration in blocks, and 2 to 5
+  of the 8 cores are busy at the small sizes.
+- Below its memory floor the block solver of CCSDTQ raises MemoryError and
+  the front end takes the dense solver with its scratch files; (P) reads T4
+  packed, so that the blocks are expanded once for it.
+
 ### Complex spinors, larger cases, less memory
 
 zccsdt alone, the same node and batch (jobs 31703734 and 31703874), 8
