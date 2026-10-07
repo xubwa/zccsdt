@@ -615,22 +615,20 @@ def molecule(directory='.'):
 
 
 def reference(directory='.'):
-    '''CFOUR's SCF as a PySCF object without an SCF calculation here: the
-    molecule (molecule()), CFOUR's spinors in PySCF's spinor basis
-    (scf2ccmo; socutils maps the basis), their energies and occupations and
-    CFOUR's SCF energy.  The one-electron Hamiltonian is PySCF's X2C-1e -
-    what the Fock matrix of the AO-driven CCSD is made with -, which is
-    CFOUR's RELATIVISTIC=X2C1E; with an atomic mean-field section
-    (%amfimethod) this is not the Hamiltonian of the run and is refused.'''
+    '''CFOUR's SCF as a PySCF object without an SCF calculation here, and
+    with nothing of the Hamiltonian made here: the molecule (molecule()),
+    CFOUR's spinors in PySCF's spinor basis (scf2ccmo; socutils maps the
+    basis), their energies (scf2ceig), occupations and the SCF energy.  The
+    one-electron Hamiltonian of the object is the one that gives CFOUR's
+    Fock matrix with these spinors, h = S C e C+ S - G(D): whatever CFOUR's
+    was (X2C-1e, atomic mean field, ...), as long as its two-electron
+    operator is the bare Coulomb operator.  Returns (mf, frozen occupied
+    spinors, dropped virtual spinors).'''
     from pyscf import x2c
     try:
         from socutils.tools.label import Labels
     except ImportError as err:
         raise ImportError('socutils is needed to map CFOUR\'s spinor basis to PySCF\'s (socutils.tools.label)') from err
-    keywords, sections = parse_zmat(os.path.join(directory, 'ZMAT'))
-    if keywords.get('RELATIVISTIC', '').upper() != 'X2C1E' or 'amfimethod' in sections:
-        raise NotImplementedError('%s: only RELATIVISTIC=X2C1E without %%amfiMethod is taken on CFOUR\'s spinors '
-                                  'by the AO-driven CCSD' % directory)
     mol = molecule(directory)
     n = mol.nao_2c()
     ntot = int(_record(os.path.join(directory, 'nmototal'), _I8)[0])
@@ -650,6 +648,9 @@ def reference(directory='.'):
     ndropped = int(arc.get('NUMVIRTA', default=[0])[0])
     mf.mo_occ = (np.arange(n) < mol.nelectron).astype(float)
     mf.e_tot, mf.converged = float(arc.get('SCFENEG', _F8)[0]), True
+    SC = S @ C
+    hcore = (SC * mf.mo_energy) @ SC.conj().T - mf.get_veff(mol, mf.make_rdm1(C, mf.mo_occ))
+    mf.get_hcore = lambda *args, **kwargs: hcore
     return mf, nfrozen, ndropped
 
 
