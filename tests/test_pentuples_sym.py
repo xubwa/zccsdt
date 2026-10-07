@@ -1,10 +1,13 @@
 '''(P) in symmetry sectors (zccsdt.cc.pentuples_sym) against the dense code
 (zccsdt.cc.pentuples): HBr with X2C spinors and the labels 2 m_j of the
-front end, the same labels modulo 4, one label, complex amplitudes; the
-intermediates in blocks against those of the dense code; the memory plan.
+front end, the same labels modulo 4, one label, complex amplitudes; random
+integrals with labels of several kinds; the intermediates in blocks against
+those of the dense code; the memory plan; converged CCSDTQ amplitudes with
+the spin projection as the label against MRCC.
 
-(P) is a function of the amplitudes it is given: T2 here is that of second
-order, T3 and T4 are random numbers on the elements that the labels allow.'''
+(P) is a function of the amplitudes it is given: for HBr T2 is that of
+second order, T3 and T4 are random numbers on the elements that the labels
+allow.'''
 import copy
 import gc
 import tracemalloc
@@ -125,6 +128,40 @@ def test_random_labels(no, nv, cplx, modulus, labels):
         # (real amplitudes of the higher ranks with complex integrals)
         ref = PT.kernel(eris, t2, t3.real, t4.real)
         assert abs(PS.kernel(eris, t2, t3.real, t4.real) - ref) < 1e-12 * abs(ref)
+
+
+def test_ccsdtq_amplitudes_and_mrcc():
+    """Converged CCSDTQ amplitudes of BH / STO-3G on spin orbitals, with the
+    spin projection as the label (+1 and -1, no modulus): CCSDTQ(P) of the
+    dense code and of MRCC."""
+    import json
+    import os
+    from pyscf import scf
+    from zccsdt import eris as E
+    from zccsdt.cc import ccsdtq
+    from zccsdt.genbas import read_genbas
+    root = os.path.join(os.path.dirname(__file__), '..', 'bench', 'refs')
+    ref = json.load(open(os.path.join(root, 'reference_energies.json')))['bh_sto3g']['recommended']
+    bas = {el: read_genbas(os.path.join(root, 'GENBAS'), '%s:STO-3G' % el) for el in ('B', 'H')}
+    mf = scf.RHF(gto.M(atom='B 0 0 0; H 0 0 1.2324', basis=bas, verbose=0)).run(conv_tol=1e-13)
+    ghf = scf.addons.convert_to_ghf(mf)
+    eris = E.from_scf(ghf, packed_vvvv=True)
+    r = ccsdtq.kernel(eris, ccsdtq.Options(conv_tol=1e-12, conv_tol_normt=1e-9))
+    assert r.converged
+    nao = mf.mol.nao
+    mo = np.asarray(ghf.mo_coeff)
+    spin = np.where(abs(mo[:nao]).max(axis=0) > abs(mo[nao:]).max(axis=0), 1, -1)
+    es = copy.copy(eris)
+    es.labels = np.concatenate((spin[ghf.mo_occ > 0], spin[ghf.mo_occ == 0]))
+    es.modulus = 0
+    no = eris.nocc
+    assert no == 6 and es.labels[:no].sum() == 0 and es.labels[no:].sum() == 0
+    forbidden = ~_allowed(es.labels, no, 4)
+    assert abs(r.t4).max() > 1e-6 and abs(np.asarray(r.t4).reshape(forbidden.shape)[forbidden]).max() < 1e-12
+    e_p = PT.kernel(eris, r.t2, r.t3, r.t4)
+    e_s = PS.kernel(es, r.t2, r.t3, r.t4)
+    assert abs(e_s - e_p) < 1e-14 and abs(e_p) > 1e-9
+    assert abs(e_s - (ref['e_ccsdtq(p)'] - ref['e_ccsdtq'])) < 3e-12
 
 
 def test_intermediates_in_blocks(hbr):

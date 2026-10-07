@@ -318,7 +318,7 @@ def plan(eris, isz, budget=None):
         'Xv': isz * xv,
         'Xq': isz * xq,
         'layouts': isz * (nP * nQ + no * nv * nQ + nP * no * nv + no * no * nQ + 2 * nP * nv * nv),
-        'tables': (12 * nA4 + 24 * nA3 + 16 * nv * nQ + 24 * nQ + nI5 * 600 + nI4 * (no * 9 + 250)
+        'tables': (12 * nA4 + 24 * nA3 + 40 * nQ + nI5 * 600 + nI4 * (no * 9 + 250)
                    + nI3 * (nP + no) * 9 + nP * nP * 9 + Q.SLACK),
     }
     kept = sum(parts.values())
@@ -449,7 +449,6 @@ class Pentuples:
         t(ij; ab) <cd||kl>.'''
         sec, no, nv, dtype = self.sec, self.nocc, self.nvir, self.dtype
         i2, j2 = Q._pairs(no)
-        a2, b2 = Q._pairs(nv)
         t2_pp = _c(self.t2_xp[i2, j2])                                      # [(ij), (ab)]
         quads = P.tuples(no, 4)
         eo4 = mo_e[:no][quads].sum(axis=1)
