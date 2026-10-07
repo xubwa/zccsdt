@@ -3297,6 +3297,39 @@ amplitudes, zccsdt 03c2889.
 - Other labels: +1 and -1 modulo 4 (the two fermion irreps of C2) for
   integrals in Kramers pairs (`zccsdt.dirac`); the same code, not timed.
 
+### (P) in symmetry sectors
+
+The same for the (P) correction (`zccsdt.cc.pentuples_sym`, called
+directly: the front end still runs the dense code).  HBr, X2C, cc-pVTZ-DK;
+c105, 8 cores, one job per line (31724716, 31724717, 31724719), the two
+codes one after the other in one process on the same amplitudes (T2 of
+second order, random T3 and T4 on the elements that the labels allow: the
+cost does not depend on them), zccsdt 79e84b5.  The
+node was shared with other jobs (load 40).
+
+| Frozen | Active spinors | Dense | Sectors | Ratio | Cores busy: dense, sectors | Resident above the start: dense, sectors |
+|---|---|---|---|---|---|---|
+| 28 | 8 + 38 | 3.29 s | 0.69 s | 4.8 | 6.2, 2.5 | 0.25 GB, 0.04 GB |
+| 28 | 8 + 78 | 129.1 s | 7.46 s | 17.3 | 7.4, 6.4 | 4.1 GB, 1.7 GB |
+| 18 | 18 + 30 | 195.8 s | 44.6 s | 4.4 | 6.0, 2.7 | 2.6 GB, 1.1 GB |
+
+- E(P) of the two codes differs by 1e-17 Eh at most.
+- 8 + 78: the products of the blocks 3.6 s, the sum over the virtual
+  pentuples of the sectors 1.8 s, the products on one index and a quadruple
+  1.1 s, the intermediates 0.9 s (dense: 12 s).
+- 18 + 30, 8568 occupied pentuples of 5 ms each: the sector code is bound
+  by what Python does per pentuple (the rows of T4 and the integrals of
+  the products on one index and a quadruple, 1.9 ms; the lists of the
+  operands of the blocks), on one thread.
+- Memory plan against the allocations (tracemalloc, job 31724718, 8 + 78):
+  1817 MB planned, 1801 MB at the peak; with the labels modulo 4 4702 and
+  4677 MB (36.9 s), with one label 9134 and 9110 MB (103.5 s) - twice the
+  plan of the dense code (4464 MB), whose r and z are on the pentuples:
+  without symmetry the dense code is the one to use.
+- Still dense: T3, T4 and the second-order quadruples as stored (of the
+  latter only the allowed elements are computed), Xo and the layouts of T2
+  and of the integrals with two virtual indices.
+
 ### Complex spinors, larger cases, less memory
 
 zccsdt alone, the same node and batch (jobs 31703734 and 31703874), 8
