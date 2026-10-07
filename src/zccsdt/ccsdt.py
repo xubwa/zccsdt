@@ -1056,12 +1056,20 @@ class GCCSDT(UCCSDT):
         # (the columns: frozen occupied first, the dropped virtual ones left out)
         cols = np.concatenate((fo, o, v))
         real = self._axial()
+        if real is not None and self.symmetry:
+            # the spinors of one label next to each other (by energy inside a label): the
+            # blocks of the amplitudes are ranges then
+            two_m = np.round(2 * self._axial_mj).astype(np.int64)
+            o, v = (x[np.argsort(two_m[x], kind='stable')] for x in (np.asarray(o), np.asarray(v)))
+            cols = np.concatenate((fo, o, v))
+            self._sorted = (o, v)
         out = eris.from_scf(self._scf, mo_coeff=(np.asarray(self.mo_coeff) if real is None else real)[:, cols],
                             mo_occ=np.asarray(self.mo_occ)[cols], frozen=len(fo), packed_vvvv=True,
                             max_memory=self.max_memory, real=real is not None)
         if real is not None:
             # the symmetry label of the axis: 2 m_j, which adds without a modulus
-            out.labels = np.round(2 * self._axial_mj[np.concatenate((o, v))]).astype(np.int64)
+            out.labels = np.round(2 * self._axial_mj[cols[len(fo):]]).astype(np.int64)
+            out.use_labels = bool(self.symmetry)
         return out
 
     def _amplitude_lines(self, eris):
@@ -1081,6 +1089,8 @@ class GCCSDT(UCCSDT):
 
     def _labels(self, eris):
         _, occ, vir, _ = self._active()
+        if getattr(eris, 'labels', None) is not None and getattr(self, '_sorted', None) is not None:
+            occ, vir = self._sorted                 # (in the order of their labels)
         num = getattr(eris, 'spinors', None)        # (their numbers where the integrals were made)
         if num is not None:
             occ, vir = num[:eris.nocc], num[eris.nocc:]
@@ -1097,6 +1107,8 @@ class GCCSDT(UCCSDT):
         t2 = self.t2 if t2 is None else t2
         t3 = self.t3 if t3 is None else t3
         eris = self._eris if self._eris is not None else self.ao2mo()
+        if np.size(t3) != comb(eris.nocc, 3) * comb(eris.nmo - eris.nocc, 3):
+            t3 = ccsdt_opt.packed_t3(eris, t3)  # (the blocks of the labels, as (Q) reads them)
         ccsdt_opt.release_cached(eris)          # (what the iterations kept: not part of this budget)
         no, nv = eris.nocc, eris.nmo - eris.nocc
         dtype = np.result_type(t2, t3, eris.oovv)

@@ -608,7 +608,7 @@ void zc_breduce2_##SFX(T *R, const int64_t *Rcol, int64_t ntg,                 \
                        int64_t A0, int64_t A1, int64_t nvt,                    \
                        const int64_t *vfree, const int64_t *vpair,             \
                        const int64_t *vpgrp, const int64_t *zoff,              \
-                       const int64_t *nQg, const int64_t *Qoff,                \
+                       int64_t npg, const int64_t *nQg, const int64_t *Qoff,   \
                        const int64_t *rowpos, int64_t no, const T *Z)          \
 {                                                                              \
     const int64_t nch = (A1 - A0 + RED_CH - 1) / RED_CH;                       \
@@ -627,7 +627,7 @@ void zc_breduce2_##SFX(T *R, const int64_t *Rcol, int64_t ntg,                 \
         }                                                                      \
         for (int64_t t = 0; t < ntg; t++) {                                    \
             const int64_t x = tx[t];                                           \
-            const int64_t *zo = zoff + tP[t] * 3;                              \
+            const int64_t *zo = zoff + tP[t] * npg;                            \
             const double sg = tsg[t];                                          \
             T *r = R + tbase[t];                                               \
             for (int64_t k = 0; k < a_hi - a_lo; k++) {                        \
@@ -1536,7 +1536,8 @@ void zc_breduce_pass2_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol,   \
                             int64_t nvt, const int64_t *voff,                  \
                             const int64_t *vfree, const int64_t *vpair,        \
                             const int64_t *vpgrp, int64_t p0, int64_t p1,      \
-                            const int64_t *zoff, const int64_t *nQg,           \
+                            const int64_t *zoff, int64_t npg,                  \
+                            const int64_t *nQg,                                \
                             const int64_t *Qoff, const int64_t *rowpos,        \
                             int64_t no, const T *Z)                            \
 {                                                                              \
@@ -1549,7 +1550,7 @@ void zc_breduce_pass2_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol,   \
             const int64_t P = opair[rr * nto + it];                            \
             if (P < p0 || P >= p1) continue;                                   \
             const int64_t x = ofree[rr * nto + it];                            \
-            const int64_t *zo = zoff + (P - p0) * 3;                           \
+            const int64_t *zo = zoff + (P - p0) * npg;                         \
             const double sg = (rr == 1) ? -1.0 : 1.0;                          \
             for (int64_t A = voff[g]; A < voff[g + 1]; A++) {                  \
                 T acc = 0;                                                     \
@@ -1592,13 +1593,13 @@ void zc_bgather_vir_##SFX(const T *T3b, const int64_t *obase,                  \
 /* pp-ladder reduction into blocked R for the triples rows[] of group g:      \
  * R[I, A] += sum_s rs_s X_sc[(Q - hoff[sc]) nrows nc[sc] + ib nc[sc]          \
  *                            + (c - coff[sc])],  c = free_s(A), Q = pair_s(A), \
- * sc = vspin[c];  X0 / X1 are the GEMM outputs for c alpha / beta. */         \
+ * sc = vspin[c];  Xs[sc] is the GEMM output for the c of class sc. */        \
 void zc_breduce_ppl_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol,     \
                           int64_t nrows, const int64_t *rows, int64_t nvt,     \
                           int64_t A0, int64_t A1, const int64_t *vfree,        \
                           const int64_t *vpair, const int64_t *vspin,          \
                           const int64_t *hoff, const int64_t *ncs,             \
-                          const int64_t *coff, const T *X0, const T *X1)       \
+                          const int64_t *coff, const T *const *Xs)             \
 {                                                                              \
     _Pragma("omp parallel for schedule(static)")                               \
     for (int64_t ib = 0; ib < nrows; ib++) {                                   \
@@ -1608,7 +1609,7 @@ void zc_breduce_ppl_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol,     \
             for (int s = 0; s < 3; s++) {                                      \
                 const int64_t c = vfree[s * nvt + A], Q = vpair[s * nvt + A];  \
                 const int64_t sc = vspin[c];                                   \
-                const T *X = sc ? X1 : X0;                                     \
+                const T *X = Xs[sc];                                           \
                 const T v = X[((Q - hoff[sc]) * nrows + ib) * ncs[sc] + (c - coff[sc])]; \
                 acc += (s == 1) ? -v : v;                                      \
             }                                                                  \

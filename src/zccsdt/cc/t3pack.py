@@ -59,9 +59,14 @@ class TripleMap:
     are grouped by their number of beta indices (stable within a group), so
     Ms-conserving blocks are contiguous ranges: pair_off[g] .. pair_off[g+1]
     and tri_off[g] .. tri_off[g+1] hold the members with g beta indices.
-    All other maps only depend on this enumeration.'''
+    All other maps only depend on this enumeration.
 
-    def __init__(self, n, spins=None):
+    The labels need not be spins: any label 0 .. ncls - 1 that adds (the
+    classes of 2 m_j of a linear molecule, shifted and halved) with the
+    indices in the order of their labels; the groups are then the 2 ncls - 1
+    sums of two labels and the 3 ncls - 2 sums of three.'''
+
+    def __init__(self, n, spins=None, ncls=None):
         self.n = n
         pi, pj = np.triu_indices(n, 1)
         tri = np.array([(i, j, k) for i in range(n) for j in range(i + 1, n)
@@ -70,8 +75,11 @@ class TripleMap:
             self.spins = None
         else:
             spins = np.asarray(spins, dtype=np.int64)
-            assert spins.shape == (n,) and np.all(np.diff(spins) >= 0), \
-                'spins must be 0/1 with alpha indices first'
+            self.ncls = max(2, int(spins.max(initial=0)) + 1) if ncls is None else int(ncls)
+            self.npg, self.ntg = 2 * self.ncls - 1, 3 * self.ncls - 2
+            assert spins.shape == (n,) and np.all(np.diff(spins) >= 0) \
+                and (n == 0 or (spins[0] >= 0 and spins[-1] < self.ncls)), \
+                'labels must be 0 .. ncls - 1 (spins: 0/1), in that order'
             self.spins = spins
             order = np.argsort(spins[pi] + spins[pj], kind='stable')
             pi, pj = pi[order], pj[order]
@@ -90,8 +98,8 @@ class TripleMap:
         if spins is not None:
             self.pair_grp = spins[pi] + spins[pj]
             self.tri_grp = spins[tri].sum(axis=1) if self.ntri else np.zeros(0, np.int64)
-            self.pair_off = np.searchsorted(self.pair_grp, np.arange(4))
-            self.tri_off = np.searchsorted(self.tri_grp, np.arange(5))
+            self.pair_off = np.searchsorted(self.pair_grp, np.arange(self.npg + 1))
+            self.tri_off = np.searchsorted(self.tri_grp, np.arange(self.ntg + 1))
 
         # (free, pair) -> triple, sign
         self.tri = np.zeros((n, self.npair), dtype=np.int64)
@@ -130,18 +138,36 @@ class TripleMap:
         if spins is None:
             self.blocks = [(0, self.npair)]
         else:
-            self.blocks = [(int(self.pair_off[h]), int(self.pair_off[h + 1])) for h in range(3)]
+            self.blocks = [(int(self.pair_off[h]), int(self.pair_off[h + 1])) for h in range(self.npg)]
         self.pidx_blk = []
         for lo, hi in self.blocks:
             loc = np.where((pidx >= lo) & (pidx < hi), pidx - lo, -1)
             self.pidx_blk.append(np.ascontiguousarray(loc, dtype=np.int64))
 
 
-def triple_map(n, spins=None):
-    key = (n, None if spins is None else tuple(int(x) for x in spins))
+def triple_map(n, spins=None, ncls=None):
+    key = (n, None if spins is None else tuple(int(x) for x in spins), ncls)
     if key not in _CACHE:
-        _CACHE[key] = TripleMap(n, spins)
+        _CACHE[key] = TripleMap(n, spins, ncls)
     return _CACHE[key]
+
+
+def classes_of(eris):
+    '''(labels of the occupied, of the virtual spinors, number of classes)
+    as the grouped maps take them, from the symmetry labels of an integral
+    object: shifted to start at 0 and divided by their common step.  None if
+    there are no labels, if they add modulo something, or if the spinors are
+    not in the order of their labels.'''
+    lab = getattr(eris, 'labels', None)
+    if lab is None or getattr(eris, 'modulus', 0) or not getattr(eris, 'use_labels', True):
+        return None
+    lab = np.asarray(lab, dtype=np.int64)
+    no = eris.nocc
+    if np.any(np.diff(lab[:no]) < 0) or np.any(np.diff(lab[no:]) < 0):
+        return None
+    step = int(np.gcd.reduce(np.diff(np.unique(lab)))) if len(np.unique(lab)) > 1 else 1
+    k = (lab - lab.min()) // step
+    return k[:no], k[no:], int(k.max()) + 1
 
 
 def maps_for(eris):
@@ -152,6 +178,10 @@ def maps_for(eris):
     sv = getattr(eris, 'spin_vir', None)
     nocc = eris.nocc
     nvir = np.asarray(eris.fock).shape[0] - nocc
+    if so is None:
+        cls = classes_of(eris)
+        if cls is not None:     # symmetry labels: the same block structure as spins
+            return triple_map(nocc, cls[0], cls[2]), triple_map(nvir, cls[1], cls[2])
     return triple_map(nocc, so), triple_map(nvir, sv)
 
 

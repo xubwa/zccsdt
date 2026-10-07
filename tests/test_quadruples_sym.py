@@ -14,7 +14,7 @@ from pyscf import gto, scf, x2c
 
 import zccsdt
 from zccsdt import dirac
-from zccsdt.cc import quadruples as QD, quadruples_sym as QS, t4pack as P
+from zccsdt.cc import ccsdt_opt, quadruples as QD, quadruples_sym as QS, t4pack as P
 
 
 @pytest.fixture(scope='module')
@@ -27,7 +27,8 @@ def hbr():
     cc.verbose = 0
     cc.conv_tol, cc.conv_tol_normt = 1e-11, 1e-9
     cc.kernel()
-    return cc.ao2mo(), cc.t2, np.asarray(cc.t3)
+    eris = cc.ao2mo()
+    return eris, cc.t2, ccsdt_opt.packed_t3(eris, cc.t3)
 
 
 def _conserved(x, lab, key, no, modulus=0):
@@ -134,3 +135,27 @@ def test_front_end_and_memory(hbr):
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
     assert peak < pl.need + (2 << 20), (peak, pl.need)
+
+
+def test_ccsdt_in_blocks():
+    """The CCSDT iterations with T3 in the blocks of the labels (the block
+    engine of the spin-ordered code, with the classes of 2 m_j) against the
+    dense ones: energies, T2, T3 put back on the packed block."""
+    mol = gto.M(atom='Br 0 0 0; H 0 0 1.4145', basis='cc-pvdz-dk', verbose=0)
+    mf = x2c.UHF(mol)
+    mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-8
+    mf.kernel()
+    out = {}
+    for sym in (True, False):
+        cc = zccsdt.GCCSDT(mf, frozen=28)
+        cc.verbose, cc.symmetry = 0, sym
+        cc.conv_tol, cc.conv_tol_normt = 1e-11, 1e-9
+        cc.kernel()
+        eris = cc.ao2mo()
+        t3 = ccsdt_opt.packed_t3(eris, cc.t3)
+        out[sym] = (cc.e_corr, cc.ccsdt_q(), cc.e_q5, np.size(cc.t3), np.linalg.norm(t3), np.linalg.norm(cc.t2),
+                    eris.labels)
+    assert out[True][3] == 31820 and out[False][3] == 56 * 3276
+    assert (np.diff(out[True][6][:8]) >= 0).all() and (np.diff(out[True][6][8:]) >= 0).all()
+    for k in (0, 1, 2, 4, 5):
+        assert abs(out[True][k] - out[False][k]) < 1e-11, k

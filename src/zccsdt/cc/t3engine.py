@@ -302,7 +302,9 @@ class T3Layout:
         self.om, self.vm, self.flip = om, vm, flip
         self.nI = np.diff(om.tri_off)
         self.nA = np.diff(vm.tri_off)
-        self.stored = [0, 1] if flip else [0, 1, 2, 3]
+        self.ntg = om.ntg
+        assert not flip or om.ncls == 2
+        self.stored = [0, 1] if flip else list(range(om.ntg))
         self.boff = {}
         off = 0
         for g in self.stored:
@@ -313,7 +315,7 @@ class T3Layout:
         self.vcol = np.zeros(vm.ntri, dtype=np.int64)
         self.osig = np.ones(om.ntri)
         self.vsig = np.ones(vm.ntri)
-        for g in range(4):
+        for g in range(self.ntg):
             I = np.arange(om.tri_off[g], om.tri_off[g + 1])
             A = np.arange(vm.tri_off[g], vm.tri_off[g + 1])
             if g in self.stored:
@@ -338,7 +340,7 @@ class T3Layout:
     def to_dense(self, T3):
         om, vm = self.om, self.vm
         D = np.zeros((om.ntri, vm.ntri), dtype=T3.dtype)
-        for g in range(4):
+        for g in range(self.ntg):
             I = np.arange(om.tri_off[g], om.tri_off[g + 1])
             A = np.arange(vm.tri_off[g], vm.tri_off[g + 1])
             D[I[:, None], A] = (self.osig[I][:, None] * self.vsig[A]
@@ -383,11 +385,15 @@ class SpinBlockT3:
         self.L = T3Layout(om, vm, flip)
         self.size = self.L.size
         so, sv = om.spins, vm.spins
-        self.orng = [np.where(so == s)[0] for s in (0, 1)]
-        self.vrng = [np.where(sv == s)[0] for s in (0, 1)]
+        assert om.ncls == vm.ncls
+        self.nc, self.npg, self.ntg = nc, npg, ntg = om.ncls, om.npg, om.ntg
+        self.cls = range(nc)
+        self.deltas = range(1 - nc, nc)
+        self.orng = [np.where(so == s)[0] for s in range(nc)]
+        self.vrng = [np.where(sv == s)[0] for s in range(nc)]
         # composite (d, m) / (a, i) index sets D_delta, delta = s(vir) - s(occ),
         # as lists of (s_vir, s_occ) sub-blocks, each vir-major
-        self.dsub = {-1: [(0, 1)], 0: [(0, 0), (1, 1)], 1: [(1, 0)]}
+        self.dsub = {d: [(sa, sa - d) for sa in range(nc) if 0 <= sa - d < nc] for d in self.deltas}
         self.mem_mb = None
         self.set_memory(mem_mb)
         self.use_c = t3pack.USE_C and hasattr(t3pack._lib, 'zc_bgather_d')
@@ -398,7 +404,7 @@ class SpinBlockT3:
         self.Rcol = np.ascontiguousarray(L.vcol)
         # position of (a, x) inside its D_delta (delta = s(a) - s(x))
         self.rowpos = -np.ones((vm.n, om.n), dtype=np.int64)
-        for delta in (-1, 0, 1):
+        for delta in self.deltas:
             a, i = self._rows(delta)
             self.rowpos[a, i] = np.arange(len(a))
 
@@ -426,7 +432,7 @@ class SpinBlockT3:
         # pass 1 keeps one gathered block T[P, d, m, Q] (single spins of d, m)
         # per pair alive: larger batches than pass 2, for larger GEMMs
         nmax = max(len(r) for r in self.orng) * max(len(r) for r in self.vrng)
-        nqmax = max(vm.pair_off[g + 1] - vm.pair_off[g] for g in range(3))
+        nqmax = max(vm.pair_off[g + 1] - vm.pair_off[g] for g in range(self.npg))
         per_pair = 2 * nmax * nqmax * isz
         nb1 = max(nb, int(mem_mb * 1e6 // max(per_pair, 1)))
         nbt = max(1, int(mem_mb * 1e6 // max(3 * vm.npair * vm.n * isz, 1)))
@@ -452,8 +458,8 @@ class SpinBlockT3:
         by rows (both spins of the free index).'''
         vm, L = self.vm, self.L
         ncs = [len(r) for r in self.vrng]
-        nQ = [int(vm.pair_off[h + 1] - vm.pair_off[h]) for h in range(3)]
-        return max([sum(nQ[g - sc] * ncs[sc] for sc in (0, 1) if 0 <= g - sc <= 2)
+        nQ = [int(vm.pair_off[h + 1] - vm.pair_off[h]) for h in range(self.npg)]
+        return max([sum(nQ[g - sc] * ncs[sc] for sc in self.cls if 0 <= g - sc < self.npg)
                     for g in L.stored] + [1])
 
     def buffer_bytes(self, mem_mb, max_rows=None):
@@ -464,26 +470,27 @@ class SpinBlockT3:
         isz = np.dtype(self.dtype).itemsize
         nb, nb1, nbt = self._batch_sizes(mem_mb)
         no, nv = [len(r) for r in self.orng], [len(r) for r in self.vrng]
-        nP = [int(om.pair_off[g + 1] - om.pair_off[g]) for g in range(3)]
-        nQ = [int(vm.pair_off[g + 1] - vm.pair_off[g]) for g in range(3)]
-        nI = [int(om.tri_off[g + 1] - om.tri_off[g]) for g in range(4)]
-        nD = {d: sum(nv[sa] * no[si] for sa, si in self.dsub[d]) for d in (-1, 0, 1)}
+        npg, nc = self.npg, self.nc
+        nP = [int(om.pair_off[g + 1] - om.pair_off[g]) for g in range(npg)]
+        nQ = [int(vm.pair_off[g + 1] - vm.pair_off[g]) for g in range(npg)]
+        nI = [int(om.tri_off[g + 1] - om.tri_off[g]) for g in range(self.ntg)]
+        nD = {d: sum(nv[sa] * no[si] for sa, si in self.dsub[d]) for d in self.deltas}
         n = 1
-        for gP in range(3):
+        for gP in range(npg):
             # pass 1: one gathered block T[P, d, m, Q]
-            for sd in (0, 1):
-                for sm in (0, 1):
-                    if 0 <= gP + sm - sd <= 2:
+            for sd in self.cls:
+                for sm in self.cls:
+                    if 0 <= gP + sm - sd < npg:
                         n = max(n, min(nb1, nP[gP]) * nv[sd] * no[sm] * nQ[gP + sm - sd])
             # pass 2: the products of all pair groups and one gathered block
-            sizes = [nD[gP - gQ] * nQ[gQ] for gQ in range(3) if abs(gP - gQ) <= 1 and nQ[gQ]]
+            sizes = [nD[gP - gQ] * nQ[gQ] for gQ in range(npg) if abs(gP - gQ) < nc and nQ[gQ]]
             if sizes:
                 n = max(n, min(nb, nP[gP]) * (sum(sizes) + max(sizes)))
         for g in L.stored:
             # pp ladder: the products of both spins of the free index and one
             # gathered block (operator in memory), or the gathered blocks and
             # one product (operator by rows: two thirds of the budget)
-            sizes = [nQ[g - sc] * nv[sc] for sc in (0, 1) if 0 <= g - sc <= 2 and nQ[g - sc]]
+            sizes = [nQ[g - sc] * nv[sc] for sc in self.cls if 0 <= g - sc < npg and nQ[g - sc]]
             if sizes and nI[g]:
                 n = max(n, min(nbt, nI[g]) * (sum(sizes) + max(sizes)))
         per = self._row_unit() + (max(nQ) if max_rows is None else max_rows) * max(nv)
@@ -505,7 +512,7 @@ class SpinBlockT3:
         if (p0, p1) not in cache:
             om, vm = self.om, self.vm
             out = []
-            for g in range(4):
+            for g in range(self.ntg):
                 A0, A1 = vm.tri_off[g], vm.tri_off[g + 1]
                 its = np.where((self.Rbase >= 0) & (om.tri_grp == g))[0]
                 if A1 == A0 or len(its) == 0:
@@ -541,12 +548,12 @@ class SpinBlockT3:
         r1 = np.zeros((nvir, nocc), dtype=dtype)
         rA = np.zeros((om.npair, npv), dtype=dtype)
         G3 = G_mQ.reshape(nocc, npv, nocc + nvir)
-        for gP in range(3):
+        for gP in range(self.npg):
             for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
-                for sd in (0, 1):
-                    for sm in (0, 1):
+                for sd in self.cls:
+                    for sm in self.cls:
                         gQ = gP + sm - sd
-                        if not 0 <= gQ <= 2:
+                        if not 0 <= gQ < self.npg:
                             continue
                         d, m = self.vrng[sd], self.orng[sm]
                         Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
@@ -555,7 +562,7 @@ class SpinBlockT3:
                         T = self.gather(T3, pb, d, m, Qlo, Qhi)  # (P, d, m, Q)
                         Tf = T.reshape(len(pb) * len(d), len(m) * (Qhi - Qlo))
                         sy = gP - sd                  # spin of e/j (X) and n/a (Y)
-                        if 0 <= sy <= 1:
+                        if 0 <= sy < self.nc:
                             ey, jy = self.vrng[sy], nvir + self.orng[sy]
                             rows = np.concatenate((ey, jy))
                             G = np.ascontiguousarray(G_Pd[rows][:, pb][:, :, d]).reshape(
@@ -621,18 +628,18 @@ class SpinBlockT3:
         om, vm, dtype = self.om, self.vm, self.dtype
         nocc, nvir = om.n, vm.n
         Wd = {}
-        for delta in (-1, 0, 1):
+        for delta in self.deltas:
             a, i = self._rows(delta)
             flat = a * nocc + i
             Wd[delta] = np.ascontiguousarray(WringT[flat[:, None], flat])
-        top = 1 if self.L.flip else 2          # flip: targets g <= 1 need gP <= 1
+        top = 1 if self.L.flip else self.npg - 1   # flip: targets g <= 1 need gP <= 1
         for gP in range(top + 1):
             for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
                 nbp = len(pb)
                 Zfull = np.zeros((nbp, nvir, nocc, vm.npair), dtype=dtype)
-                for gQ in range(3):
+                for gQ in range(self.npg):
                     delta = gP - gQ
-                    if abs(delta) > 1:
+                    if abs(delta) >= self.nc:
                         continue
                     Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
                     if Qhi == Qlo:
@@ -651,7 +658,7 @@ class SpinBlockT3:
                         nr = len(c) * len(i)
                         Zs = Z[:, r0:r0 + nr].reshape(nbp, len(c), len(i), -1)
                         se = gP - sc
-                        if 0 <= se <= 1:
+                        if 0 <= se < self.nc:
                             e = self.vrng[se]
                             mm = self.orng[se]
                             Zs -= np.einsum('Pec,qei->Pciq', t2mn[pb][:, e][:, :, c],
@@ -671,9 +678,9 @@ class SpinBlockT3:
             if len(rows) == 0:
                 continue
             Xfull = np.zeros((vm.npair, len(rows), nvir), dtype=dtype)
-            for sc in (0, 1):
+            for sc in self.cls:
                 h = g - sc
-                if not 0 <= h <= 2:
+                if not 0 <= h < self.npg:
                     continue
                 Qlo, Qhi = vm.pair_off[h], vm.pair_off[h + 1]
                 c = self.vrng[sc]
@@ -785,13 +792,13 @@ def _spin_block_c_methods():
                     gy_cache[key] = G.reshape((m1 - m0) * (Qhi - Qlo), -1)
             return gy_cache[key]
 
-        for gP in range(3):
+        for gP in range(self.npg):
             for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb1):
                 p0, p1 = pb[0], pb[-1] + 1
-                for sd in (0, 1):
-                    for sm in (0, 1):
+                for sd in self.cls:
+                    for sm in self.cls:
                         gQ = gP + sm - sd
-                        if not 0 <= gQ <= 2:
+                        if not 0 <= gQ < self.npg:
                             continue
                         if flip and (gP, sd, sm) > (2 - gP, 1 - sd, 1 - sm):
                             continue      # spin-flipped image of a computed combination
@@ -806,7 +813,7 @@ def _spin_block_c_methods():
                         Tf = T.reshape(len(pb) * nd, nm * nQ)
                         t_.__exit__(None, None, None)
                         sy = gP - sd
-                        if 0 <= sy <= 1:
+                        if 0 <= sy < self.nc:
                             e0, e1 = vr[sy]
                             j0, j1 = orr[sy]
                             G = np.concatenate((G_Pd[e0:e1, p0:p1, vr[sd][0]:vr[sd][1]],
@@ -894,19 +901,20 @@ def _spin_block_c_methods():
         nocc, nvir = om.n, vm.n
         vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
         orr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.orng]
+        npg = self.npg
         Wd, nD = {}, {}
-        for delta in (-1, 0, 1):
+        for delta in self.deltas:
             a, i = self._rows(delta)
             flat = a * nocc + i
             Wd[delta] = np.ascontiguousarray(WringT[flat[:, None], flat], dtype=dtype)
             nD[delta] = len(a)
         # drive right-hand sides B[(e|m), (i, Q)] per (gQ, s_i), e and m of spin gQ - s_i
         Bd = {}
-        for gQ in range(3):
+        for gQ in range(npg):
             Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
-            for si in (0, 1):
+            for si in self.cls:
                 se = gQ - si
-                if not 0 <= se <= 1 or Qhi == Qlo:
+                if not 0 <= se < self.nc or Qhi == Qlo:
                     continue
                 (e0, e1), (i0, i1), (m0, m1) = vr[se], orr[si], orr[se]
                 B1 = Wv[Qlo:Qhi, e0:e1, i0:i1].transpose(1, 2, 0)          # [e, i, Q]
@@ -914,18 +922,20 @@ def _spin_block_c_methods():
                 Bd[gQ, si] = np.ascontiguousarray(np.concatenate((B1, B2), axis=0),
                                                   dtype=dtype).reshape(
                     (e1 - e0) + (m1 - m0), -1)
-        nQg = np.array([vm.pair_off[g + 1] - vm.pair_off[g] for g in range(3)], dtype=np.int64)
-        Qoff = np.ascontiguousarray(vm.pair_off[:3], dtype=np.int64)
+        nQg = np.array([vm.pair_off[g + 1] - vm.pair_off[g] for g in range(npg)], dtype=np.int64)
+        Qoff = np.ascontiguousarray(vm.pair_off[:npg], dtype=np.int64)
         lib = t3pack._lib
         fred = getattr(lib, 'zc_breduce_pass2_' + t3pack._sfx(dtype))
         fred2 = getattr(lib, 'zc_breduce2_' + t3pack._sfx(dtype))
         I_, p_ = _CArgs.I, _CArgs.p
-        top = 1 if L.flip else 2
+        top = 1 if L.flip else npg - 1
         for gP in range(top + 1):
             for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
                 p0, p1, nbp = pb[0], pb[-1] + 1, len(pb)
-                gQs = [gQ for gQ in range(3) if abs(gP - gQ) <= 1 and nQg[gQ] > 0]
-                zoff = -np.ones((nbp, 3), dtype=np.int64)
+                gQs = [gQ for gQ in range(npg) if abs(gP - gQ) < self.nc and nQg[gQ] > 0]
+                if not gQs:
+                    continue
+                zoff = -np.ones((nbp, npg), dtype=np.int64)
                 off = 0
                 for k in range(nbp):
                     for gQ in gQs:
@@ -970,7 +980,7 @@ def _spin_block_c_methods():
                         (c0, c1), (i0, i1) = vr[sc], orr[si]
                         nc, ni = c1 - c0, i1 - i0
                         se = gP - sc
-                        if nc and ni and 0 <= se <= 1 and (gQ, si) in Bd \
+                        if nc and ni and 0 <= se < self.nc and (gQ, si) in Bd \
                                 and gP + si in L.stored:
                             (e0, e1), (m0, m1) = vr[se], orr[se]
                             for k, P in enumerate(pb):
@@ -987,13 +997,13 @@ def _spin_block_c_methods():
                     for tb, tx, tP, tsg, A0, A1 in self._red_targets(p0, p1):
                         fred2(p_(R), p_(self.Rcol), I_(len(tb)), p_(tb), p_(tx), p_(tP),
                               p_(tsg), I_(A0), I_(A1), I_(vm.ntri), p_(vm.free_c),
-                              p_(vm.pair_c), p_(vm.pair_grp), p_(zoff), p_(nQg), p_(Qoff),
+                              p_(vm.pair_c), p_(vm.pair_grp), p_(zoff), I_(npg), p_(nQg), p_(Qoff),
                               p_(self.rowpos), I_(nocc), p_(Z))
                 else:
                     fred(p_(R), p_(self.Rbase), p_(self.Rcol), I_(om.ntri), p_(om.tri_grp),
                          p_(om.free_c), p_(om.pair_c), I_(vm.ntri), p_(vm.tri_off),
                          p_(vm.free_c), p_(vm.pair_c), p_(vm.pair_grp), I_(p0), I_(p1),
-                         p_(zoff), p_(nQg), p_(Qoff), p_(self.rowpos), I_(nocc), p_(Z))
+                         p_(zoff), I_(npg), p_(nQg), p_(Qoff), p_(self.rowpos), I_(nocc), p_(Z))
                 t_.__exit__(None, None, None)
 
     def _ppl_c(self, T3, Wpp, R):
@@ -1005,12 +1015,12 @@ def _spin_block_c_methods():
         fr = getattr(lib, 'zc_breduce_ppl_' + t3pack._sfx(dtype))
         I_, p_ = _CArgs.I, _CArgs.p
         Wh = {}
-        for h in range(3):
+        for h in range(self.npg):
             Qlo, Qhi = vm.pair_off[h], vm.pair_off[h + 1]
             Wh[h] = np.ascontiguousarray(Wpp[h], dtype=dtype)
         vspin = np.ascontiguousarray(vm.spins, dtype=np.int64)
-        coff = np.array([vr[0][0], vr[1][0]], dtype=np.int64)
-        ncs = np.array([vr[0][1] - vr[0][0], vr[1][1] - vr[1][0]], dtype=np.int64)
+        coff = np.array([vr[s][0] for s in self.cls], dtype=np.int64)
+        ncs = np.array([vr[s][1] - vr[s][0] for s in self.cls], dtype=np.int64)
         dummy = np.zeros(1, dtype=dtype)
         nbt = self.nbt
         for g in L.stored:
@@ -1019,13 +1029,13 @@ def _spin_block_c_methods():
                 continue
             for rows in _batches(om.tri_off[g], om.tri_off[g + 1], nbt):
                 nb = len(rows)
-                X = [dummy, dummy]
-                hoff = np.zeros(2, dtype=np.int64)
+                X = [dummy] * self.nc
+                hoff = np.zeros(self.nc, dtype=np.int64)
                 # workspace [X_0 | X_1 | T]: both X stay alive for the reduction
                 size = {}
-                for sc in (0, 1):
+                for sc in self.cls:
                     h = g - sc
-                    if 0 <= h <= 2 and ncs[sc] and vm.pair_off[h + 1] > vm.pair_off[h]:
+                    if 0 <= h < self.npg and ncs[sc] and vm.pair_off[h + 1] > vm.pair_off[h]:
                         size[sc] = (vm.pair_off[h + 1] - vm.pair_off[h]) * nb * int(ncs[sc])
                 nx = sum(size.values())
                 ws = self._workspace(nx + max(size.values(), default=0))
@@ -1041,9 +1051,12 @@ def _spin_block_c_methods():
                     gemm(Wh[h], T.reshape(Qhi - Qlo, -1), X[sc])
                     xo += size[sc]
                     hoff[sc] = Qlo
+                if not size:
+                    continue
+                xs = (ctypes.c_void_p * self.nc)(*[x.ctypes.data for x in X])
                 fr(p_(R), p_(self.Rbase), p_(self.Rcol), I_(nb), p_(rows), I_(vm.ntri),
                    I_(A0), I_(A1), p_(vm.free_c), p_(vm.pair_c), p_(vspin), p_(hoff),
-                   p_(ncs), p_(coff), p_(X[0]), p_(X[1]))
+                   p_(ncs), p_(coff), xs)
 
     def pp_ladder_rows(self, T3, slabs, R, order='slab', max_rows=None):
         '''pp ladder with the operator given in slabs of rows of its pair
@@ -1063,14 +1076,14 @@ def _spin_block_c_methods():
         fr = getattr(lib, 'zc_breduce_ppl_rows_' + t3pack._sfx(dtype))
         I_, p_ = _CArgs.I, _CArgs.p
         vspin = np.ascontiguousarray(vm.spins, dtype=np.int64)
-        coff = [vr[0][0], vr[1][0]]
-        ncs = [vr[0][1] - vr[0][0], vr[1][1] - vr[1][0]]
-        nQ = [int(vm.pair_off[h + 1] - vm.pair_off[h]) for h in range(3)]
+        coff = [vr[s][0] for s in self.cls]
+        ncs = [vr[s][1] - vr[s][0] for s in self.cls]
+        nQ = [int(vm.pair_off[h + 1] - vm.pair_off[h]) for h in range(self.npg)]
         max_rows = max(nQ) if max_rows is None else max_rows
 
         def combos(g):                  # (spin of the free index, pair block) of group g
-            return [(sc, g - sc) for sc in (0, 1)
-                    if 0 <= g - sc <= 2 and ncs[sc] and nQ[g - sc]]
+            return [(sc, g - sc) for sc in self.cls
+                    if 0 <= g - sc < self.npg and ncs[sc] and nQ[g - sc]]
 
         # per triple of a batch: the gathered T3 of both spins of the free
         # index and one product; two thirds of the buffer budget

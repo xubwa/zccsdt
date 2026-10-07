@@ -504,7 +504,7 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None, inplace=False,
     with timer('wv.vvvv_t1'):
         if Vd is None:
             pass
-        elif vm.spins is not None:
+        elif vm.spins is not None and vm.ncls == 2:
             spin_imds.vvvv_t1_blocks(W, Vd, t1, om, vm)
         else:
             for h, (lo, hi) in enumerate(vm.blocks):
@@ -853,6 +853,25 @@ def _spin_r1_vovv(eris, ges, t2, vm):
 
 
 _ENGINES = {}
+
+
+def packed_t3(eris, t3):
+    '''T3 on the unique block [C(no,3), C(nv,3)] in lexicographic order of
+    the triples, whatever the engine of these integrals stores: the blocks
+    of the symmetry labels are put in their places (zeros elsewhere).'''
+    from math import comb
+    om, vm = t3pack.maps_for(eris)
+    t3 = np.asarray(t3)
+    if om.spins is None:
+        return t3.reshape(om.ntri, vm.ntri)
+    eng = engine_for(eris, t3.dtype)
+
+    def lex(m):
+        y = m.n - 1 - m.triples
+        return comb(m.n, 3) - 1 - y[:, 0] * (y[:, 0] - 1) * (y[:, 0] - 2) // 6 - y[:, 1] * (y[:, 1] - 1) // 2 - y[:, 2]
+    out = np.zeros((om.ntri, vm.ntri), dtype=t3.dtype)
+    out[np.ix_(lex(om), lex(vm))] = eng.L.to_dense(t3)
+    return out
 
 
 def _engine_key(eris, dtype, flip=False):
