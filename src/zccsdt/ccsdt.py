@@ -962,12 +962,13 @@ class GCCSDT(UCCSDT):
         or spinors (zccsdt.cc.quadruples; canonical orbitals); returns E(Q)
         and stores e_q, e_q5 (its fifth-order part, [Q]) and e_tot_q.'''
         from math import comb
-        from zccsdt.cc import quadruples
+        from zccsdt.cc import ccsdt_opt, quadruples
         log = logger.new_logger(self)
         pr = _Printer(log)
         t2 = self.t2 if t2 is None else t2
         t3 = self.t3 if t3 is None else t3
         eris = self._eris if self._eris is not None else self.ao2mo()
+        ccsdt_opt.release_cached(eris)          # (what the iterations kept: not part of this budget)
         no, nv = eris.nocc, eris.nmo - eris.nocc
         dtype = np.result_type(t2, t3, eris.oovv)
         snap0 = timing.snapshot()

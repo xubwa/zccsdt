@@ -93,6 +93,22 @@ def cached_bytes(eris):
         + (overhead() if _STEPS[0] else 0)
 
 
+def release_cached(eris):
+    '''Drop what a CCSDT step keeps for the next one (cached_bytes()): the
+    arrays on the integral object and the work array of the engine.  For
+    what follows the iterations - a perturbative correction plans its own
+    memory - and for a rerun they are formed again.'''
+    d = eris.__dict__
+    for key in ('_buffers', '_bare_Q', '_bare_vvvo', '_bare_packed'):
+        d.pop(key, None)
+    t3engine.release_workspace()
+    try:                        # (glibc: give the freed pages back, they count as resident)
+        import ctypes
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 def sliceable(eris, eng):
     '''Can the dressed packed <ab||de> be used in slabs of rows?  Yes for the
     dense engine and, with the C kernels, for U/R-form integrals; not for

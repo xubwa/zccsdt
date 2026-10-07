@@ -14,8 +14,8 @@
  *     t[g1, g2] = sgn * t[sorted tuple].
  *
  * No tables of the size of the tuples are used: the kernels walk through
- * the tuples in order, in chunks, and compute the ranks of the groups of
- * every split from the binomial coefficients.
+ * the tuples in order and compute the ranks of the groups of every split
+ * from the binomial coefficients - once per run of the last index.
  *
  * Addresses are given by strides (in elements), so that the two groups and
  * an outer index o may sit in any order in the array on the two groups:
@@ -105,48 +105,119 @@ static void tn_next(const tn_split *sp, int *a)
         a[u] = a[u - 1] + 1;
 }
 
-/* the offsets in X of the splits of ``cnt`` tuples from rank A0 on (-1:
- * outside the block of X).  From one tuple to the next mostly the last
- * index grows by one, and with it the rank of the group that has it. */
-static void tn_offsets(const tn_split *sp, int64_t A0, int64_t cnt,
-                       int64_t b0, int64_t b1, int64_t c0, int64_t c1,
-                       int64_t s1, int64_t s2, int64_t *off)
+/* The tuples are walked through by their first k - 1 indices (a "prefix"):
+ * with these fixed, the last index d runs over a_{k-2} < d < n and the
+ * tuples have consecutive ranks.  Of every split one group has d, and its
+ * rank grows by one with d; the other group does not change.  So within the
+ * block of X (b0 <= r1 < b1, c0 <= r2 < c1) a split of a prefix is a run:
+ * steps tlo <= t < thi of d, X from ``base`` in strides of s1 (d in the
+ * first group) or s2.  The work of a kernel is then that of the elements
+ * of the block, whatever part of all tuples the block is. */
+typedef struct {
+    int64_t tlo, thi, base, stride;
+    double sgn;
+} tn_run;
+
+#define PCHUNK 32               /* prefixes per piece of work */
+
+/* the number of prefixes: (k-1)-tuples of range(n) */
+static int64_t tn_nprefix(const tn_split *sp)
 {
-    int a[KMAX], last1[NSPLIT_MAX];
-    int64_t r1[NSPLIT_MAX], r2[NSPLIT_MAX];
-    const int n = sp->n, k = sp->k, k1 = sp->k1, k2 = sp->k2, ns = sp->nsplit;
-    const int64_t top1 = CB(sp, k1, n) - 1, top2 = CB(sp, k2, n) - 1;
-    for (int s = 0; s < ns; s++)
-        last1[s] = k1 > 0 && sp->p1[s][k1 - 1] == k - 1;
-    tn_unrank(sp, A0, a);
-    int fresh = 1;
-    for (int64_t t = 0; t < cnt; t++) {
-        if (fresh) {
-            for (int s = 0; s < ns; s++) {
-                int64_t x = top1, y = top2;
-                for (int u = 0; u < k1; u++)
-                    x -= CB(sp, k1 - u, n - 1 - a[sp->p1[s][u]]);
-                for (int u = 0; u < k2; u++)
-                    y -= CB(sp, k2 - u, n - 1 - a[sp->p2[s][u]]);
-                r1[s] = x; r2[s] = y;
-            }
+    return (sp->k > 1) ? CB(sp, sp->k - 1, sp->n) : 1;
+}
+
+static void tn_prefix_unrank(const tn_split *sp, int64_t r, int *a)
+{
+    const int m = sp->k - 1;
+    int x = 0;
+    for (int t = 0; t < m; t++) {
+        int left = m - 1 - t;
+        while (CB(sp, left, sp->n - 1 - x) <= r) {
+            r -= CB(sp, left, sp->n - 1 - x);
+            x++;
         }
-        int64_t *f = off + t * ns;
-        for (int s = 0; s < ns; s++)
-            f[s] = (r1[s] >= b0 && r1[s] < b1 && r2[s] >= c0 && r2[s] < c1)
-                ? (r1[s] - b0) * s1 + (r2[s] - c0) * s2 : -1;
-        if (a[k - 1] < n - 1) {
-            a[k - 1]++;
-            for (int s = 0; s < ns; s++) {
-                r1[s] += last1[s];
-                r2[s] += !last1[s];
-            }
-            fresh = 0;
-        } else {
-            tn_next(sp, a);
-            fresh = 1;
-        }
+        a[t] = x++;
     }
+}
+
+static void tn_prefix_next(const tn_split *sp, int *a)
+{
+    const int m = sp->k - 1;
+    int t = m - 1;
+    while (t >= 0 && a[t] == sp->n - m + t)
+        t--;
+    if (t < 0)
+        return;
+    a[t]++;
+    for (int u = t + 1; u < m; u++)
+        a[u] = a[u - 1] + 1;
+}
+
+/* the runs of the splits for the prefix a; returns the length of the run of
+ * tuples (0: none) and the rank of its first tuple */
+static int64_t tn_runs(const tn_split *sp, const int *a, int64_t b0, int64_t b1,
+                       int64_t c0, int64_t c1, int64_t s1, int64_t s2,
+                       tn_run *run, int64_t *A0)
+{
+    const int n = sp->n, k = sp->k, k1 = sp->k1, k2 = sp->k2;
+    int full[KMAX];
+    for (int u = 0; u < k - 1; u++)
+        full[u] = a[u];
+    const int d0 = (k > 1) ? a[k - 2] + 1 : 0;
+    const int64_t L = n - d0;
+    if (L <= 0)
+        return 0;
+    full[k - 1] = d0;
+    int64_t A = CB(sp, k, n) - 1;
+    for (int u = 0; u < k; u++)
+        A -= CB(sp, k - u, n - 1 - full[u]);
+    *A0 = A;
+    const int64_t top1 = CB(sp, k1, n) - 1, top2 = CB(sp, k2, n) - 1;
+    for (int s = 0; s < sp->nsplit; s++) {
+        int64_t r1 = top1, r2 = top2, lo, hi;
+        for (int u = 0; u < k1; u++)
+            r1 -= CB(sp, k1 - u, n - 1 - full[sp->p1[s][u]]);
+        for (int u = 0; u < k2; u++)
+            r2 -= CB(sp, k2 - u, n - 1 - full[sp->p2[s][u]]);
+        run[s].sgn = sp->sgn[s];
+        run[s].tlo = run[s].thi = 0;
+        if (k1 > 0 && sp->p1[s][k1 - 1] == k - 1) {     /* d in the first group */
+            if (r2 < c0 || r2 >= c1)
+                continue;
+            lo = (b0 > r1) ? b0 - r1 : 0;
+            hi = (b1 - r1 < L) ? b1 - r1 : L;
+            run[s].stride = s1;
+        } else {
+            if (r1 < b0 || r1 >= b1)
+                continue;
+            lo = (c0 > r2) ? c0 - r2 : 0;
+            hi = (c1 - r2 < L) ? c1 - r2 : L;
+            run[s].stride = s2;
+        }
+        if (hi <= lo)
+            continue;
+        run[s].tlo = lo;
+        run[s].thi = hi;
+        run[s].base = (r1 - b0) * s1 + (r2 - c0) * s2;
+    }
+    return L;
+}
+
+/* the runs of PCHUNK prefixes from the prefix of rank p0 on: run[q * ns + s],
+ * len[q], first[q]; returns the number of prefixes */
+static int tn_chunk(const tn_split *sp, int64_t p0, int64_t b0, int64_t b1,
+                    int64_t c0, int64_t c1, int64_t s1, int64_t s2,
+                    tn_run *run, int64_t *len, int64_t *first)
+{
+    int a[KMAX];
+    const int64_t np = tn_nprefix(sp);
+    int cnt = (np - p0 < PCHUNK) ? (int)(np - p0) : PCHUNK;
+    tn_prefix_unrank(sp, p0, a);
+    for (int q = 0; q < cnt; q++) {
+        len[q] = tn_runs(sp, a, b0, b1, c0, c1, s1, s2, run + q * sp->nsplit, first + q);
+        tn_prefix_next(sp, a);
+    }
+    return cnt;
 }
 
 /* out[A] = sum_t e[a_t]: the sums of orbital energies of the sorted k-tuples */
@@ -249,29 +320,32 @@ void zc_tn_reduce_##SFX(T *R, int64_t nout, int64_t sR, int n, int k1, int k2, \
     tn_split sp;                                                               \
     if (tn_setup(&sp, n, k1, k2))                                              \
         return;                                                                \
-    const int64_t nA = sp.ntuple, nchunk = (nA + CHUNK - 1) / CHUNK;           \
     const int ns = sp.nsplit;                                                  \
+    const int64_t np = tn_nprefix(&sp), nchunk = (np + PCHUNK - 1) / PCHUNK;   \
     _Pragma("omp parallel")                                                    \
     {                                                                          \
-        int64_t *off = (int64_t *)malloc(sizeof(int64_t) * CHUNK * ns);        \
-        _Pragma("omp for schedule(dynamic, 4)")                                \
+        tn_run run[PCHUNK * NSPLIT_MAX];                                       \
+        int64_t len[PCHUNK], first[PCHUNK];                                    \
+        _Pragma("omp for schedule(dynamic, 2)")                                \
         for (int64_t ch = 0; ch < nchunk; ch++) {                              \
-            int64_t A0 = ch * CHUNK, cnt = (nA - A0 < CHUNK) ? nA - A0 : CHUNK; \
-            tn_offsets(&sp, A0, cnt, b0, b1, c0, c1, s1, s2, off);             \
+            int cnt = tn_chunk(&sp, ch * PCHUNK, b0, b1, c0, c1, s1, s2, run, len, first); \
             for (int64_t o = 0; o < nout; o++) {                               \
-                T *r = R + o * sR + A0;                                        \
                 const T *x = X + o * so;                                       \
-                for (int64_t t = 0; t < cnt; t++) {                            \
-                    const int64_t *f = off + t * ns;                           \
-                    T v = 0;                                                   \
-                    for (int s = 0; s < ns; s++)                               \
-                        if (f[s] >= 0)                                         \
-                            v += sp.sgn[s] * x[f[s]];                          \
-                    r[t] += scale * v;                                         \
+                for (int q = 0; q < cnt; q++) {                                \
+                    if (len[q] <= 0) continue;                                 \
+                    T *r = R + o * sR + first[q];                              \
+                    for (int s = 0; s < ns; s++) {                             \
+                        const tn_run *u = run + q * ns + s;                    \
+                        if (u->thi <= u->tlo) continue;                        \
+                        const double f = scale * u->sgn;                       \
+                        const T *xb = x + u->base;                             \
+                        const int64_t st = u->stride;                          \
+                        if (st == 1) for (int64_t t = u->tlo; t < u->thi; t++) r[t] += f * xb[t]; \
+                        else         for (int64_t t = u->tlo; t < u->thi; t++) r[t] += f * xb[t * st]; \
+                    }                                                          \
                 }                                                              \
             }                                                                  \
         }                                                                      \
-        free(off);                                                             \
     }                                                                          \
     free(sp.cb);                                                               \
 }                                                                              \
@@ -286,28 +360,32 @@ void zc_tn_expand_##SFX(const T *R, int64_t nout, int64_t sR, int n, int k1,   \
     tn_split sp;                                                               \
     if (tn_setup(&sp, n, k1, k2))                                              \
         return;                                                                \
-    const int64_t nA = sp.ntuple, nchunk = (nA + CHUNK - 1) / CHUNK;           \
     const int ns = sp.nsplit;                                                  \
+    const int64_t np = tn_nprefix(&sp), nchunk = (np + PCHUNK - 1) / PCHUNK;   \
     _Pragma("omp parallel")                                                    \
     {                                                                          \
-        int64_t *off = (int64_t *)malloc(sizeof(int64_t) * CHUNK * ns);        \
-        _Pragma("omp for schedule(dynamic, 4)")                                \
+        tn_run run[PCHUNK * NSPLIT_MAX];                                       \
+        int64_t len[PCHUNK], first[PCHUNK];                                    \
+        _Pragma("omp for schedule(dynamic, 2)")                                \
         for (int64_t ch = 0; ch < nchunk; ch++) {                              \
-            int64_t A0 = ch * CHUNK, cnt = (nA - A0 < CHUNK) ? nA - A0 : CHUNK; \
-            tn_offsets(&sp, A0, cnt, b0, b1, c0, c1, s1, s2, off);             \
+            int cnt = tn_chunk(&sp, ch * PCHUNK, b0, b1, c0, c1, s1, s2, run, len, first); \
             for (int64_t o = 0; o < nout; o++) {                               \
-                const T *r = R + o * sR + A0;                                  \
                 T *x = X + o * so;                                             \
-                for (int64_t t = 0; t < cnt; t++) {                            \
-                    const int64_t *f = off + t * ns;                           \
-                    T v = scale * r[t];                                        \
-                    for (int s = 0; s < ns; s++)                               \
-                        if (f[s] >= 0)                                         \
-                            x[f[s]] = sp.sgn[s] * v;                           \
+                for (int q = 0; q < cnt; q++) {                                \
+                    if (len[q] <= 0) continue;                                 \
+                    const T *r = R + o * sR + first[q];                        \
+                    for (int s = 0; s < ns; s++) {                             \
+                        const tn_run *u = run + q * ns + s;                    \
+                        if (u->thi <= u->tlo) continue;                        \
+                        const double f = scale * u->sgn;                       \
+                        T *xb = x + u->base;                                   \
+                        const int64_t st = u->stride;                          \
+                        if (st == 1) for (int64_t t = u->tlo; t < u->thi; t++) xb[t] = f * r[t]; \
+                        else         for (int64_t t = u->tlo; t < u->thi; t++) xb[t * st] = f * r[t]; \
+                    }                                                          \
                 }                                                              \
             }                                                                  \
         }                                                                      \
-        free(off);                                                             \
     }                                                                          \
     free(sp.cb);                                                               \
 }                                                                              \
@@ -321,9 +399,8 @@ void zc_tn_expand_##SFX(const T *R, int64_t nout, int64_t sR, int n, int k1,   \
  * - the reduction of a product on two groups of occupied and two groups of    \
  * virtual indices: an entry per split of an occupied tuple (its row), the     \
  * kernel does the virtual side.  Entries with the same row must follow each   \
- * other: the parallel loop is over (rows) x (chunks of tuples), so that no    \
- * two threads write the same element, and a thread stays within one slab of   \
- * X for a while. */                                                           \
+ * other: the parallel loop is over (rows) x (pieces of the tuples), so that   \
+ * no two threads write the same element. */                                   \
 void zc_tn_reduce2_##SFX(T *R, int64_t ldR, int64_t nout, const int64_t *row,  \
                          const int64_t *xoff, const double *osgn, int n,       \
                          int k1, int k2, int64_t b0, int64_t b1, int64_t c0,   \
@@ -333,8 +410,8 @@ void zc_tn_reduce2_##SFX(T *R, int64_t ldR, int64_t nout, const int64_t *row,  \
     tn_split sp;                                                               \
     if (nout <= 0 || tn_setup(&sp, n, k1, k2))                                 \
         return;                                                                \
-    const int64_t nA = sp.ntuple, nchunk = (nA + CHUNK - 1) / CHUNK;           \
     const int ns = sp.nsplit;                                                  \
+    const int64_t np = tn_nprefix(&sp), nchunk = (np + PCHUNK - 1) / PCHUNK;   \
     int64_t *gs = (int64_t *)malloc(sizeof(int64_t) * (size_t)(nout + 1));     \
     int64_t ng = 0;                                                            \
     for (int64_t o = 0; o < nout; o++)                                         \
@@ -343,29 +420,31 @@ void zc_tn_reduce2_##SFX(T *R, int64_t ldR, int64_t nout, const int64_t *row,  \
     gs[ng] = nout;                                                             \
     _Pragma("omp parallel")                                                    \
     {                                                                          \
-        int64_t *off = (int64_t *)malloc(sizeof(int64_t) * CHUNK * ns);        \
+        tn_run run[PCHUNK * NSPLIT_MAX];                                       \
+        int64_t len[PCHUNK], first[PCHUNK];                                    \
         _Pragma("omp for collapse(2) schedule(dynamic, 16)")                   \
         for (int64_t g = 0; g < ng; g++)                                       \
         for (int64_t ch = 0; ch < nchunk; ch++) {                              \
-            int64_t A0 = ch * CHUNK, cnt = (nA - A0 < CHUNK) ? nA - A0 : CHUNK; \
-            tn_offsets(&sp, A0, cnt, b0, b1, c0, c1, s1, s2, off);             \
-            T *r = R + row[gs[g]] * ldR + A0;                                  \
+            int cnt = tn_chunk(&sp, ch * PCHUNK, b0, b1, c0, c1, s1, s2, run, len, first); \
+            T *rr = R + row[gs[g]] * ldR;                                      \
             for (int64_t o = gs[g]; o < gs[g + 1]; o++) {                      \
-                if (osgn[o] == 0)                                              \
-                    continue;                                                  \
+                if (osgn[o] == 0) continue;                                    \
                 const T *x = X + xoff[o];                                      \
-                const double sg = scale * osgn[o];                             \
-                for (int64_t t = 0; t < cnt; t++) {                            \
-                    const int64_t *f = off + t * ns;                           \
-                    T v = 0;                                                   \
-                    for (int s = 0; s < ns; s++)                               \
-                        if (f[s] >= 0)                                         \
-                            v += sp.sgn[s] * x[f[s]];                          \
-                    r[t] += sg * v;                                            \
+                for (int q = 0; q < cnt; q++) {                                \
+                    if (len[q] <= 0) continue;                                 \
+                    T *r = rr + first[q];                                      \
+                    for (int s = 0; s < ns; s++) {                             \
+                        const tn_run *u = run + q * ns + s;                    \
+                        if (u->thi <= u->tlo) continue;                        \
+                        const double f = scale * osgn[o] * u->sgn;             \
+                        const T *xb = x + u->base;                             \
+                        const int64_t st = u->stride;                          \
+                        if (st == 1) for (int64_t t = u->tlo; t < u->thi; t++) r[t] += f * xb[t]; \
+                        else         for (int64_t t = u->tlo; t < u->thi; t++) r[t] += f * xb[t * st]; \
+                    }                                                          \
                 }                                                              \
             }                                                                  \
         }                                                                      \
-        free(off);                                                             \
     }                                                                          \
     free(gs);                                                                  \
     free(sp.cb);                                                               \
@@ -383,30 +462,33 @@ void zc_tn_expand2_##SFX(const T *M, int64_t ldM, int64_t nout,                \
     tn_split sp;                                                               \
     if (nout <= 0 || tn_setup(&sp, n, k1, k2))                                 \
         return;                                                                \
-    const int64_t nA = sp.ntuple, nchunk = (nA + CHUNK - 1) / CHUNK;           \
     const int ns = sp.nsplit;                                                  \
+    const int64_t np = tn_nprefix(&sp), nchunk = (np + PCHUNK - 1) / PCHUNK;   \
     _Pragma("omp parallel")                                                    \
     {                                                                          \
-        int64_t *off = (int64_t *)malloc(sizeof(int64_t) * CHUNK * ns);        \
+        tn_run run[PCHUNK * NSPLIT_MAX];                                       \
+        int64_t len[PCHUNK], first[PCHUNK];                                    \
         _Pragma("omp for collapse(2) schedule(dynamic, 16)")                   \
         for (int64_t o = 0; o < nout; o++)                                     \
         for (int64_t ch = 0; ch < nchunk; ch++) {                              \
-            if (osgn[o] == 0)                                                  \
-                continue;                                                      \
-            int64_t A0 = ch * CHUNK, cnt = (nA - A0 < CHUNK) ? nA - A0 : CHUNK; \
-            tn_offsets(&sp, A0, cnt, b0, b1, c0, c1, s1, s2, off);             \
-            const T *r = M + row[o] * ldM + A0;                                \
+            if (osgn[o] == 0) continue;                                        \
+            int cnt = tn_chunk(&sp, ch * PCHUNK, b0, b1, c0, c1, s1, s2, run, len, first); \
+            const T *rr = M + row[o] * ldM;                                    \
             T *x = X + xoff[o];                                                \
-            const double sg = scale * osgn[o];                                 \
-            for (int64_t t = 0; t < cnt; t++) {                                \
-                const int64_t *f = off + t * ns;                               \
-                T v = sg * r[t];                                               \
-                for (int s = 0; s < ns; s++)                                   \
-                    if (f[s] >= 0)                                             \
-                        x[f[s]] = sp.sgn[s] * v;                               \
+            for (int q = 0; q < cnt; q++) {                                    \
+                if (len[q] <= 0) continue;                                     \
+                const T *r = rr + first[q];                                    \
+                for (int s = 0; s < ns; s++) {                                 \
+                    const tn_run *u = run + q * ns + s;                        \
+                    if (u->thi <= u->tlo) continue;                            \
+                    const double f = scale * osgn[o] * u->sgn;                 \
+                    T *xb = x + u->base;                                       \
+                    const int64_t st = u->stride;                              \
+                    if (st == 1) for (int64_t t = u->tlo; t < u->thi; t++) xb[t] = f * r[t]; \
+                    else         for (int64_t t = u->tlo; t < u->thi; t++) xb[t * st] = f * r[t]; \
+                }                                                              \
             }                                                                  \
         }                                                                      \
-        free(off);                                                             \
     }                                                                          \
     free(sp.cb);                                                               \
 }                                                                              \
