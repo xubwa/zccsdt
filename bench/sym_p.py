@@ -75,7 +75,8 @@ eo, ev = mo_e[:no], mo_e[no:]
 t2 = np.conj(np.asarray(eris.oovv)) / (eo[:, None, None, None] + eo[None, :, None, None]
                                      - ev[None, None, :, None] - ev[None, None, None, :])
 rng = np.random.default_rng(3)
-t3, t4 = (s * rng.standard_normal(ok.shape) * ok for s, ok in ((3e-3, allowed(lab, no, 3)), (1e-3, allowed(lab, no, 4))))
+t3, t4 = (s * rng.standard_normal(ok.shape) * ok
+          for s, ok in ((3e-3, allowed(lab, no, 3)), (1e-3, allowed(lab, no, 4))))
 print('%d occupied + %d virtual spinors, labels of the virtual ones: %s;  T4 %.0f MB;  %s threads'
       % (no, nv, ' '.join('%d:%d' % (k, (lab[no:] == k).sum()) for k in np.unique(lab[no:])), t4.nbytes / 1e6,
          os.environ.get('OMP_NUM_THREADS')), flush=True)

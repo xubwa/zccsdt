@@ -75,6 +75,58 @@ def test_sectors_against_dense(hbr):
     assert abs(PS.kernel(e1, t2, t3, t4) - ref) < 1e-13
 
 
+def _random(no, nv, lab, modulus, cplx, seed=1):
+    """A container with random blocks of integrals and random amplitudes, of
+    which the elements that the labels allow are there."""
+    import types
+    rng = np.random.default_rng(seed)
+    lab = np.asarray(lab)
+
+    def rnd(*shape):
+        x = rng.standard_normal(shape)
+        return x + 1j * rng.standard_normal(shape) if cplx else x
+
+    def block(key):
+        x, k = rnd(*[no if c == 'o' else nv for c in key]), 0
+        for ax, c in enumerate(key):
+            l = lab[:no] if c == 'o' else lab[no:]
+            k = k + (1 if ax < 2 else -1) * l.reshape([-1 if n == ax else 1 for n in range(4)])
+        return x * ((k % modulus if modulus else k) == 0)
+    mo_e = np.concatenate((np.sort(rng.uniform(-3, -1, no)), np.sort(rng.uniform(1, 3, nv))))
+    eris = types.SimpleNamespace(nocc=no, fock=np.diag(mo_e), mo_energy=mo_e, vvvv=None, labels=lab, modulus=modulus,
+                                 **{key: block(key) for key in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv')})
+    a, b = np.triu_indices(nv, 1)
+    k = (lab[no:][a] + lab[no:][b])[:, None] - (lab[no:][a] + lab[no:][b])[None, :]
+    eris._vvvv_pp = rnd(len(a), len(a)) * ((k % modulus if modulus else k) == 0)
+    t2 = block('oovv')
+    t2 = t2 - t2.transpose(1, 0, 2, 3)
+    t2 = t2 - t2.transpose(0, 1, 3, 2)
+    t3, t4 = (rnd(*ok.shape) * ok for ok in (_allowed(lab, no, 3, modulus), _allowed(lab, no, 4, modulus)))
+    return eris, t2, t3, t4
+
+
+@pytest.mark.parametrize('no,nv,cplx,modulus,labels', [
+    (6, 9, True, 0, [-1, 1, 1, -1, 3, -3, 1, -1, 3, 1, -1, 5, -3, 1, -1]),      # spinors in any order
+    (7, 8, False, 4, [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 1, 3, 3, 1]),             # the two irreps of C2
+    (6, 8, True, 3, [0, 1, 2, 0, 1, 2, 0, 0, 1, 2, 2, 1, 1, 0]),                 # three classes, modulo 3
+    (9, 7, False, 0, [0, 2, -2, 0, 2, -2, 0, 4, -4, 0, 2, -2, 6, -6, 2, 0]),     # classes of one spinor
+    (5, 6, True, 0, [0, 0, 0, 0, 1, 1, 1, 1, -1, -1, 7]),                        # one pentuple, a label apart
+])
+def test_random_labels(no, nv, cplx, modulus, labels):
+    """Random integrals and amplitudes with labels of several kinds - more
+    occupied than virtual spinors, classes of one spinor, a sector of one
+    virtual pentuple and a label that nothing goes with: the energy of the
+    dense code."""
+    eris, t2, t3, t4 = _random(no, nv, labels, modulus, cplx)
+    ref = PT.kernel(eris, t2, t3, t4)
+    assert abs(ref) > 1e-3
+    assert abs(PS.kernel(eris, t2, t3, t4) - ref) < 1e-12 * abs(ref)
+    if cplx:
+        # (real amplitudes of the higher ranks with complex integrals)
+        ref = PT.kernel(eris, t2, t3.real, t4.real)
+        assert abs(PS.kernel(eris, t2, t3.real, t4.real) - ref) < 1e-12 * abs(ref)
+
+
 def test_intermediates_in_blocks(hbr):
     """Xv and Xq in blocks are the elements of those of the dense code that
     the labels allow, and the others vanish there."""
@@ -126,9 +178,6 @@ def test_complex_amplitudes(hbr):
     ref = PT.kernel(eris, t2, t3, t4)
     assert abs(PT.kernel(ec, *amps) - ref) < 1e-13
     assert abs(PS.kernel(ec, *amps) - ref) < 1e-13
-    # real amplitudes of higher rank with complex integrals
-    ec.labels = np.zeros_like(eris.labels)
-    assert abs(PS.kernel(ec, t2c, 0 * amps[1], amps[2]) - PT.kernel(ec, t2c, 0 * amps[1], amps[2])) < 1e-13
 
 
 @pytest.mark.parametrize('how', ['2 m_j', 'modulo 4', 'one label'])

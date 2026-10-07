@@ -12,23 +12,33 @@ into blocks:
     X[e, (abcd)]     one block per label p of e: the virtual spinors of
                      label p times the quadruples of label M - p
 
-for r and for z each.  The blocks of one occupied pentuple are formed by
-matrix products on the rows and columns that the labels allow, and one
-kernel (zc_p_sector_energy, csrc/psym.c) walks through the virtual pentuples
-of the sector, sums the ten and the five splits of each from the blocks and
-adds the energy: nothing of the size of the virtual pentuples is stored, and
-no tables of their size are made.
+for r and for z each.  The blocks of one occupied pentuple are matrix
+products on the rows and columns that the labels allow - the rows of all
+splits and terms of a block stacked, as in the dense code -, and one kernel
+(zc_p_sector_energy, csrc/psym.c) walks through the virtual pentuples of the
+sector, sums the ten and the five splits of each from the blocks and adds
+the energy: nothing of the size of the virtual pentuples is stored, and no
+tables of their size are made.
 
-The two large intermediates of T2 are in blocks too, formed from blocks:
+The intermediates with virtual triples are in blocks too, formed from blocks
+of T2 and of the integrals:
 
     Xv(g; ij; abc)      for the g of one label the triples of one label
     Xq(n; jklm; abc)    for the n of one label the triples of one label
 
-T3 and T4 are the packed blocks of the dense code; what a product needs of
-them is read where it is (quad_rows13(), quad_pick()).  The second-order
-quadruples of the left-hand side (as large as T4), the intermediate
-Xo(n; ijm; de) and the layouts of T2 and of the integrals with two virtual
-indices are those of the dense code.
+(zc_xv_sector of csrc/tnpack.c and zc_p_xq_sector reduce the products onto
+the triples), and of the second-order quadruples of the left-hand side only
+the elements that the labels allow are evaluated (zc_p_y4_row).
+
+T3 and T4 are the packed blocks of the dense code, and the second-order
+quadruples are stored like T4; what a product needs of them is read where
+it is (quad_row(), quad_pick()).  Xo(n; ijm; de) and the layouts of T2
+and of the integrals with two virtual indices are those of the dense code.
+
+Memory (plan()): all of this for one plan - where it does not fit,
+MemoryError, and the dense code has plans for less (batches of columns,
+scratch files).  With one label the blocks are the dense arrays, and r and z
+on two groups of indices take more than the dense code's on the pentuples.
 '''
 
 import ctypes
@@ -45,7 +55,6 @@ from zccsdt.timing import timer
 
 _I64, _INT, _DBL = ctypes.c_int64, ctypes.c_int, ctypes.c_double
 _p = P._p
-PASSES = Q.PASSES
 
 
 def _load_lib():
@@ -101,8 +110,7 @@ class Sectors(QS.Sectors):
         self.k3 = self.red(self.ko[P.tuples(no, 3)].sum(axis=1))
         self.k4 = self.red(self.ko[P.tuples(no, 4)].sum(axis=1))
         self.k5 = self.red(self.ko[P.tuples(no, 5)].sum(axis=1))
-        self.lid = {k: l for l, k in enumerate(self.vlab)}
-        self._layout5, self._xq_layout = {}, {}
+        self._layout5, self._xq = {}, {}
 
     def layout5(self, M):
         '''The blocks of the products of an occupied pentuple of total label
@@ -170,75 +178,94 @@ class Sectors(QS.Sectors):
                     work = max(work, lay[2])
         return total, work
 
-    def u_rows(self, kjk, kn, kg):
-        """The rows (a n c) of U(jk; a n c g) = sum_f t(jk; f a) <cn||fg> for
-        the n of label ``kn``, the g of label ``kg`` and a pair (jk) of label
-        ``kjk``, one class of a after the other:
-        ([(label of a, label of c, first row, rows)], rows)."""
-        rows, n = [], 0
-        for ka in self.vlab:
-            kc = int(self.red(kjk - ka + kg - kn))
-            if kc in self.V:
-                m = len(self.V[ka]) * len(self.O[kn]) * len(self.V[kc])
-                rows.append((ka, kc, n, m))
-                n += m
-        return rows, n
+    # Xq(n; jklm; abc) is the sum of two products that are reduced onto the triples,
+    #     G[(ab), n, c] = sum_o t(jo; ab) W(n, o; klm; c)                    (4 splits of jklm)
+    #     Z[a, n, c, b] = sum_g U(jk; a n c g) t(lm; g b),  U = sum_f t(jk; f a) <cn||fg>   (3 splits)
+    # for all labels of n in one matrix product each: the columns (n c) and the rows (a n c)
+    # with the n of one label after those of another.
 
-    def xq_layout(self, kJ, kn):
-        """The products that Xq(n; jklm; abc) is made from, for the n of
-        label ``kn`` and a quadruple of label ``kJ``: (label of the triples;
-        {label of (ab): offset}, size, offsets and widths of the blocks
-        [(ab), n, c] - the term with one integral <oo||vo> -;
-        [(label of b, offset, rows)], size, offsets and widths of the blocks
-        [a, n, c, b] by the labels of a and b - the term with <vo||vv>: for
-        one label of b the rows (a n c) of u_rows()); None if there are no
-        such triples."""
-        key = (kJ, kn)
-        if key in self._xq_layout:
-            return self._xq_layout[key]
-        T = int(self.red(kJ - kn))
-        if T not in self.A3:
-            self._xq_layout[key] = None
-            return None
-        nn = len(self.O[kn])
-        where, n = {}, 0
-        off, nd = np.full(self.nq, -1, dtype=np.int64), np.zeros(self.nq, dtype=np.int64)
-        for q2 in self.qlab:
-            kc = int(self.red(T - q2))
-            if kc in self.V:
-                where[q2] = n
-                off[q2 - self.qmin], nd[q2 - self.qmin] = n, len(self.V[kc])
-                n += len(self.Q2[q2]) * nn * len(self.V[kc])
-        nl = len(self.vlab)
-        zrows, n2 = [], 0
-        off2 = np.full(nl * nl, -1, dtype=np.int64)
-        ncs, nbs = np.zeros(nl * nl, dtype=np.int64), np.zeros(nl * nl, dtype=np.int64)
-        for lb, kb in enumerate(self.vlab):
-            nb, m = len(self.V[kb]), 0
-            for la, ka in enumerate(self.vlab):
-                kc = int(self.red(T - ka - kb))
+    def xq_cols(self, S):
+        """The columns (n c) with the labels of n and c adding up to ``S``:
+        ({label of n: (first column, label of c)}, columns)."""
+        if ('c', S) not in self._xq:
+            cols, n = {}, 0
+            for kn in self.olab:
+                kc = int(self.red(S - kn))
                 if kc in self.V:
-                    off2[la * nl + lb], ncs[la * nl + lb], nbs[la * nl + lb] = n2 + m * nb, len(self.V[kc]), nb
-                    m += len(self.V[ka]) * nn * len(self.V[kc])
+                    cols[kn] = (n, kc)
+                    n += len(self.O[kn]) * len(self.V[kc])
+            self._xq['c', S] = (cols, n)
+        return self._xq['c', S]
+
+    def xq_rows(self, S):
+        """The rows (a n c) with the labels of a, n and c adding up to ``S``,
+        the a of one label together and for each of them the columns
+        xq_cols(S - label of a): ([(label of a, first row, rows for one a,
+        columns)], rows)."""
+        if ('r', S) not in self._xq:
+            rows, n = [], 0
+            for ka in self.vlab:
+                cols, m = self.xq_cols(int(self.red(S - ka)))
+                if m:
+                    rows.append((ka, n, m, cols))
+                    n += len(self.V[ka]) * m
+            self._xq['r', S] = (rows, n)
+        return self._xq['r', S]
+
+    def xq_layout(self, kJ):
+        """The two products for an occupied quadruple of label ``kJ``:
+        [(label of (ab), offset, columns)] and the size of G,
+        [(label of b, offset, rows)] and the size of Z, and for every label
+        of n that has triples (those of label kJ - kn) the arrays of the
+        kernel: {label of n: (label of the triples, offsets, strides and
+        widths of the blocks of G and of Z)}."""
+        if kJ in self._xq:
+            return self._xq[kJ]
+        gb, n = [], 0
+        for q2 in self.qlab:
+            m = self.xq_cols(int(self.red(kJ - q2)))[1]
             if m:
-                zrows.append((kb, n2, m))
-                n2 += m * nb
-        self._xq_layout[key] = (T, where, n, off, nd, zrows, n2, off2, ncs, nbs)
-        return self._xq_layout[key]
+                gb.append((q2, n, m))
+                n += len(self.Q2[q2]) * m
+        zb, n2 = [], 0
+        for kb in self.vlab:
+            m = self.xq_rows(int(self.red(kJ - kb)))[1]
+            if m:
+                zb.append((kb, n2, m))
+                n2 += m * len(self.V[kb])
+        nl, kern = len(self.vlab), {}
+        for kn in self.olab:
+            T = int(self.red(kJ - kn))
+            if T not in self.A3:
+                continue
+            goff, gst, gnd = (np.full(self.nq, x, dtype=np.int64) for x in (-1, 0, 0))
+            for q2, at, m in gb:
+                cols = self.xq_cols(int(self.red(kJ - q2)))[0]
+                if kn in cols:
+                    goff[q2 - self.qmin], gst[q2 - self.qmin] = at + cols[kn][0], m
+                    gnd[q2 - self.qmin] = len(self.V[cols[kn][1]])
+            off, ast, ncs, nbs = (np.full(nl * nl, x, dtype=np.int64) for x in (-1, 0, 0, 0))
+            for kb, at, _ in zb:
+                lb, nb = self.vlab.index(kb), len(self.V[kb])
+                for ka, first, m, cols in self.xq_rows(int(self.red(kJ - kb)))[0]:
+                    if kn in cols:
+                        k = self.vlab.index(ka) * nl + lb
+                        off[k], ast[k] = at + (first + cols[kn][0]) * nb, m * nb
+                        ncs[k], nbs[k] = len(self.V[cols[kn][1]]), nb
+            kern[kn] = (T, goff, gst, gnd, off, ast, ncs, nbs)
+        self._xq[kJ] = (gb, n, zb, n2, kern)
+        return self._xq[kJ]
 
     def xq_sizes(self):
         """Elements of the blocks of Xq for all occupied quadruples, of the
-        largest sets of products that one of them is made from (the two
-        terms), of U for the pairs of one smallest index, and of the blocks
-        of <vo||vv>."""
+        largest G and Z that one of them is made from, of U for the pairs
+        of one smallest index, and of the blocks of <vo||vv>."""
         total = work = work2 = 0
         for kJ, count in zip(*np.unique(self.k4, return_counts=True)):
-            for kn in self.olab:
-                lay = self.xq_layout(int(kJ), kn)
-                if lay is not None:
-                    total += int(count) * len(self.O[kn]) * len(self.A3[lay[0]])
-                    work, work2 = max(work, lay[2]), max(work2, lay[6])
-        usz = {int(k): sum(self.u_rows(int(k), kn, kg)[1] * len(self.V[kg]) for kn in self.olab for kg in self.vlab)
+            gb, n, zb, n2, kern = self.xq_layout(int(kJ))
+            total += int(count) * sum(len(self.O[kn]) * len(self.A3[x[0]]) for kn, x in kern.items())
+            work, work2 = max(work, n), max(work2, n2)
+        usz = {int(k): sum(self.xq_rows(int(self.red(k + kg)))[1] * len(self.V[kg]) for kg in self.vlab)
                for k in np.unique(self.kpair)}
         pairs = P.tuples(self.nocc, 2)
         u = max(sum(usz[int(k)] for k in self.kpair[pairs[:, 0] == j]) for j in range(self.nocc - 1))
@@ -260,6 +287,7 @@ class Plan:
     n14: int                # and X[e, (abcd)]
     work: int               # elements of the stacked rows of the right operand of a product
     lwork: int              # and of the left one
+    zwork: tuple            # the same for z, (left, right)
     kept: int               # bytes of what stays to the end
     parts: dict             # bytes by array (for the output and for tests)
 
@@ -283,6 +311,7 @@ def plan(eris, isz, budget=None):
     max3, max2 = (max(len(x) for x in c.values()) for c in (sec.A3, sec.Q2))
     rows = 15 * (maxV + maxO) + 10          # of the stacked operands of X[(de), (abc)], at most
     work, lwork = max(rows * max3, blk14), rows * max2
+    zwork = ((5 * maxV + 10) * max2, (5 * maxV + 10) * max3)
     parts = {
         'second-order quadruples': isz * nI4 * nA4,
         'Xo': isz * nI3 * no * nQ,
@@ -300,24 +329,24 @@ def plan(eris, isz, budget=None):
     t_xv = isz * (sec.w_size() + xv_work + 2 * maxO * maxV * max(maxV, max2))
     w1 = nI3 * no * no * nv
     t_w1 = isz * (no ** 3 * nv + 2 * no ** 3 * nP * nv + 3 * w1)
-    t_xq = isz * (2 * w1 + no * no * nQ + vints + no * nv * maxV * maxV + xq_work + xq_work2 + xq_u)
-    t_run = isz * (2 * n23 + 2 * n14 + work + lwork + 10 * no * maxV)
+    t_xq = isz * (2 * w1 + no * no * nQ + vints + 3 * no * nv * maxV * maxV + xq_work + xq_work2 + xq_u)
+    t_run = isz * (2 * n23 + 2 * n14 + work + lwork + sum(zwork) + 2 * (5 + 10 * no) * nv + 10 * no * nv)
     parts['blocks of a pentuple'] = t_run
     need = kept + max(t_y4, t_xo, t_xv, t_w1, t_xq, t_run)
     if budget is not None and need > budget:
         raise MemoryError('(P) in blocks of the symmetry labels needs %.0f MB besides T3, T4 and the integrals '
                           'for %d occupied and %d virtual spinors; %.0f MB are left'
                           % (need / 1e6, no, nv, budget / 1e6))
-    return Plan(int(need), sec, int(n23), int(n14), int(work), int(lwork), int(kept), parts)
+    return Plan(int(need), sec, int(n23), int(n14), int(work), int(lwork), zwork, int(kept), parts)
 
 
 # ---- what is read of the packed quadruples (T4 and the second-order ones)
 
-def quad_rows13(T4, J, nv, es, tri, out):
-    '''out[e, t] = t(J; e, abc) for the virtual spinors ``es`` and the sorted
-    triples ``tri`` of the occupied quadruple J of a packed block.'''
-    _fn('expand13', out.dtype)(_p(T4[J]), _INT(nv), _p(es), _INT(len(es)), _p(tri), _I64(len(tri)), _p(out))
-    return out
+def quad_row(T4, J):
+    '''The address of the packed row of the occupied quadruple J: the
+    kernel reads t(J; f, abc) from it for the f and the triples (abc) of a
+    block (zc_p_operands23).'''
+    return T4.ctypes.data + J * T4.strides[0]
 
 
 def quad_pick(T4, rows, sgn, cols, out):
@@ -341,7 +370,7 @@ class Pentuples:
         nP, nQ, nI3, nA3, nI4, nA4, nI5, nA5 = PT._sizes(no, nv)
         i2, j2 = Q._pairs(no)
         a2, b2 = Q._pairs(nv)
-        self._k = {name: _fn(name, dtype) for name in ('expand13', 'expand12', 'pick', 'copy', 'sector_energy',
+        self._k = {name: _fn(name, dtype) for name in ('operands23', 'pick', 'sector_energy',
                                                        'xq_sector', 'y4_row')}
         self._xv_sector = getattr(P._lib, 'zc_xv_sector_' + P._SFX[np.dtype(dtype)])
 
@@ -400,8 +429,17 @@ class Pentuples:
         self.R23, self.Z23 = (np.empty(max(plan_.n23, 1), dtype=dtype) for _ in range(2))
         self.R14, self.Z14 = (np.empty(max(plan_.n14, 1), dtype=dtype) for _ in range(2))
         self.L, self.R = np.empty(max(plan_.lwork, 1), dtype=dtype), np.empty(max(plan_.work, 1), dtype=dtype)
+        self.LZ, self.RZ = (np.empty(max(n, 1), dtype=dtype) for n in plan_.zwork)
         self.e = np.zeros(1)
-        self._sg, self._t3r, self._ix = {}, {}, {}
+        # the addresses that the kernel of the operands is given
+        adr = lambda x: x.ctypes.data                           # noqa: E731
+        self._adr = {
+            'V': {k: (adr(x), adr(sec.V32[k]), len(x)) for k, x in sec.V.items()},
+            'O': {k: (adr(x), len(x)) for k, x in sec.O.items()},
+            'Xq': [{k: adr(x) for k, x in blk.items()} for blk in self.Xq],
+            'Xv': [{k: adr(x) for k, x in blk.items()} for blk in self.Xv],
+        }
+        self._t3r = {}
 
     # ---- the second-order quadruples <Q| V T2 |0> / D of the left-hand side
 
@@ -476,41 +514,45 @@ class Pentuples:
         product of <cn||fg> with the first T2, U(jk; a n c g), is the same
         for all quadruples with the pair (jk): it is formed for the pairs of
         one smallest index j at a time.'''
-        sec, dtype, no = self.sec, self.dtype, self.nocc
-        nI3 = comb(no, 3)
+        sec, dtype, no, red = self.sec, self.dtype, self.nocc, self.sec.red
 
         def c_(x):
             return np.ascontiguousarray(x, dtype=dtype)
-        # W(n, o; klm; c) = P(m/kl) sum_f <no||fm> t(kl; fc), [(klm), o, n, c], in the blocks of the
-        # labels of o and n: [o, (n c)]
+
+        def stack(parts):
+            return parts[0] if len(parts) == 1 else c_(np.concatenate(parts, axis=1))
+        # W(n, o; klm; c) = P(m/kl) sum_f <no||fm> t(kl; fc), [(klm), o, n, c], for the o of one
+        # label: [o, (n c)]
         oovo = -np.asarray(eris.ooov).transpose(0, 1, 3, 2)                         # <no||fm>
         G = np.einsum('nofm,Pfc->mPonc', oovo, self.tfc, optimize=True)
         W1 = P.fold(G, self.o12, 0, 1)
         del G, oovo
         w1 = {}
-        for J3 in range(nI3):
+        for J3 in range(len(W1)):
             for ko_ in sec.olab:
-                for kn in sec.olab:
-                    kc = int(sec.red(sec.k3[J3] - kn - ko_))
-                    if kc in sec.V:
-                        os_, ns = sec.O[ko_], sec.O[kn]
-                        w1[J3, ko_, kn] = c_(W1[J3][np.ix_(os_, ns, sec.V[kc])]).reshape(len(os_), -1)
+                cols = sec.xq_cols(int(red(sec.k3[J3] - ko_)))[0]
+                if cols:
+                    os_ = sec.O[ko_]
+                    w1[J3, ko_] = stack([c_(W1[J3][np.ix_(os_, sec.O[kn], sec.V[kc])]).reshape(len(os_), -1)
+                                         for kn, (_, kc) in cols.items()])
         del W1
         # t(j o; ab) for the pairs of one label: [(ab), o]
         t2b = {(j, ko_): c_(self.t2_xp[j][np.ix_(sec.O[ko_], sec.Q2[q2])].T)
-               for j in range(no) for ko_ in sec.olab for q2 in [int(sec.red(ko_ + sec.ko[j]))] if q2 in sec.Q2}
-        # <cn||fg> as [f, (n c g)] in the blocks of the labels
+               for j in range(no) for ko_ in sec.olab for q2 in [int(red(ko_ + sec.ko[j]))] if q2 in sec.Q2}
+        # <cn||fg> for the f and the g of one label each: [f, (n c), g]
         ovvv = np.asarray(eris.ovvv)
         vb = {}
-        for kn in sec.olab:
-            for kf in sec.vlab:
-                for kg in sec.vlab:
-                    kc = int(sec.red(kf + kg - kn))
-                    if kc in sec.V:
-                        x = ovvv[np.ix_(sec.O[kn], sec.V[kc], sec.V[kf], sec.V[kg])].transpose(2, 0, 1, 3)
-                        vb[kf, kn, kg] = np.ascontiguousarray(-x, dtype=dtype).reshape(len(sec.V[kf]), -1)
+        for kf in sec.vlab:
+            for kg in sec.vlab:
+                cols = sec.xq_cols(int(red(kf + kg)))[0]
+                if cols:
+                    F, G = sec.V[kf], sec.V[kg]
+                    vb[kf, kg] = stack([
+                        c_(-ovvv[np.ix_(sec.O[kn], sec.V[kc], F, G)].transpose(2, 0, 1, 3)).reshape(len(F), -1, len(G))
+                        for kn, (_, kc) in cols.items()]).reshape(len(F), -1)
+        del ovvv
         sz = sec.xq_sizes()
-        self._m3, self._z = np.empty(max(sz[1], 1), dtype=dtype), np.empty(max(sz[2], 1), dtype=dtype)
+        self._g, self._z = np.empty(max(sz[1], 1), dtype=dtype), np.empty(max(sz[2], 1), dtype=dtype)
         quads = P.tuples(no, 4)
         pair_of = P.ranks(no, 2)
         out = []
@@ -518,189 +560,160 @@ class Pentuples:
             U = {}
             for k in range(j + 1, no):
                 p = int(pair_of[j, k])
-                for kn in sec.olab:
-                    for kg in sec.vlab:
-                        rows = sec.u_rows(int(sec.kpair[p]), kn, kg)
-                        if not rows[1]:
-                            continue
-                        u = np.zeros((rows[1], len(sec.V[kg])), dtype=dtype)
-                        for ka, kc, o, m in rows[0]:
-                            if (p, ka) in self.tblk:
-                                gemm(self.tblk[p, ka].T, vb[int(sec.red(sec.kpair[p] - ka)), kn, kg],
-                                     u[o:o + m].reshape(len(sec.V[ka]), -1))
-                        U[p, kn, kg] = u
+                for kg in sec.vlab:
+                    rows, n = sec.xq_rows(int(red(sec.kpair[p] + kg)))
+                    if not n:
+                        continue
+                    ng = len(sec.V[kg])
+                    U[p, kg] = u = np.zeros((n, ng), dtype=dtype)
+                    for ka, first, m, _ in rows:
+                        if (p, ka) in self.tblk:
+                            na = len(sec.V[ka])
+                            gemm(self.tblk[p, ka].T, vb[int(red(sec.kpair[p] - ka)), kg],
+                                 u[first:first + na * m].reshape(na, m * ng))
             for J in np.where(quads[:, 0] == j)[0]:
                 out.append(self.xq_blocks(int(J), w1, t2b, U))
             del U
-        self._m3 = self._z = None
+        self._g = self._z = None
         return out
 
     def xq_blocks(self, J, w1, t2b, U):
         '''{label of n: Xq[n, (abc)]} for the occupied quadruple J: the n of
         that label and the triples of the label that goes with it.'''
-        sec, dtype, o13, o22 = self.sec, self.dtype, self.o13, self.o22
+        sec, dtype, o13, o22, red = self.sec, self.dtype, self.o13, self.o22, self.sec.red
+        gb, n, zb, n2, kern = sec.xq_layout(int(sec.k4[J]))
+        G, Z = self._g, self._z
+        P.zero(G[:n])
+        P.zero(Z[:n2])
+        for s in range(4):                                                  # (j|klm)
+            j, J3, sg = int(o13.idx1[J, s]), int(o13.idx2[J, s]), float(o13.sgn[J, s])
+            for q2, at, m in gb:
+                ko_ = int(red(q2 - sec.ko[j]))
+                if (J3, ko_) in w1:
+                    L = t2b[j, ko_]                                         # [(ab), o]
+                    gemm(L, w1[J3, ko_], G[at:at + L.shape[0] * m].reshape(L.shape[0], m), alpha=sg, beta=1.0)
+        for s in range(3):                                                  # (jk|lm), j in the first pair
+            pj, pl_, sg = int(o22.idx1[J, s]), int(o22.idx2[J, s]), float(o22.sgn[J, s])
+            for kb, at, m in zb:
+                u = U.get((pj, int(red(sec.kpair[pl_] - kb))))
+                if u is not None:
+                    tb = self.tblk[pl_, kb]                                 # [g, b]
+                    gemm(u, tb, Z[at:at + m * tb.shape[1]].reshape(m, tb.shape[1]), alpha=-sg, beta=1.0)
         out = {}
-        for kn in sec.olab:
-            lay = sec.xq_layout(int(sec.k4[J]), kn)
-            if lay is None:
-                continue
-            T, where, n, off, nd, zrows, n2, off2, ncs, nbs = lay
-            nn = len(sec.O[kn])
-            self._m3[:n] = 0
-            for s in range(4):                                              # (j|klm)
-                j, J3, sg = int(o13.idx1[J, s]), int(o13.idx2[J, s]), float(o13.sgn[J, s])
-                for ko_ in sec.olab:
-                    at = where.get(int(sec.red(ko_ + sec.ko[j])))
-                    if at is not None and (J3, ko_, kn) in w1:
-                        L = t2b[j, ko_]                                     # [(ab), o]
-                        R = w1[J3, ko_, kn]                                 # [o, (n c)]
-                        gemm(L, R, self._m3[at:at + L.shape[0] * R.shape[1]].reshape(L.shape[0], R.shape[1]),
-                             alpha=sg, beta=1.0)
-            tri = sec.tri[T]
-            res = np.empty((nn, len(tri)), dtype=dtype)
-            self._xv_sector(_INT(sec.nvir), _p(sec.kv32), _INT(sec.modulus), _p(tri), _I64(len(tri)), _INT(nn),
-                            _INT(sec.qmin), _INT(sec.nq), _p(off), _p(nd), _p(sec.posV), _p(sec.posQ),
-                            _p(self._m3), _p(res))
-            self._z[:n2] = 0
-            for s in range(3):                                              # (jk|lm), j in the first pair
-                pj, pl_, sg = int(o22.idx1[J, s]), int(o22.idx2[J, s]), float(o22.sgn[J, s])
-                for kb, o, m in zrows:
-                    u = U.get((pj, kn, int(sec.red(sec.kpair[pl_] - kb))))
-                    if u is not None and (pl_, kb) in self.tblk:
-                        tb = self.tblk[pl_, kb]                             # [g, b]
-                        gemm(u, tb, self._z[o:o + m * tb.shape[1]].reshape(m, tb.shape[1]), alpha=-sg, beta=1.0)
+        for kn, (T, goff, gst, gnd, off, ast, ncs, nbs) in kern.items():
+            tri, nn = sec.tri[T], len(sec.O[kn])
+            out[kn] = res = np.empty((nn, len(tri)), dtype=dtype)
             self._k['xq_sector'](
-                _INT(sec.nvir), _p(sec.kv32), _INT(sec.kmin), _p(sec.lid_of), _INT(len(sec.vlab)), _p(tri),
-                _I64(len(tri)), _INT(nn), _p(off2), _p(ncs), _p(nbs), _p(sec.posV), _p(self._z), _DBL(1.0),
-                _p(res))
-            out[kn] = res
+                _INT(sec.nvir), _p(sec.kv32), _INT(sec.modulus), _INT(sec.kmin), _p(sec.lid_of), _INT(len(sec.vlab)),
+                _p(tri), _I64(len(tri)), _INT(nn), _INT(sec.qmin), _INT(sec.nq), _p(goff), _p(gst), _p(gnd),
+                _p(sec.posQ), _p(G), _p(off), _p(ast), _p(ncs), _p(nbs), _p(sec.posV), _p(Z), _p(res))
         return out
 
     # ---- one occupied pentuple
 
-    def _signs(self, n, sg):
-        if (n, sg) not in self._sg:
-            self._sg[n, sg] = np.full(n, sg)
-        return self._sg[n, sg]
-
-    def _index(self, i):
-        if i not in self._ix:
-            self._ix[i] = np.array([i], dtype=np.int64)
-        return self._ix[i]
-
     def _t3_rows(self, kn, pp):
         '''(rows, signs) of t(n kl; abc) in the packed T3 for the n of label
-        ``kn`` and the occupied pair ``pp`` (sign 0: n is one of k, l).'''
+        ``kn`` and the occupied pair ``pp`` (sign 0: n is one of k, l), as
+        addresses.'''
         if (kn, pp) not in self._t3r:
             ns = self.sec.O[kn]
-            self._t3r[kn, pp] = (_i64(self.o12.pos[ns, pp]), _c(self.o12.psg[ns, pp], np.float64))
+            rows, sgn = _i64(self.o12.pos[ns, pp]), _c(self.o12.psg[ns, pp], np.float64)
+            self._t3r[kn, pp] = (rows.ctypes.data, sgn.ctypes.data, rows, sgn)
         return self._t3r[kn, pp]
 
     def energy(self, I):
         '''Adds the energy of the occupied pentuple I to self.e.'''
         sec, dtype, nv, K = self.sec, self.dtype, self.nvir, self._k
-        ko, kpair, k3 = sec.ko, sec.kpair, sec.k3
+        ko, kpair, k3, red = sec.ko, sec.kpair, sec.k3, sec.red
         o41, o32, o31 = self.o41, self.o32, self.o31
         T3, T4, Y4 = self.T3, self.T4, self.Y4
-        nA3 = T3.shape[1]
         M = int(sec.k5[I])
         b23, _, b14, _, off23, nc23, off14, nc14 = sec.layout5(M)
         J4s, xs, s41 = [[int(x) for x in a] for a in (o41.idx1[I], o41.idx2[I], o41.sgn[I])]
         J3s, ps, s32 = [[int(x) for x in a] for a in (o32.idx1[I], o32.idx2[I], o32.sgn[I])]
-        pick, copy = K['pick'], K['copy']
+        aV, aO, aXq, aXv = (self._adr[x] for x in ('V', 'O', 'Xq', 'Xv'))
+        a_t3 = T3.ctypes.data
+        t3_rows = [a_t3 + J3 * T3.strides[0] for J3 in J3s]
+        t4_rows, y4_rows = ([quad_row(amp, J) for J in J4s] for amp in (T4, Y4))
+        vvvo = [self.vvvo_t.ctypes.data + x * self.vvvo_t.strides[0] for x in xs]
+        t2x = [self.t2_xp.ctypes.data + x * self.t2_xp.strides[0] for x in xs]
+        xo = [self.Xo.ctypes.data + J3 * self.Xo.strides[0] for J3 in J3s]
+        vvoo = [self.vvoo_t.ctypes.data + pp * self.vvoo_t.strides[0] for pp in ps]
+        kx, k3s, kps = [int(ko[x]) for x in xs], [int(k3[J3]) for J3 in J3s], [int(kpair[pp]) for pp in ps]
         with timer('ps.23'):
             for q, off, nr, nc in b23:
-                T = int(sec.red(M - q))
-                rq, ca, tri, prs = sec.Q2[q], sec.A3[T], sec.tri[T], sec.pr32[q]
-                p_rq, p_ca, i_nr, i_nc = _p(rq), _p(ca), _I64(nr), _I64(nc)
-                # the rows of the stacked operands: [V,T4] | T2 with Xq | Xo with T3 | T3 with Xv
-                kfs = [int(sec.red(q - ko[x])) for x in xs]
-                kns = [int(sec.red(k3[J3] - q)) for J3 in J3s]
-                segs, n = [], 0
-                for kind, labels, cls in ((0, kfs, sec.V), (1, kfs, sec.O), (2, kns, sec.O), (3, kns, sec.V)):
-                    for s, k in enumerate(labels):
-                        if k in cls:
-                            segs.append((kind, s, k, n, len(cls[k])))
-                            n += len(cls[k])
-                    if kind == 0:
-                        na = n
+                T = int(red(M - q))
+                kfs, kns = [int(red(q - k)) for k in kx], [int(red(k - q)) for k in k3s]
+                # the rows of the stacked operands: [V,T4] | T2 with Xq | Xo with T3 | T3 with Xv,
+                # and those of z: the first with the second-order quadruples | t(ijk; abc) <de||lm>
+                seg, scale, zseg, zscale, n = [], [], [], [], 0
+                for s in range(5):
+                    if kfs[s] in aV:
+                        rows, es, m = aV[kfs[s]]
+                        seg += [0, n, m, vvvo[s], rows, t4_rows[s], es, 0]
+                        zseg += [4, n, m, vvvo[s], rows, y4_rows[s], es, 0]
+                        scale.append(-s41[s])
+                        n += m
+                nz = n
+                for s in range(5):
+                    if kfs[s] in aO:
+                        rows, m = aO[kfs[s]]
+                        seg += [1, n, m, t2x[s], rows, aXq[J4s[s]][kfs[s]], 0, 0]
+                        scale.append(s41[s])
+                        n += m
+                for s in range(10):
+                    if kns[s] in aO:
+                        rows, m = aO[kns[s]]
+                        seg += [2, n, m, xo[s], rows, a_t3] + list(self._t3_rows(kns[s], ps[s])[:2])
+                        scale.append(s32[s])
+                        n += m
+                for s in range(10):
+                    if kns[s] in aV:
+                        _, es, m = aV[kns[s]]
+                        seg += [3, n, m, t3_rows[s], es, aXv[ps[s]][kns[s]], 0, 0]
+                        scale.append(s32[s])
+                        n += m
+                    if kps[s] == q:
+                        zseg += [5, nz, 1, vvoo[s], 0, t3_rows[s], 0, 0]
+                        zscale.append(s32[s])
+                        nz += 1
                 X = self.R23[off:off + nr * nc].reshape(nr, nc)
                 Z = self.Z23[off:off + nr * nc].reshape(nr, nc)
-                L, R = self.L[:n * nr].reshape(n, nr), self.R[:n * nc].reshape(n, nc)
-                for kind, s, k, at, m in segs:
-                    l_, r_, i_m = ctypes.c_void_p(L.ctypes.data + at * L.strides[0]), \
-                        ctypes.c_void_p(R.ctypes.data + at * R.strides[0]), _I64(m)
-                    if kind == 0:               # (ijkl|m): <de||fm> t(ijkl; abc f) = - <de||fm> t(ijkl; f abc)
-                        pick(_p(self.vvvo_t[xs[s]]), _I64(self.vvvo_t.shape[2]), _p(sec.V[k]),
-                             _p(self._signs(m, -float(s41[s]))), i_m, p_rq, i_nr, l_)
-                        K['expand13'](_p(T4[J4s[s]]), _INT(nv), _p(sec.V32[k]), _INT(m), _p(tri), i_nc, _DBL(1.0), r_)
-                    elif kind == 1:             # (i|jklm): t(in; de) Xq(n; jklm; abc)
-                        pick(_p(self.t2_xp[xs[s]]), _I64(self.t2_xp.shape[2]), _p(sec.O[k]),
-                             _p(self._signs(m, float(s41[s]))), i_m, p_rq, i_nr, l_)
-                        copy(_p(self.Xq[J4s[s]][k]), _I64(m * nc), _DBL(1.0), r_)
-                    elif kind == 2:             # (ijm|kl): Xo(n; ijm; de) t(n kl; abc)
-                        pick(_p(self.Xo[J3s[s]]), _I64(self.Xo.shape[2]), _p(sec.O[k]),
-                             _p(self._signs(m, float(s32[s]))), i_m, p_rq, i_nr, l_)
-                        rows, sgn = self._t3_rows(k, ps[s])
-                        pick(_p(T3), _I64(nA3), _p(rows), _p(sgn), i_m, p_ca, i_nc, r_)
-                    else:                       # (klm|ij): t(klm; g de) Xv(g; ij; abc)
-                        K['expand12'](_p(T3[J3s[s]]), _INT(nv), _p(sec.V32[k]), _INT(m), _p(prs), i_nr,
-                                      _DBL(float(s32[s])), l_)
-                        copy(_p(self.Xv[ps[s]][k]), _I64(m * nc), _DBL(1.0), r_)
-                if n:
-                    gemm(L.T, R, X)
-                else:
-                    P.zero(X)
-                # z: the first rows with the second-order quadruples, and t(ijk; abc) <de||lm>
-                for kind, s, k, at, m in segs:
-                    if kind == 0:
-                        K['expand13'](_p(Y4[J4s[s]]), _INT(nv), _p(sec.V32[k]), _INT(m), _p(tri), i_nc, _DBL(1.0),
-                                      ctypes.c_void_p(R.ctypes.data + at * R.strides[0]))
-                n = na
-                for s in range(10):
-                    if kpair[ps[s]] == q:
-                        pick(_p(self.vvoo_t), _I64(self.vvoo_t.shape[1]), _p(self._index(ps[s])),
-                             _p(self._signs(1, float(s32[s]))), _I64(1), p_rq, i_nr,
-                             ctypes.c_void_p(self.L.ctypes.data + n * nr * self.L.itemsize))
-                        pick(_p(T3), _I64(nA3), _p(self._index(J3s[s])), _p(self._signs(1, 1.0)), _I64(1), p_ca, i_nc,
-                             ctypes.c_void_p(self.R.ctypes.data + n * nc * self.R.itemsize))
-                        n += 1
-                if n:
-                    gemm(self.L[:n * nr].reshape(n, nr).T, self.R[:n * nc].reshape(n, nc), Z)
-                else:
-                    P.zero(Z)
+                seg = np.array(seg + zseg, dtype=np.int64)
+                scale = np.array(scale + scale[:len(zseg) // 8 - len(zscale)] + zscale, dtype=np.float64)
+                K['operands23'](_INT(nv), _I64(len(scale)), _p(seg), _p(scale), _p(sec.Q2[q]), _I64(nr),
+                                _p(sec.pr32[q]), _p(sec.A3[T]), _I64(nc), _p(sec.tri[T]),
+                                _p(self.L), _p(self.R), _p(self.LZ), _p(self.RZ))
+                for Lx, Rx, m, out in ((self.L, self.R, n, X), (self.LZ, self.RZ, nz, Z)):
+                    if m:
+                        gemm(Lx[:m * nr].reshape(m, nr).T, Rx[:m * nc].reshape(m, nc), out)
+                    else:
+                        P.zero(out)
         with timer('ps.14'):
+            # - <ne||lm> t(ijk n; abcd), (ijk|lm): the rows of T4 that the ten splits share, each
+            # once, with the sum of the integrals that multiply it, [row, e]
+            pos, sg4 = o31.pos[J3s], o31.psg[J3s] * (-np.array(s32))[:, None]           # [split, n]
+            rows, inv = np.unique(pos[sg4 != 0], return_inverse=True)
+            LC = np.zeros((len(rows), nv), dtype=dtype)
+            np.add.at(LC, inv, (self.ovoo_t[ps] * sg4[:, :, None])[sg4 != 0])
+            klab = red(M - sec.k4[rows])                # the label of e that goes with a row
             for pe, off, nr, nc in b14:
-                va, ca = sec.V[pe], sec.A4[int(sec.red(M - pe))]
-                rows, Ls = [], []
-                for s in range(10):             # (ijk|lm): - <ne||lm> t(ijk n; abcd)
-                    J3, pp, sg = J3s[s], ps[s], float(s32[s])
-                    kn = int(sec.red(kpair[pp] - pe))
-                    if kn in sec.O:
-                        ns = sec.O[kn]
-                        sn = o31.psg[J3, ns]
-                        ns, sn = ns[sn != 0], sn[sn != 0]
-                        if len(ns):
-                            rows.append(o31.pos[J3, ns])
-                            Ls.append((-sg * sn)[:, None] * self.ovoo_t[pp][np.ix_(ns, va)])
                 X = self.R14[off:off + nr * nc].reshape(nr, nc)
                 Z = self.Z14[off:off + nr * nc].reshape(nr, nc)
-                if not rows:
+                sel = np.where(klab == pe)[0]
+                if not len(sel):
                     P.zero(X)
                     P.zero(Z)
                     continue
-                # (the rows of T4 that the ten splits share: each once)
-                rows, inv = np.unique(np.concatenate(rows), return_inverse=True)
-                L = np.zeros((len(rows), nr), dtype=dtype)
-                np.add.at(L, inv, np.concatenate(Ls))
-                L = _c(L.T)
-                rows, one = _i64(rows), np.ones(len(rows))
-                step = max(1, len(self.R) // len(rows))
+                ca = sec.A4[int(red(M - pe))]
+                L = _c(LC[np.ix_(sel, sec.V[pe])].T)
+                rows_, one = _i64(rows[sel]), np.ones(len(sel))
+                step = max(1, len(self.R) // len(sel))
                 for c0 in range(0, nc, step):
                     c1 = min(nc, c0 + step)
-                    W = self.R[:len(rows) * (c1 - c0)].reshape(len(rows), c1 - c0)
+                    W = self.R[:len(sel) * (c1 - c0)].reshape(len(sel), c1 - c0)
                     for amp, out in ((T4, X), (Y4, Z)):
-                        gemm(L, quad_pick(amp, rows, one, ca[c0:c1], W), out[:, c0:c1])
+                        gemm(L, quad_pick(amp, rows_, one, ca[c0:c1], W), out[:, c0:c1])
         with timer('ps.sum'):
             K['sector_energy'](
                 _INT(nv), _p(sec.kv32), _INT(sec.modulus), _INT(M), _p(self.ev), _DBL(float(self.eo5[I])),

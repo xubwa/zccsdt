@@ -7,12 +7,12 @@
  * triples and quadruples by label are given by the position of each inside
  * its class (posV, posQ, pos3, pos4).
  *
- * zc_p_expand13:  out[e, t] = scale * t(e, abc) of one packed row of
- *     quadruples, for the e of a list and the sorted triples (abc) of a list
- *     - the sign of e at its place among a<b<c, zero where e is one of them.
- * zc_p_expand12:  the same for a packed row of triples and sorted pairs.
+ * zc_p_operands23:  the stacked operands of one block X[(de), (abc)]: rows
+ *     of the integrals and of T2 on the pairs of the block, rows of the
+ *     packed T3 and T4 on (g | de) and (f | abc) - the sign of the single
+ *     index at its place in the sorted tuple, zero where it is one of the
+ *     others -, rows of T3 and blocks of the intermediates on the triples.
  * zc_p_pick:      out[r, c] = sg[r] * M[rows[r], cols[c]].
- * zc_p_copy:      out[i] = scale * x[i].
  * zc_p_y4_row:    one row of the second-order quadruples <Q| V T2 |0> / D:
  *     for the virtual quadruples a<b<c<d of total label M the sum over the
  *     six splits (ab | cd) and the six splits of the occupied quadruple
@@ -29,11 +29,14 @@
  *     but one of the fifteen splits read the elements of a block one after
  *     the other: the tuples that differ in the largest index of a class, or
  *     in the last pair, follow each other in their class.
- * zc_p_xq_sector:  the T2 T2 <vo||vv> part of the intermediate of three T2:
- *     out[o, t] += scale * sum over the six orders (a, b, c) of the sorted
- *     triple t of sgn * Z[a, o, c, b], Z in blocks by the classes of a and
- *     b: block (la, lb) at off[la * nl + lb], [a, o, c, b] with nc and nb
- *     members of the classes of c and b.
+ * zc_p_xq_sector:  the intermediate of three T2 for the occupied spinors o
+ *     of one label on the sorted triples t of one label,
+ *     out[o, t] = 1/2 sum over the splits (pq | r) of sgn * G[(pq), o, r]
+ *               + sum over the six orders (a, b, c) of sgn * Z[a, o, c, b]:
+ *     G in blocks by the label of (pq), at goff[q - qmin] with gst elements
+ *     from one pair to the next and gnd spinors r; Z in blocks by the
+ *     classes of a and b, at off[la * nl + lb] with ast elements from one a
+ *     to the next, and ncs and nbs members of the classes of c and b.
  */
 #include <complex.h>
 #include <stdint.h>
@@ -65,55 +68,48 @@ static int64_t *binomials(int n)
 }
 
 #define DEFINE_PSEC(T, SFX)                                                    \
-void zc_p_expand13_##SFX(const T *row, int n, const int32_t *es, int ne,       \
-        const int32_t *tri, int64_t nt, double scale, T *out)                  \
+static void zc_p_expand13_serial_##SFX(const T *row, int n, const int32_t *es, \
+        int ne, const int32_t *tri, int64_t nt, double scale, T *out)          \
 {                                                                              \
-    int64_t *cb = binomials(n);                                                \
-    const int64_t *c2 = cb, *c3 = cb + n + 1, *c4 = cb + 2 * (n + 1);          \
-    const int64_t top = c4[n] - 1;                                             \
-    _Pragma("omp parallel for schedule(static) if(nt * ne > SMALL)")           \
-    for (int64_t t = 0; t < nt; t++) {                                         \
-        const int a = tri[3 * t], b = tri[3 * t + 1], c = tri[3 * t + 2];      \
-        for (int x = 0; x < ne; x++) {                                         \
-            const int e = es[x];                                               \
-            int v[4];                                                          \
-            double sg;                                                         \
-            if (e == a || e == b || e == c) { out[x * nt + t] = 0; continue; } \
-            if (e < a)      { v[0] = e; v[1] = a; v[2] = b; v[3] = c; sg = scale; }  \
-            else if (e < b) { v[0] = a; v[1] = e; v[2] = b; v[3] = c; sg = -scale; } \
-            else if (e < c) { v[0] = a; v[1] = b; v[2] = e; v[3] = c; sg = scale; }  \
-            else            { v[0] = a; v[1] = b; v[2] = c; v[3] = e; sg = -scale; } \
-            out[x * nt + t] = sg * row[top - c4[n - 1 - v[0]] - c3[n - 1 - v[1]] \
-                                       - c2[n - 1 - v[2]] - (n - 1 - v[3])];   \
-        }                                                                      \
-    }                                                                          \
-    free(cb);                                                                  \
-}                                                                              \
-                                                                               \
-void zc_p_expand12_##SFX(const T *row, int n, const int32_t *es, int ne,       \
-        const int32_t *prs, int64_t np, double scale, T *out)                  \
-{                                                                              \
-    const int64_t top = (int64_t)n * (n - 1) / 2 * (n - 2) / 3 - 1;            \
-    _Pragma("omp parallel for schedule(static) if(np * ne > SMALL)")           \
+    const int64_t n1 = n - 1;                                                  \
+    const int64_t top = (int64_t)n * n1 / 2 * (n - 2) / 3 * (n - 3) / 4 - 1;   \
     for (int x = 0; x < ne; x++) {                                             \
         const int e = es[x];                                                   \
+        T *o = out + x * nt;                                                   \
+        for (int64_t t = 0; t < nt; t++) {                                     \
+            const int a = tri[3 * t], b = tri[3 * t + 1], c = tri[3 * t + 2];  \
+            int64_t y0, y1, y2, y3;                                            \
+            double sg;                                                         \
+            if (e == a || e == b || e == c) { o[t] = 0; continue; }            \
+            if (e < a)      { y0 = n1 - e; y1 = n1 - a; y2 = n1 - b; y3 = n1 - c; sg = scale; }  \
+            else if (e < b) { y0 = n1 - a; y1 = n1 - e; y2 = n1 - b; y3 = n1 - c; sg = -scale; } \
+            else if (e < c) { y0 = n1 - a; y1 = n1 - b; y2 = n1 - e; y3 = n1 - c; sg = scale; }  \
+            else            { y0 = n1 - a; y1 = n1 - b; y2 = n1 - c; y3 = n1 - e; sg = -scale; } \
+            o[t] = sg * row[top - y0 * (y0 - 1) / 2 * (y0 - 2) / 3 * (y0 - 3) / 4 \
+                            - y1 * (y1 - 1) * (y1 - 2) / 6 - y2 * (y2 - 1) / 2 - y3]; \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+static void zc_p_expand12_serial_##SFX(const T *row, int n, const int32_t *es, \
+        int ne, const int32_t *prs, int64_t np, double scale, T *out)          \
+{                                                                              \
+    const int64_t n1 = n - 1;                                                  \
+    const int64_t top = (int64_t)n * n1 / 2 * (n - 2) / 3 - 1;                 \
+    for (int x = 0; x < ne; x++) {                                             \
+        const int e = es[x];                                                   \
+        T *o = out + x * np;                                                   \
         for (int64_t t = 0; t < np; t++) {                                     \
             const int a = prs[2 * t], b = prs[2 * t + 1];                      \
             int64_t y0, y1, y2;                                                \
             double sg;                                                         \
-            if (e == a || e == b) { out[x * np + t] = 0; continue; }           \
-            if (e < a)      { y0 = n - 1 - e; y1 = n - 1 - a; y2 = n - 1 - b; sg = scale; }  \
-            else if (e < b) { y0 = n - 1 - a; y1 = n - 1 - e; y2 = n - 1 - b; sg = -scale; } \
-            else            { y0 = n - 1 - a; y1 = n - 1 - b; y2 = n - 1 - e; sg = scale; }  \
-            out[x * np + t] = sg * row[top - y0 * (y0 - 1) * (y0 - 2) / 6 - y1 * (y1 - 1) / 2 - y2]; \
+            if (e == a || e == b) { o[t] = 0; continue; }                      \
+            if (e < a)      { y0 = n1 - e; y1 = n1 - a; y2 = n1 - b; sg = scale; }  \
+            else if (e < b) { y0 = n1 - a; y1 = n1 - e; y2 = n1 - b; sg = -scale; } \
+            else            { y0 = n1 - a; y1 = n1 - b; y2 = n1 - e; sg = scale; }  \
+            o[t] = sg * row[top - y0 * (y0 - 1) * (y0 - 2) / 6 - y1 * (y1 - 1) / 2 - y2]; \
         }                                                                      \
     }                                                                          \
-}                                                                              \
-                                                                               \
-void zc_p_copy_##SFX(const T *x, int64_t n, double scale, T *out)              \
-{                                                                              \
-    _Pragma("omp parallel for schedule(static) if(n > SMALL)")                 \
-    for (int64_t i = 0; i < n; i++) out[i] = scale * x[i];                     \
 }                                                                              \
                                                                                \
 void zc_p_pick_##SFX(const T *M, int64_t ld, const int64_t *rows,              \
@@ -123,6 +119,61 @@ void zc_p_pick_##SFX(const T *M, int64_t ld, const int64_t *rows,              \
     for (int64_t r = 0; r < nr; r++)                                           \
     for (int64_t c = 0; c < nc; c++)                                           \
         out[r * nc + c] = sg[r] * M[rows[r] * ld + cols[c]];                   \
+}                                                                              \
+                                                                               \
+/* the stacked operands of one block X[(de), (abc)] of r (L, R) and of z   \
+ * (LZ, RZ): for every segment seg[8 s ..] = (kind, first row, rows,         \
+ * left source, left indices, right source, right indices, right signs)   \
+ * - addresses -, with the factor scale[s] on the left:                     \
+ *   0  <de||fm> (rows f of [f, (de)])        t(ijkl; f abc) of a row of T4  \
+ *   1  t(in; de) (rows n of [n, (de)])       a block Xq[n, (abc)]           \
+ *   2  Xo(n; ijm; de) (rows n)               rows of T3 with their signs    \
+ *   3  t(klm; g de) of a row of T3           a block Xv[g, (abc)]           \
+ *   4  as 0, into LZ and RZ (the row: of the second-order quadruples)       \
+ *   5  one row <de||lm>                      one row t(ijk; abc), into LZ, RZ \
+ * rq, prs: the pairs (de) of the block as positions and as indices; ca,    \
+ * tri: its triples. */                                                      \
+void zc_p_operands23_##SFX(int n, int64_t nseg, const int64_t *seg,            \
+        const double *scale, const int64_t *rq, int64_t nr,                    \
+        const int32_t *prs, const int64_t *ca, int64_t nc, const int32_t *tri, \
+        T *L, T *R, T *LZ, T *RZ)                                              \
+{                                                                              \
+    const int64_t nQ = (int64_t)n * (n - 1) / 2, nA3 = nQ * (n - 2) / 3;       \
+    int64_t rows = 0;                                                          \
+    for (int64_t s = 0; s < nseg; s++) rows += seg[8 * s + 2];                 \
+    _Pragma("omp parallel for schedule(dynamic, 1) if(rows * nc > SMALL)")     \
+    for (int64_t s = 0; s < nseg; s++) {                                       \
+        const int64_t *g = seg + 8 * s;                                        \
+        const int kind = (int)g[0];                                            \
+        const int64_t at = g[1], m = g[2];                                     \
+        const double f = scale[s];                                             \
+        T *l = (kind < 4 ? L : LZ) + at * nr, *r = (kind < 4 ? R : RZ) + at * nc; \
+        if (kind == 3) {                                                       \
+            zc_p_expand12_serial_##SFX((const T *)g[3], n, (const int32_t *)g[4], (int)m, prs, nr, f, l); \
+        } else if (kind == 5) {                                                \
+            const T *x = (const T *)g[3];                                      \
+            for (int64_t c = 0; c < nr; c++) l[c] = f * x[rq[c]];              \
+        } else {                                                               \
+            const T *x = (const T *)g[3];                                      \
+            const int64_t *idx = (const int64_t *)g[4];                        \
+            for (int64_t i = 0; i < m; i++)                                    \
+                for (int64_t c = 0; c < nr; c++) l[i * nr + c] = f * x[idx[i] * nQ + rq[c]]; \
+        }                                                                      \
+        if (kind == 0 || kind == 4) {                                          \
+            zc_p_expand13_serial_##SFX((const T *)g[5], n, (const int32_t *)g[6], (int)m, tri, nc, 1.0, r); \
+        } else if (kind == 1 || kind == 3) {                                   \
+            memcpy(r, (const T *)g[5], sizeof(T) * (size_t)(m * nc));          \
+        } else if (kind == 2) {                                                \
+            const T *x = (const T *)g[5];                                      \
+            const int64_t *idx = (const int64_t *)g[6];                        \
+            const double *sg = (const double *)g[7];                           \
+            for (int64_t i = 0; i < m; i++)                                    \
+                for (int64_t c = 0; c < nc; c++) r[i * nc + c] = sg[i] * x[idx[i] * nA3 + ca[c]]; \
+        } else {                                                               \
+            const T *x = (const T *)g[5];                                      \
+            for (int64_t c = 0; c < nc; c++) r[c] = x[ca[c]];                  \
+        }                                                                      \
+    }                                                                          \
 }                                                                              \
                                                                                \
 void zc_p_y4_row_##SFX(int n, const int *kv, int modulus, int M,               \
@@ -137,9 +188,9 @@ void zc_p_y4_row_##SFX(int n, const int *kv, int modulus, int M,               \
     static const int g22[6][4] = {{0,1,2,3}, {0,2,1,3}, {0,3,1,2},             \
                                   {1,2,0,3}, {1,3,0,2}, {2,3,0,1}};            \
     static const double s22[6] = {1, -1, 1, 1, -1, 1};                         \
-    _Pragma("omp parallel for schedule(static)")                               \
+    _Pragma("omp parallel for schedule(static) if(c4[n] > SMALL)")             \
     for (int64_t A = 0; A < c4[n]; A++) out[A] = 0;                            \
-    _Pragma("omp parallel for schedule(dynamic, 1)")                           \
+    _Pragma("omp parallel for schedule(dynamic, 1) if(c4[n] > SMALL)")         \
     for (int a = 0; a < n - 3; a++)                                            \
     for (int b = a + 1; b < n - 2; b++)                                        \
     for (int c = b + 1; c < n - 1; c++) {                                      \
@@ -188,7 +239,7 @@ void zc_p_sector_energy_##SFX(int n, const int *kv, int modulus, int M,        \
     int64_t maxq = 1;                                                          \
     for (int q = 0; q < nq; q++) if (qlen[q] > maxq) maxq = qlen[q];           \
     double esum = 0;                                                           \
-    _Pragma("omp parallel reduction(+:esum)")                                  \
+    _Pragma("omp parallel reduction(+:esum) if(c4[n] * n > 20 * SMALL)")       \
     {                                                                          \
     T *rb = malloc(sizeof(T) * (size_t)maxq), *zb = malloc(sizeof(T) * (size_t)maxq); \
     int64_t *ix = malloc(sizeof(int64_t) * (size_t)(n + 1));                   \
@@ -312,24 +363,38 @@ void zc_p_sector_energy_##SFX(int n, const int *kv, int modulus, int M,        \
     free(cb);                                                                  \
 }                                                                              \
                                                                                \
-void zc_p_xq_sector_##SFX(int n, const int *kv, int kmin, const int *lid_of,   \
-        int nl, const int32_t *tri, int64_t nt, int no, const int64_t *off,    \
-        const int64_t *ncs, const int64_t *nbs, const int32_t *posV,           \
-        const T *Z, double scale, T *out)                                      \
+void zc_p_xq_sector_##SFX(int n, const int *kv, int modulus, int kmin,         \
+        const int *lid_of, int nl, const int32_t *tri, int64_t nt, int no,     \
+        int qmin, int nq, const int64_t *goff, const int64_t *gst,             \
+        const int64_t *gnd, const int32_t *posQ, const T *G,                   \
+        const int64_t *off, const int64_t *ast, const int64_t *ncs,            \
+        const int64_t *nbs, const int32_t *posV, const T *Z, T *out)           \
 {                                                                              \
+    const int64_t nQ = (int64_t)n * (n - 1) / 2;                               \
+    static const int g3[3][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}};             \
+    static const double s3[3] = {0.5, -0.5, 0.5};                              \
     static const int g[6][3] = {{0,1,2}, {0,2,1}, {1,0,2}, {1,2,0}, {2,0,1}, {2,1,0}}; \
     static const double sg[6] = {1, -1, -1, 1, 1, -1};                         \
     _Pragma("omp parallel for schedule(static) if(nt * no > SMALL)")           \
     for (int64_t t = 0; t < nt; t++) {                                         \
         const int v[3] = {tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]};         \
+        for (int o = 0; o < no; o++) out[o * nt + t] = 0;                      \
+        for (int s = 0; s < 3; s++) {                                          \
+            const int p = v[g3[s][0]], q = v[g3[s][1]], r = v[g3[s][2]];       \
+            const int kq = red(kv[p] + kv[q], modulus) - qmin;                 \
+            if (kq < 0 || kq >= nq || goff[kq] < 0) continue;                  \
+            const int64_t rk = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q); \
+            const int64_t d = gnd[kq];                                         \
+            const T *m = G + goff[kq] + posQ[rk] * gst[kq] + posV[r];          \
+            for (int o = 0; o < no; o++) out[o * nt + t] += s3[s] * m[o * d];  \
+        }                                                                      \
         for (int s = 0; s < 6; s++) {                                          \
             const int a = v[g[s][0]], b = v[g[s][1]], c = v[g[s][2]];          \
             const int64_t k = (int64_t)lid_of[kv[a] - kmin] * nl + lid_of[kv[b] - kmin]; \
             if (off[k] < 0) continue;                                          \
             const int64_t nc = ncs[k], nb = nbs[k];                            \
-            const T *z = Z + off[k] + posV[a] * no * nc * nb + posV[c] * nb + posV[b]; \
-            const double f = scale * sg[s];                                    \
-            for (int o = 0; o < no; o++) out[o * nt + t] += f * z[o * nc * nb]; \
+            const T *z = Z + off[k] + posV[a] * ast[k] + posV[c] * nb + posV[b]; \
+            for (int o = 0; o < no; o++) out[o * nt + t] += sg[s] * z[o * nc * nb]; \
         }                                                                      \
     }                                                                          \
 }
