@@ -3073,6 +3073,216 @@ Two things in the first numbers were zccsdt's own:
   per pass. The frozen virtual spinors came with it: they are frozen
   indices of the same integrals.
 
+## CCSDT(Q), CCSDTQ and CCSDTQ(P) on spinors, 8 cores
+
+The high-order methods of the spinor line: the (Q) correction of CCSDT
+(`zccsdt.cc.quadruples`), CCSDTQ (`zccsdt.cc.t4engine`, `zccsdt.cc.ccsdtq`)
+and its (P) correction (`zccsdt.cc.pentuples`) - on spin orbitals or spinors
+without spin blocks, real or complex, without point-group symmetry, T3 and
+T4 on their unique blocks (i<j<k(<l), a<b<c(<d)).  Through the front end:
+`zccsdt.CCSDT(mf).ccsdt_q()`, `zccsdt.CCSDTQ(mf)` and its `ccsdtq_p()`
+(`docs/usage.md`).
+
+### Are the numbers right
+
+The one program here that has these methods for spinors is MRCC (release of
+February 2018) through its interface to DIRAC, for real integrals only -
+spinors of a molecule with a real double group.  Two ways to its numbers:
+DIRAC's own files (`zccsdt.dirac.from_dirac`), and the integrals of a PySCF
+calculation written in DIRAC's format by `zccsdt.dirac.write`, so that both
+programs read the same numbers and nothing is left to basis sets, geometry
+or the SCF (`bench/dirac`).
+
+| Check | Agreement |
+|---|---|
+| Every product against the dense evaluation of its term (`zccsdt.cc.ccsdtq_terms`, derived by Wick's theorem and checked in Fock space), complex random amplitudes and integrals: (Q), each piece of the T4 equation, each of the eight terms and two left-hand parts of (P) | 1e-12 of the largest element |
+| MRCC, nonrelativistic, same geometry and basis: CCSDT(Q) for H2O and N2 / 6-31G and H2O / cc-pVDZ with a frozen core; CCSDTQ for BH, CH2, N2 / STO-3G and H2O / 6-31G; CCSDTQ(P) for BH, CH2, N2 / STO-3G | 1e-11 Eh in the energies, 3e-12 Eh in E(P) |
+| the same for BH and H2O with complex spin orbitals (every spin pair mixed by its own SU(2) matrix) | the same |
+| MRCC on the integrals of DIRAC (BH, X2C, uncontracted STO-2G): the C2v files (real) and the files of the run without symmetry (complex) | 1e-12 Eh, the two sets of files the same |
+| MRCC on the same integrals, written here (table below) | 1e-12 Eh |
+| the molecule of that table turned away from the axis: complex spinors and amplitudes (below) | 5e-13 Eh |
+| an open-shell doublet with complex spinors (BeH, X2C, turned) against the dense reference | all digits |
+
+**The same integrals in both programs.**  `bench/dirac/write_integrals.py`,
+`mrcc_rel.sh`, `run_integrals.py`; total energies in Eh.
+
+| | H2O / 6-31G of PySCF, RHF as GHF, 10 + 16 | | HBr / cc-pVDZ-DK, X2C, 28 frozen, 8 + 16 spinors | |
+|---|---|---|---|---|
+| | MRCC | zccsdt | MRCC | zccsdt |
+| CCSDT | -76.120425241930 | -76.120425241930 | -2604.935758729690 | -2604.935758729690 |
+| CCSDT[Q] | -76.120873756589 | -76.120873756590 | -2604.935855183769 | -2604.935855183769 |
+| CCSDT(Q) | -76.120881746521 | -76.120881746522 | -2604.935858921859 | -2604.935858921859 |
+| CCSDTQ | -76.120856118031 | -76.120856118031 | -2604.935868926205 | -2604.935868926205 |
+| CCSDTQ(P) | -76.120864383878 | -76.120864383878 | -2604.935870892496 | -2604.935870892496 |
+
+For HBr the spinors are those of `pyscf.x2c.UHF` adapted to m_j
+(`zccsdt.dirac.kramers_pairs`: real then), the 4p shell split by 13 mEh.
+MRCC needs three things that its interface does not do by itself - the
+group given as C2v, the integral list completed under permutations, and
+the reference flagged as Hartree-Fock (otherwise it prints the (Q)/A and
+(P)/A variants, 5e-7 Eh away): `bench/dirac/mrcc_rel.sh`.
+
+**The molecule turned.**  MRCC cannot take complex integrals, and a linear
+molecule on the z axis has real ones.  Turned away from the axis (H at
+0.988, 0.745, 0.686 Angstrom from Br) the same HBr has spinors that cannot
+be adapted to m_j, integrals with imaginary parts up to 0.03 and complex T3
+and T4 (imaginary parts up to 9e-5) - and the correlation energies must be
+those of the table:
+
+| | turned - on the axis (Eh) |
+|---|---|
+| E(SCF) | -6.5e-11 |
+| CCSDT correlation energy | < 5e-13 |
+| CCSDT[Q], CCSDT(Q) | 4.5e-13 |
+| CCSDTQ | < 5e-13 |
+| CCSDTQ(P) | 4.5e-13 |
+
+(`tests/test_dirac.py`; `bench/dirac/turned.py` for other molecules.)  So
+the complex code is checked on the numbers of MRCC without MRCC being able
+to run it.
+
+### (Q)
+
+c108 (2 x Xeon Gold 6248R), 8 cores, one job (31701101), zccsdt 4731da9;
+H2O / cc-pVTZ, all electrons: 10 occupied and 106 virtual spin orbitals or
+spinors, 210 x 4,967,690 quadruples.
+
+| Run | CCSDT iteration | (Q) | Peak memory of (Q) | E[Q], E(Q) / Eh |
+|---|---|---|---|---|
+| closed-shell code (`zccsdt.RCCSDT`), for the size | 0.38 s | 5.25 s | 1.0 GB | -0.000163912754, -0.000367643998 |
+| spin orbitals of RHF (real) | 5.03 s | 51.2 s | 4.2 GB | the same to twelve digits |
+| X2C spinors (complex) | 15.8 s | 163.1 s | 7.0 GB | -0.000164579265, -0.000368743084 |
+| X2C, `max_memory` 5500 MB | | 221 s | 5.4 GB | the same as without the limit |
+| X2C, `max_memory` 4000 MB | | 411 s | 3.9 GB | the same |
+
+- (Q) costs as much as ten CCSDT iterations, real and complex alike.  The
+  spin-orbital code takes ten times the closed-shell one, which has the
+  spin symmetry (and 45 quadruples for 210).
+- Complex / real is 3.2: the matrix products take 108.7 s of the 163 s
+  (344 GFLOP/s of complex arithmetic; 384 GFLOP/s and 24.3 s in the real
+  run), the reductions 13.8 s, the left-hand side 16.9 s, Xv 14.0 s.
+  MKL's `zgemm3m` gives the same times and the same numbers as `zgemm` on
+  this machine: nothing to gain there.
+- The runs under `max_memory` were job steps with a memory limit of their
+  own (6.5 and 5 GB): no allocation failed, the peaks are below the limits.
+  With less memory the products are done in batches of columns (16 at 5500
+  MB) and Xv is formed for a few occupied indices at a time - that is what
+  costs at 4000 MB (243 s; since 3a2b13f only the indices that are new from
+  one group of quadruples to the next are formed, a third of the
+  formations).
+
+### CCSDTQ against MRCC on the same integrals
+
+c108, 8 cores for each program, MRCC first, in one job per molecule
+(31701602, 31701603); zccsdt ac752e0.  MRCC: its release binary (MKL,
+OpenMP, 8 threads), 24 GB allowed; it uses the two fermion irreps of the
+files (half of the quadruples), zccsdt no symmetry.
+
+| | H2O / cc-pVDZ, RHF as GHF, 10 + 38 | HBr / cc-pVTZ-DK, X2C, 28 frozen, 8 + 38 spinors |
+|---|---|---|
+| quadruples: zccsdt, MRCC | 15,501,150; 7,751,430 | 5,167,050; 2,584,038 |
+| MRCC: iterations, time, per iteration | 25, 1002 s, 40.1 s | 24, 339 s, 14.1 s |
+| zccsdt: iterations, time, per iteration | 17, 81.8 s, 4.81 s | 18, 29.9 s, 1.66 s |
+| MRCC / zccsdt per iteration | 8.3 | 8.5 |
+| E(CCSDTQ): MRCC | -76.243786573522 | -2605.103035301211 |
+| E(CCSDTQ): zccsdt | -76.243786573525 | -2605.103035301210 |
+| memory: zccsdt (peak), MRCC (allocated, besides its files) | 5.3 GB; 0.7 GB | 2.8 GB; 0.3 GB |
+
+- Convergence: MRCC to 1e-12 Eh in the energy, zccsdt to 1e-11 Eh and 1e-9
+  in the step (norm of the changes of the full amplitudes); at the 17th
+  iteration MRCC's energy still changes by 2e-10 Eh for H2O.
+- zccsdt takes more memory than it must at this size: the batches of its
+  products are 1 GB by default and the eight DIIS vectors of T4 are in
+  memory.  With `max_memory` set the batches shrink and the vectors go to
+  the scratch file; the floor is T4, its residual and the six-index
+  intermediate (0.76 GB for H2O here).
+- MRCC's count of operations is 7.7e12 per iteration for H2O (its own
+  estimate, with its symmetry), zccsdt's products take about 8e11
+  (multiplications and additions, without symmetry): the factorization -
+  the six-index intermediates, the splits of a tuple summed by the matrix
+  products - is where the factor comes from, not the speed of the
+  arithmetic (190 GFLOP/s for MRCC by that count).
+
+**Complex spinors, a larger case** (job 31701604, the same node, zccsdt
+ac752e0, three iterations each):
+
+| | T4 | CCSDTQ iteration | Peak memory |
+|---|---|---|---|
+| H2O / cc-pVDZ, RHF as GHF, 10 + 38, real | 124 MB | 4.81 s | 5.3 GB |
+| H2O / cc-pVDZ, X2C spinors, 10 + 38, complex | 248 MB | 13.4 s | 4.4 GB |
+| H2O / aug-cc-pVDZ, RHF as GHF, 10 + 72, real | 1.7 GB | 78.3 s | 9.9 GB |
+
+Complex / real is 2.8.  The larger case has 14 times the quadruples and
+takes 16 times as long: at 10 + 38 the products of one occupied quadruple
+or triple are too small for the threaded BLAS (5.7 of 8 cores busy).
+
+### (P)
+
+MRCC, in the two jobs of the table above, takes 205 s for (P) of H2O /
+cc-pVDZ (10 + 38; 63,244,692 pentuples in its two irreps) and 67 s for HBr
+(8 + 38; 14,054,376) after its CCSDTQ iterations.  The energies - on the
+same integrals, 8 + 16 and 10 + 16 - are in the first table of this
+section.
+
+### Where the time of a CCSDTQ iteration goes
+
+H2O / aug-cc-pVDZ, 10 + 72, real, 78.3 s per iteration (job 31701604,
+zccsdt ac752e0):
+
+| Stage | Time | Cores busy | What it is |
+|---|---|---|---|
+| ring; T4 in Xv and R3 | 28.9 s | 5.1 | t(m jkl; e bcd) by blocks of columns times Wr, for every occupied triple the block with i and m outside it; the thin products with <oo||vo> and <oo||vv> |
+| by occupied quadruple | 20.0 s | 7.5 | the two products with the six-index intermediates Xo and Xv, T3 x T3 through Z and Y: X[(ab),(cd)] and X[a,(bcd)], each reduced once |
+| pp ladder; T4 in Xo, R2, R3 | 18.2 s | 7.5 | Wq times T4 with its virtual indices in two pairs, 434 GFLOP/s |
+| Xv without T4 | 3.4 s | 7.5 | |
+| hh ladder | 2.1 s | 7.6 | |
+| T3 with one integral | 1.5 s | 5.2 | |
+| DIIS (T4 in the scratch file), CCSDT step, Jacobi step | 1.3 s, 1.1 s, 1.0 s | | |
+
+The ring ran at 187 GFLOP/s: its products per occupied triple are a few
+milliseconds each, and their operators were gathered again for every block
+of columns.  Since ed5bc1b they are made once and the products of the
+triples run on separate threads with a sequential GEMM each
+(`zc_gemm_each`); on the shared node the ring of the 10 + 38 case went from
+1.80 to 1.24 s.
+
+### What is not there
+
+- No symmetry: neither time reversal (Kramers pairs: a factor of two in
+  the amplitudes of a closed shell) nor the axis of a linear molecule
+  (m_j), nor point groups.  MRCC uses the two irreps that DIRAC's files
+  give it for a linear molecule or C2v.
+- With too little memory for T4, its residual and Xv (and for the
+  second-order quadruples of (P)) these are arrays of a scratch file that
+  the operating system pages (7194bad, 2f3a2a8): checked for the numbers,
+  not yet timed at size.
+- No spin-adapted closed-shell CCSDTQ: an RHF reference runs as spin
+  orbitals.
+- The products of one occupied quadruple and of one occupied triple are
+  small matrix products at this size (a millisecond each) and keep 5.7 of
+  the 8 cores busy; larger virtual spaces fill them.
+
+### Optimization history
+
+| Version | (Q), H2O / cc-pVTZ, real / complex | CCSDTQ iteration, H2O / cc-pVDZ real | Change |
+|---|---|---|---|
+| 36fe7fc | 72.0 s / 189 s | | (Q): per occupied quadruple, five stacked products, kernels on packed tuples |
+| da029c6 | | 13.7 s | T4 equation: every product on two occupied and two virtual groups (190 gathers per element) |
+| f2f3cab | | 6.26 s | by occupied quadruple and by blocks of columns (22 + 26 gathers) |
+| 4731da9 | 51.2 s / 163 s | | kernels that walk by runs of the last index; reductions 22.7 -> 9.5 s |
+| ac752e0 | | 6.09 s (4.81 s on the node of the benchmarks) | ring over the occupied indices outside each triple: ((o - 3) / o)^2 of its multiplications |
+| ed5bc1b | | 5.42 s | the ring products of the triples on separate threads, their operators made once |
+
+The CCSDTQ column is from the shared node (8 threads, not a benchmark),
+where every version was run; the (Q) column is from benchmark nodes.
+
+**Linear molecules** (4dbfc0c): the spinors of a linear molecule on the z
+axis are adapted to m_j by the front end, and all arithmetic is real then.
+HBr / cc-pVTZ-DK, X2C, 28 frozen, 8 + 38 spinors, on the shared node (not a
+benchmark), real against complex, the same energies: CCSDT iteration 0.11
+/ 0.24 s, (Q) 0.56 / 0.94 s, CCSDTQ iteration 1.87 / 4.81 s, (P) 4.86 /
+10.2 s.
+
 ## Correctness references
 
 | Reference | Agreement | Test |
@@ -3082,3 +3292,7 @@ Two things in the first numbers were zccsdt's own:
 | MRCC and CFOUR ncc/ecc/vcc CCSD and CCSDT, 5 small molecules | 1e-8 (observed about 5e-11) | `tests/test_references.py` |
 | Determinant-space brute force, T3 residual element-wise | 1e-12 | `tests/test_ccsdt.py` |
 | Invariance under complex occ-occ / vir-vir rotations (RHF -> GHF -> U) | 1e-10 | `tests/test_ccsdt.py` |
+| MRCC CCSDT(Q), CCSDTQ, CCSDTQ(P), nonrelativistic (spin orbitals, real and complex) | 1e-11 | `tests/test_quadruples.py`, `tests/test_ccsdtq.py`, `tests/test_pentuples.py` |
+| MRCC through its interface to DIRAC, on DIRAC's integrals and on integrals written here (X2C spinors) | 1e-12 | `tests/test_dirac.py` |
+| A linear molecule turned off the axis (complex spinors) against itself on the axis | 5e-13 | `tests/test_dirac.py` |
+| Dense evaluation of every term of CCSDTQ, (Q) and (P) (Wick's theorem; Fock space) | 1e-12 | `tests/test_ccsdtq_terms.py`, `tests/test_pentuples.py` |
