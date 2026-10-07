@@ -1175,7 +1175,6 @@ class GCCSDTQ(GCCSDT):
 ''' + CCSDTBase.__doc__
 
     _title = 'GCCSDTQ'
-    _block_iterations = False   # (the T4 equation is not in blocks yet; (Q) and (P) are)
     _subtitle = 'CCSDTQ on spin orbitals or spinors (GHF, X2C), real or complex'
     _stages = Q_STAGES
     _keys = GCCSDT._keys | {'t4', 'e_ccsdt', 'ccsdt_run', 'e_p'}
@@ -1209,8 +1208,9 @@ class GCCSDTQ(GCCSDT):
         return self.ccsdt_run.ccsdt_q(t2, t3)
 
     def ccsdtq(self, t1, t2, t3, t4=None):
+        import copy
         from math import comb
-        from zccsdt.cc import ccsdtq
+        from zccsdt.cc import ccsdtq, ccsdtq_sym, ccsdt_opt
         log = logger.new_logger(self)
         cput0 = log.init_timer()
         pr = _Printer(log)
@@ -1221,21 +1221,44 @@ class GCCSDTQ(GCCSDT):
         dtype = np.result_type(t1, t2, eris.oovv, eris.fock)
         isz = np.dtype(dtype).itemsize
         nt4 = comb(no, 4) * comb(nv, 4)
+        # in the blocks of the symmetry labels where the integrals have them and the blocks fit
+        splan = None
+        if self.symmetry and ccsdtq_sym.available(eris):
+            try:
+                splan = ccsdtq_sym.plan_for(eris, dtype, self.max_memory, self.diis_space, self.incore_complete)
+            except MemoryError:         # (the dense solver has plans for less: scratch files)
+                pass
+        if splan is None and getattr(eris, 'use_labels', False):
+            # the dense solver on spinors that are in the order of their labels: T3 packed, no blocks
+            t3 = ccsdt_opt.packed_t3(eris, t3)
+            ccsdt_opt.release_cached(eris)
+            eris = copy.copy(eris)
+            eris.use_labels = False
+            eris.__dict__.pop('_buffers', None)
+            self._eris = eris
         pr.rule()
-        pr.kv('amplitudes', 'T4 %s (%s, i<j<k<l, a<b<c<d), %s; T3 %s'
-              % (_count(nt4), _size(nt4 * isz), 'complex' if isz == 16 else 'real',
-                 _count(comb(no, 3) * comb(nv, 3))))
+        if splan is not None:
+            pr.kv('amplitudes', 'T4 %s of %s in the blocks of the labels (%s), %s'
+                  % (_count(splan.layout.size), _count(nt4), _size(splan.t4), 'complex' if isz == 16 else 'real'))
+        else:
+            pr.kv('amplitudes', 'T4 %s (%s, i<j<k<l, a<b<c<d), %s; T3 %s'
+                  % (_count(nt4), _size(nt4 * isz), 'complex' if isz == 16 else 'real',
+                     _count(comb(no, 3) * comb(nv, 3))))
         normt = self._conv_tol_normt()
         pr.kv('convergence', '|dE| < %g Eh and %s < %g; at most %d iterations'
               % (self.conv_tol, self._norm_name, normt, self.max_cycle))
         pr.kv('memory', self._budget_text())
-        plan = self.plan if isinstance(self.plan, ccsdtq.Plan) else ccsdtq.plan_for(
-            eris, dtype, self.max_memory, self.diis_space, self.incore_complete)
-        filed = [name for name, on in (('T4', plan.t4_file), ('the six-index intermediate', plan.xv_file),
-                                       ('the residual of T4', plan.r4_file)) if on]
-        pr.kv('memory plan', 'needs %s next to the integrals: %s' % (
-            _size(plan.need), 'T4, its residual and the six-index intermediate in memory' if not filed
-            else 'memory is short - %s in a scratch file' % ', '.join(filed)))
+        if splan is not None:
+            plan = splan
+            pr.kv('memory plan', 'needs %s next to the integrals: everything in memory, in blocks' % _size(plan.need))
+        else:
+            plan = self.plan if isinstance(self.plan, ccsdtq.Plan) else ccsdtq.plan_for(
+                eris, dtype, self.max_memory, self.diis_space, self.incore_complete)
+            filed = [name for name, on in (('T4', plan.t4_file), ('the six-index intermediate', plan.xv_file),
+                                           ('the residual of T4', plan.r4_file)) if on]
+            pr.kv('memory plan', 'needs %s next to the integrals: %s' % (
+                _size(plan.need), 'T4, its residual and the six-index intermediate in memory' if not filed
+                else 'memory is short - %s in a scratch file' % ', '.join(filed)))
         pr.kv('batches', 'products of the T4 equation in batches of %s%s'
               % (_size(plan.batch_bytes), '' if plan.mem_mb in (None, 2000.0) else
                  '; the CCSDT step with buffers of %.0f MB' % plan.mem_mb), indent=3)
@@ -1260,7 +1283,7 @@ class GCCSDTQ(GCCSDT):
                               plan=plan, callback=report)
         snap0 = timing.snapshot()
         with _PeakMemory() as peak, timing.timer(ROOT_ITER):
-            res = ccsdtq.kernel(eris, opts, t1, t2, t3, t4)
+            res = (ccsdtq_sym if splan is not None else ccsdtq).kernel(eris, opts, t1, t2, t3, t4)
         self.converged, self.cycles = bool(res.converged), int(res.ncycle)
         self.e_hf, self.e_corr = float(eris.e_hf), float(res.e_corr)
         self.t1, self.t2, self.t3, self.t4 = res.t1, res.t2, res.t3, res.t4
@@ -1292,6 +1315,12 @@ class GCCSDTQ(GCCSDT):
         if t4 is None:
             raise RuntimeError('GCCSDTQ.ccsdtq_p(): no CCSDTQ amplitudes (kernel() first)')
         eris = self._eris if self._eris is not None else self.ao2mo()
+        # (P) reads the packed arrays: the blocks of the labels are put in their places
+        from zccsdt.cc import ccsdtq_sym
+        if np.size(t3) != comb(eris.nocc, 3) * comb(eris.nmo - eris.nocc, 3):
+            t3 = ccsdt_opt.packed_t3(eris, t3)
+        if np.size(t4) != comb(eris.nocc, 4) * comb(eris.nmo - eris.nocc, 4):
+            t4 = ccsdtq_sym.packed_t4(eris, t4)
         ccsdt_opt.release_cached(eris)          # (what the iterations kept: not part of this budget)
         no, nv = eris.nocc, eris.nmo - eris.nocc
         dtype = np.result_type(t2, t3, t4, eris.oovv)
