@@ -155,6 +155,31 @@ void zc_gemm_slices_d(int ta, int64_t nb, int64_t m, int64_t n, int64_t k,
         gemm_d(ta, 0, m, n, k, *alpha, a, lda, b + i * sb, ldb, *beta, c + i * sc, ldc);
 }
 
+/* C_i = A_i B_i for i < nb, each product with matrices of its own:
+ * A_i = a + i sa (m x k), B_i = b + i sb (k x n), C_i = c + i sc (m x n),
+ * row-major with the leading dimensions given.  One product per thread, BLAS
+ * sequential inside: for many products of a few milliseconds each, which a
+ * threaded BLAS does not run at its rate. */
+void zc_gemm_each_d(int64_t nb, int64_t m, int64_t n, int64_t k,
+                    const double *a, int64_t sa, int64_t lda,
+                    const double *b, int64_t sb, int64_t ldb,
+                    double *c, int64_t sc, int64_t ldc)
+{
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int64_t i = 0; i < nb; i++)
+        gemm_d(0, 0, m, n, k, 1.0, a + i * sa, lda, b + i * sb, ldb, 0.0, c + i * sc, ldc);
+}
+
+void zc_gemm_each_z(int64_t nb, int64_t m, int64_t n, int64_t k,
+                    const double complex *a, int64_t sa, int64_t lda,
+                    const double complex *b, int64_t sb, int64_t ldb,
+                    double complex *c, int64_t sc, int64_t ldc)
+{
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int64_t i = 0; i < nb; i++)
+        gemm_z(0, 0, m, n, k, 1.0, a + i * sa, lda, b + i * sb, ldb, 0.0, c + i * sc, ldc);
+}
+
 #define DEFINE_T3(T, SFX)                                                      \
                                                                                \
 /* T[P - p0, d, m, Q] = osgn * vsgn * T3p[otri[m, P], vtri[d, Q]] */          \

@@ -146,3 +146,33 @@ def gemm_slices(A, B, C, alpha=1.0, beta=0.0):
     for j in range(nb):
         gemm(A, B[:, j, :], C[j], alpha=alpha, beta=beta)
     return C
+
+
+def gemm_each(A, B, C):
+    '''C[i] = A[i] @ B[i] for all i, in place: A (nb, m, k), B (nb, k, n) and
+    C (nb, m, n), C-contiguous and of one type.  With the kernel library the
+    products run on separate threads, one sequential GEMM each - for many
+    products of a few milliseconds; otherwise (or for fewer products than
+    two per thread) one after the other on the threaded BLAS.'''
+    nb, m, k = A.shape
+    n = B.shape[2]
+    assert B.shape == (nb, k, n) and C.shape == (nb, m, n) and A.dtype == B.dtype == C.dtype
+    assert A.flags.c_contiguous and B.flags.c_contiguous and C.flags.c_contiguous
+    lib = _clib()
+    name = 'zc_gemm_each_' + _SFX[C.dtype]
+    if lib is not None and hasattr(lib, name) and nb >= 2 * _threads() and m and n and k:
+        p = lambda x: ctypes.c_void_p(x.ctypes.data)          # noqa: E731
+        i = ctypes.c_int64
+        getattr(lib, name)(i(nb), i(m), i(n), i(k), p(A), i(m * k), i(k), p(B), i(k * n), i(n),
+                           p(C), i(m * n), i(n))
+        return C
+    for j in range(nb):
+        gemm(A[j], B[j], C[j])
+    return C
+
+
+def _threads():
+    try:
+        return int(os.environ.get('OMP_NUM_THREADS') or len(os.sched_getaffinity(0)))
+    except (ValueError, AttributeError):
+        return 8
