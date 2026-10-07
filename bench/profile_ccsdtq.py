@@ -9,6 +9,9 @@ usage: python bench/profile_ccsdtq.py MOLECULE BASIS KIND [NITER] [FROZEN]
          before them is converged
   FROZEN: frozen occupied spin orbitals or spinors
   ZC_MAXMEM: max_memory in MB (default: 80% of the available memory)
+  ZC_P=1: the (P) correction after the iterations (with the amplitudes as
+          they are then: its cost does not depend on them);
+          ZC_P_MAXMEM: max_memory of that step
 '''
 import os
 import sys
@@ -48,6 +51,12 @@ def main():
     cc.kernel(cc3.t1, cc3.t2, cc3.t3)
     print('E(CCSDT) = %.12f   E(CCSDTQ) = %.12f after %d iterations (converged %s)'
           % (cc3.e_tot, cc.e_tot, cc.cycles, cc.converged))
+    if os.environ.get('ZC_P'):
+        del cc3
+        if os.environ.get('ZC_P_MAXMEM'):
+            cc.max_memory = float(os.environ['ZC_P_MAXMEM'])
+        cc.ccsdtq_p()
+        print('E(P) = %.12e' % cc.e_p)
 
 
 if __name__ == '__main__':

@@ -35,8 +35,12 @@ t(ijk; abc) <de||lm> (10 splits).  The intermediates of T2:
 Xv has v^4 / 6 elements per pair of occupied indices (as in the T4 equation
 of CCSDTQ), Xq o v^3 / 6 per occupied quadruple.
 
-Cost: o^5 v^5 (25 v + 15 o) / 1440 multiplications in the products with
-three and two virtual indices - for r; z takes 5 v + 10 of the 25 v + 15 o.
+The four products of the first group are one matrix product per pentuple,
+(de) x 15 (v + o) x (abc); the ten splits of the last line take the
+5 + 10 (o - 5) rows of T4 that they share once each.
+
+Cost: o^5 v^5 (20 v + 15 o + 10) / 1440 multiplications in the products
+with two and three virtual indices, a quarter of them for z.
 
 Memory (plan()): besides T3, T4 and the packed <vv||vv>, which are given,
 Y4 (as large as T4), Xv for all pairs, Xq for all occupied quadruples
@@ -86,7 +90,7 @@ def _kept(no, nv, isz):
     nP, nQ, nI3, nA3, nI4, nA4, nI5, nA5 = _sizes(no, nv)
     amps = nI4 * nA4 + nP * nv * nA3 + nI3 * no * nQ                       # Y4, Xv, Xo
     layouts = nP * nQ + no * nv * nQ + nP * no * nv + no * no * nQ + nP * nv * nv   # integrals, T2 twice
-    work = 2 * nA5 + (10 * nv + 15 * no + 10) * nQ + 10 * no * nv + 10 * nv * nQ + 10 * nA4 + 10 * nA3
+    work = 2 * nA5 + (20 * nv + 15 * no + 10) * nQ + 20 * no * nv + 10 * nA4 + 10 * nA3
     tables = 8 * nA5 + nI5 * 600 + nI4 * (no * 9 + 250) + nI3 * (nP + no) * 9 + nP * nP * 9
     # (for the quadruples of one pentuple: with the operands that Xq is made of)
     five = 5 * no * nA3 + nI3 * no * no * nv + no * nv ** 3 + nQ * no * nv
@@ -106,7 +110,7 @@ def _transient(no, nv, isz, cols23, cols14, rows, store_xq=True):
     step = 4 * max(rows, no) * nv * nv
     xq = max(no ** 3 * nv + 2 * no ** 3 * nP * nv + 4 * nI3 * no * no * nv, no * nv ** 3 + nQ * no * nv + step)
     # the work arrays stay from one product to the next: each as large as its largest use
-    batch = max((5 * nv + 15 * no) * cols23, 10 * no * cols14) + max(nQ * cols23, nv * cols14) + 10 * cols23
+    batch = max(15 * (nv + no) * cols23, 10 * no * cols14) + max(nQ * cols23, nv * cols14) + 10 * cols23
     if not store_xq:
         batch += step
     return isz * max(y4, xv, xo, xq, batch)
@@ -146,7 +150,7 @@ def plan(no, nv, isz, budget=None, batch_bytes=None):
     nP, nQ, nI3, nA3, nI4, nA4, nI5, nA5 = _sizes(no, nv)
     kept, xq_all, xq_five = _kept(no, nv, isz)
     min23, min14, min_rows = _least(no, nv)
-    top23 = int(max(min23, min(nA3, batch_bytes // (isz * (nQ + 5 * nv + 15 * no)))))
+    top23 = int(max(min23, min(nA3, batch_bytes // (isz * (nQ + 15 * (nv + no))))))
     top14 = int(max(min14, min(nA4, batch_bytes // (isz * (nv + 10 * no)))))
     top_rows = int(max(min_rows, min(nQ, batch_bytes // (isz * 4 * nv * nv))))
     if budget is None:
@@ -301,10 +305,10 @@ class Pentuples:
 
         # ---- the work arrays of one pentuple
         self.r, self.z = np.empty(nA5, dtype=dtype), np.empty(nA5, dtype=dtype)
-        self.LA = np.empty((5 * nv + 15 * no, nQ), dtype=dtype)
+        self.LA = np.empty((15 * nv + 15 * no, nQ), dtype=dtype)
         self.LZ = np.empty((5 * nv + 10, nQ), dtype=dtype)
-        self.LB = np.empty((10 * no, nv), dtype=dtype)
-        self.EC = np.empty((10, nv, nQ), dtype=dtype)
+        self.LB, self.LC = (np.empty((10 * no, nv), dtype=dtype) for _ in range(2))
+        self.Xv2 = self.Xv.reshape(nP * nv, nA3)
         self._buf = {}
 
     def want(self, *parts):
@@ -367,10 +371,11 @@ class Pentuples:
         o41, o32, o31, o12 = self.o41, self.o32, self.o31, self.o12
         J4s, xs, s41 = o41.idx1[I], o41.idx2[I], o41.sgn[I]
         J3s, ps, s32 = o32.idx1[I], o32.idx2[I], o32.sgn[I]
-        r, z, LA, LZ, LB, EC = self.r, self.z, self.LA, self.LZ, self.LB, self.EC
+        r, z, LA, LZ, LB, LC = self.r, self.z, self.LA, self.LZ, self.LB, self.LC
         P.zero(r)
         P.zero(z)
-        ka, kd = 5 * nv, 5 * nv + 10 * no
+        # the rows of the stacked operands: [V,T4] | Xo with T3 | T2 with Xq | T3 with Xv
+        ka, kd, kg = 5 * nv, 5 * nv + 10 * no, 5 * nv + 15 * no
         Xq = self._xq_of(J4s) if want('g', 'h') else None
         with timer('p.operands'):
             for s in range(5):
@@ -384,40 +389,49 @@ class Pentuples:
                 np.multiply(self.vvoo_t[ps[s]], float(s32[s]), out=LZ[ka + s])
                 np.multiply(self.ovoo_t[ps[s]], -float(s32[s]), out=LB[s * no:(s + 1) * no])
             if want('c', 'e'):
-                P.tn_expand(EC, np.ascontiguousarray(T3[J3s]), nv, 1, 2, outer=0)       # t(klm; g, de)
+                # (klm|ij): t(klm; g, de), for Xv(g; ij; abc) with the sign of the split
+                P.tn_expand(LA[kg:].reshape(10, nv, nQ), np.ascontiguousarray(T3[J3s]), nv, 1, 2, outer=0)
+                rowsv = (ps[:, None] * nv + np.arange(nv)).ravel()
+                sgnv = np.repeat(s32, nv)
             rows3, sgn3 = o12.pos[:, ps].T.ravel(), o12.psg[:, ps].T.ravel()            # t(n kl; abc)
-            rows4, sgn4 = o31.pos[J3s].ravel(), o31.psg[J3s].ravel()                    # t(ijk n; abcd)
+            # t(ijk n; abcd): the rows of T4 that the ten splits (ijk|lm) and the n make, each once
+            rows4, sgn4 = o31.pos[J3s].ravel(), o31.psg[J3s].ravel()
+            rows4, inv = np.unique(rows4[sgn4 != 0], return_inverse=True)
+            LC[:len(rows4)] = 0
+            np.add.at(LC, inv, LB[sgn4 != 0] * sgn4[sgn4 != 0][:, None])
+            one4 = np.ones(len(rows4), dtype=np.int8)
             T4r = np.ascontiguousarray(T4[J4s])
             Y4r = np.ascontiguousarray(Y4[J4s]) if Y4 is not None else None
         for c in _batches(nA3, self.plan.cols23):
             nc = c[1] - c[0]
             # ---- r
-            R = self._work('R', (5 * nv + 15 * no, nc))
+            R = self._work('R', (15 * nv + 15 * no, nc))
             with timer('p.operands'):
-                P.zero(R)
                 if want('a'):
                     P.tn_expand(R[:ka].reshape(5, nv, nc), T4r, nv, 1, 3, cols=c, outer=0)
+                else:
+                    P.zero(R[:ka])
                 if want('d', 'f'):
                     P.tn_rows(R[ka:kd], T3, rows3, sgn3, cols=c)
-                if want('g', 'h'):
-                    for s in range(5):
-                        R[kd + s * no:kd + (s + 1) * no] = Xq[s][:, c[0]:c[1]]
+                else:
+                    P.zero(R[ka:kd])
+                for s in range(5):
+                    R[kd + s * no:kd + (s + 1) * no] = Xq[s][:, c[0]:c[1]] if Xq is not None else 0
+                if want('c', 'e'):
+                    P.tn_rows(R[kg:], self.Xv2, rowsv, sgnv, cols=c)
             X = self._work('X', (nQ, nc))
             with timer('p.gemm'):
-                gemm(LA.T, R, X)
-                if want('c', 'e'):
-                    for s in range(10):
-                        gemm(EC[s].T, self.Xv[ps[s]][:, c[0]:c[1]], X, alpha=float(s32[s]), beta=1.0)
+                gemm((LA if want('c', 'e') else LA[:kg]).T, R if want('c', 'e') else R[:kg], X)
             with timer('p.reduce'):
                 P.tn_reduce(r, X, nv, 2, 3, cols=c)
             # ---- z
             R = R[:ka + 10]
             with timer('p.operands'):
-                P.zero(R)
                 if want('zy'):
                     P.tn_expand(R[:ka].reshape(5, nv, nc), Y4r, nv, 1, 3, cols=c, outer=0)
-                if want('zt3'):
-                    R[ka:] = T3[J3s, c[0]:c[1]]
+                else:
+                    P.zero(R[:ka])
+                R[ka:] = T3[J3s, c[0]:c[1]] if want('zt3') else 0
             with timer('p.gemm'):
                 gemm(LZ.T, R, X)
             with timer('p.reduce'):
@@ -425,15 +439,15 @@ class Pentuples:
         R = X = None                    # (views of the work arrays: they would pin them)
         for c in _batches(nA4, self.plan.cols14):
             nc = c[1] - c[0]
-            R = self._work('R', (10 * no, nc))
+            R = self._work('R', (len(rows4), nc))
             X = self._work('X', (nv, nc))
             for amp, out, part in ((T4, r, 'b'), (Y4, z, 'zy')):
                 if not want(part):
                     continue
                 with timer('p.operands'):
-                    P.tn_rows(R, amp, rows4, sgn4, cols=c)
+                    P.tn_rows(R, amp, rows4, one4, cols=c)
                 with timer('p.gemm'):
-                    gemm(LB.T, R, X)
+                    gemm(LC[:len(rows4)].T, R, X)
                 with timer('p.reduce'):
                     P.tn_reduce(out, X, nv, 1, 4, cols=c)
         return r, z
