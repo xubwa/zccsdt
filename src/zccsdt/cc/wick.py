@@ -133,6 +133,41 @@ def derive(kind, ranks, rank, sym=1):
     return terms
 
 
+def derive_left(kind, ranks, lrank, rank, sym=1):
+    '''All terms of the left-hand projection
+
+        1/sym <0| Lambda_lrank (H tau T_a T_b ..)_C |0>,   tau = a+ b+ .. j i,
+
+    the part of <0| (1 + Lambda) [exp(-T) H exp(T), tau] |0> with H of
+    ``kind``, the de-excitation operator Lambda_n = (1/n!)^2 sum
+    l[i.., a..] i+ j+ .. b a (lrank = 0: the 1) and cluster operators of
+    ``ranks``: [(coefficient, factors, external letters of tau)], a term
+    being coefficient * A(product) with A over the letters of tau (rank 1:
+    the product).
+
+    tau is of quasi-particle creators like a cluster operator and commutes
+    with them, so the commutator is the connected product with tau as one
+    more cluster operator, of unit amplitude - what derive() enumerates
+    with the ranks ``ranks + [rank]``.  Lambda is of quasi-particle
+    annihilators only: it closes the open lines of that product, and the
+    n!^2 ways of doing so are relabelings of its summed indices, each with
+    the sign that the antisymmetry of l takes back: 1/n!^2 sum l[I, A]
+    <Phi_I^A| .. |0> is sum l[I, A] (representative product)[I, A].  The
+    unit amplitude: a term of derive() is a sum c G[J, B] t[J, B] over all
+    index values of the last operator, where the amplitude of one
+    excitation stands rank!^2 times with its signs: its coefficient is
+    c A(G).
+
+    With the T1-dressed H, tau of rank 1 gives the derivative with respect
+    to t1 (d/dt1[i,a] exp(-T1) H exp(T1) = [exp(-T1) H exp(T1), a+_a a_i]).'''
+    out = []
+    for coef, factors, _ in derive(kind, list(ranks) + [rank], lrank, sym):
+        tau = factors[-1][1]
+        left = (('l%d' % lrank, OCC_LETTERS[:lrank] + VIR_LETTERS[:lrank]),) if lrank else ()
+        out.append((coef, left + factors[:-1], tau))
+    return out
+
+
 def topology(factors):
     '''The topology of a term given as factors: the sorted (rank, hole
     lines, particle lines) of its cluster operators.'''
