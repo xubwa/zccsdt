@@ -23,11 +23,14 @@ the sector, sums the splits of each from the blocks and adds the energies:
 nothing of the size of the virtual quadruples is stored, and no tables of
 their size are made.
 
-The intermediate Xv of T2 with <vv||vv> is that of the dense code (its
-symmetry is not used yet).
+The intermediate of T2 with <vv||vv> is in blocks too: Xv(e; xl; bcd) for
+the e of one label has the triples of one label only, and is formed from the
+blocks <bc||ef> t(xl, fd) of the labels of (bc) (zc_xv_sector).  The rows of
+T3 that a product needs are read where they are (zc_rows_gemm).
 '''
 
 import ctypes
+from dataclasses import dataclass
 from math import comb
 
 import numpy as np
@@ -82,7 +85,8 @@ class Sectors:
         self.lstart = np.concatenate(([0], np.cumsum([len(self.V[k]) for k in self.vlab]))).astype(np.int32)
         self.qlab = sorted(self.Q2)
         self.qmin, self.nq = self.qlab[0], self.qlab[-1] - self.qlab[0] + 1
-        self._layout, self._t3tab = {}, {}
+        self.tri = {k: np.ascontiguousarray(p3[idx], dtype=np.int32) for k, idx in self.A3.items()}
+        self._layout, self._t3tab, self._w = {}, {}, {}
 
     def red(self, k):
         return k % self.modulus if self.modulus else k
@@ -129,6 +133,47 @@ class Sectors:
             self._t3tab[ke, qc] = (np.where(sgn != 0, rank, 0), sgn.astype(np.float64))
         return self._t3tab[ke, qc]
 
+    def w_block(self, vpp, q2, ke):
+        '''<bc||ef> for the pairs (bc) of label ``q2``, the e of label ``ke``
+        and the f of the label that is left: [(bc) e, f], kept.'''
+        if (q2, ke) not in self._w:
+            nv = self.nvir
+            e, f = self.V[ke][:, None], self.V[int(self.red(q2 - ke))][None, :]
+            lo, hi = np.minimum(e, f), np.maximum(e, f)
+            rank = comb(nv, 2) - 1 - (nv - 1 - lo) * (nv - 2 - lo) // 2 - (nv - 1 - hi)
+            sgn = (np.sign(f - e) + 0 * rank).ravel()
+            col = np.where(sgn != 0, rank.ravel(), 0)
+            W = np.asarray(vpp)[np.ix_(self.Q2[q2], col)] * sgn
+            self._w[q2, ke] = np.ascontiguousarray(W.reshape(-1, f.shape[1]))
+        return self._w[q2, ke]
+
+    def w_size(self):
+        '''Elements of all blocks of w_block().'''
+        return sum(len(self.Q2[q]) * len(self.V[k]) * len(self.V[int(self.red(q - k))])
+                   for q in self.qlab for k in self.vlab if int(self.red(q - k)) in self.V)
+
+    def xv_size(self):
+        '''Elements of the blocks of Xv for one pair of occupied indices, at
+        most, and of the largest set of products that one of them is made
+        from.'''
+        nv = self.nvir
+        slab = work = 0
+        for kxl in np.unique(self.red(self.ko[:, None] + self.ko[None, :])):
+            n = 0
+            for ke in self.vlab:
+                if int(self.red(ke + kxl)) not in self.A3:
+                    continue
+                n += len(self.V[ke]) * len(self.A3[int(self.red(ke + kxl))])
+                m = 0
+                for q in self.qlab:
+                    kf = int(self.red(q - ke))
+                    kd = int(self.red(kxl - kf))
+                    if kf in self.V and kd in self.V:
+                        m += len(self.Q2[q]) * len(self.V[ke]) * len(self.V[kd])
+                work = max(work, m)
+            slab = max(slab, n)
+        return slab, work
+
     def sizes(self, quads):
         '''(elements of the largest X[(ab), (cd)], of the largest X[a, (bcd)])
         over the occupied quadruples ``quads``.'''
@@ -136,12 +181,71 @@ class Sectors:
         return (max(self.layout(int(M))[1] for M in Ms), max(self.layout(int(M))[3] for M in Ms))
 
 
-def need(eris, isz):
-    '''Bytes of the blocks of one occupied quadruple (three products on two
-    pairs, two on one index and a triple).'''
+@dataclass
+class Plan:
+    need: int               # bytes besides T3 and the integrals
+    dense: object           # the plan of the dense code for its operands and the x of Xv at a time
+    sectors: object         # Sectors
+    n22: int                # elements of the largest set of blocks X[(ab), (cd)]
+    n13: int                # and X[a, (bcd)]
+
+
+def plan(eris, isz, budget=None):
+    """The plan for ``budget`` bytes (None: no limit); MemoryError if the
+    blocks and the operands of the dense code do not fit.  Counted: the
+    blocks of one occupied quadruple (three products on two pairs, two on one
+    index and a triple), <vv||vv> in blocks, the products that Xv is made
+    from, the tables of the sectors and the rows picked for a product; Xv
+    itself for each occupied index as the dense plan counts it (v C(v,3)
+    elements, of which the blocks have a part)."""
     sec = Sectors(eris)
-    n22, n13 = sec.sizes(P.tuples(sec.nocc, 4))
-    return (3 * n22 + 2 * n13) * isz
+    no, nv = sec.nocc, sec.nvir
+    n22, n13 = sec.sizes(P.tuples(no, 4))
+    slab, work = sec.xv_size()
+    nQ, nA3 = comb(nv, 2), comb(nv, 3)
+    tables = 16 * nv * nQ + 32 * nA3 + 8 * nQ
+    rows = 4 * (4 * nv + 4 * no + 6) * max(len(x) for x in sec.Q2.values()) * isz
+    mine = (3 * n22 + 2 * n13 + sec.w_size() + work) * isz + tables + rows
+    pl = Q.plan(no, nv, isz, None if budget is None else budget - mine)
+    pl = Q.explicit_plan(no, nv, isz, 1, 1, pl.xv, pl.rows)
+    return Plan(pl.need + mine, pl, sec, n22, n13)
+
+
+def xv_blocks(sec, q, x, l):
+    '''{label of e: Xv[e, (bcd)]} for the occupied pair (x, l): the e of
+    that label and the triples of the label that goes with it,
+    Xv(e; xl; bcd) = P(d/bc) 1/2 sum_f <bc||ef> t(xl, fd).'''
+    dtype = q.dtype
+    kxl = int(sec.red(sec.ko[x] + sec.ko[l]))
+    t = np.asarray(q.t2[x, l])
+    fn = getattr(P._lib, 'zc_xv_sector_' + P._SFX[np.dtype(dtype)])
+    kv32 = np.ascontiguousarray(sec.kv, dtype=np.int32)
+    out = {}
+    for ke in sec.vlab:
+        T = int(sec.red(ke + kxl))
+        if T not in sec.A3:
+            continue
+        ne = len(sec.V[ke])
+        todo, n = [], 0
+        off, nd = np.full(sec.nq, -1, dtype=np.int64), np.zeros(sec.nq, dtype=np.int64)
+        for q2 in sec.qlab:
+            kf = int(sec.red(q2 - ke))
+            kd = int(sec.red(kxl - kf))
+            if kf in sec.V and kd in sec.V:
+                todo.append((q2, kf, kd, n))
+                off[q2 - sec.qmin], nd[q2 - sec.qmin] = n, len(sec.V[kd])
+                n += len(sec.Q2[q2]) * ne * len(sec.V[kd])
+        m3 = np.empty(max(n, 1), dtype=dtype)
+        for q2, kf, kd, o in todo:
+            W = sec.w_block(q.vpp, q2, ke)
+            tb = np.ascontiguousarray(t[np.ix_(sec.V[kf], sec.V[kd])], dtype=dtype)
+            gemm(W, tb, m3[o:o + W.shape[0] * tb.shape[1]].reshape(W.shape[0], tb.shape[1]))
+        tri = sec.tri[T]
+        blk = np.empty((ne, len(tri)), dtype=dtype)
+        fn(_INT(sec.nvir), P._p(kv32), _INT(sec.modulus), P._p(tri), _I64(len(tri)), _INT(ne),
+           _INT(sec.qmin), _INT(sec.nq), P._p(off), P._p(nd), P._p(sec.posV), P._p(sec.posQ), P._p(m3), P._p(blk))
+        out[ke] = blk
+    return out
 
 
 def _stack(parts, ncol, dtype):
@@ -150,7 +254,7 @@ def _stack(parts, ncol, dtype):
     return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
 
-def kernel(eris, t2, t3, max_memory=None):
+def kernel(eris, t2, t3, max_memory=None, plan_=None):
     '''(E[Q], E(Q)) as zccsdt.cc.quadruples.kernel, in the symmetry sectors
     of ``eris.labels``.'''
     from zccsdt import memory
@@ -160,16 +264,11 @@ def kernel(eris, t2, t3, max_memory=None):
         return 0.0, 0.0
     dtype = np.result_type(t2, t3, eris.oovv)
     isz = np.dtype(dtype).itemsize
-    sec = Sectors(eris)
+    if plan_ is None:
+        plan_ = plan(eris, isz, memory.budget(max_memory))
+    sec, n22, n13 = plan_.sectors, plan_.n22, plan_.n13
     quads = P.tuples(no, 4)
-    n22, n13 = sec.sizes(quads)
-    mine = (3 * n22 + 2 * n13) * isz
-    budget = memory.budget(max_memory)
-    # the dense code's intermediates with what the blocks leave: its products
-    # are not formed (one column at a time in its plan)
-    pl = Q.plan(no, nv, isz, None if budget is None else budget - mine)
-    pl = Q.explicit_plan(no, nv, isz, 1, 1, pl.xv, pl.rows)
-    q = Q.Quadruples(eris, t2, t3, pl)
+    q = Q.Quadruples(eris, t2, t3, plan_.dense)
     B1, B2, B3 = (np.empty(n22, dtype=dtype) for _ in range(3))
     C1, C2 = (np.empty(n13, dtype=dtype) for _ in range(2))
     ko = sec.ko
@@ -180,9 +279,19 @@ def kernel(eris, t2, t3, max_memory=None):
     p_ = P._p
     kv32 = np.ascontiguousarray(sec.kv, dtype=np.int32)
     so13, so22, so12, T3 = q.so13, q.so22, q.so12, q.T3
+    rg = getattr(P._lib, 'zc_rows_gemm_' + P._SFX[np.dtype(dtype)])
+    nA3 = T3.shape[1]
     e = np.zeros(2)
+    XV, last = {}, None
     for l, xs, Is in q.schedule():
-        Xv, where = q.xi_v(l, xs)
+        with timer('qs.xv'):
+            if last != l:
+                XV, last = {}, l
+            for x in [x for x in XV if x not in xs]:
+                del XV[x]
+            for x in xs:
+                if int(x) not in XV:
+                    XV[int(x)] = xv_blocks(sec, q, int(x), l)
         for I in Is:
             M = int(sec.red(ko[quads[I]].sum()))
             b22, _, b13, _, off22, nc22, off13, nc13 = sec.layout(M)
@@ -217,7 +326,7 @@ def kernel(eris, t2, t3, max_memory=None):
             with timer('qs.13'):
                 for pp, off, nr, nc in b13:
                     va, a3 = sec.V[pp], sec.A3[int(sec.red(M - pp))]
-                    LC, RC = [], []
+                    LC, rows, sgs = [], [], []
                     for k in range(6):              # <m a||ij> t(m kl; bcd)
                         km = int(sec.red(kpair[p22[k]] - pp))
                         if km in sec.O:
@@ -226,28 +335,32 @@ def kernel(eris, t2, t3, max_memory=None):
                             ms = ms[sg != 0]
                             if len(ms):
                                 LC.append(float(s22[k]) * q.ovoo_t[p22[k]][np.ix_(ms, va)])
-                                RC.append(T3[np.ix_(so12.pos[ms, q22[k]], a3)] * sg[sg != 0][:, None])
+                                rows.append(so12.pos[ms, q22[k]])
+                                sgs.append(sg[sg != 0])
                     X = C1[off:off + nr * nc].reshape(nr, nc)
                     if LC:
-                        gemm(np.ascontiguousarray(_stack(LC, nr, dtype).T), _stack(RC, nc, dtype), X)
+                        L = np.ascontiguousarray(_stack(LC, nr, dtype))
+                        rows = np.ascontiguousarray(np.concatenate(rows), dtype=np.int64)
+                        sgs = np.ascontiguousarray(np.concatenate(sgs), dtype=np.float64)
+                        cols = np.ascontiguousarray(a3, dtype=np.int64)
+                        rg(p_(T3), _I64(nA3), p_(rows), p_(sgs), _I64(len(rows)), p_(cols), _I64(nc),
+                           p_(L), _I64(nr), p_(X))
                     else:
                         X[...] = 0
                     X = C2[off:off + nr * nc].reshape(nr, nc)
-                    LD, RD = [], []
+                    first = True
                     for k in (0, 1, 3):             # 2 t(ij, a e) Xv(e; kl; bcd), l in the second pair
                         ke = int(sec.red(kpair[p22[k]] - pp))
                         if ke in sec.V:
-                            E = sec.V[ke]
-                            LD.append(2.0 * float(s22[k]) * q.t2_px[p22[k]][np.ix_(E, va)])
-                            RD.append(Xv[where[int(xl[q22[k], 0])]][np.ix_(E, a3)])
-                    if LD:
-                        gemm(np.ascontiguousarray(_stack(LD, nr, dtype).T), _stack(RD, nc, dtype), X)
-                    else:
+                            L = np.ascontiguousarray(q.t2_px[p22[k]][np.ix_(sec.V[ke], va)].T)
+                            gemm(L, XV[int(xl[q22[k], 0])][ke], X, alpha=2.0 * float(s22[k]),
+                                 beta=0.0 if first else 1.0)
+                            first = False
+                    if first:
                         X[...] = 0
             with timer('qs.sum'):
                 fn(_INT(nv), p_(kv32), _INT(sec.modulus), _INT(M), p_(ev), _DBL(float(q.eo4[I])),
                    _INT(sec.kmin), _INT(sec.nk), p_(sec.lid_of), p_(sec.lstart), p_(sec.lmem),
                    _INT(sec.qmin), _INT(sec.nq), p_(off22), p_(nc22), p_(off13), p_(nc13),
                    p_(sec.posV), p_(sec.posQ), p_(sec.pos3), p_(B1), p_(B2), p_(B3), p_(C1), p_(C2), p_(e))
-        del Xv
     return float(e[0]), float(e[0] + e[1])

@@ -727,3 +727,66 @@ void zc_q_sector_energy_##SFX(int n, const int *kv, int modulus, int M,        \
 
 DEFINE_QSEC(double, d)
 DEFINE_QSEC(double complex, z)
+
+/*
+ * Two more kernels of (Q) in symmetry sectors.
+ *
+ * zc_rows_gemm:  X[a, c] = sum_r L[r, a] sg[r] M[rows[r], cols[c]] - a
+ * product with rows and columns picked from a packed block, which is not
+ * copied (L: [nr, na], X: [na, nc]).
+ *
+ * zc_xv_sector:  out[e, t] = 1/2 sum over the splits (pq | r) of the sorted
+ * triples t = (p<q<r) of one label of sgn * m3[(pq), e, r] - the
+ * intermediate of T2 with <vv||vv> for the e of one label, from the blocks
+ * m3 of the labels of (pq): block at off[q - qmin], [pairs at posQ, e, nd
+ * virtual spinors of the label that is left, at posV].
+ */
+#define DEFINE_QSEC2(T, SFX)                                                   \
+void zc_rows_gemm_##SFX(const T *M, int64_t ld, const int64_t *rows,           \
+        const double *sg, int64_t nr, const int64_t *cols, int64_t nc,         \
+        const T *L, int64_t na, T *X)                                          \
+{                                                                              \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *tmp = malloc(sizeof(T) * (size_t)(nr > 0 ? nr : 1));                \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t c = 0; c < nc; c++) {                                     \
+            for (int64_t r = 0; r < nr; r++)                                   \
+                tmp[r] = sg[r] * M[rows[r] * ld + cols[c]];                    \
+            for (int64_t a = 0; a < na; a++) {                                 \
+                T x = 0;                                                       \
+                for (int64_t r = 0; r < nr; r++) x += L[r * na + a] * tmp[r];  \
+                X[a * nc + c] = x;                                             \
+            }                                                                  \
+        }                                                                      \
+        free(tmp);                                                             \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_xv_sector_##SFX(int n, const int *kv, int modulus, const int32_t *tri, \
+        int64_t nt, int ne, int qmin, int nq, const int64_t *off,              \
+        const int64_t *nd, const int32_t *posV, const int32_t *posQ,           \
+        const T *m3, T *out)                                                   \
+{                                                                              \
+    const int64_t nQ = (int64_t)n * (n - 1) / 2;                               \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t t = 0; t < nt; t++) {                                         \
+        const int v[3] = {tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]};         \
+        static const int g[3][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}};          \
+        static const double sg[3] = {0.5, -0.5, 0.5};                          \
+        for (int e = 0; e < ne; e++) out[e * nt + t] = 0;                      \
+        for (int s = 0; s < 3; s++) {                                          \
+            const int p = v[g[s][0]], q = v[g[s][1]], r = v[g[s][2]];          \
+            int kq = kv[p] + kv[q];                                            \
+            if (modulus) kq = ((kq % modulus) + modulus) % modulus;            \
+            if (kq < qmin || kq >= qmin + nq || off[kq - qmin] < 0) continue;  \
+            const int64_t rk = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q);      \
+            const int64_t d = nd[kq - qmin];                                   \
+            const T *m = m3 + off[kq - qmin] + posQ[rk] * ne * d + posV[r];    \
+            for (int e = 0; e < ne; e++) out[e * nt + t] += sg[s] * m[e * d];  \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_QSEC2(double, d)
+DEFINE_QSEC2(double complex, z)

@@ -4,6 +4,9 @@ the same with the labels modulo 4 and with complex amplitudes, and spin
 orbitals of RHF with the two fermion irreps of C2 from the integrals in
 Kramers pairs.'''
 import copy
+import gc
+import io
+import tracemalloc
 
 import numpy as np
 import pytest
@@ -103,3 +106,31 @@ def test_two_irreps_of_c2():
     cc.kernel()
     ref = QD.kernel(eris, cc.t2, cc.t3)
     assert np.allclose(QS.kernel(eris, cc.t2, cc.t3), ref, rtol=0, atol=1e-14)
+
+
+def test_front_end_and_memory(hbr):
+    """Through GCCSDT.ccsdt_q: the sectors by default, the dense code with
+    ``symmetry`` off or too little memory for the blocks - the same numbers;
+    and the peak of the allocations within the plan."""
+    eris, t2, t3 = hbr
+    ref = QD.kernel(eris, t2, t3)
+    out = {}
+    for sym in (True, False):
+        buf = io.StringIO()
+        cc = zccsdt.GCCSDT.from_integrals(eris, verbose=4, stdout=buf)
+        cc.symmetry = sym
+        cc.t2, cc.t3, cc.e_corr, cc.e_hf = t2, t3, 0.0, eris.e_hf
+        assert abs(cc.ccsdt_q(t2, t3) - ref[1]) < 1e-13 and abs(cc.e_q5 - ref[0]) < 1e-13
+        out[sym] = buf.getvalue()
+    assert '6 labels of the virtual spinors (2 m_j): the products in blocks' in out[True]
+    assert 'in blocks' not in out[False] and 'batches of columns' in out[False]
+    isz = 8
+    pl = QS.plan(eris, isz)
+    with pytest.raises(MemoryError):
+        QS.plan(eris, isz, pl.need // 50)
+    gc.collect()
+    tracemalloc.start()
+    QS.kernel(eris, t2, t3, plan_=pl)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < pl.need + (2 << 20), (peak, pl.need)

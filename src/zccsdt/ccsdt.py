@@ -973,7 +973,8 @@ class GCCSDT(UCCSDT):
     _subtitle = 'CCSDT on spin orbitals or spinors (GHF, X2C), real or complex'
     _frozen_unit = 2
     real_spinors = True
-    _keys = UCCSDT._keys | {'real_spinors'}
+    symmetry = True         # use the labels of the spinors where the integrals have them ((Q))
+    _keys = UCCSDT._keys | {'real_spinors', 'symmetry'}
 
     def _axial(self):
         '''The spinors of a linear molecule on the z axis adapted to m_j
@@ -1090,7 +1091,7 @@ class GCCSDT(UCCSDT):
         or spinors (zccsdt.cc.quadruples; canonical orbitals); returns E(Q)
         and stores e_q, e_q5 (its fifth-order part, [Q]) and e_tot_q.'''
         from math import comb
-        from zccsdt.cc import ccsdt_opt, quadruples
+        from zccsdt.cc import ccsdt_opt, quadruples, quadruples_sym
         log = logger.new_logger(self)
         pr = _Printer(log)
         t2 = self.t2 if t2 is None else t2
@@ -1106,15 +1107,33 @@ class GCCSDT(UCCSDT):
         if no < 4 or nv < 4:
             self.e_q5 = self.e_q = 0.0
         else:
-            pl = quadruples.plan(no, nv, np.dtype(dtype).itemsize, memory.budget(self.max_memory))
+            budget = memory.budget(self.max_memory)
             xfull = max(3, no - 1)
-            pr.kv('memory', '%s besides T3 and the integrals' % _size(pl.need), indent=3)
-            pr.kv('plan', 'products in %d and %d batches of columns; T2 <vv||vv> intermediate for %s'
-                  % (-(-comb(nv, 2) // pl.cols22), -(-comb(nv, 3) // pl.cols13),
-                     'all occupied indices' if pl.xv >= xfull else
-                     '%d of %d occupied indices at a time' % (pl.xv, xfull)), indent=3)
-            with _PeakMemory() as peak, timing.timer(ROOT_Q):
-                self.e_q5, self.e_q = quadruples.kernel(eris, t2, t3, plan_=pl)
+            spl = None
+            if self.symmetry and quadruples_sym.available(eris):
+                try:
+                    spl = quadruples_sym.plan(eris, np.dtype(dtype).itemsize, budget)
+                except MemoryError:     # (the dense code can do with less: batches of columns)
+                    pass
+            if spl is not None:
+                sec = spl.sectors
+                pr.kv('symmetry', '%d labels of the virtual spinors%s: the products in blocks'
+                      % (len(sec.vlab), ' modulo %d' % sec.modulus if sec.modulus else ' (2 m_j)'), indent=3)
+                pr.kv('memory', '%s besides T3 and the integrals' % _size(spl.need), indent=3)
+                pr.kv('plan', 'T2 <vv||vv> intermediate for %s' % (
+                    'all occupied indices' if spl.dense.xv >= xfull else
+                    '%d of %d occupied indices at a time' % (spl.dense.xv, xfull)), indent=3)
+                with _PeakMemory() as peak, timing.timer(ROOT_Q):
+                    self.e_q5, self.e_q = quadruples_sym.kernel(eris, t2, t3, plan_=spl)
+            else:
+                pl = quadruples.plan(no, nv, np.dtype(dtype).itemsize, budget)
+                pr.kv('memory', '%s besides T3 and the integrals' % _size(pl.need), indent=3)
+                pr.kv('plan', 'products in %d and %d batches of columns; T2 <vv||vv> intermediate for %s'
+                      % (-(-comb(nv, 2) // pl.cols22), -(-comb(nv, 3) // pl.cols13),
+                         'all occupied indices' if pl.xv >= xfull else
+                         '%d of %d occupied indices at a time' % (pl.xv, xfull)), indent=3)
+                with _PeakMemory() as peak, timing.timer(ROOT_Q):
+                    self.e_q5, self.e_q = quadruples.kernel(eris, t2, t3, plan_=pl)
             w, c, k = timing.since(snap0)[(ROOT_Q,)]
         pr.kv('E[Q]', '%20.12f   (fifth order)' % self.e_q5, indent=3)
         pr.kv('E(Q)', '%20.12f' % self.e_q, indent=3)
