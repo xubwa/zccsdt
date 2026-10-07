@@ -24,6 +24,9 @@
 #   occupation line (refdet=vector) is taken over.
 #
 # Results: DIR/full/mrcc_<calc>/out.mrcc (HF = 1) and out.dmrcc (HF = 0).
+# MRCC_HF_ONLY=1: dmrcc only writes its input files (it is given programs
+# that do nothing in the place of goldstone, xmrcc and mrcc), then the run
+# with HF = 1 - one calculation instead of two, for timings.
 set -e
 MRCCDIR=${MRCCDIR:-/home/czhan119/code/cfour-git/bin}
 ROOT=${ZC_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
@@ -49,7 +52,13 @@ R=$full/mrcc_$tag
 mkdir -p $R && cp $full/MRCONEE $full/MDCINT $full/fort.55 $R/
 printf 'iface=dirac\ncalc=%s\nmem=%s\ncctol=12\nrefdet=vector\n%s\n' "$calc" "${MRCC_MEM:-4GB}" "$(sed -n 5p $full/MINP)" > $R/MINP
 cd $R
-dmrcc > out.dmrcc 2>&1 || true
+if [ -n "$MRCC_HF_ONLY" ]; then
+  mkdir -p stub
+  for p in goldstone xmrcc mrcc; do printf '#!/bin/sh\nexit 0\n' > stub/$p; chmod +x stub/$p; done
+  PATH=$R/stub:$PATH dmrcc > out.dmrcc 2>&1 || true
+else
+  dmrcc > out.dmrcc 2>&1 || true
+fi
 python - <<'PY'
 import re
 lines = open('fort.56').read().split('\n')
@@ -62,5 +71,7 @@ xmrcc > out.xmrcc 2>&1
 mrcc > out.mrcc 2>&1
 echo "== $calc with the reference as Hartree-Fock:"
 grep -E "Total .* energy|Energy of reference" out.mrcc
-echo "== the variants of the interface (HF = 0):"
-grep -E "Total .*/[AB] energy" out.dmrcc || true
+if [ -z "$MRCC_HF_ONLY" ]; then
+  echo "== the variants of the interface (HF = 0):"
+  grep -E "Total .*/[AB] energy" out.dmrcc || true
+fi
