@@ -3255,11 +3255,11 @@ they are then (the cost does not depend on them).
   that and without - CCSDT iteration 0.84 against 2.32 s, (Q) 5.2 against
   12.5 s, CCSDTQ and (P) as in the table, 240 s against 707 s for the run;
   E[Q], E(Q) and E(P) (-2.213315408679e-6 Eh after two iterations) agree
-  to all digits printed.  This is a special case, not the speed of the
-  code: it needs a linear molecule, on the z axis, with a closed shell or
-  an open shell whose SCF kept the symmetry of the axis (the doublet of
-  BeH from `pyscf.x2c.UHF` on the axis did not, and ran complex).  Every
-  other calculation is the complex one of the other lines.
+  to all digits printed.  It needs a linear molecule, on the z axis, with
+  a closed shell or an open shell whose SCF kept the symmetry of the axis
+  (the doublet of BeH from `pyscf.x2c.UHF` on the axis did not, and ran
+  complex); every other calculation is the complex one of the other
+  lines.
 - **Size.**  At 10 + 72 there are 14 times the quadruples of 10 + 38 and
   the iteration takes 15 times as long; (P) takes 26 times as long for 28
   times the pentuples.  (P) is 3.6 CCSDTQ iterations at 10 + 38, 6.1 at
