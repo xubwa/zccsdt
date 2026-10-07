@@ -156,3 +156,31 @@ def test_two_sided(dtype):
     got = P.tn_reduce2(np.zeros_like(T), Z, nv, 2, 2, (np.arange(3, 8), np.arange(5) * sv.n1 * sv.n2, np.ones(5)),
                        sv.n2, 1)
     assert abs(got - ref).max() < 1e-12
+
+
+@pytest.mark.parametrize('dtype', [np.float64, np.complex128])
+def test_single_index_splits_on_a_block_of_columns(dtype):
+    '''tn_expand1 / tn_reduce1 - the splits (a | K), the kernel walking
+    through a block of the tuples K, the slabs of a row summed before the
+    reduction - against the general kernels, for ranks 3 to 5.'''
+    rng = np.random.default_rng(0)
+    no, nv = 6, 9
+    for rank, ko in ((4, (1, 3)), (4, (2, 2)), (3, (1, 2)), (5, (2, 3))):
+        k2 = rank - 1
+        T = _rnd(rng, dtype, comb(no, rank), comb(nv, rank))
+        so = P.split(no, *ko)
+        n2 = comb(nv, k2)
+        for jo, jv in ((None, None), ((1, min(4, so.n2)), (5, min(31, n2))), (None, (n2 - 7, n2)), (None, (0, 1))):
+            b0, b1 = jo or (0, so.n2)
+            c0, c1 = jv or (0, n2)
+            shape = (so.n1, nv, b1 - b0, c1 - c0)                       # [g1o, a, g2o, K]
+            st = [int(np.prod(shape[i + 1:])) for i in range(4)]
+            ent = P.occ_expand(so, st[0], st[2], jo)
+            A = P.tn_expand2(np.full(shape, 7.0, dtype=dtype), T, nv, 1, k2, ent, st[1], 1, cols=(c0, c1))
+            B = P.tn_expand1(np.full(shape, 7.0, dtype=dtype), T, nv, k2, ent, st[1], cols=(c0, c1))
+            assert abs(A - B).max() == 0, (rank, ko, jo, jv)
+            Z = _rnd(rng, dtype, *shape)
+            ent = P.occ_reduce(so, st[0], st[2], jo)
+            r2 = P.tn_reduce2(np.zeros_like(T), Z, nv, 1, k2, ent, st[1], 1, cols=(c0, c1), scale=0.6)
+            r1 = P.tn_reduce1(np.zeros_like(T), Z, nv, k2, ent, st[1], cols=(c0, c1), scale=0.6)
+            assert abs(r1 - r2).max() < 1e-12, (rank, ko, jo, jv)

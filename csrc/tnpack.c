@@ -172,6 +172,57 @@ void zc_tn_tuple_sums(const double *e, int n, int k, double *out)
     free(sp.cb);
 }
 
+/* The splits (a | K) of the sorted (1 + k2)-tuples with the single index
+ * first, for the k2-tuples K of the ranks c0 <= K < c1:
+ *   idx[a * nc + (K - c0)] = rank of the sorted tuple K + a  (-1: a in K),
+ *   sg [a * nc + (K - c0)] = sign of (a, K) = (-1)^(members of K below a).
+ * For a fixed a the ranks grow with K: a kernel that walks through K reads
+ * or writes the packed row in one direction. */
+static void tn_single_table(int n, int k2, int64_t c0, int64_t c1,
+                            int64_t *idx, int8_t *sg)
+{
+    tn_split sp, sk;
+    if (tn_setup(&sp, n, 1, k2))
+        return;
+    if (tn_setup(&sk, n, k2, 0)) {
+        free(sp.cb);
+        return;
+    }
+    const int k = k2 + 1;
+    const int64_t nc = c1 - c0, top = CB(&sp, k, n) - 1;
+    const int64_t nchunk = (nc + CHUNK - 1) / CHUNK;
+#pragma omp parallel for schedule(static)
+    for (int64_t ch = 0; ch < nchunk; ch++) {
+        int K[KMAX];
+        int64_t pre[KMAX + 1], suf[KMAX + 1];
+        int64_t j0 = ch * CHUNK, cnt = (nc - j0 < CHUNK) ? nc - j0 : CHUNK;
+        tn_unrank(&sk, c0 + j0, K);
+        for (int64_t j = j0; j < j0 + cnt; j++) {
+            /* the tuple with a at position p: K[0..p-1], a, K[p..] */
+            pre[0] = 0;
+            for (int t = 0; t < k2; t++)
+                pre[t + 1] = pre[t] + CB(&sp, k - t, n - 1 - K[t]);
+            suf[k2] = 0;
+            for (int t = k2 - 1; t >= 0; t--)
+                suf[t] = suf[t + 1] + CB(&sp, k - t - 1, n - 1 - K[t]);
+            int p = 0;
+            for (int a = 0; a < n; a++) {
+                if (p < k2 && K[p] == a) {
+                    idx[a * nc + j] = -1;
+                    sg[a * nc + j] = 0;
+                    p++;
+                    continue;
+                }
+                idx[a * nc + j] = top - pre[p] - CB(&sp, k - p, n - 1 - a) - suf[p];
+                sg[a * nc + j] = (p & 1) ? -1 : 1;
+            }
+            tn_next(&sk, K);
+        }
+    }
+    free(sp.cb);
+    free(sk.cb);
+}
+
 void zc_tn_zero(void *p, int64_t nbytes)
 {
     const int64_t blk = 1 << 20, nblk = (nbytes + blk - 1) / blk;
@@ -358,6 +409,93 @@ void zc_tn_expand2_##SFX(const T *M, int64_t ldM, int64_t nout,                \
         free(off);                                                             \
     }                                                                          \
     free(sp.cb);                                                               \
+}                                                                              \
+                                                                               \
+/* The splits (a | K) alone, for the k2-tuples c0 <= K < c1 (a block of       \
+ * columns of a product): walks through the block, not through all tuples.     \
+ *   X[xoff[o] + a * s1 + (K - c0)] = scale * osgn[o] * sgn * M[row[o] * ldM + A] \
+ * for every entry o, A the sorted tuple K + a. */                             \
+void zc_tn_expand1_##SFX(const T *M, int64_t ldM, int64_t nout,                \
+                         const int64_t *row, const int64_t *xoff,              \
+                         const double *osgn, int n, int k2, int64_t c0,        \
+                         int64_t c1, T *X, int64_t s1, double scale)           \
+{                                                                              \
+    const int64_t nc = c1 - c0;                                                \
+    if (nout <= 0 || nc <= 0)                                                  \
+        return;                                                                \
+    int64_t *idx = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n * nc));      \
+    int8_t *sg = (int8_t *)malloc((size_t)(n * nc));                           \
+    tn_single_table(n, k2, c0, c1, idx, sg);                                   \
+    _Pragma("omp parallel for collapse(2) schedule(dynamic, 8)")               \
+    for (int64_t o = 0; o < nout; o++)                                         \
+    for (int a = 0; a < n; a++) {                                              \
+        if (osgn[o] == 0)                                                      \
+            continue;                                                          \
+        const T *r = M + row[o] * ldM;                                         \
+        T *x = X + xoff[o] + a * s1;                                           \
+        const int64_t *ia = idx + a * nc;                                      \
+        const int8_t *sa = sg + a * nc;                                        \
+        const double f = scale * osgn[o];                                      \
+        for (int64_t j = 0; j < nc; j++)                                       \
+            if (ia[j] >= 0)                                                    \
+                x[j] = (f * sa[j]) * r[ia[j]];                                 \
+    }                                                                          \
+    free(idx);                                                                 \
+    free(sg);                                                                  \
+}                                                                              \
+                                                                               \
+/* R[row * ldR + A] += scale * sgn * sum over the entries o of the row of      \
+ * osgn[o] * X[xoff[o] + a * s1 + (K - c0)]: the slabs of the splits of an     \
+ * occupied tuple are summed first (in order), then one reduction of the sum.  \
+ * Entries with the same row must follow each other; a thread has a row. */    \
+void zc_tn_reduce1_##SFX(T *R, int64_t ldR, int64_t nout, const int64_t *row,  \
+                         const int64_t *xoff, const double *osgn, int n,       \
+                         int k2, int64_t c0, int64_t c1, const T *X,           \
+                         int64_t s1, double scale)                             \
+{                                                                              \
+    const int64_t nc = c1 - c0;                                                \
+    if (nout <= 0 || nc <= 0)                                                  \
+        return;                                                                \
+    int64_t *idx = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n * nc));      \
+    int8_t *sg = (int8_t *)malloc((size_t)(n * nc));                           \
+    tn_single_table(n, k2, c0, c1, idx, sg);                                   \
+    int64_t *gs = (int64_t *)malloc(sizeof(int64_t) * (size_t)(nout + 1));     \
+    int64_t ng = 0;                                                            \
+    for (int64_t o = 0; o < nout; o++)                                         \
+        if (o == 0 || row[o] != row[o - 1])                                    \
+            gs[ng++] = o;                                                      \
+    gs[ng] = nout;                                                             \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *S = (T *)malloc(sizeof(T) * (size_t)nc);                            \
+        _Pragma("omp for schedule(dynamic, 2)")                                \
+        for (int64_t g = 0; g < ng; g++) {                                     \
+            T *r = R + row[gs[g]] * ldR;                                       \
+            for (int a = 0; a < n; a++) {                                      \
+                int have = 0;                                                  \
+                for (int64_t o = gs[g]; o < gs[g + 1]; o++) {                  \
+                    const double f = osgn[o];                                  \
+                    if (f == 0)                                                \
+                        continue;                                              \
+                    const T *x = X + xoff[o] + a * s1;                         \
+                    if (!have) for (int64_t j = 0; j < nc; j++) S[j] = f * x[j]; \
+                    else       for (int64_t j = 0; j < nc; j++) S[j] += f * x[j]; \
+                    have = 1;                                                  \
+                }                                                              \
+                if (!have)                                                     \
+                    continue;                                                  \
+                const int64_t *ia = idx + a * nc;                              \
+                const int8_t *sa = sg + a * nc;                                \
+                for (int64_t j = 0; j < nc; j++)                               \
+                    if (ia[j] >= 0)                                            \
+                        r[ia[j]] += (scale * sa[j]) * S[j];                    \
+            }                                                                  \
+        }                                                                      \
+        free(S);                                                               \
+    }                                                                          \
+    free(gs);                                                                  \
+    free(idx);                                                                 \
+    free(sg);                                                                  \
 }                                                                              \
                                                                                \
 /* R[tgt[e] * ldR + c] += sgn[e] * X[src[e] + c], c < ncol: rows of X added    \

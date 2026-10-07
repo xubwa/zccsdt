@@ -302,6 +302,39 @@ def tn_expand2(X, M, n, k1, k2, entries, s1, s2, rows=None, cols=None, scale=1.0
     return X
 
 
+def tn_expand1(X, M, n, k2, entries, s1, cols=None, scale=1.0):
+    '''tn_expand2 for the splits (a | K) with one index in the first group
+    and X contiguous in the second (s2 = 1): the kernel walks through the
+    block cols = (c0, c1) of the k2-tuples K instead of through all tuples -
+    for products in many batches of columns.'''
+    row, xoff, osgn = _entries(*entries)
+    c0, c1 = cols or (0, comb(n, k2))
+    assert M.flags.c_contiguous and X.flags.c_contiguous and M.dtype == X.dtype and M.ndim == 2
+    assert M.shape[1] == comb(n, k2 + 1)
+    _lib.zc_tn_zero(_p(X), _I64(X.nbytes))
+    getattr(_lib, 'zc_tn_expand1_' + _SFX[X.dtype])(
+        _p(M), _I64(M.shape[1]), _I64(len(row)), _p(row), _p(xoff), _p(osgn), _INT(n), _INT(k2),
+        _I64(c0), _I64(c1), _p(X), _I64(s1), _DBL(scale))
+    return X
+
+
+def tn_reduce1(R, X, n, k2, entries, s1, cols=None, scale=1.0):
+    '''tn_reduce2 for the splits (a | K) with one index in the first group
+    and X contiguous in the second: the slabs of the entries of a row are
+    summed first, then reduced once, walking through the block
+    cols = (c0, c1) of the k2-tuples.'''
+    row, xoff, osgn = _entries(*entries)
+    c0, c1 = cols or (0, comb(n, k2))
+    assert R.flags.c_contiguous and X.flags.c_contiguous and R.dtype == X.dtype and R.ndim == 2
+    assert R.shape[1] == comb(n, k2 + 1)
+    order = np.argsort(row, kind='stable')
+    row, xoff, osgn = row[order], xoff[order], osgn[order]
+    getattr(_lib, 'zc_tn_reduce1_' + _SFX[R.dtype])(
+        _p(R), _I64(R.shape[1]), _I64(len(row)), _p(row), _p(xoff), _p(osgn), _INT(n), _INT(k2),
+        _I64(c0), _I64(c1), _p(X), _I64(s1), _DBL(scale))
+    return R
+
+
 def tn_axpy_rows(R, X, tgt, src, sgn, col0=0):
     '''R[tgt[e], col0 + c] += sgn[e] * X.flat[src[e] + c] for c < X.shape[-1]:
     rows of X added to rows of R - the reduction over the splits of the
