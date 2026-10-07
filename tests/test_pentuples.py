@@ -85,6 +85,13 @@ def test_every_plan_gives_the_same():
             for a, b in zip(PT.rows(eris, arr['t2'], T3, T4, pl), ref):
                 assert abs(a - b).max() < 1e-12 * abs(b).max(), pl
             assert abs(PT.kernel(eris, arr['t2'], T3, T4, plan_=pl) - e0) < 1e-12 * abs(e0)
+    # the second-order quadruples and Xv as arrays of a scratch file
+    for y4_file in (False, True):
+        pl = PT.explicit_plan(no, nv, 16, 3, 5, 2, False, y4_file, True)
+        assert pl.xv_file and pl.y4_file == y4_file
+        for a, b in zip(PT.rows(eris, arr['t2'], T3, T4, pl), ref):
+            assert abs(a - b).max() < 1e-12 * abs(b).max(), pl
+        assert abs(PT.kernel(eris, arr['t2'], T3, T4, plan_=pl) - e0) < 1e-12 * abs(e0)
     # fewer than five occupied or virtual spin orbitals: nothing
     arr, mo_e, eris, T3, T4 = _random(4, 6, False)
     assert PT.kernel(eris, arr['t2'], T3, T4) == 0.0
@@ -123,12 +130,16 @@ def test_memory_plan(no, nv, cplx):
     assert (full.cols23, full.cols14, full.store_xq) == (nA3, nA4, True)
     budgets = [int(b) for b in np.linspace(full.floor, 1.1 * full.need, 80)]
     plans = [PT.plan(no, nv, isz, b, batch_bytes=1 << 40) for b in budgets]
-    key = [(p.store_xq, p.cols23, p.cols14, p.rows) for p in plans]
+    key = [(not p.y4_file, not p.xv_file, p.store_xq, p.cols23, p.cols14, p.rows) for p in plans]
     for a, b in zip(key, key[1:]):
         assert all(x <= y for x, y in zip(a, b))
     assert all(p.need <= b for p, b in zip(plans, budgets))
-    assert key[-1] == (True, full.cols23, full.cols14, full.rows) and plans[-1].need == full.need
-    assert plans[0].need == full.floor == min(PT._floors(no, nv, isz))
+    assert key[-1] == (True, True, True, full.cols23, full.cols14, full.rows) and plans[-1].need == full.need
+    # at the floor the second-order quadruples and Xv are arrays of a scratch file: Xv alone
+    # a little above it, none of the two where both fit
+    assert plans[0].need == full.floor == min(PT._floors(no, nv, isz)) - sum(PT._big(no, nv, isz))
+    assert plans[0].y4_file and plans[0].xv_file and not full.y4_file and not full.xv_file
+    assert {(p.y4_file, p.xv_file) for p in plans} == {(True, True), (False, True), (False, False)}
     with pytest.raises(MemoryError, match=r'\(P\) needs'):
         PT.plan(no, nv, isz, full.floor - 1)
     e0 = PT.kernel(eris, t2, T3, T4, plan_=full)

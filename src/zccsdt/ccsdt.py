@@ -1265,9 +1265,12 @@ class GCCSDTQ(GCCSDT):
         else:
             pl = pentuples.plan(no, nv, np.dtype(dtype).itemsize, memory.budget(self.max_memory))
             pr.kv('memory', '%s besides T3, T4 and the integrals' % _size(pl.need), indent=3)
-            pr.kv('plan', 'products in %d and %d batches of columns; T2 T2 T2 intermediate for %s'
+            filed = [name for name, on in (('the second-order quadruples', pl.y4_file),
+                                           ('the six-index intermediate', pl.xv_file)) if on]
+            pr.kv('plan', 'products in %d and %d batches of columns; T2 T2 T2 intermediate for %s%s'
                   % (-(-comb(nv, 3) // pl.cols23), -(-comb(nv, 4) // pl.cols14),
-                     'all occupied quadruples' if pl.store_xq else 'the quadruples of one pentuple at a time'),
+                     'all occupied quadruples' if pl.store_xq else 'the quadruples of one pentuple at a time',
+                     '; memory is short - %s in a scratch file' % ' and '.join(filed) if filed else ''),
                   indent=3)
             with _PeakMemory() as peak, timing.timer(ROOT_P):
                 self.e_p = pentuples.kernel(eris, t2, t3, t4, plan_=pl)

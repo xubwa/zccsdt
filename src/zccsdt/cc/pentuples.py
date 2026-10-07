@@ -47,7 +47,9 @@ Y4 (as large as T4), Xv for all pairs, Xq for all occupied quadruples
 (4 o / (v - 3) of T4) and the products of one batch of columns.  With less
 memory the products are done in more batches, and Xq is made for the five
 quadruples of a pentuple when it comes (o - 4 times each, at o v^4 per
-quadruple: a few percent of the products).  Y4 and Xv are the floor.
+quadruple: a few percent of the products).  With still less Xv and then Y4
+are arrays of a scratch file (zccsdt.scratch), paged by the operating
+system; the floor is the rest.
 '''
 
 from dataclasses import dataclass
@@ -77,6 +79,8 @@ class Plan:
     store_xq: bool      # Xq for all occupied quadruples (else: for those of one pentuple)
     need: int           # bytes of the arrays of the calculation (without T3, T4 and <vv||vv>)
     floor: int          # the least that a calculation takes
+    y4_file: bool = False       # the second-order quadruples in a scratch file
+    xv_file: bool = False       # Xv in the scratch file
 
 
 def _sizes(no, nv):
@@ -130,22 +134,34 @@ def _floors(no, nv, isz):
             kept + xq_five + _transient(no, nv, isz, *least, False))
 
 
-def explicit_plan(no, nv, isz, cols23, cols14, rows, store_xq=True):
+def _big(no, nv, isz):
+    '''Bytes of the second-order quadruples and of Xv: what can be in a scratch file.'''
+    nP, nQ, nI3, nA3, nI4, nA4, nI5, nA5 = _sizes(no, nv)
+    return isz * nI4 * nA4, isz * nP * nv * nA3
+
+
+def explicit_plan(no, nv, isz, cols23, cols14, rows, store_xq=True, y4_file=False, xv_file=False):
     '''The Plan with these batch sizes.'''
     kept, xq_all, xq_five = _kept(no, nv, isz)
-    floor = min(_floors(no, nv, isz))
-    need = kept + (xq_all if store_xq else xq_five) + _transient(no, nv, isz, cols23, cols14, rows, store_xq)
-    return Plan(int(cols23), int(cols14), int(rows), bool(store_xq), int(need), int(floor))
+    y4, xv = _big(no, nv, isz)
+    floor = min(_floors(no, nv, isz)) - y4 - xv
+    need = (kept + (xq_all if store_xq else xq_five) + _transient(no, nv, isz, cols23, cols14, rows, store_xq)
+            - (y4 if y4_file else 0) - (xv if xv_file else 0))
+    return Plan(int(cols23), int(cols14), int(rows), bool(store_xq), int(need), int(floor), bool(y4_file),
+                bool(xv_file))
 
 
 def plan(no, nv, isz, budget=None, batch_bytes=None):
-    '''The Plan for ``budget`` bytes (None: no limit).  The floor - below it
-    MemoryError - is Y4, Xv, Xq for the quadruples of one pentuple with the
-    operands it is made of (or Xq for all quadruples, where that is less)
-    and the products in PASSES batches of columns; from there first Xq for
-    all quadruples, then the products in fewer batches (of ``batch_bytes``
-    at most), then more rows per step of the intermediates: one after the
-    other, so that no part of a plan shrinks when the budget grows.'''
+    '''The Plan for ``budget`` bytes (None: no limit).  With enough memory
+    Y4 and Xv are in memory; with less they are arrays of a scratch file
+    that the operating system pages (Xv first, then Y4 too), and the floor
+    - below it MemoryError - is Xq for the quadruples of one pentuple with
+    the operands it is made of (or Xq for all quadruples, where that is
+    less) and the products in PASSES batches of columns.  Above the two
+    arrays: first Xq for all quadruples, then the products in fewer batches
+    (of ``batch_bytes`` at most), then more rows per step of the
+    intermediates - one after the other, so that no part of a plan shrinks
+    when the budget grows.'''
     batch_bytes = batch_bytes or BATCH_BYTES
     nP, nQ, nI3, nA3, nI4, nA4, nI5, nA5 = _sizes(no, nv)
     kept, xq_all, xq_five = _kept(no, nv, isz)
@@ -156,10 +172,17 @@ def plan(no, nv, isz, budget=None, batch_bytes=None):
     if budget is None:
         return explicit_plan(no, nv, isz, top23, top14, top_rows, True)
     with_all, with_five = _floors(no, nv, isz)
-    if budget < min(with_all, with_five):
+    y4, xv = _big(no, nv, isz)
+    least_in = min(with_all, with_five)
+    if budget < least_in - y4 - xv:
         raise MemoryError('(P) needs %.0f MB besides T3, T4 and the integrals for %d occupied and %d virtual '
-                          'spin orbitals (the second-order quadruples, as large as T4: %.0f MB); %.0f MB are left'
-                          % (min(with_all, with_five) / 1e6, no, nv, isz * nI4 * nA4 / 1e6, budget / 1e6))
+                          'spin orbitals, with the second-order quadruples (as large as T4: %.0f MB) and the '
+                          'six-index intermediate in scratch files; %.0f MB are left'
+                          % ((least_in - y4 - xv) / 1e6, no, nv, y4 / 1e6, budget / 1e6))
+    if budget < least_in:
+        # the two large arrays in a scratch file, Xv first; the rest as at the floor
+        return explicit_plan(no, nv, isz, min23, min14, min_rows, with_all <= with_five,
+                             budget < least_in - xv, True)
     store = budget >= with_all
     rest = budget - kept - (xq_all if store else xq_five)
     cols23, cols14, rows = min23, min14, min_rows
@@ -229,15 +252,25 @@ class Pentuples:
         self.t2_xp = t2_xp = c_(t2[:, :, a2, b2])                           # [i, n, (ab)]
         tfc = c_(t2[i2, j2])                                                # [(ij), f, c]
         ovvo = np.asarray(eris.ovvo)
+        # (with too little memory: the two large arrays in a scratch file, whose new space
+        # reads as zeros)
+        self._scr = None
+        if pl.y4_file or pl.xv_file:
+            from zccsdt.scratch import Scratch
+            self._scr = Scratch(prefix='zccsdt_p_', what='the second-order quadruples and Xv of (P)',
+                                hint=' or give the calculation more memory (max_memory)')
         with timer('p.y4'):
             # (the products of the left-hand quadruples in their smallest batches of columns)
             from zccsdt.cc import quadruples
             qp = quadruples.explicit_plan(no, nv, isz, -(-nQ // PASSES), -(-nA3 // PASSES), 3, 1)
-            self.Y4 = c_(second_order_quadruples(eris, t2, qp)) if want('zy') else None
+            out = self._scr.create('y4', (nI4, nA4), dtype) if pl.y4_file else np.empty((nI4, nA4), dtype=dtype)
+            self.Y4 = second_order_quadruples(eris, t2, qp, out) if want('zy') else None
+            del out
 
         # ---- Xv[(ij), g, (abc)]
         with timer('p.xv'):
-            self.Xv = Xv = np.zeros((nP, nv, nA3), dtype=dtype)
+            self.Xv = Xv = (self._scr.create('xv', (nP, nv, nA3), dtype) if pl.xv_file
+                            else np.zeros((nP, nv, nA3), dtype=dtype))
             if want('c'):
                 vpp = vvvv_packed(eris, t3pack.triple_map(nv))[0]           # [(bc), (gf)]
                 for r0, r1 in _batches(nQ, pl.rows):

@@ -206,7 +206,9 @@ taken as they are (complex).
   computes it for a Hartree-Fock reference (its CCSDTQ[P] is the same
   number), for canonical orbitals: one occupied pentuple at a time, nothing
   of the size of T5 is kept.  It needs the second-order quadruples (an
-  array as large as T4) and less memory than the CCSDTQ iterations.
+  array as large as T4) and less memory than the CCSDTQ iterations; with
+  too little memory that array and the six-index intermediate go to a
+  scratch file.
 - An RHF, UHF or ROHF reference given to `zccsdt.CCSDTQ` is taken as GHF
   spin orbitals (there is no spin-adapted CCSDTQ here); `frozen` then
   counts orbitals per spin, as in the CCSDT class of that reference.

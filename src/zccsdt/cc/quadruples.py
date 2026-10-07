@@ -404,11 +404,13 @@ def rows(eris, t2, t3, plan_=None):
     return out
 
 
-def second_order_quadruples(eris, t2, plan_=None):
+def second_order_quadruples(eris, t2, plan_=None, out=None):
     '''<Q| V T2 |0> / D on the unique block, [C(no,4), C(nv,4)]: the
-    quadruples of the bra to second order (the left-hand side of (P)).'''
+    quadruples of the bra to second order (the left-hand side of (P)).
+    ``out``: the array for them (one of a scratch file, say).'''
     q = Quadruples(eris, t2, None, plan_, left_only=True)
-    out = np.empty((len(q.eo4), q.nA), dtype=q.dtype)
+    if out is None:
+        out = np.empty((len(q.eo4), q.nA), dtype=q.dtype)
     for I in range(len(q.eo4)):
-        out[I] = q.left(I) / (q.eo4[I] - q.ev4)
+        np.divide(q.left(I), q.eo4[I] - q.ev4, out=out[I])
     return out
