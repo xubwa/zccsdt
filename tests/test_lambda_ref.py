@@ -164,7 +164,6 @@ def test_reduces_to_ccsd(cplx):
     one-particle one before it is made Hermitian is gamma1 of
     zccsdt.zccsd.rdm block by block.  H2O / STO-3G, also with complex spin
     orbitals.'''
-    from pyscf.cc import gccsd_rdm
     from zccsdt.zccsd import rdm
     mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='sto-3g', verbose=0)
     ghf = scf.addons.convert_to_ghf(scf.RHF(mol).run(conv_tol=1e-13))
@@ -272,3 +271,48 @@ def test_dipole_derivative(name, cplx):
     assert abs(dz.real - scf_value) > 1e-2
     other = np.einsum('pq,pq', zmo, LR.densities(amps, [t.conj() for t in amps], nocc)[0]).real
     assert abs(other - dz.real) > 1e-5
+
+
+@pytest.mark.parametrize('name,cplx', [('h2o', False), ('bh', True)])
+def test_relaxed_dipole_through_the_zvector_code(name, cplx):
+    '''The orbital gradient of the table goes into the Z-vector equations
+    of the CCSD line as it is (zccsdt.zccsd.zvector.solve with
+    G[a,i] = 1/2 Gnh[a,i], relaxed_rdm1 on the Hermitian density): the
+    relaxed CCSDT dipole derivative is that of E(SCF) + E_corr(CCSDT) with
+    the SCF repeated in the field (central differences of fourth order).
+    The unrelaxed one is another number.'''
+    from zccsdt.zccsd import zvector
+    mol = _molecule(name, False)[0].mol
+    with mol.with_common_orig((0, 0, 0)):
+        z = mol.intor('int1e_r')[2]
+    h0 = scf.RHF(mol).get_hcore()
+
+    def run(eps):
+        mf = scf.RHF(mol)
+        mf.get_hcore = lambda *args: h0 + eps * z
+        mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-10
+        mf.kernel()
+        ghf = scf.addons.convert_to_ghf(mf)
+        h2 = np.kron(np.eye(2), h0 + eps * z)
+        ghf.get_hcore = lambda *args: h2
+        C = _spin_mixed(ghf)[0] if cplx else ghf.mo_coeff
+        fock, g, mo_e, nocc = R.integrals(E.from_scf(ghf, mo_coeff=C))
+        r = R.kernel(fock, g, mo_e, nocc, 'ccsdt', conv_tol=1e-13, conv_tol_normt=1e-11)
+        assert r.converged
+        return mf.e_tot + r.e_corr, (ghf, C, fock, g, mo_e, nocc, r.amps)
+
+    ghf, C, fock, g, mo_e, nocc, amps = run(0.0)[1]
+    rl = LR.kernel(fock, g, mo_e, nocc, amps, conv_tol_normt=1e-11)
+    dm1 = LR.pyscf_rdms(*LR.densities(amps, rl.lams, nocc))[0]
+    G = 0.5 * LR.orbital_gradient(fock, g, nocc, amps, rl.lams, dressed=True)
+    conv, zv = zvector.solve(ghf, C, mo_e, nocc, -G, tol=1e-11)
+    assert rl.converged and conv
+    nao = mol.nao_nr()
+    zmo = C[:nao].conj().T @ z @ C[:nao] + C[nao:].conj().T @ z @ C[nao:]
+    unrelaxed = np.einsum('pq,qp', zmo, dm1).real
+    relaxed = np.einsum('pq,qp', zmo, zvector.relaxed_rdm1(dm1, zv, nocc)).real
+    eps = 1e-3
+    e = {k: run(k * eps)[0] for k in (-2, -1, 1, 2)}
+    fd = (8 * (e[1] - e[-1]) - (e[2] - e[-2])) / (12 * eps)
+    assert abs(fd - relaxed) < 2e-10
+    assert abs(unrelaxed - relaxed) > 5e-6

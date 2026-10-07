@@ -122,7 +122,6 @@ def canonical(coef, factors, ext, antisym):
         keys = sorted(classes)
         for perms in iproduct(*[permutations(classes[k]) for k in keys]):
             rename, count, sign = {}, {('o', True): 0, ('o', False): 0, ('v', True): 0, ('v', False): 0}, 1
-            newext = {}
             for k, perm in zip(keys, perms):
                 cl, external = k[0], k[1]
                 for c in perm:
@@ -267,7 +266,7 @@ def one_index(excitation):
     ext = 'ia' if excitation else 'ai'
     for coef, factors in lagrangian():
         factors = _fresh(factors)
-        x = [k for k, _ in factors].index('f') if 'f' in [k for k, _ in factors] else [k for k, _ in factors].index('v')
+        x = next(y for y, (k, _) in enumerate(factors) if k in ('f', 'v'))      # the integral
         kind, ix = factors[x]
         for s, c in enumerate(ix):
             bra, occ = s < len(ix) // 2, c.lower() in OCC
@@ -317,8 +316,7 @@ def densities():
     terms = []
     for coef, factors in lagrangian():
         factors = _fresh(factors)
-        kinds = [k for k, _ in factors]
-        x = kinds.index('f') if 'f' in kinds else kinds.index('v')
+        x = next(y for y, (k, _) in enumerate(factors) if k in ('f', 'v'))
         rest = _lower_all(factors[:x] + factors[x + 1:], factors[x][1])
         terms.append((coef, rest[0], rest[1]))
     return collect(terms, antisym=False)
