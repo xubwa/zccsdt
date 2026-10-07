@@ -1,4 +1,4 @@
-'''zccsdt: spin-orbital / spinor CCSDT.'''
+'''zccsdt: spin-orbital / spinor CCSDT, CCSDT(Q) and CCSDTQ.'''
 
 import os
 
@@ -8,7 +8,7 @@ os.environ.setdefault('OMP_WAIT_POLICY', 'PASSIVE')
 
 
 # the PySCF-style front end (zccsdt.ccsdt), imported on first use
-_FRONT = ('CCSDT', 'RCCSDT', 'UCCSDT', 'GCCSDT')
+_FRONT = ('CCSDT', 'RCCSDT', 'UCCSDT', 'GCCSDT', 'CCSDTQ', 'GCCSDTQ')
 
 
 def __getattr__(name):

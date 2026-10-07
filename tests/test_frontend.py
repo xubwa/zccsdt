@@ -116,6 +116,62 @@ def test_dispatch_and_frozen(rhf, uhf):
         zccsdt.UCCSDT(uhf).ccsdt_q()
 
 
+def test_ccsdtq_front_end(rhf):
+    '''zccsdt.CCSDTQ: the class by the kind of reference; H2O / 6-31G, RHF
+    taken as GHF spin orbitals - CCSDT first, then CCSDTQ, (Q) from the
+    CCSDT step - against MRCC on the same integrals (bench/refs:
+    h2o_631g_pyscf_mdcint); the report; a second run from the amplitudes;
+    the frozen core in the unit of the reference.'''
+    import json
+    import os
+    from zccsdt import eris as E
+    from zccsdt.cc import ccsdtq
+    ref = json.load(open(os.path.join(os.path.dirname(__file__), '..', 'bench', 'refs',
+                                      'reference_energies.json')))['h2o_631g_pyscf_mdcint']['recommended']
+    mol = rhf.mol
+    assert isinstance(zccsdt.CCSDTQ(scf.GHF(mol)), zccsdt.GCCSDTQ)
+    assert isinstance(zccsdt.CCSDTQ(x2c.UHF(mol)), zccsdt.GCCSDTQ)
+    with pytest.raises(RuntimeError):
+        zccsdt.CCSDTQ(dft.RKS(mol))
+    with pytest.raises(NotImplementedError):
+        zccsdt.CCSDTQ(scf.DHF(mol))
+    mycc = zccsdt.CCSDTQ(rhf)
+    assert isinstance(mycc, zccsdt.GCCSDTQ) and mycc.ncore == 0
+    buf = io.StringIO()
+    mycc.stdout, mycc.verbose = buf, 4
+    mycc.conv_tol, mycc.conv_tol_normt = 1e-10, 1e-8
+    mycc.kernel()
+    out = buf.getvalue()
+    assert mycc.converged and mycc.ccsdt_run.converged
+    assert abs(rhf.e_tot - ref['e_scf']) < 1e-9
+    assert abs(mycc.e_ccsdt - ref['e_ccsdt']) < 2e-9 and abs(mycc.e_tot - ref['e_ccsdtq']) < 2e-9
+    e_q = mycc.ccsdt_q()
+    assert abs(e_q - (ref['e_ccsdt(q)'] - ref['e_ccsdt'])) < 1e-10
+    assert abs(mycc.ccsdt_run.e_q5 - (ref['e_ccsdt[q]'] - ref['e_ccsdt'])) < 1e-10
+    assert mycc.t4.shape == (210, 1820) and mycc.t4.dtype == np.float64 and len(mycc.timings) == mycc.cycles
+    for text in ('zccsdt GCCSDT:', 'zccsdt GCCSDTQ:', '|dT4|', 'T4 382,200', 'GCCSDTQ converged',
+                 'E(CCSDTQ) - E(CCSDT)', 'T4 equation', 'products by occupied quadruple', 'peak memory'):
+        assert text in out, text
+    # from the converged amplitudes: nothing left to do
+    again = zccsdt.GCCSDTQ(scf.addons.convert_to_ghf(rhf))
+    again.verbose = 0
+    again.conv_tol, again.conv_tol_normt = 1e-9, 1e-7
+    again.kernel(mycc.t1, mycc.t2, mycc.t3, mycc.t4)
+    assert again.cycles <= 2 and abs(again.e_tot - mycc.e_tot) < 1e-9 and again.e_ccsdt is None
+    with pytest.raises(RuntimeError):
+        again.ccsdt_q()
+    # frozen core: orbitals per spin of the RHF reference, spin orbitals of the class
+    small = scf.RHF(_water('sto-3g')).run(conv_tol=1e-12)
+    fc = zccsdt.CCSDTQ(small, frozen=1)
+    fc.verbose = 0
+    fc.conv_tol, fc.conv_tol_normt = 1e-11, 1e-9
+    fc.kernel()
+    assert fc.frozen == 2 and fc.t4.shape == (70, 1)
+    direct = ccsdtq.kernel(E.from_scf(scf.addons.convert_to_ghf(small), frozen=2, packed_vvvv=True),
+                           ccsdtq.Options(conv_tol=1e-11, conv_tol_normt=1e-9))
+    assert abs(fc.e_tot - direct.e_tot) < 1e-9
+
+
 def test_quiet_and_short_of_memory(rhf, monkeypatch, tmp_path):
     from zccsdt import memory
     monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))

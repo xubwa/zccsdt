@@ -184,3 +184,29 @@ def test_what_cannot_be_paired():
     with pytest.raises(ValueError):
         dirac.integrals(mf)
 
+
+def test_hbr_spinors_against_mrcc_on_the_same_integrals(hbr):
+    '''HBr / cc-pVDZ-DK, X2C spinors, 28 frozen, 8 + 16 active: CCSDT,
+    CCSDT[Q], CCSDT(Q) and CCSDTQ through the front end on the integrals in
+    Kramers pairs, against MRCC on the files written from them.'''
+    ref = REFS['hbr_ccpvdzdk_x2c_mdcint']['recommended']
+    x = dirac.integrals(hbr, frozen=28, nvir=16)
+    assert len(x.energy) == 24 and x.g.dtype == np.float64
+    eris = dirac.container(x)
+    assert eris.nocc == 8 and abs(eris.e_hf - ref['e_scf']) < 1e-9
+    buf = io.StringIO()
+    cc = zccsdt.GCCSDTQ.from_integrals(eris, verbose=4, stdout=buf)
+    cc.conv_tol, cc.conv_tol_normt = 1e-11, 1e-9
+    cc.kernel()
+    e_q = cc.ccsdt_q()
+    out = buf.getvalue()
+    assert 'integrals given (spinors in Kramers pairs)' in out and '8 occupied, 16 virtual spinors' in out
+    corr = lambda key: ref[key] - ref['e_scf']
+    assert cc.converged and cc.ccsdt_run.converged
+    assert abs(cc.ccsdt_run.e_corr - corr('e_ccsdt')) < 2e-10
+    assert abs(cc.ccsdt_run.e_corr + cc.ccsdt_run.e_q5 - corr('e_ccsdt[q]')) < 2e-10
+    assert abs(cc.ccsdt_run.e_corr + e_q - corr('e_ccsdt(q)')) < 2e-10
+    assert abs(cc.e_corr - corr('e_ccsdtq')) < 2e-10
+    assert abs(cc.e_tot - ref['e_ccsdtq']) < 1e-9 and abs(cc.e_ccsdt - ref['e_ccsdt']) < 1e-9
+    with pytest.raises(RuntimeError):
+        cc.set_frozen()

@@ -109,6 +109,22 @@ CC_STAGES = {
 }
 
 
+Q_STAGES = dict(CC_STAGES, **{
+    'ccsdtq.t3': ('CCSDT step', 'CCSDT step: the T1, T2, T3 equations without T4'),
+    'ccsdtq.dress': ('dressing', 'T1 dressing of the integrals of the T4 equation'),
+    'ccsdtq.t4': ('T4 equation', 'T4 equation, T4 in the T2 and T3 equations'),
+    'ccsdtq.update': ('update', 'Jacobi step'),
+    'ccsdtq.diis': ('DIIS', 'DIIS'),
+    't4.t3pass': ('T3 operands', 'T3 with one integral'),
+    't4.imds': ('intermediates', 'intermediates of T2 and T3'),
+    't4.xv': ('Xv', 'six-index intermediate without T4'),
+    't4.pp': ('pp ladder', 'pp ladder; T4 in Xo, R2, R3'),
+    't4.ring': ('ring', 'ring; T4 in Xv, R3'),
+    't4.hh': ('hh ladder', 'hh ladder'),
+    't4.rows': ('by quadruple', 'products by occupied quadruple'),
+})
+
+
 _PARTS = {'gemm': 'GEMMs', 'gather': 'gather of T3', 'reduce': 'reduction into the residual',
           'drive': 'drive GEMMs', 'ring': 'ring GEMMs', 'acc': 'accumulation',
           'scatter': 'scatter into the residual'}
@@ -248,6 +264,21 @@ class _Printer:
         self._emit(level, '%s%-17s %s' % (' ' * indent, key, value))
 
 
+class _Given:
+    '''In the place of the SCF object when the integrals were made elsewhere
+    (GCCSDT.from_integrals): what the front end asks of one.'''
+    converged = True
+    mo_coeff = None
+    mol = None
+
+    def __init__(self, eris, verbose, stdout):
+        self.eris = eris
+        self.e_tot = float(eris.e_hf)
+        self.mo_occ = (np.arange(eris.nmo) < eris.nocc).astype(float)
+        self.verbose = verbose
+        self.stdout = sys.stdout if stdout is None else stdout
+
+
 # -------------------------------------------------------------- the classes
 
 class CCSDTBase(lib.StreamObject):
@@ -339,17 +370,18 @@ class CCSDTBase(lib.StreamObject):
         if isinstance(mf, hf.KohnShamDFT):
             raise RuntimeError('%s: the first argument is a DFT object; CCSDT needs an HF '
                                'object (mf.to_hf())' % self.__class__.__name__)
+        given = isinstance(mf, _Given)
         if mo_coeff is None:
             mo_coeff = mf.mo_coeff
-            if mo_coeff is None and mf.mol.nelectron > 0:
+            if mo_coeff is None and not given and mf.mol.nelectron > 0:
                 mf.run()
                 mo_coeff = mf.mo_coeff
         if mo_occ is None:
             mo_occ = mf.mo_occ
         self.mol = mf.mol
         self._scf = mf
-        self.verbose = self.mol.verbose
-        self.stdout = self.mol.stdout
+        self.verbose = mf.verbose if given else self.mol.verbose
+        self.stdout = mf.stdout if given else self.mol.stdout
         self.max_memory = None
         self.frozen = frozen
         self.mo_coeff = mo_coeff
@@ -389,6 +421,9 @@ class CCSDTBase(lib.StreamObject):
     def set_frozen(self):
         '''Freeze the chemical core (pyscf.data.elements.chemcore).'''
         from pyscf.data import elements
+        if self.mol is None:
+            raise RuntimeError('%s: the integrals were given; what is frozen is decided where they are made'
+                               % self.__class__.__name__)
         self.frozen = elements.chemcore(self.mol) * self._frozen_unit
         return self
 
@@ -422,13 +457,17 @@ class CCSDTBase(lib.StreamObject):
         self._header(pr)
         pr.rule()
         mf = self._scf
-        conv = 'converged' if getattr(mf, 'converged', True) else 'NOT converged'
-        pr.kv('reference', '%s   E(SCF) = %.12f   %s'
-              % (_reference_name(mf), mf.e_tot, conv))
-        mol = self.mol
-        basis = mol.basis if isinstance(mol.basis, str) else 'per atom'
-        pr.kv('molecule', '%s   %d electrons   charge %d   2S = %d   basis %s'
-              % (_formula(mol), mol.nelectron, mol.charge, mol.spin, basis))
+        if isinstance(mf, _Given):
+            pr.kv('reference', 'integrals given%s   E(SCF) = %.12f'
+                  % (' (%s)' % mf.eris.source if mf.eris.source else '', mf.e_tot))
+        else:
+            conv = 'converged' if getattr(mf, 'converged', True) else 'NOT converged'
+            pr.kv('reference', '%s   E(SCF) = %.12f   %s'
+                  % (_reference_name(mf), mf.e_tot, conv))
+            mol = self.mol
+            basis = mol.basis if isinstance(mol.basis, str) else 'per atom'
+            pr.kv('molecule', '%s   %d electrons   charge %d   2S = %d   basis %s'
+                  % (_formula(mol), mol.nelectron, mol.charge, mol.spin, basis))
         for key, value in self._orbital_lines():
             pr.kv(key, value)
         normt = self._conv_tol_normt()
@@ -928,12 +967,26 @@ class GCCSDT(UCCSDT):
         return [('orbitals', '%d occupied, %d virtual %s; %d frozen'
                  % (nocc, len(occ) - int(occ.sum()), kind, self.ncore))]
 
+    @classmethod
+    def from_integrals(cls, eris, verbose=logger.NOTE, stdout=None):
+        '''The same calculation on integrals made elsewhere: an integral
+        container (zccsdt.eris.ERIs) of the active spinors, occupied first,
+        with <ab||cd> on pairs - zccsdt.dirac.from_dirac() for the files of
+        DIRAC, zccsdt.dirac.container().  There is no SCF object and no
+        molecule then, and nothing to freeze.'''
+        return cls(_Given(eris, verbose, stdout))
+
     def _kind(self):
         from zccsdt.eris import _orbital_kind
-        return _orbital_kind(self._scf)
+        return 'spinor' if isinstance(self._scf, _Given) else _orbital_kind(self._scf)
 
     def ao2mo(self):
         from zccsdt import eris
+        if isinstance(self._scf, _Given):
+            if self.ncore:
+                raise RuntimeError('%s: the integrals were given; nothing can be frozen here'
+                                   % self.__class__.__name__)
+            return self._scf.eris
         return eris.from_scf(self._scf, mo_coeff=self.mo_coeff, mo_occ=self.mo_occ,
                              frozen=self.ncore, packed_vvvv=True, max_memory=self.max_memory)
 
@@ -955,6 +1008,9 @@ class GCCSDT(UCCSDT):
     def _labels(self, eris):
         occ = np.where(np.asarray(self.mo_occ) > 0)[0][self.ncore:]
         vir = np.where(np.asarray(self.mo_occ) == 0)[0]
+        num = getattr(eris, 'spinors', None)        # (their numbers where the integrals were made)
+        if num is not None:
+            occ, vir = num[:eris.nocc], num[eris.nocc:]
         return ['%d' % (i + 1) for i in occ], ['%d' % (a + 1) for a in vir]
 
     def ccsdt_q(self, t2=None, t3=None):
@@ -996,6 +1052,132 @@ class GCCSDT(UCCSDT):
                   % (w, c, c / w if w > 0 else 0, _size(peak.peak or 0)), indent=3)
         pr.rule(char='=')
         return self.e_q
+
+
+class GCCSDTQ(GCCSDT):
+    __doc__ = '''CCSDTQ on a GHF or two-component spinor (X2C) reference: spin
+    orbitals or spinors without spin blocks, real or complex
+    (zccsdt.cc.ccsdtq; T3 and T4 on their unique blocks).
+
+    kernel() runs CCSDT first (a GCCSDT object with the same settings, kept
+    as ``ccsdt_run``: its ccsdt_q() gives CCSDT(Q)) and CCSDTQ from its
+    amplitudes; with amplitudes given (t1, t2, t3 packed, optionally t4) it
+    starts from those.  Afterwards e_corr, e_tot, t1 .. t4, converged,
+    cycles and timings are those of CCSDTQ, e_ccsdt the total energy of the
+    CCSDT step.  ``frozen`` counts spin orbitals or spinors.
+
+''' + CCSDTBase.__doc__
+
+    _title = 'GCCSDTQ'
+    _subtitle = 'CCSDTQ on spin orbitals or spinors (GHF, X2C), real or complex'
+    _stages = Q_STAGES
+    _keys = GCCSDT._keys | {'t4', 'e_ccsdt', 'ccsdt_run'}
+
+    def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
+        GCCSDT.__init__(self, mf, frozen, mo_coeff, mo_occ)
+        self.t4 = None
+        self.e_ccsdt = None
+        self.ccsdt_run = None
+
+    def kernel(self, t1=None, t2=None, t3=None, t4=None):
+        if t1 is None or t2 is None or t3 is None:
+            cc3 = GCCSDT(self._scf, self.frozen, self.mo_coeff, self.mo_occ)
+            for key in ('verbose', 'stdout', 'max_memory', 'conv_tol', 'conv_tol_normt', 'max_cycle',
+                        'diis_space', 'diis_file', 'incore_complete'):
+                setattr(cc3, key, getattr(self, key))
+            cc3.kernel()
+            self.ccsdt_run, self._eris, self.e_ccsdt = cc3, cc3._eris, cc3.e_tot
+            t1, t2, t3 = cc3.t1, cc3.t2, cc3.t3
+        return self.ccsdtq(t1, t2, t3, t4)
+
+    def ccsdt_q(self, t2=None, t3=None):
+        if self.ccsdt_run is None:
+            raise RuntimeError('GCCSDTQ.ccsdt_q(): no CCSDT step has been run (kernel() without amplitudes)')
+        return self.ccsdt_run.ccsdt_q(t2, t3)
+
+    def ccsdtq(self, t1, t2, t3, t4=None):
+        from math import comb
+        from zccsdt.cc import ccsdt_opt, ccsdtq, solver
+        log = logger.new_logger(self)
+        cput0 = log.init_timer()
+        pr = _Printer(log)
+        self._header(pr)
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        self._eris = eris
+        no, nv = eris.nocc, eris.nmo - eris.nocc
+        dtype = np.result_type(t1, t2, eris.oovv, eris.fock)
+        isz = np.dtype(dtype).itemsize
+        nt4 = comb(no, 4) * comb(nv, 4)
+        pr.rule()
+        pr.kv('amplitudes', 'T4 %s (%s, i<j<k<l, a<b<c<d), %s; T3 %s'
+              % (_count(nt4), _size(nt4 * isz), 'complex' if isz == 16 else 'real',
+                 _count(comb(no, 3) * comb(nv, 3))))
+        normt = self._conv_tol_normt()
+        pr.kv('convergence', '|dE| < %g Eh and %s < %g; at most %d iterations'
+              % (self.conv_tol, self._norm_name, normt, self.max_cycle))
+        pr.kv('memory', self._budget_text())
+        step = ccsdt_opt.plan_for(eris, dtype, solver.Options(incore_complete=True)).need
+        plan = self.plan if isinstance(self.plan, ccsdtq.Plan) else ccsdtq.plan(
+            no, nv, isz, memory.budget(self.max_memory), self.diis_space, self.incore_complete, step)
+        pr.kv('memory plan', 'needs %s next to the integrals: T4, its residual and the six-index '
+              'intermediate in memory' % _size(plan.need))
+        pr.kv('batches', 'products of the T4 equation in batches of %s' % _size(plan.batch_bytes), indent=3)
+        pr.kv('DIIS', '%d vectors, those of T4 in %s' % (
+            self.diis_space, (self.diis_file or 'a scratch file') if plan.diis_file else 'memory'), indent=3)
+        pr.rule()
+        head = ('iter', 'E_corr / Eh', 'dE / Eh', '|dT1|', '|dT2|', '|dT3|', '|dT4|', 'DIIS', 'time / s', 'cores')
+        fmt = ' %4s  %20s  %12s  %9s  %9s  %9s  %9s  %4s  %9s  %5s'
+        pr.line(fmt % head)
+        pr.line(fmt % tuple('-' * n for n in (4, 20, 12, 9, 9, 9, 9, 4, 9, 5)))
+
+        def report(info):
+            busy = info['cpu'] / info['wall'] if info['wall'] > 0 else 0.0
+            pr.line(' %4d  %20.15f  %12.4e  %9.2e  %9.2e  %9.2e  %9.2e  %4d  %9.2f  %5.1f'
+                    % ((info['cycle'], info['e_corr'], info['de']) + tuple(info['norms'])
+                       + (info['diis'], info['wall'], busy)))
+            if self.callback is not None:
+                self.callback(info)
+        opts = ccsdtq.Options(conv_tol=self.conv_tol, conv_tol_normt=normt, max_cycle=self.max_cycle,
+                              diis_space=self.diis_space, diis_file=self.diis_file,
+                              incore_complete=self.incore_complete, max_memory=self.max_memory,
+                              plan=plan, callback=report)
+        snap0 = timing.snapshot()
+        with _PeakMemory() as peak, timing.timer(ROOT_ITER):
+            res = ccsdtq.kernel(eris, opts, t1, t2, t3, t4)
+        self.converged, self.cycles = bool(res.converged), int(res.ncycle)
+        self.e_hf, self.e_corr = float(eris.e_hf), float(res.e_corr)
+        self.t1, self.t2, self.t3, self.t4 = res.t1, res.t2, res.t3, res.t4
+        self.plan_used, self.timings, self.peak_memory = res.plan, list(res.timings), peak.peak
+        pr.rule()
+        pr.line(' GCCSDTQ %s in %d iterations' % ('converged' if self.converged else 'NOT converged', self.cycles))
+        pr.kv('E(SCF)', '%20.12f' % self.e_hf, indent=3)
+        pr.kv('E_corr(CCSDTQ)', '%20.12f' % self.e_corr, indent=3)
+        pr.kv('E(CCSDTQ)', '%20.12f' % self.e_tot, indent=3)
+        if self.e_ccsdt is not None:
+            pr.kv('E(CCSDTQ) - E(CCSDT)', '%20.12f' % (self.e_tot - self.e_ccsdt), indent=3)
+        self._print_timings(pr, snap0, peak.peak)
+        pr.rule(char='=')
+        log.timer(self.__class__.__name__, *cput0)
+        return self.e_corr, self.t1, self.t2, self.t3, self.t4
+
+
+def CCSDTQ(mf, frozen=None, mo_coeff=None, mo_occ=None):
+    '''CCSDTQ for the reference ``mf``: GCCSDTQ for GHF and two-component
+    (X2C) spinors.  An RHF, UHF or ROHF reference is taken as GHF spin
+    orbitals (no spin adaptation at this level yet); ``frozen`` then counts
+    orbitals per spin, as in their CCSDT classes.'''
+    from pyscf import scf
+    from pyscf.scf import dhf, ghf, hf
+    from pyscf.x2c import x2c
+    if isinstance(mf, hf.KohnShamDFT):
+        raise RuntimeError('CCSDTQ needs an HF object, not a DFT object (mf.to_hf())')
+    if isinstance(mf, dhf.DHF):
+        raise NotImplementedError('CCSDTQ on a four-component (DHF) reference')
+    if isinstance(mf, (ghf.GHF, x2c.SCF)):
+        return GCCSDTQ(mf, frozen, mo_coeff, mo_occ)
+    if mo_coeff is not None or mo_occ is not None:
+        raise NotImplementedError('CCSDTQ with given orbitals needs a GHF or X2C reference')
+    return GCCSDTQ(scf.addons.convert_to_ghf(mf), None if frozen is None else 2 * int(frozen))
 
 
 def CCSDT(mf, frozen=None, mo_coeff=None, mo_occ=None):
