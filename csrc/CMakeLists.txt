@@ -28,6 +28,15 @@ target_link_libraries(zc_tnpack PUBLIC OpenMP::OpenMP_C m)
 set_target_properties(zc_tnpack PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
 
+# (P) in symmetry sectors: rows of packed quadruples on the classes of the
+# labels and the sum over the virtual pentuples of a sector
+# (zccsdt/cc/pentuples_sym.py)
+add_library(zc_psym SHARED psym.c)
+target_compile_options(zc_psym PRIVATE -O3 -march=native -fcx-limited-range)
+target_link_libraries(zc_psym PUBLIC OpenMP::OpenMP_C m)
+set_target_properties(zc_psym PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
+
 # kernels of the spinor CCSD amplitude equations (zccsdt/zccsd/amps.py) and of
 # its (T) correction (zccsdt/zccsd/triples.py)
 add_library(zc_zccsd SHARED zccsd_kernels.c zccsd_t.c)
