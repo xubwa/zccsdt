@@ -268,6 +268,19 @@ def test_frozen_and_dropped_spinors_by_a_list(hbr):
     corr = lambda key: ref[key] - ref['e_scf']
     assert abs(cc.e_corr - corr('e_ccsdt')) < 2e-10
     assert abs(cc.e_corr + cc.e_q5 - corr('e_ccsdt[q]')) < 2e-10 and abs(cc.e_corr + e_q - corr('e_ccsdt(q)')) < 2e-10
+    # the molecule is on the z axis: the spinors were adapted to m_j and everything is real
+    assert 'adapted to m_j' in buf.getvalue()
+    assert cc._eris.dtype == np.float64 and np.asarray(cc.t3).dtype == np.float64 and cc.t2.dtype == np.float64
+    # the spinors as the SCF left them: complex, the same energies
+    cz = zccsdt.CCSDT(hbr, frozen=frozen)
+    cz.real_spinors, cz.verbose = False, 0
+    cz.conv_tol, cz.conv_tol_normt = 1e-11, 1e-9
+    cz.kernel()
+    assert cz._eris.dtype == np.complex128 and abs(cz.e_corr - cc.e_corr) < 1e-10
+    assert abs(cz.ccsdt_q() - e_q) < 1e-11
+    # a pair cut in two by the list: the spinors as they are
+    cut = zccsdt.GCCSDT(hbr, frozen=list(order[:27]))
+    assert cut._axial() is None and zccsdt.GCCSDT(hbr, frozen=list(order[:28]))._axial() is not None
     # a number is the lowest occupied ones
     assert zccsdt.GCCSDT(hbr, frozen=28)._active()[0].tolist() == sorted(order[:28].tolist())
     with pytest.raises(ValueError):

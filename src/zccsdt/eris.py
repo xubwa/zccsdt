@@ -189,7 +189,7 @@ def _chem_block(mol, kind, C1, C2, C3, C4, max_memory=None):
     return out
 
 
-def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
+def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None, real=False):
     '''Antisymmetrized blocks from chemist blocks; vvvv returned packed over
     a<b, c<d, built one a at a time: from the rows that PySCF's out-of-core
     transformation writes to a scratch file (spinors, _spinor_vvvv_rows), or
@@ -201,11 +201,12 @@ def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
     from zccsdt import memory
     from zccsdt.scratch import Scratch
     # (PySCF takes up to its max_memory for buffers: bound every transformation)
-    ch = lambda a, b, c, d: _chem_block(mol, kind, a, b, c, d,       # noqa: E731
-                                        memory.ao2mo_memory(max_memory))
+    def ch(a, b, c, d):
+        x = _chem_block(mol, kind, a, b, c, d, memory.ao2mo_memory(max_memory))
+        return _real_part(x) if real else x
     # the ovvv block and its chemist form are what this step needs at least
     no, nv = Co.shape[1], Cv.shape[1]
-    isz = 16 if kind == 'spinor' or np.iscomplexobj(Cv) else 8
+    isz = 8 if real else (16 if kind == 'spinor' or np.iscomplexobj(Cv) else 8)
     floor = 2 * no * nv ** 3 * isz + 400_000_000
     limit = memory.budget(max_memory) if max_memory is not None else memory.available()
     if limit is not None and floor > limit:
@@ -238,7 +239,7 @@ def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
          if k[0] == k[1] else np.ascontiguousarray(b) for k, b in g.items()}
     del oooo, ooov, ovov, oovv, ovvo
     pa, pb = np.triu_indices(nv, 1)
-    dtype = np.result_type(g['oooo'], Cv)
+    dtype = np.dtype(np.float64) if real else np.result_type(g['oooo'], Cv)
     isz = np.dtype(dtype).itemsize
     pp = len(pa) * len(pa) * isz
     # one a of (ac|bd): the chemist block, its antisymmetrized form and the
@@ -269,6 +270,8 @@ def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
         row = 0
         for a, Y in (_spinor_vvvv_rows(mol, Cv, memory.ao2mo_memory(max_memory)) if spinor
                      else batches()):
+            if real and np.iscomplexobj(Y):
+                Y = _real_part(Y, copy=False)
             G = Y.transpose(1, 0, 2) - Y.transpose(1, 2, 0)          # <ab||cd> as [b, c, d]
             nb = nv - a - 1
             vpp[row:row + nb] = G[a + 1:][:, pa, pb]
@@ -280,6 +283,89 @@ def _blocks_by_ao2mo(mol, kind, Co, Cv, vir_batch, max_memory=None):
     return g, vpp, scr
 
 
+def _real_part(x, copy=True, tol=1e-8):
+    '''The real part of integrals that are real (spinors of a linear molecule
+    adapted to j_z): an array of its own, or a view.'''
+    if not np.iscomplexobj(x):
+        return x
+    if x.size and abs(x.imag).max() > tol:
+        raise ValueError('integrals taken for real have imaginary parts up to %.1e' % abs(x.imag).max())
+    return np.ascontiguousarray(x.real) if copy else x.real
+
+
+def spinor_jz(mol):
+    '''m_j of the basis functions of PySCF's spinor basis.'''
+    out = []
+    for b in range(mol.nbas):
+        l, kappa = mol.bas_angular(b), mol.bas_kappa(b)
+        js = (l - 0.5, l + 0.5) if kappa == 0 else ((l - 0.5,) if kappa > 0 else (l + 0.5,))
+        for _ in range(mol.bas_nctr(b)):
+            for j in js:
+                if j > 0:
+                    out += list(np.arange(-j, j + 1))
+    return np.array(out)
+
+
+def axial_spinors(mf, mo_coeff=None, mo_energy=None, mo_occ=None, tol=1e-7):
+    '''The spinors of a linear molecule on the z axis as eigenfunctions of
+    j_z with real coefficients: (C, level).  C[:, p] is in the place of
+    mo_coeff[:, p] - the spinors of a degenerate level of one occupation
+    rotated among themselves (a Kramers pair into m_j and -m_j), every
+    spinor with a real phase; ``level`` numbers the levels (what must not be
+    cut in two by freezing).  All MO integrals of such spinors are real:
+    products of the phases exp(i m phi) that survive the integration are
+    one.  What the SCF left of other m_j in a spinor is projected out.
+
+    None if the spinors are not of that kind: another molecule or another
+    orientation, an SCF solution without the symmetry of the axis (an open
+    shell whose spin is not on the axis), GHF spin orbitals.'''
+    if _orbital_kind(mf) != 'spinor':
+        return None
+    C = np.array(mf.mo_coeff if mo_coeff is None else mo_coeff)
+    e = np.asarray(mf.mo_energy if mo_energy is None else mo_energy)
+    occ = np.asarray(mf.mo_occ if mo_occ is None else mo_occ) > 0
+    if C.ndim != 2 or e.shape != (C.shape[1],) or occ.shape != e.shape:
+        return None
+    m_ao = spinor_jz(mf.mol)
+    S = mf.get_ovlp()
+    if len(m_ao) != C.shape[0] or abs(S * (m_ao[:, None] != m_ao[None, :])).max() > tol:
+        return None
+    n = len(e)
+    order = np.lexsort((e, ~occ))               # occupied first, each set by energy
+    level = np.zeros(n, dtype=np.int64)
+    mj = np.zeros(n)
+    k, nlev = 0, 0
+    while k < n:
+        m = k + 1
+        while m < n and occ[order[m]] == occ[order[k]] and e[order[m]] - e[order[m - 1]] < tol:
+            m += 1
+        idx = order[k:m]
+        V = C[:, idx]
+        w, U = np.linalg.eigh(V.conj().T @ (S * m_ao[None, :]) @ V)
+        if abs(w - np.round(w - 0.5) - 0.5).max() > 1e-5:
+            return None
+        V = V @ U
+        big = V[np.argmax(abs(V), axis=0), np.arange(m - k)]
+        C[:, idx] = V * (abs(big) / big)
+        level[idx], mj[idx] = nlev, np.round(w - 0.5) + 0.5
+        k, nlev = m, nlev + 1
+    if abs(C.imag).max() > 1e-7:
+        return None
+    C = np.ascontiguousarray(C.real) * (m_ao[:, None] == mj[None, :])
+    # orthonormal again, those of one m_j among themselves: the occupied ones, then the
+    # virtual ones in the complement of the occupied
+    for m in np.unique(mj):
+        o, v = np.where((mj == m) & occ)[0], np.where((mj == m) & ~occ)[0]
+        for sel in (o, v):
+            if not len(sel):
+                continue
+            if sel is v and len(o):
+                C[:, v] -= C[:, o] @ (C[:, o].T @ S.real @ C[:, v])
+            w, U = np.linalg.eigh(C[:, sel].T @ S.real @ C[:, sel])
+            C[:, sel] = C[:, sel] @ (U / np.sqrt(w)) @ U.T
+    return C, level
+
+
 def _orbital_kind(mf):
     ''''ghf' for PySCF GHF objects (spin-orbital AO basis), 'spinor' otherwise
     (j-adapted spinor AO basis).  The mo_coeff shape cannot tell the two apart:
@@ -289,7 +375,7 @@ def _orbital_kind(mf):
 
 
 def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=False,
-             vir_batch=16, spin_order=False, max_memory=None):
+             vir_batch=16, spin_order=False, max_memory=None, real=False):
     '''Build spin-orbital ERIs from a converged SCF object.
 
     ``mo_coeff`` may be any orbitals spanning the same occupied space as the
@@ -303,6 +389,10 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=Fa
     of what the node and the memory limit of the job leave) then bounds the
     transformation, and the packed vvvv becomes a mapped array of a scratch
     file if it does not fit in memory twice.
+
+    ``real``: the integrals of these orbitals are real although the AO
+    integrals are not (the spinors of axial_spinors()): real arrays are kept
+    (ValueError if an imaginary part is not zero).
     '''
     if mo_coeff is None:
         mo_coeff = mf.mo_coeff
@@ -332,9 +422,11 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=Fa
                                nocc + np.argsort(spins[nocc:], kind='stable')))
         C, spins = C[:, perm], spins[perm]
     fock = C.conj().T @ fock_ao @ C
+    if real:
+        fock = _real_part(fock)
     if packed_vvvv and not (kind == 'ghf' and np.iscomplexobj(C)):
         g, vpp, scr = _blocks_by_ao2mo(mf.mol, kind, C[:, :nocc], C[:, nocc:], vir_batch,
-                                       max_memory)
+                                       max_memory, real)
         if kind == 'ghf':
             fock = fock.real
             g = {k: b.real for k, b in g.items()}
@@ -349,6 +441,8 @@ def from_scf(mf, mo_coeff=None, mo_occ=None, frozen=0, kind=None, packed_vvvv=Fa
             out.spin_occ, out.spin_vir = spins[:nocc], spins[nocc:]
         return out
     eri = _mo_chemist(mf.mol, C, kind)
+    if real:
+        eri = _real_part(eri)
     g = eri.transpose(0, 2, 1, 3)              # <pq|rs> = (pr|qs)
     g = g - g.transpose(0, 1, 3, 2)            # <pq||rs>
     # enforce the bra antisymmetry exactly as well (the MO transformation

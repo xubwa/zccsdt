@@ -297,15 +297,8 @@ def time_reversed(mf, C):
 
 def _jz(mf):
     '''m_j of the basis functions of PySCF's spinor basis.'''
-    mol, out = mf.mol, []
-    for b in range(mol.nbas):
-        l, kappa = mol.bas_angular(b), mol.bas_kappa(b)
-        js = (l - 0.5, l + 0.5) if kappa == 0 else ((l - 0.5,) if kappa > 0 else (l + 0.5,))
-        for _ in range(mol.bas_nctr(b)):
-            for j in js:
-                if j > 0:
-                    out += list(np.arange(-j, j + 1))
-    return np.array(out)
+    from zccsdt.eris import spinor_jz
+    return spinor_jz(mf.mol)
 
 
 def kramers_pairs(mf, mo_coeff=None, mo_energy=None, tol=1e-7):

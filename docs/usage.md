@@ -180,6 +180,17 @@ myq = zccsdt.CCSDTQ(mf, frozen=frozen)
 
 (cut between Kramers pairs, not through one).
 
+**Linear molecules.**  For a linear molecule on the z axis the spinors can
+be chosen as eigenfunctions of j_z with real coefficients, and then every
+integral and amplitude is real.  The classes do that by themselves
+(`real_spinors`, default `True`; `zccsdt.eris.axial_spinors`): each
+degenerate level of the reference is rotated into its m_j components - a
+Kramers pair into m_j and -m_j - and the report says so.  The energies are
+the same and the arithmetic is two to three times faster.  It applies to
+closed shells and to open shells whose SCF kept the symmetry of the axis;
+in any other orientation, or with `real_spinors = False`, the spinors are
+taken as they are (complex).
+
 - **(Q)** (`zccsdt.cc.quadruples`) is the correction of Bomble, Stanton,
   Kallay and Gauss for canonical Hartree-Fock orbitals: `e_q5` is its
   fifth-order part, CCSDT[Q].  It is computed one occupied quadruple at a

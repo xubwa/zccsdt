@@ -959,11 +959,45 @@ class GCCSDT(UCCSDT):
     (zccsdt.eris, the dense T3 engine), and its (Q) correction (ccsdt_q()).
     ``frozen`` counts spin orbitals or spinors, as in PySCF's GCCSD.
 
+    real_spinors : bool
+        For a linear molecule on the z axis the spinors of the reference are
+        adapted to m_j, each degenerate level by itself; all integrals and
+        amplitudes are real then and the arithmetic is three times faster
+        (zccsdt.eris.axial_spinors).  Default True; it applies where the
+        reference has such spinors - a closed shell, or an open shell whose
+        SCF kept the symmetry of the axis.  False: the spinors as they are.
+
 ''' + CCSDTBase.__doc__
 
     _title = 'GCCSDT'
     _subtitle = 'CCSDT on spin orbitals or spinors (GHF, X2C), real or complex'
     _frozen_unit = 2
+    real_spinors = True
+    _keys = UCCSDT._keys | {'real_spinors'}
+
+    def _axial(self):
+        '''The spinors of a linear molecule on the z axis adapted to m_j
+        (zccsdt.eris.axial_spinors), with which all integrals are real - if
+        ``real_spinors`` is set, the reference has them and what is frozen
+        and dropped does not cut a degenerate level; else None.'''
+        key = (id(self._scf), id(self.mo_coeff), id(self.mo_occ), str(self.frozen), bool(self.real_spinors))
+        if getattr(self, '_axial_cache', (None,))[0] != key:
+            out = None
+            mf = self._scf
+            if (self.real_spinors and not isinstance(mf, _Given) and self._kind() == 'spinor'
+                    and self.mo_coeff is mf.mo_coeff and self.mo_occ is mf.mo_occ):
+                from zccsdt import eris
+                ax = eris.axial_spinors(mf)
+                if ax is not None:
+                    part = np.zeros(len(ax[1]), dtype=np.int64)
+                    for k, idx in enumerate(self._active()):
+                        part[idx] = k
+                    first = np.zeros(ax[1].max() + 1, dtype=np.int64)
+                    first[ax[1]] = part
+                    if (first[ax[1]] == part).all():
+                        out = ax[0]
+            self._axial_cache = (key, out)
+        return self._axial_cache[1]
 
     def _active(self):
         '''(frozen occupied, active occupied, active virtual, dropped
@@ -989,8 +1023,12 @@ class GCCSDT(UCCSDT):
     def _orbital_lines(self):
         fo, o, v, fv = self._active()
         kind = 'spinors' if self._kind() == 'spinor' else 'spin orbitals'
-        return [('orbitals', '%d occupied, %d virtual %s; %d frozen%s'
-                 % (len(o), len(v), kind, len(fo), ', %d virtual ones dropped' % len(fv) if len(fv) else ''))]
+        lines = [('orbitals', '%d occupied, %d virtual %s; %d frozen%s'
+                  % (len(o), len(v), kind, len(fo), ', %d virtual ones dropped' % len(fv) if len(fv) else ''))]
+        if self._axial() is not None:
+            lines.append(('', 'a linear molecule on the z axis: the spinors adapted to m_j, real integrals '
+                          'and amplitudes'))
+        return lines
 
     @classmethod
     def from_integrals(cls, eris, verbose=logger.NOTE, stdout=None):
@@ -1015,9 +1053,10 @@ class GCCSDT(UCCSDT):
             return self._scf.eris
         # (the columns: frozen occupied first, the dropped virtual ones left out)
         cols = np.concatenate((fo, o, v))
-        return eris.from_scf(self._scf, mo_coeff=np.asarray(self.mo_coeff)[:, cols],
+        real = self._axial()
+        return eris.from_scf(self._scf, mo_coeff=(np.asarray(self.mo_coeff) if real is None else real)[:, cols],
                              mo_occ=np.asarray(self.mo_occ)[cols], frozen=len(fo), packed_vvvv=True,
-                             max_memory=self.max_memory)
+                             max_memory=self.max_memory, real=real is not None)
 
     def _amplitude_lines(self, eris):
         from zccsdt.scratch import is_mapped
@@ -1118,7 +1157,7 @@ class GCCSDTQ(GCCSDT):
         if t1 is None or t2 is None or t3 is None:
             cc3 = GCCSDT(self._scf, self.frozen, self.mo_coeff, self.mo_occ)
             for key in ('verbose', 'stdout', 'max_memory', 'conv_tol', 'conv_tol_normt', 'max_cycle',
-                        'diis_space', 'diis_file', 'incore_complete'):
+                        'diis_space', 'diis_file', 'incore_complete', 'real_spinors'):
                 setattr(cc3, key, getattr(self, key))
             cc3.kernel()
             self.ccsdt_run, self._eris, self.e_ccsdt = cc3, cc3._eris, cc3.e_tot
