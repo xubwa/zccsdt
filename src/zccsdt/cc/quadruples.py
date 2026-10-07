@@ -41,7 +41,8 @@ products of one batch of columns (v^4 / 4 and v^4 / 6 elements at most) and
 Xv for the x < l (up to (o - 1) v^4 / 6).  With less memory the products are
 done in batches of columns, and Xv for a few x at a time: the quadruples of
 one l are then taken in groups by the thirds of the x that their other
-three indices fall in.
+three indices fall in, and from one group to the next only the x that are
+new are formed.
 '''
 
 from dataclasses import dataclass
@@ -114,7 +115,7 @@ def _fixed(no, nv, isz):
 
 def _variable(no, nv, isz, cols22, cols13, xv, rows):
     nP, nQ, nI3, nA3, nA = _sizes(no, nv)
-    return isz * (nQ * cols22 + nv * cols13 + nv * xv * nA3 + nv * nv * (xv + rows * (1 + xv)))
+    return isz * (nQ * cols22 + nv * cols13 + nv * xv * nA3 + nv * nv * (xv + 2 * rows))
 
 
 def plan(no, nv, isz, budget=None, batch_bytes=None):
@@ -132,7 +133,7 @@ def plan(no, nv, isz, budget=None, batch_bytes=None):
     min22, min13, min_rows = _least(nv)
     top22 = int(max(min22, min(nQ, batch_bytes // (isz * nQ))))
     top13 = int(max(min13, min(nA3, batch_bytes // (isz * nv))))
-    top_rows = int(max(min_rows, min(nQ, batch_bytes // (isz * nv * nv * (1 + xfull)))))
+    top_rows = int(max(min_rows, min(nQ, batch_bytes // (isz * nv * nv * 2))))
     least = work + _variable(no, nv, isz, min22, min13, 3, min_rows)
     floor = base + max(xo, least)
     if budget is None:
@@ -144,7 +145,7 @@ def plan(no, nv, isz, budget=None, batch_bytes=None):
         # one after the other, each to its top before the next starts (so that
         # no part of a plan shrinks when the budget grows)
         rest = budget - base - least
-        per_x = isz * nv * (nA3 + nv * (1 + min_rows))
+        per_x = isz * nv * (nA3 + nv)
         xv = int(min(xfull, 3 + rest // per_x))
         cols22, cols13, rows = min22, min13, min_rows
         if xv == xfull:
@@ -153,7 +154,7 @@ def plan(no, nv, isz, budget=None, batch_bytes=None):
             lack = isz * (nQ * (top22 - min22) + nv * (top13 - min13))
             if rest >= lack:
                 cols22, cols13 = top22, top13
-                rows = int(min(top_rows, min_rows + (rest - lack) // (isz * nv * nv * (1 + xv))))
+                rows = int(min(top_rows, min_rows + (rest - lack) // (isz * nv * nv * 2)))
             else:
                 cols22 = int(min22 + rest / lack * (top22 - min22))
                 cols13 = int(min13 + rest / lack * (top13 - min13))
@@ -237,32 +238,47 @@ class Quadruples:
         self.LB, self.RB = (np.empty((4 * no, nQ), dtype=dtype) for _ in range(2))
         self.LC, self.RC = np.empty((6 * no, nv), dtype=dtype), np.empty((6 * no, nA3), dtype=dtype)
         self.rt3, self.rtt = np.empty(nA, dtype=dtype), np.empty(nA, dtype=dtype)
-        self._xv = (None, None, None)
+        self._xv = (None, None, {})
 
     # ---- the intermediate of T2 with <vv||vv>, for pairs (x, l)
 
     def xi_v(self, l, xs):
-        '''Xv[e, n, (bcd)] = P(d/bc) 1/2 sum_f <bc||ef> t(x l, fd) for
-        x = xs[n], and {x: n}.'''
-        key = (l, tuple(int(x) for x in xs))
-        if self._xv[0] == key:
-            return self._xv[1], self._xv[2]
-        self._xv = (None, None, None)                   # (the old one goes before the new one comes)
-        nv, nQ, nA3, dtype, nx = self.nvir, self.nQ, self.nA3, self.dtype, len(xs)
-        with timer('q.xv'):
-            out = np.empty((nv, nx, nA3), dtype=dtype)
-            P.zero(out)
-            tl = np.ascontiguousarray(self.t2[xs, l].transpose(1, 0, 2), dtype=dtype).reshape(nv, nx * nv)
-            for b0, b1 in _batches(nQ, self.plan.rows):
-                nb = b1 - b0
-                W = np.empty((nb, nv, nv), dtype=dtype)                         # [(bc), e, f]
-                P.tn_expand(W, np.ascontiguousarray(self.vpp[b0:b1], dtype=dtype), nv, 1, 1, outer=0)
-                M = gemm(W.reshape(nb * nv, nv), tl)                            # [(bc), e, n, d]
-                P.tn_reduce(out.reshape(nv * nx, nA3), M.reshape(nb, nv * nx, nv), nv, 2, 1,
-                            rows=(b0, b1), scale=0.5, outer=1)
-                del W, M
-        self._xv = (key, out, {int(x): n for n, x in enumerate(xs)})
-        return out, self._xv[2]
+        '''(Xv, {x: n}): Xv[n, e, (bcd)] = P(d/bc) 1/2 sum_f <bc||ef> t(x l, fd)
+        for the x of ``xs``.  The array has a place for every x that the
+        plan holds at a time; those of the last call that are asked for
+        again stay, the others make room.'''
+        nv, nQ, nA3, dtype = self.nvir, self.nQ, self.nA3, self.dtype
+        last, store, where = self._xv
+        nslot = max(3, min(self.plan.xv, self.nocc - 1), len(xs))
+        if store is None or len(store) < nslot:
+            self._xv = store = None                     # (the old one goes before the new one comes)
+            store = np.empty((nslot, nv, nA3), dtype=dtype)
+            last, where = None, {}
+        if last != l:
+            where = {}
+        need = [int(x) for x in xs]
+        for x in [x for x in where if x not in need]:
+            del where[x]
+        free = [n for n in range(len(store)) if n not in where.values()]
+        new = [x for x in need if x not in where]
+        if new:
+            with timer('q.xv'):
+                for x in new:
+                    where[x] = free.pop()
+                    P.zero(store[where[x]])
+                tl = [np.ascontiguousarray(self.t2[x, l], dtype=dtype) for x in new]            # [f, d]
+                for b0, b1 in _batches(nQ, self.plan.rows):
+                    nb = b1 - b0
+                    W = np.empty((nb, nv, nv), dtype=dtype)                     # [(bc), e, f]
+                    P.tn_expand(W, np.ascontiguousarray(self.vpp[b0:b1], dtype=dtype), nv, 1, 1, outer=0)
+                    M = np.empty((nb * nv, nv), dtype=dtype)
+                    for x, t in zip(new, tl):
+                        gemm(W.reshape(nb * nv, nv), t, M)                      # [(bc), e, d]
+                        P.tn_reduce(store[where[x]], M.reshape(nb, nv, nv), nv, 2, 1, rows=(b0, b1), scale=0.5,
+                                    outer=1)
+                    del W, M
+        self._xv = (l, store, where)
+        return store, where
 
     def schedule(self):
         '''[(l, xs, quadruples)]: the occupied quadruples by their largest
@@ -341,7 +357,7 @@ class Quadruples:
                 P.tn_reduce(rt3, X, nv, 1, 3, cols=c)
             with timer('q.gemm'):
                 for k, (p, n, alpha) in enumerate(last):
-                    gemm(self.t2_px[p].T, Xv[:, n, c[0]:c[1]], X, alpha=alpha, beta=float(k > 0))
+                    gemm(self.t2_px[p].T, Xv[n][:, c[0]:c[1]], X, alpha=alpha, beta=float(k > 0))
             with timer('q.reduce'):
                 P.tn_reduce(rtt, X, nv, 1, 3, cols=c)
         return rt3, rtt
