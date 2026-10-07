@@ -3230,40 +3230,81 @@ zccsdt no symmetry.
   products - is where the factor comes from, not the speed of the
   arithmetic (190 GFLOP/s for MRCC by that count).
 
-**Complex spinors, a larger case** (job 31701604, the same node, zccsdt
-ac752e0, three iterations each):
+### Complex spinors, larger cases, less memory
 
-| | T4 | CCSDTQ iteration | Peak memory |
-|---|---|---|---|
-| H2O / cc-pVDZ, RHF as GHF, 10 + 38, real | 124 MB | 4.81 s | 5.3 GB |
-| H2O / cc-pVDZ, X2C spinors, 10 + 38, complex | 248 MB | 13.4 s | 4.4 GB |
-| H2O / aug-cc-pVDZ, RHF as GHF, 10 + 72, real | 1.7 GB | 78.3 s | 9.9 GB |
+zccsdt alone, the same node and batch (jobs 31703734 and 31703874), 8
+cores; CCSDTQ for two or three iterations and (P) with the amplitudes as
+they are then (the cost does not depend on them).
 
-Complex / real is 2.8.  The larger case has 14 times the quadruples and
-takes 16 times as long: at 10 + 38 the products of one occupied quadruple
-or triple are too small for the threaded BLAS (5.7 of 8 cores busy).
+| | T4 | CCSDTQ iteration | (P) | Peak memory: CCSDTQ, (P) |
+|---|---|---|---|---|
+| H2O / cc-pVDZ, RHF as GHF, 10 + 38, real | 124 MB | 4.50 s | 16.1 s | 6.1 GB, 1.0 GB |
+| H2O / cc-pVDZ, X2C spinors, 10 + 38, complex | 248 MB | 12.0 s | 38.7 s | 5.2 GB, 1.6 GB |
+| H2O / aug-cc-pVDZ, RHF as GHF, 10 + 72, real | 1.7 GB | 67.8 s | 413 s | 10.7 GB, 8.1 GB |
+| the same with `max_memory` 10600 MB, and 7400 MB for (P) | | 67.3 s | 454 s | 9.4 GB, 7.4 GB |
+| the same with 7000 MB, and 3500 MB for (P): T4 and Xv in a scratch file | | 98 s | 739 s | 5.7 GB, 2.9 GB |
+| the same with 5500 MB, and 2500 MB for (P): T4, Xv and the residual in the file | | 193 s, 268 s | 747 s | 4.0 GB, 1.1 GB |
+| HBr / cc-pVTZ-DK, X2C, 28 frozen, 8 + 78: spinors adapted to m_j, real | 0.8 GB | 33.5 s | 140 s | 7.7 GB, 5.6 GB |
+| the same with the spinors as the SCF left them, complex | 1.6 GB | 108.6 s | 424 s | 12.3 GB, 9.6 GB |
+
+- **Complex / real** is 2.7 for the CCSDTQ iteration and 2.4 for (P) at
+  10 + 38, and 3.2 and 3.0 at 8 + 78.
+- **Linear molecules** (4dbfc0c).  The spinors of a linear molecule on the
+  z axis are adapted to m_j by the front end (`real_spinors`), and all
+  arithmetic is real: the last two lines are the same calculation with
+  that and without - CCSDT iteration 0.84 against 2.32 s, (Q) 5.2 against
+  12.5 s, CCSDTQ and (P) as in the table, 240 s against 707 s for the run;
+  E[Q], E(Q) and E(P) (-2.213315408679e-6 Eh after two iterations) agree
+  to all digits printed.
+- **Size.**  At 10 + 72 there are 14 times the quadruples of 10 + 38 and
+  the iteration takes 15 times as long; (P) takes 26 times as long for 28
+  times the pentuples.  (P) is 3.6 CCSDTQ iterations at 10 + 38, 6.1 at
+  10 + 72 and 4.2 at 8 + 78.
+- **Less memory.**  The runs with `max_memory` were job steps with a
+  memory limit of their own (11, 8 and 6.5 GB; the last two in job
+  31704446, zccsdt 2f3a2a8).  At 10600 MB everything is still in memory:
+  CCSDTQ with batches of 616 MB where 1 GB is the default and the CCSDT
+  step with its smallest buffers - the same time per iteration; (P) with
+  its products in five and four batches of columns, 10 % slower.  Below
+  what T4 (1.7 GB), its residual and Xv (1.5 GB) take in memory they are
+  arrays of a scratch file on the local disk of the node, which the
+  operating system pages within the limit of the step: with T4 and Xv
+  there the iteration takes 1.4 times as long, with the residual too 3 to
+  4 times (the ring, which adds to the residual and to Xv block by block
+  of columns across all rows, 170 s of it with 2.3 cores busy).  (P) with
+  the second-order quadruples and Xv in the file, its other intermediate
+  made per pentuple and its products in 16 batches takes 1.8 times as
+  long; the reductions are what grows (88 -> 358 s: the kernel walks all
+  tuples in every batch).  The energies of the two iterations and E(P) are
+  those of the runs in memory to all digits; the peaks of ordinary memory
+  stay below `max_memory`.
 
 ### Where the time of a CCSDTQ iteration goes
 
-H2O / aug-cc-pVDZ, 10 + 72, real, 78.3 s per iteration (job 31701604,
-zccsdt ac752e0):
+H2O / aug-cc-pVDZ, 10 + 72, real, 67.8 s per iteration, 7.0 of 8 cores
+busy (job 31703734, zccsdt ed5bc1b):
 
 | Stage | Time | Cores busy | What it is |
 |---|---|---|---|
-| ring; T4 in Xv and R3 | 28.9 s | 5.1 | t(m jkl; e bcd) by blocks of columns times Wr, for every occupied triple the block with i and m outside it; the thin products with <oo||vo> and <oo||vv> |
 | by occupied quadruple | 20.0 s | 7.5 | the two products with the six-index intermediates Xo and Xv, T3 x T3 through Z and Y: X[(ab),(cd)] and X[a,(bcd)], each reduced once |
+| ring; T4 in Xv and R3 | 18.5 s | 6.6 | t(m jkl; e bcd) by blocks of columns times Wr, for every occupied triple the block with i and m outside it; the thin products with <oo||vo> and <oo||vv> |
 | pp ladder; T4 in Xo, R2, R3 | 18.2 s | 7.5 | Wq times T4 with its virtual indices in two pairs, 434 GFLOP/s |
 | Xv without T4 | 3.4 s | 7.5 | |
 | hh ladder | 2.1 s | 7.6 | |
 | T3 with one integral | 1.5 s | 5.2 | |
 | DIIS (T4 in the scratch file), CCSDT step, Jacobi step | 1.3 s, 1.1 s, 1.0 s | | |
 
-The ring ran at 187 GFLOP/s: its products per occupied triple are a few
-milliseconds each, and their operators were gathered again for every block
-of columns.  Since ed5bc1b they are made once and the products of the
-triples run on separate threads with a sequential GEMM each
-(`zc_gemm_each`); on the shared node the ring of the 10 + 38 case went from
-1.80 to 1.24 s.
+The ring took 28.9 s with 5.1 cores busy before ed5bc1b (job 31701604,
+78.3 s per iteration): its products per occupied triple are a few
+milliseconds each - 187 GFLOP/s on a threaded BLAS - and their operators
+were gathered again for every block of columns.  Now the operators are
+made once and the products of the triples run on separate threads with a
+sequential GEMM each (`zc_gemm_each`).
+
+(P) of the same case, 413 s: the products 252 s (one matrix product of
+(de) x 15 (v + o) x (abc) per pentuple and its like for z: 1.3e14
+operations, 504 GFLOP/s), the reductions onto a<b<c<d<e 88 s, the operands
+37 s, the T2 T2 T2 intermediate 24 s, the second-order quadruples 5 s.
 
 ### What is not there
 
@@ -3271,15 +3312,18 @@ triples run on separate threads with a sequential GEMM each
   the amplitudes of a closed shell) nor the axis of a linear molecule
   (m_j), nor point groups.  MRCC uses the two irreps that DIRAC's files
   give it for a linear molecule or C2v.
-- With too little memory for T4, its residual and Xv (and for the
-  second-order quadruples of (P)) these are arrays of a scratch file that
-  the operating system pages (7194bad, 2f3a2a8): checked for the numbers,
-  not yet timed at size.
+- T4 out of core is the paging of the operating system on mapped arrays
+  (7194bad, 2f3a2a8), not an algorithm of its own: 1.4 to 4 times slower
+  in the runs above, where a third to a half of what the calculation
+  needs was given.  The products are not reordered for the disk.
 - No spin-adapted closed-shell CCSDTQ: an RHF reference runs as spin
   orbitals.
-- The products of one occupied quadruple and of one occupied triple are
-  small matrix products at this size (a millisecond each) and keep 5.7 of
-  the 8 cores busy; larger virtual spaces fill them.
+- The products of one occupied quadruple are small matrix products at
+  10 + 38 (a millisecond each, on the threaded BLAS: 6.0 of the 8 cores
+  busy in the iteration); at 10 + 72 it is 7.0.  Those of the occupied
+  triples run on separate threads since ed5bc1b.
+- With many batches of columns (little memory) the reductions of (Q) and
+  (P) cost three to four times what they cost in one or two batches.
 
 ### Optimization history
 
@@ -3289,18 +3333,11 @@ triples run on separate threads with a sequential GEMM each
 | da029c6 | | 13.7 s | T4 equation: every product on two occupied and two virtual groups (190 gathers per element) |
 | f2f3cab | | 6.26 s | by occupied quadruple and by blocks of columns (22 + 26 gathers) |
 | 4731da9 | 51.2 s / 163 s | | kernels that walk by runs of the last index; reductions 22.7 -> 9.5 s |
-| ac752e0 | | 6.09 s (4.81 s on the node of the benchmarks) | ring over the occupied indices outside each triple: ((o - 3) / o)^2 of its multiplications |
-| ed5bc1b | | 5.42 s | the ring products of the triples on separate threads, their operators made once |
+| ac752e0 | | 6.09 s (4.81 s on a benchmark node) | ring over the occupied indices outside each triple: ((o - 3) / o)^2 of its multiplications |
+| ed5bc1b | | 5.42 s (4.50 s on a benchmark node) | the ring products of the triples on separate threads, their operators made once |
 
 The CCSDTQ column is from the shared node (8 threads, not a benchmark),
 where every version was run; the (Q) column is from benchmark nodes.
-
-**Linear molecules** (4dbfc0c): the spinors of a linear molecule on the z
-axis are adapted to m_j by the front end, and all arithmetic is real then.
-HBr / cc-pVTZ-DK, X2C, 28 frozen, 8 + 38 spinors, on the shared node (not a
-benchmark), real against complex, the same energies: CCSDT iteration 0.11
-/ 0.24 s, (Q) 0.56 / 0.94 s, CCSDTQ iteration 1.87 / 4.81 s, (P) 4.86 /
-10.2 s.
 
 ## Correctness references
 
