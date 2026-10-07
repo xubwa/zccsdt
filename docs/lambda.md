@@ -302,10 +302,12 @@ Reference implementation (`tests/test_lambda_ref.py`, 25 s):
 | BH / STO-3G, complex | 2.087019107908 | 2.087019107989 | 8.2e-11 |
 | H2O / STO-3G, real | 1.582638016242 | 1.582638016253 | 1.2e-11 |
 | H2O / STO-3G, complex | 1.582638016242 | 1.582638016240 | 1.4e-12 |
-H2O631G_FIELD
+| H2O / 6-31G, real | 1.227823968433 | 1.227823968377 | 5.7e-11 |
 
-  (at step 2e-3 the differences are 1.2e-9 for BH and 2.4e-11 to 3.9e-11
-  for H2O: the truncation error of the stencil.)
+  (at step 2e-3 the differences are 1.2e-9 for BH, 7.5e-10 for H2O / 6-31G
+  and 2.4e-11 to 3.9e-11 for H2O / STO-3G: the truncation error of the
+  stencil.  STO-3G: in the tests; 6-31G: `bench/lambda_ccsdt.py` in job
+  31735245, where the dense Lambda equations take 55 s for 17 iterations.)
 
 - orbital relaxation through the code of the CCSD line: `GRADIENT` halved
   is the right-hand side of `zccsd.zvector.solve`, and `relaxed_rdm1` on
