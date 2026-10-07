@@ -577,5 +577,16 @@
    "e_ccsdtq": -2604.935868926205,
    "e_ccsdtq(p)": -2604.935870892496
   }
+ },
+ "hat_x2csvpall_x2c_mdcint": {
+  "description": "HAt on the z axis (1.71 Angstrom), x2c-SVPall of PySCF, X2C (pyscf.x2c.UHF, spinors adapted to m_j: real integrals), the 6p shell split by 60 mEh (occupied pairs at -0.959, -0.511, -0.379, -0.319 Eh): 78 spinors frozen, 8 occupied + the 20 lowest virtual spinors active.  MO integrals of PySCF in Kramers pairs written as MRCONEE and MDCINT by zccsdt.dirac (bench/dirac/write_integrals.py); MRCC (release Feb 2018) through its interface to DIRAC (iface=dirac) on those files, the reference flagged as Hartree-Fock (bench/dirac/mrcc_rel.sh); zccsdt on the same files (bench/dirac/run_integrals.py) gives every one of these energies to the last digit, and the molecule turned off the axis (bench/dirac/turned.py: complex spinors) the correlation energies to 6e-12 (job 31703735).",
+  "recommended": {
+   "e_scf": -22854.835782191796,
+   "e_ccsdt": -22854.93363194838,
+   "e_ccsdt[q]": -22854.933758252417,
+   "e_ccsdt(q)": -22854.93376969215,
+   "e_ccsdtq": -22854.93378181932,
+   "e_ccsdtq(p)": -22854.933785264926
+  }
  }
 }

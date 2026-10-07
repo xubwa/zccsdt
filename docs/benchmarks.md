@@ -3099,8 +3099,8 @@ or the SCF (`bench/dirac`).
 | MRCC, nonrelativistic, same geometry and basis: CCSDT(Q) for H2O and N2 / 6-31G and H2O / cc-pVDZ with a frozen core; CCSDTQ for BH, CH2, N2 / STO-3G and H2O / 6-31G; CCSDTQ(P) for BH, CH2, N2 / STO-3G | 1e-11 Eh in the energies, 3e-12 Eh in E(P) |
 | the same for BH and H2O with complex spin orbitals (every spin pair mixed by its own SU(2) matrix) | the same |
 | MRCC on the integrals of DIRAC (BH, X2C, uncontracted STO-2G): the C2v files (real) and the files of the run without symmetry (complex) | 1e-12 Eh, the two sets of files the same |
-| MRCC on the same integrals, written here (table below) | 1e-12 Eh |
-| the molecule of that table turned away from the axis: complex spinors and amplitudes (below) | 5e-13 Eh |
+| MRCC on the same integrals, written here: H2O, HBr, HAt (tables below) | 1e-12 Eh; HAt to the last of twelve decimals |
+| HBr and HAt turned away from the axis: complex spinors and amplitudes (below) | 5e-13 Eh and 6e-12 Eh |
 | an open-shell doublet with complex spinors (BeH, X2C, turned) against the dense reference | all digits |
 
 **The same integrals in both programs.**  `bench/dirac/write_integrals.py`,
@@ -3121,6 +3121,22 @@ MRCC needs three things that its interface does not do by itself - the
 group given as C2v, the integral list completed under permutations, and
 the reference flagged as Hartree-Fock (otherwise it prints the (Q)/A and
 (P)/A variants, 5e-7 Eh away): `bench/dirac/mrcc_rel.sh`.
+
+**A 6p element.**  HAt with the X2C Hamiltonian and x2c-SVPall (job
+31703735): 78 spinors frozen, 8 + 20 active; the occupied pairs are at
+-0.959, -0.511, -0.379 and -0.319 Eh - the 6p shell split by 60 mEh.
+
+| | MRCC | zccsdt, the same integrals | zccsdt, the molecule turned: correlation energy, turned - on the axis |
+|---|---|---|---|
+| CCSDT | -22854.933631948381 | -22854.933631948381 | 6e-12 |
+| CCSDT[Q] | -22854.933758252417 | -22854.933758252417 | 6e-12 |
+| CCSDT(Q) | -22854.933769692150 | -22854.933769692150 | 6e-12 |
+| CCSDTQ | -22854.933781819320 | -22854.933781819320 | 6e-12 |
+| CCSDTQ(P) | -22854.933785264926 | -22854.933785264926 | 6e-12 |
+
+(E[Q] = -0.000126304036, E(Q) = -0.000137743768 and E(P) = -0.000003445607
+Eh are the same in the turned molecule to the last digit; the 6e-12 is its
+CCSDT energy, that is, its SCF.)
 
 **The molecule turned.**  MRCC cannot take complex integrals, and a linear
 molecule on the z axis has real ones.  Turned away from the axis (H at
@@ -3171,31 +3187,42 @@ spinors, 210 x 4,967,690 quadruples.
   one group of quadruples to the next are formed, a third of the
   formations).
 
-### CCSDTQ against MRCC on the same integrals
+### CCSDTQ and (P) against MRCC on the same integrals
 
-c108, 8 cores for each program, MRCC first, in one job per molecule
-(31701602, 31701603); zccsdt ac752e0.  MRCC: its release binary (MKL,
-OpenMP, 8 threads), 24 GB allowed; it uses the two fermion irreps of the
-files (half of the quadruples), zccsdt no symmetry.
+c349 (2 x Xeon Gold 6248R), 8 cores for each program, MRCC first, one job
+per molecule (31703732, 31703733); the other cores of the node were held
+by the jobs of the same batch, which waited their turn.  zccsdt ed5bc1b.  MRCC: its release binary (MKL, OpenMP, 8 threads), 24 GB allowed;
+it uses the two fermion irreps of the files (half of the amplitudes),
+zccsdt no symmetry.
 
 | | H2O / cc-pVDZ, RHF as GHF, 10 + 38 | HBr / cc-pVTZ-DK, X2C, 28 frozen, 8 + 38 spinors |
 |---|---|---|
 | quadruples: zccsdt, MRCC | 15,501,150; 7,751,430 | 5,167,050; 2,584,038 |
-| MRCC: iterations, time, per iteration | 25, 1002 s, 40.1 s | 24, 339 s, 14.1 s |
-| zccsdt: iterations, time, per iteration | 17, 81.8 s, 4.81 s | 18, 29.9 s, 1.66 s |
-| MRCC / zccsdt per iteration | 8.3 | 8.5 |
-| E(CCSDTQ): MRCC | -76.243786573522 | -2605.103035301211 |
-| E(CCSDTQ): zccsdt | -76.243786573525 | -2605.103035301210 |
-| memory: zccsdt (peak), MRCC (allocated, besides its files) | 5.3 GB; 0.7 GB | 2.8 GB; 0.3 GB |
+| MRCC CCSDTQ: iterations, time, per iteration | 25, 993 s, 39.7 s | 24, 344 s, 14.3 s |
+| zccsdt CCSDTQ: iterations, time, per iteration | 17, 76.5 s, 4.50 s | 18, 28.6 s, 1.59 s |
+| MRCC / zccsdt per iteration | 8.8 | 9.0 |
+| (P): MRCC | 205 s | 67.3 s |
+| (P): zccsdt | 16.1 s | 3.71 s |
+| MRCC / zccsdt for (P) | 12.7 | 18 |
+| E(CCSDTQ): MRCC, zccsdt | -76.243786573522, -76.243786573525 | -2605.103035301217, -2605.103035301215 |
+| E(CCSDTQ(P)): MRCC, zccsdt | -76.243801090687, -76.243801090690 | -2605.103034463946, -2605.103034463944 |
+| the whole step: MRCC (CCSDTQ, (P)); zccsdt (CCSDT, (Q), CCSDTQ, (P)) | 1202 s; 100 s | 415 s; 39 s |
+| memory: zccsdt (peak of CCSDTQ, of (P)), MRCC (allocated, besides its files) | 6.1 GB, 1.0 GB; 0.7 GB | 3.3 GB, 0.6 GB; 0.3 GB |
 
+- The first round of these jobs, on another node (c108, jobs 31701602 and
+  31701603, zccsdt ac752e0), gave MRCC 40.1 and 14.1 s per iteration and
+  zccsdt 4.81 and 1.66 s: the two nodes agree to 1-2 % for MRCC, and the
+  ring products on separate threads (ed5bc1b) are the 4-7 % of zccsdt.
 - Convergence: MRCC to 1e-12 Eh in the energy, zccsdt to 1e-11 Eh and 1e-9
   in the step (norm of the changes of the full amplitudes); at the 17th
   iteration MRCC's energy still changes by 2e-10 Eh for H2O.
+- (P) of zccsdt is as long as 3.6 (H2O) and 2.3 (HBr) of its CCSDTQ
+  iterations, that of MRCC as 5.2 and 4.7 of its own.  E(P) is -1.4517e-5
+  Eh for H2O and +8.3727e-7 Eh for HBr in both programs.
 - zccsdt takes more memory than it must at this size: the batches of its
   products are 1 GB by default and the eight DIIS vectors of T4 are in
   memory.  With `max_memory` set the batches shrink and the vectors go to
-  the scratch file; the floor is T4, its residual and the six-index
-  intermediate (0.76 GB for H2O here).
+  the scratch file.
 - MRCC's count of operations is 7.7e12 per iteration for H2O (its own
   estimate, with its symmetry), zccsdt's products take about 8e11
   (multiplications and additions, without symmetry): the factorization -
@@ -3215,14 +3242,6 @@ ac752e0, three iterations each):
 Complex / real is 2.8.  The larger case has 14 times the quadruples and
 takes 16 times as long: at 10 + 38 the products of one occupied quadruple
 or triple are too small for the threaded BLAS (5.7 of 8 cores busy).
-
-### (P)
-
-MRCC, in the two jobs of the table above, takes 205 s for (P) of H2O /
-cc-pVDZ (10 + 38; 63,244,692 pentuples in its two irreps) and 67 s for HBr
-(8 + 38; 14,054,376) after its CCSDTQ iterations.  The energies - on the
-same integrals, 8 + 16 and 10 + 16 - are in the first table of this
-section.
 
 ### Where the time of a CCSDTQ iteration goes
 
