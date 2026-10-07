@@ -1,6 +1,6 @@
-'''(Q) in symmetry sectors against the dense (Q), one after the other on the
-same amplitudes: a linear molecule on the z axis with X2C spinors (labels
-2 m_j).
+'''CCSDT and (Q) in the blocks of the symmetry labels against the dense
+code: a linear molecule on the z axis with X2C spinors (labels 2 m_j), the
+whole calculation once with ``symmetry`` and once without.
 
 usage: python bench/sym_q.py GEOM BASIS FROZEN [NVIR]
        e.g.  python bench/sym_q.py 'Br 0 0 0; H 0 0 1.4145' cc-pvtz-dk 28
@@ -20,13 +20,12 @@ mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-8
 mf.kernel()
 order = np.argsort(mf.mo_energy)
 nocc = int((mf.mo_occ > 0).sum())
-cc = zccsdt.GCCSDT(mf, frozen=list(order[:frozen]) + ([] if nvir is None else list(order[nocc + nvir:])))
-cc.verbose = 4
-cc.conv_tol, cc.conv_tol_normt = 1e-10, 1e-8
-cc.kernel()
 out = {}
-for sym in (True, False, True):
-    cc.symmetry = sym
+for sym in (True, False):
+    cc = zccsdt.GCCSDT(mf, frozen=list(order[:frozen]) + ([] if nvir is None else list(order[nocc + nvir:])))
+    cc.verbose, cc.symmetry = 4, sym
+    cc.conv_tol, cc.conv_tol_normt = 1e-10, 1e-8
+    cc.kernel()
     cc.ccsdt_q()
-    out[sym] = (cc.e_q5, cc.e_q)
-print('sectors - dense: E[Q] %.1e  E(Q) %.1e' % tuple(np.subtract(out[True], out[False])))
+    out[sym] = (cc.e_corr, cc.e_q5, cc.e_q)
+print('blocks - dense: E(CCSDT) %.1e  E[Q] %.1e  E(Q) %.1e' % tuple(np.subtract(out[True], out[False])))
