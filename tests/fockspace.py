@@ -118,3 +118,179 @@ def random_integrals(rng, n):
     x = x - x.transpose(1, 0, 2, 3)
     x = x - x.transpose(0, 1, 3, 2)
     return x + x.transpose(2, 3, 0, 1)
+
+
+# ---------------------------------------------------------------------------
+# The left-hand state of coupled-cluster theory, exactly: complex amplitudes,
+# the similarity-transformed Hamiltonian as a matrix, the Lambda equations as
+# a linear system, densities as expectation values.
+
+def unique_tuples(n, k):
+    return list(combinations(range(n), k))
+
+
+class Left:
+    '''exp(-T) H exp(T) and the left-hand state <0| (1 + Lambda) for
+    H = sum h[p,q] p+ q + 1/4 sum <pq||rs> p+ q+ s r, given by its Fock
+    matrix f[p,q] = h[p,q] + sum_i <pi||qi> and <pq||rs>, and
+    T = sum of the excitation operators of ``amps`` = [t1, t2, ..] (dense
+    antisymmetric arrays, real or complex), in the Fock space ``fk``.
+
+    The excitation manifold is that of the amplitudes: all determinants
+    a+ b+ .. j i |0> of rank 1 .. len(amps), unique ones (i < j < .., a < b
+    < ..), rank after rank.  Vectors are over the whole Fock space; the bra
+    <x| of a vector x is its transpose, never its conjugate.'''
+
+    def __init__(self, fk, f, v, amps):
+        self.fk, self.f, self.v = fk, f, v
+        self.nrank = len(amps)
+        no, nv = fk.no, fk.nv
+        self.H = (one_body(fk, f) + fk.two_body(v)).tocsr()
+        self.T = None
+        for t in amps:
+            x = fk.excitation(t)
+            self.T = x if self.T is None else self.T + x
+        self.T = self.T.tocsr()
+        self.index = [(k, occ, vir) for k in range(1, self.nrank + 1)
+                      for occ in unique_tuples(no, k) for vir in unique_tuples(nv, k)]
+        self.dets = np.array([self.det(occ, vir) for _, occ, vir in self.index]).T
+        self.right = self.exp(fk.ref.astype(complex), 1)
+
+    def det(self, occ, vir):
+        '''a+ b+ .. j i |0>.'''
+        fk = self.fk
+        x = fk.ref
+        for i in occ:
+            x = fk.a[i] @ x
+        for a in reversed(vir):
+            x = fk.ad[fk.no + a] @ x
+        return x
+
+    def tau(self, occ, vir):
+        '''a+ b+ .. j i as a matrix.'''
+        fk = self.fk
+        op = sp.identity(2 ** fk.n, format='csr')
+        for a in vir:
+            op = op @ fk.ad[fk.no + a]
+        for i in reversed(occ):
+            op = op @ fk.a[i]
+        return op
+
+    def exp(self, x, sign, left=False):
+        '''exp(sign T) x (``left``: x exp(sign T), x a bra).'''
+        T = self.T.T if left else self.T
+        out = term = np.asarray(x, dtype=complex)
+        for k in range(1, self.fk.n + 1):
+            term = sign * (T @ term) / k
+            out = out + term
+        return out
+
+    def hbar(self, x):
+        '''exp(-T) H exp(T) x.'''
+        return self.exp(self.H @ self.exp(x, 1), -1)
+
+    def hbar_left(self, x):
+        '''x exp(-T) H exp(T) for the bra x.'''
+        return self.exp(self.H.T @ self.exp(x, -1, left=True), 1, left=True)
+
+    def energy(self):
+        '''<0| Hbar |0>, with the energy of the reference.'''
+        return self.fk.ref @ self.hbar(self.fk.ref)
+
+    def e_ref(self):
+        return self.fk.ref @ (self.H @ self.fk.ref)
+
+    def residuals(self):
+        '''<Phi_mu| Hbar |0> over the excitation manifold.'''
+        return self.dets.T @ self.hbar(self.fk.ref)
+
+    def bra(self, lam):
+        '''<0| (1 + Lambda) for the coefficients ``lam`` over the manifold.'''
+        return self.fk.ref + self.dets @ np.asarray(lam)
+
+    def solve(self):
+        '''The coefficients of Lambda over the manifold from
+        <0| (1 + Lambda) (Hbar - E) |Phi_mu> = 0 for all mu of it: a linear
+        system with the matrix of Hbar among the determinants.'''
+        E = self.energy()
+        cols = np.array([self.hbar(d) for d in self.dets.T]).T          # Hbar |mu>
+        A = self.dets.T @ cols - E * np.eye(len(self.index))            # <nu| Hbar - E |mu>
+        b = self.fk.ref @ cols                                          # <0| Hbar |mu>
+        return np.linalg.solve(A.T, -b)
+
+    def lambda_residual(self, lam):
+        '''<0| (1 + Lambda) [Hbar, tau_mu] |0> over the manifold, for any
+        amplitudes (zero for the solution if T solves its equations).'''
+        bra = self.bra(lam)
+        first = self.hbar_left(bra) @ self.dets                         # <0|(1+L) Hbar tau |0>
+        hb = self.hbar(self.fk.ref)
+        second = np.array([bra @ (self.tau(occ, vir) @ hb) for _, occ, vir in self.index])
+        return first - second
+
+    def tensors(self, x):
+        '''A vector over the manifold as dense antisymmetric arrays
+        [x1[i,a], x2[i,j,a,b], ..].'''
+        no, nv = self.fk.no, self.fk.nv
+        out = [np.zeros((no,) * k + (nv,) * k, dtype=np.result_type(x)) for k in range(1, self.nrank + 1)]
+        from itertools import permutations
+        for val, (k, occ, vir) in zip(x, self.index):
+            for po in permutations(range(k)):
+                for pv in permutations(range(k)):
+                    idx = tuple(occ[y] for y in po) + tuple(vir[y] for y in pv)
+                    out[k - 1][idx] = _sign(po) * _sign(pv) * val
+        return out
+
+    def vector(self, tensors):
+        '''The inverse of tensors().'''
+        return np.array([tensors[k - 1][occ + vir] for k, occ, vir in self.index])
+
+    def expectation(self, lam, op):
+        '''<0| (1 + Lambda) exp(-T) op exp(T) |0>.'''
+        return self.exp(self.bra(lam), -1, left=True) @ (op @ self.right)
+
+    def rdm1(self, lam):
+        '''d1[p,q] = <0| (1 + Lambda) exp(-T) p+ q exp(T) |0>.'''
+        fk = self.fk
+        left = self.exp(self.bra(lam), -1, left=True)
+        L = [fk.a[p] @ left for p in range(fk.n)]                       # <left| p+
+        R = [fk.a[q] @ self.right for q in range(fk.n)]
+        return np.array([[l @ r for r in R] for l in L])
+
+    def rdm2(self, lam):
+        '''d2[p,q,r,s] = <0| (1 + Lambda) exp(-T) p+ q+ s r exp(T) |0>.'''
+        fk = self.fk
+        n = fk.n
+        left = self.exp(self.bra(lam), -1, left=True)
+        pairs = list(combinations(range(n), 2))
+        L = np.array([fk.a[q] @ (fk.a[p] @ left) for p, q in pairs])    # <left| p+ q+
+        R = np.array([fk.a[s] @ (fk.a[r] @ self.right) for r, s in pairs])
+        m = L @ R.T
+        out = np.zeros((n,) * 4, dtype=complex)
+        for x, (p, q) in enumerate(pairs):
+            for y, (r, s) in enumerate(pairs):
+                out[p, q, r, s] = out[q, p, s, r] = m[x, y]
+                out[q, p, r, s] = out[p, q, s, r] = -m[x, y]
+        return out
+
+
+def one_body(fk, f):
+    '''sum f[p,q] p+ q.'''
+    op = sp.csr_matrix((2 ** fk.n,) * 2, dtype=np.result_type(f))
+    for p in range(fk.n):
+        for q in range(fk.n):
+            if f[p, q] != 0:
+                op = op + f[p, q] * (fk.ad[p] @ fk.a[q])
+    return op
+
+
+def hermitian_integrals(rng, n):
+    '''Random complex <pq||rs>, antisymmetric in (p,q) and in (r,s),
+    <pq||rs> = conj(<rs||pq>).'''
+    x = rng.standard_normal((n,) * 4) + 1j * rng.standard_normal((n,) * 4)
+    x = x - x.transpose(1, 0, 2, 3)
+    x = x - x.transpose(0, 1, 3, 2)
+    return x + x.transpose(2, 3, 0, 1).conj()
+
+
+def complex_antisym(rng, no, nv, k, scale=1.0):
+    return scale * (random_antisym(rng, no, nv, k) + 1j * random_antisym(rng, no, nv, k))
