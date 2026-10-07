@@ -274,6 +274,23 @@ def test_solver_plan():
     assert mid.need > 0.9 * budgets[len(plans) // 4] or mid.batch_bytes == T.BATCH_BYTES
     with pytest.raises(MemoryError, match='CCSDTQ needs'):
         ccsdtq.plan(no, nv, isz, full.floor - 1)
+    # the buffers of the CCSDT step: the smallest at the floor, growing once the batches of
+    # the engine are full, before the DIIS vectors come into memory
+    need = lambda mb: int(3e8 + 0.7e6 * mb)
+    kw = dict(step_need=need, mem_mb=2000.0)
+    full = ccsdtq.plan(no, nv, isz, **kw)
+    assert full.mem_mb == 2000.0 and full.floor == ccsdtq.plan(no, nv, isz, step_bytes=need(ccsdtq.STEP_MB)).floor
+    budgets = np.linspace(full.floor, ccsdtq.plan(no, nv, isz, incore_complete=True, **kw).need * 1.05, 120)
+    plans = [ccsdtq.plan(no, nv, isz, int(b), **kw) for b in budgets]
+    for a, b in zip(plans, plans[1:]):
+        assert a.batch_bytes <= b.batch_bytes and a.mem_mb <= b.mem_mb and a.diis_file >= b.diis_file
+        assert b.mem_mb == ccsdtq.STEP_MB or b.batch_bytes == T.BATCH_BYTES
+        assert b.diis_file or b.mem_mb == 2000.0
+    assert all(p.need <= b for p, b in zip(plans, budgets))
+    assert plans[0].mem_mb == ccsdtq.STEP_MB and plans[-1].mem_mb == 2000.0 and not plans[-1].diis_file
+    assert len({p.mem_mb for p in plans}) > 2
+    with pytest.raises(MemoryError, match='CCSDTQ needs'):
+        ccsdtq.plan(no, nv, isz, full.floor - 1, **kw)
 
 
 def test_solver_memory():

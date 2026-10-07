@@ -43,6 +43,9 @@ class Options:
     callback: object = None     # callback(info) after every iteration
 
 
+STEP_MB = 100.0                 # the batch buffers of the CCSDT step when memory is short
+
+
 @dataclass
 class Plan:
     '''Where the memory of a CCSDTQ calculation goes (plan()).'''
@@ -51,6 +54,7 @@ class Plan:
     need: int                   # bytes of ordinary memory besides the integrals
     floor: int                  # the least that a calculation takes
     t4: int                     # bytes of T4
+    mem_mb: float = None        # batch buffers of the CCSDT step (None: as the options say)
 
 
 def _dressed_bytes(no, nv, isz):
@@ -60,23 +64,37 @@ def _dressed_bytes(no, nv, isz):
     return isz * (nQ * nQ + nv * nv * nQ + 2 * nQ * nv * no + 4 * no * nv ** 3 + 4 * (no * nv) ** 2)
 
 
-def plan(nocc, nvir, isz, budget=None, diis_space=8, incore_complete=False, step_bytes=0):
+def plan(nocc, nvir, isz, budget=None, diis_space=8, incore_complete=False, step_bytes=0, step_need=None,
+         mem_mb=2000.0):
     '''The Plan for ``budget`` bytes of ordinary memory (None: no limit).
     T4, its residual and the six-index intermediate Xv of the engine are
-    held in memory: that, with the smallest batches and the DIIS vectors in
-    the scratch file, is the floor (MemoryError below it).  From there the
-    batches of the engine grow, up to its default; with what is left then
-    the DIIS vectors of T4 stay in memory (``incore_complete``: in any
-    case).  ``step_bytes``: what the CCSDT step takes (its own plan).'''
+    held in memory: that, with the smallest batches, the smallest buffers of
+    the CCSDT step and the DIIS vectors in the scratch file, is the floor
+    (MemoryError below it).  From there the batches of the engine grow, up
+    to their default; then the buffers of the CCSDT step, up to ``mem_mb``;
+    with what is left then the DIIS vectors of T4 stay in memory
+    (``incore_complete``: in any case) - one after the other, so that no
+    part of a plan shrinks when the budget grows.  What the CCSDT step
+    takes: ``step_need(mem_mb)`` bytes (its own plan for these buffers), or
+    ``step_bytes`` whatever the buffers.'''
     t4 = isz * comb(nocc, 4) * comb(nvir, 4)
     t3 = isz * comb(nocc, 3) * comb(nvir, 3)
-    fixed = step_bytes + t4 + t3 + _dressed_bytes(nocc, nvir, isz)
+    if step_need is None:
+        def step_need(mb):
+            return step_bytes
+    least_mb = min(mem_mb, STEP_MB)
+    step_lo = step_need(least_mb)
+    rest_fixed = t4 + t3 + _dressed_bytes(nocc, nvir, isz)
     lo, top = t4engine.min_batch_bytes(nocc, nvir, isz), t4engine.BATCH_BYTES
     top = max(lo, top)
     diis = 2 * diis_space * (t4 + t3)
-    floor = fixed + t4engine.memory(nocc, nvir, isz, lo) + (diis if incore_complete else 0)
+    pinned = diis if incore_complete else 0
+    floor = step_lo + rest_fixed + t4engine.memory(nocc, nvir, isz, lo) + pinned
+
+    def engine(batch):
+        return t4engine.memory(nocc, nvir, isz, batch)
     if budget is None:
-        batch = top
+        batch, mb = top, mem_mb
         on_file = not incore_complete and comb(nocc, 4) * comb(nvir, 4) >= INCORE_SIZE
     else:
         if budget < floor:
@@ -84,22 +102,46 @@ def plan(nocc, nvir, isz, budget=None, diis_space=8, incore_complete=False, step
                 'CCSDTQ needs %.0f MB besides the integrals for %d occupied and %d virtual spin orbitals '
                 '(T4 and its residual: %.0f MB each); %.0f MB are left'
                 % (floor / 1e6, nocc, nvir, t4 / 1e6, budget / 1e6))
-        rest = budget - fixed - (diis if incore_complete else 0)
+        rest = budget - step_lo - rest_fixed - pinned
         # the largest batch that fits: memory() grows with it
-        if t4engine.memory(nocc, nvir, isz, top) <= rest:
+        if engine(top) <= rest:
             batch = top
         else:
             batch, hi = lo, top
             while hi - batch > max(1 << 16, batch // 64):
                 mid = (batch + hi) // 2
-                if t4engine.memory(nocc, nvir, isz, mid) <= rest:
+                if engine(mid) <= rest:
                     batch = mid
                 else:
                     hi = mid
+        mb = least_mb
+        if batch == top and mem_mb > least_mb:
+            room = rest - engine(top) + step_lo
+            if step_need(mem_mb) <= room:
+                mb = mem_mb
+            else:
+                a, b = least_mb, mem_mb
+                for _ in range(24):
+                    mid = 0.5 * (a + b)
+                    a, b = (mid, b) if step_need(mid) <= room else (a, mid)
+                mb = a
         on_file = not incore_complete and not (
-            batch == top and fixed + t4engine.memory(nocc, nvir, isz, batch) + diis <= budget)
-    need = fixed + t4engine.memory(nocc, nvir, isz, batch) + (0 if on_file else diis)
-    return Plan(int(batch), bool(on_file), int(need), int(floor), int(t4))
+            batch == top and mb == mem_mb and step_need(mb) + rest_fixed + engine(batch) + diis <= budget)
+    need = step_need(mb) + rest_fixed + engine(batch) + (0 if on_file else diis)
+    return Plan(int(batch), bool(on_file), int(need), int(floor), int(t4), float(mb))
+
+
+def plan_for(eris, dtype, max_memory=None, diis_space=8, incore_complete=False, mem_mb=2000.0):
+    '''The Plan of a calculation on the integral container ``eris``:
+    ``max_memory`` MB for the whole process (None: what the node and the
+    job leave).'''
+    nocc = eris.nocc
+    nvir = np.asarray(eris.fock).shape[0] - nocc
+
+    def step_need(mb):
+        return ccsdt_opt.plan_for(eris, dtype, solver.Options(mem_mb=mb, incore_complete=True)).need
+    return plan(nocc, nvir, np.dtype(dtype).itemsize, memory.budget(max_memory), diis_space, incore_complete,
+                step_need=step_need, mem_mb=mem_mb)
 
 
 @dataclass
@@ -143,10 +185,10 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     d2 = eo[P.tuples(nocc, 2)].sum(axis=1)[:, None] - ev[P.tuples(nvir, 2)].sum(axis=1)[None, :]
     d3 = (eo[P.tuples(nocc, 3)].sum(axis=1)[:, None] - P.tuple_sums(ev, 3)[None, :]).ravel() if nI3 else 0
     eo4, ev4 = eo[P.tuples(nocc, 4)].sum(axis=1), P.tuple_sums(ev, 4)
-    step = solver.Options(mem_mb=opts.mem_mb)                   # (of the CCSDT step: no level shift)
-    step_plan = ccsdt_opt.plan_for(eris, dtype, solver.Options(mem_mb=opts.mem_mb, incore_complete=True))
-    pl = opts.plan or plan(nocc, nvir, np.dtype(dtype).itemsize, memory.budget(opts.max_memory),
-                           opts.diis_space, opts.incore_complete, step_plan.need)
+    pl = opts.plan or plan_for(eris, dtype, opts.max_memory, opts.diis_space, opts.incore_complete, opts.mem_mb)
+    mem_mb = opts.mem_mb if pl.mem_mb is None else pl.mem_mb
+    step = solver.Options(mem_mb=mem_mb)                        # (of the CCSDT step: no level shift)
+    step_plan = ccsdt_opt.plan_for(eris, dtype, solver.Options(mem_mb=mem_mb, incore_complete=True))
     adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=not pl.diis_file,
                  incore_size=min(INCORE_SIZE, max(1, nI * nA)))
     e_old = ccsd.energy(t1, t2, eris)
@@ -155,8 +197,7 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
         for cycle in range(opts.max_cycle):
             t0, c0 = time.perf_counter(), time.process_time()
             with timer('ccsdtq.t3'):
-                t1n, t2n, t3n = ccsdt_opt.update_amps(step, t1, t2, T3, eris, mem_mb=opts.mem_mb,
-                                                      plan=step_plan)
+                t1n, t2n, t3n = ccsdt_opt.update_amps(step, t1, t2, T3, eris, mem_mb=mem_mb, plan=step_plan)
             with timer('ccsdtq.dress'):
                 ints = t4engine.Dressed.from_eris(eris, t1)
             with timer('ccsdtq.t4'):

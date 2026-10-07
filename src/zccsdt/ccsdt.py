@@ -1132,7 +1132,7 @@ class GCCSDTQ(GCCSDT):
 
     def ccsdtq(self, t1, t2, t3, t4=None):
         from math import comb
-        from zccsdt.cc import ccsdt_opt, ccsdtq, solver
+        from zccsdt.cc import ccsdtq
         log = logger.new_logger(self)
         cput0 = log.init_timer()
         pr = _Printer(log)
@@ -1151,12 +1151,13 @@ class GCCSDTQ(GCCSDT):
         pr.kv('convergence', '|dE| < %g Eh and %s < %g; at most %d iterations'
               % (self.conv_tol, self._norm_name, normt, self.max_cycle))
         pr.kv('memory', self._budget_text())
-        step = ccsdt_opt.plan_for(eris, dtype, solver.Options(incore_complete=True)).need
-        plan = self.plan if isinstance(self.plan, ccsdtq.Plan) else ccsdtq.plan(
-            no, nv, isz, memory.budget(self.max_memory), self.diis_space, self.incore_complete, step)
+        plan = self.plan if isinstance(self.plan, ccsdtq.Plan) else ccsdtq.plan_for(
+            eris, dtype, self.max_memory, self.diis_space, self.incore_complete)
         pr.kv('memory plan', 'needs %s next to the integrals: T4, its residual and the six-index '
               'intermediate in memory' % _size(plan.need))
-        pr.kv('batches', 'products of the T4 equation in batches of %s' % _size(plan.batch_bytes), indent=3)
+        pr.kv('batches', 'products of the T4 equation in batches of %s%s'
+              % (_size(plan.batch_bytes), '' if plan.mem_mb in (None, 2000.0) else
+                 '; the CCSDT step with buffers of %.0f MB' % plan.mem_mb), indent=3)
         pr.kv('DIIS', '%d vectors, those of T4 in %s' % (
             self.diis_space, (self.diis_file or 'a scratch file') if plan.diis_file else 'memory'), indent=3)
         pr.rule()
