@@ -247,3 +247,31 @@ def test_hbr_turned_off_the_axis():
     assert abs(cc.e_corr - corr('e_ccsdtq')) < 2e-10
     assert abs(cc.e_corr + e_p - corr('e_ccsdtq(p)')) < 2e-10
     assert abs(e_p - (ref['e_ccsdtq(p)'] - ref['e_ccsdtq'])) < 3e-12
+
+
+def test_frozen_and_dropped_spinors_by_a_list(hbr):
+    '''zccsdt.CCSDT on the X2C object with frozen as a list of spinors, as
+    in PySCF - the 28 of the core and the virtual ones above the sixteenth:
+    the space of the reference of MRCC, by the front end alone.'''
+    ref = REFS['hbr_ccpvdzdk_x2c_mdcint']['recommended']
+    order = np.argsort(hbr.mo_energy)
+    frozen = list(order[:28]) + list(order[36 + 16:])
+    buf = io.StringIO()
+    cc = zccsdt.CCSDT(hbr, frozen=frozen)
+    assert isinstance(cc, zccsdt.GCCSDT) and cc.ncore == 28
+    cc.stdout, cc.verbose = buf, 4
+    cc.conv_tol, cc.conv_tol_normt = 1e-11, 1e-9
+    cc.kernel()
+    assert '8 occupied, 16 virtual spinors; 28 frozen, 12 virtual ones dropped' in buf.getvalue()
+    assert cc._eris.nocc == 8 and cc._eris.nmo == 24
+    e_q = cc.ccsdt_q()
+    corr = lambda key: ref[key] - ref['e_scf']
+    assert abs(cc.e_corr - corr('e_ccsdt')) < 2e-10
+    assert abs(cc.e_corr + cc.e_q5 - corr('e_ccsdt[q]')) < 2e-10 and abs(cc.e_corr + e_q - corr('e_ccsdt(q)')) < 2e-10
+    # a number is the lowest occupied ones
+    assert zccsdt.GCCSDT(hbr, frozen=28)._active()[0].tolist() == sorted(order[:28].tolist())
+    with pytest.raises(ValueError):
+        zccsdt.GCCSDT(hbr, frozen=[64]).ncore
+    with pytest.raises(NotImplementedError):
+        zccsdt.CCSDTQ(scf.RHF(gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='sto-3g', verbose=0)).run(),
+                      frozen=[0])

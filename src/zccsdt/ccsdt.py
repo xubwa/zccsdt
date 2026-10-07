@@ -296,10 +296,12 @@ class CCSDTBase(lib.StreamObject):
             operator) goes to scratch files (ZCCSDT_TMPDIR, else PySCF's
             TMPDIR) and the passes are sliced; see docs/factorization.md and
             docs/spin_adapted.md.
-        frozen : int
+        frozen : int or list
             Number of frozen core orbitals: spatial orbitals (RCCSDT), per
             spin (UCCSDT), spin orbitals or spinors (GCCSDT).  Default 0.
-            set_frozen() freezes the chemical core.
+            set_frozen() freezes the chemical core.  For spin orbitals and
+            spinors (GCCSDT, GCCSDTQ) also a list of indices, as in PySCF:
+            occupied ones are frozen, virtual ones dropped.
         conv_tol : float
             Convergence threshold of the correlation energy (Eh).  Default 1e-10.
         conv_tol_normt : float
@@ -960,12 +962,32 @@ class GCCSDT(UCCSDT):
     _subtitle = 'CCSDT on spin orbitals or spinors (GHF, X2C), real or complex'
     _frozen_unit = 2
 
+    def _active(self):
+        '''(frozen occupied, active occupied, active virtual, dropped
+        virtual) spin orbitals or spinors, as indices into mo_coeff.
+        ``frozen``: a number - the lowest occupied ones - or, as in PySCF, a
+        list of indices: occupied ones are frozen, virtual ones dropped.'''
+        mo_occ = np.asarray(self.mo_occ)
+        occ, vir = np.where(mo_occ > 0)[0], np.where(mo_occ == 0)[0]
+        fr = self.frozen
+        if fr is None or isinstance(fr, (int, np.integer)):
+            n = int(fr or 0)
+            return occ[:n], occ[n:], vir, vir[:0]
+        fr = np.unique(np.asarray(fr, dtype=np.int64))
+        if len(fr) and (fr[0] < 0 or fr[-1] >= len(mo_occ)):
+            raise ValueError('%s: frozen = %s for %d orbitals' % (self.__class__.__name__, fr, len(mo_occ)))
+        return (np.intersect1d(occ, fr), np.setdiff1d(occ, fr), np.setdiff1d(vir, fr), np.intersect1d(vir, fr))
+
+    @property
+    def ncore(self):
+        '''Number of frozen occupied spin orbitals or spinors.'''
+        return len(self._active()[0])
+
     def _orbital_lines(self):
-        occ = np.asarray(self.mo_occ) > 0
-        nocc = int(occ.sum()) - self.ncore
+        fo, o, v, fv = self._active()
         kind = 'spinors' if self._kind() == 'spinor' else 'spin orbitals'
-        return [('orbitals', '%d occupied, %d virtual %s; %d frozen'
-                 % (nocc, len(occ) - int(occ.sum()), kind, self.ncore))]
+        return [('orbitals', '%d occupied, %d virtual %s; %d frozen%s'
+                 % (len(o), len(v), kind, len(fo), ', %d virtual ones dropped' % len(fv) if len(fv) else ''))]
 
     @classmethod
     def from_integrals(cls, eris, verbose=logger.NOTE, stdout=None):
@@ -982,13 +1004,17 @@ class GCCSDT(UCCSDT):
 
     def ao2mo(self):
         from zccsdt import eris
+        fo, o, v, fv = self._active()
         if isinstance(self._scf, _Given):
-            if self.ncore:
+            if len(fo) or len(fv):
                 raise RuntimeError('%s: the integrals were given; nothing can be frozen here'
                                    % self.__class__.__name__)
             return self._scf.eris
-        return eris.from_scf(self._scf, mo_coeff=self.mo_coeff, mo_occ=self.mo_occ,
-                             frozen=self.ncore, packed_vvvv=True, max_memory=self.max_memory)
+        # (the columns: frozen occupied first, the dropped virtual ones left out)
+        cols = np.concatenate((fo, o, v))
+        return eris.from_scf(self._scf, mo_coeff=np.asarray(self.mo_coeff)[:, cols],
+                             mo_occ=np.asarray(self.mo_occ)[cols], frozen=len(fo), packed_vvvv=True,
+                             max_memory=self.max_memory)
 
     def _amplitude_lines(self, eris):
         from zccsdt.scratch import is_mapped
@@ -1006,8 +1032,7 @@ class GCCSDT(UCCSDT):
                     'a scratch file' if is_mapped(vpp) else 'memory'))]
 
     def _labels(self, eris):
-        occ = np.where(np.asarray(self.mo_occ) > 0)[0][self.ncore:]
-        vir = np.where(np.asarray(self.mo_occ) == 0)[0]
+        _, occ, vir, _ = self._active()
         num = getattr(eris, 'spinors', None)        # (their numbers where the integrals were made)
         if num is not None:
             occ, vir = num[:eris.nocc], num[eris.nocc:]
@@ -1232,6 +1257,9 @@ def CCSDTQ(mf, frozen=None, mo_coeff=None, mo_occ=None):
         return GCCSDTQ(mf, frozen, mo_coeff, mo_occ)
     if mo_coeff is not None or mo_occ is not None:
         raise NotImplementedError('CCSDTQ with given orbitals needs a GHF or X2C reference')
+    if frozen is not None and not isinstance(frozen, (int, np.integer)):
+        raise NotImplementedError('CCSDTQ: a list of frozen orbitals needs a GHF or X2C reference '
+                                  '(scf.addons.convert_to_ghf(mf): the list is then one of spin orbitals)')
     return GCCSDTQ(scf.addons.convert_to_ghf(mf), None if frozen is None else 2 * int(frozen))
 
 
