@@ -2,19 +2,27 @@
 files MRCONEE and MDCINT of an X2C calculation on BH in tests/data/dirac -
 with C2v, real integrals, and without symmetry, complex ones - against
 DIRAC's own SCF and CCSD and against the relativistic CCSDT, CCSDT(Q) and
-CCSDTQ of MRCC on the same integrals (bench/refs: bh_sto2g_x2c_dirac).'''
+CCSDTQ of MRCC on the same integrals (bench/refs: bh_sto2g_x2c_dirac).
+
+The other direction: the spinors of PySCF in Kramers pairs, their integrals
+written in DIRAC's format and read back, and the energies of MRCC on the
+files written that way (HBr with the X2C Hamiltonian: hbr_ccpvdzdk_x2c_mdcint).'''
+import io
 import json
 import lzma
 import os
 
 import numpy as np
 import pytest
+from pyscf import gto, scf, x2c
 
-from zccsdt import dirac
+import zccsdt
+from zccsdt import dirac, eris as E
 from zccsdt.cc import ccsdtq, quadruples, solver
 
 HERE = os.path.dirname(__file__)
-REF = json.load(open(os.path.join(HERE, '..', 'bench', 'refs', 'reference_energies.json')))['bh_sto2g_x2c_dirac']
+REFS = json.load(open(os.path.join(HERE, '..', 'bench', 'refs', 'reference_energies.json')))
+REF = REFS['bh_sto2g_x2c_dirac']
 
 
 @pytest.fixture(scope='module')
@@ -92,3 +100,87 @@ def test_cc_on_dirac_integrals(files, sym):
     rq = ccsdtq.kernel(eris, ccsdtq.Options(conv_tol=1e-12, conv_tol_normt=1e-9), t1=rt.t1, t2=rt.t2, t3=rt.t3)
     assert rq.converged and abs(rq.e_tot - ref['e_ccsdtq']) < 1e-10
     assert rq.t4.dtype == eris.dtype
+
+
+def test_mrconee_as_dirac_writes_it(files, tmp_path):
+    '''write_mrconee: the file of DIRAC byte for byte (the real group); the
+    other kinds of groups are not written.'''
+    path = str(tmp_path / 'MRCONEE')
+    dirac.write_mrconee(path, dirac.read(*files['c2v']))
+    assert open(path, 'rb').read() == open(files['c2v'][0], 'rb').read()
+    with pytest.raises(NotImplementedError):
+        dirac.write_mrconee(path, dirac.read(*files['c1']))
+
+
+@pytest.fixture(scope='module')
+def hbr():
+    mol = gto.M(atom='Br 0 0 0; H 0 0 1.4145', basis='cc-pvdz-dk', verbose=0)
+    mf = x2c.UHF(mol)
+    mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-8
+    mf.kernel()
+    return mf
+
+
+def test_kramers_pairs(hbr):
+    '''The X2C spinors of HBr on the z axis in pairs (psi, T psi): real,
+    T^2 = -1, orthonormal, the Fock matrix diagonal with the spinor
+    energies, the unbarred ones of m_j = 1/2, -3/2, 5/2 and never coupled
+    to a barred one; the 4p shell split by spin-orbit coupling.'''
+    Cu, Cb, e = dirac.kramers_pairs(hbr)
+    n = len(hbr.mo_energy)
+    assert Cu.shape == (n, n // 2) and not np.iscomplexobj(Cu) and not np.iscomplexobj(Cb)
+    assert abs(dirac.time_reversed(hbr, Cb) + Cu).max() == 0
+    S, F = hbr.get_ovlp(), hbr.get_fock()
+    C = np.hstack((Cu, Cb))
+    assert abs(C.T @ S @ C - np.eye(n)).max() < 1e-12
+    f = C.T @ F @ C
+    assert abs(f - np.diag(np.concatenate((e, e)))).max() < 1e-7
+    assert abs(np.sort(np.concatenate((e, e))) - np.sort(hbr.mo_energy)).max() < 1e-8
+    mj = np.einsum('mp,mn,n,np->p', Cu, S, dirac._jz(hbr), Cu).real
+    assert set(np.round(mj, 6)) <= {0.5, -1.5, 2.5} and len(set(np.round(mj, 6))) == 3
+    assert abs(Cu.T @ S @ Cb).max() == 0
+    assert 0.010 < e[17] - e[16] < 0.016                    # (4p pi: 13 mEh)
+
+
+@pytest.mark.parametrize('kind,frozen', [('ghf', 0), ('ghf', 2), ('x2c', 0), ('x2c', 2)])
+def test_own_integrals_written_and_read(tmp_path, kind, frozen):
+    '''integrals(): spin orbitals of RHF (H2O) and X2C spinors of a linear
+    molecule (BH), all active and with a frozen pair.  Real; written, they
+    are read back as they were (the barred half is made by the reader from
+    the relation of the pairs); the container has the SCF energy and gives
+    the CCSD energy of the integrals of the SCF object.'''
+    if kind == 'ghf':
+        mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587', basis='sto-3g', verbose=0)
+        mf = scf.addons.convert_to_ghf(scf.RHF(mol).run(conv_tol=1e-12))
+    else:
+        mf = x2c.UHF(gto.M(atom='B 0 0 0; H 0 0 1.2324', basis='sto-3g', verbose=0)).run(conv_tol=1e-13)
+    x = dirac.integrals(mf, frozen)
+    n = len(mf.mo_energy) - frozen
+    assert x.g.shape == (n,) * 4 and x.g.dtype == np.float64 and x.group_type == 1
+    assert list(x.nelec) == [(mf.mol.nelectron - frozen) // 2] * 2
+    count = dirac.write(str(tmp_path), x)
+    assert count == np.count_nonzero(abs(x.g[:n // 2]) > 1e-15)
+    y = dirac.read(str(tmp_path / 'MRCONEE'), str(tmp_path / 'MDCINT'), fill=False)
+    assert abs(y.g - x.g).max() < 1e-14 and abs(y.h - x.h).max() == 0 and y.e_core == x.e_core
+    assert abs(y.e_scf - mf.e_tot) < 1e-12 and list(y.nelec) == list(x.nelec)
+    eris = dirac.from_dirac(str(tmp_path / 'MRCONEE'), str(tmp_path / 'MDCINT'))
+    ref = E.from_scf(mf, frozen=frozen, packed_vvvv=True)
+    assert eris.nocc == ref.nocc and abs(eris.e_hf - mf.e_tot) < 1e-10
+    assert abs(eris.fock - np.diag(eris.fock.diagonal())).max() < 1e-7
+    opts = solver.Options(conv_tol=1e-12, conv_tol_normt=1e-9)
+    assert abs(solver.kernel(eris, 'ccsd', opts).e_tot - solver.kernel(ref, 'ccsd', opts).e_tot) < 1e-10
+    if frozen:
+        with pytest.raises(ValueError):
+            dirac.integrals(mf, 1)
+
+
+def test_what_cannot_be_paired():
+    '''A bent molecule with X2C spinors has no real integrals: refused, and
+    so is an open shell.'''
+    mf = x2c.UHF(gto.M(atom='C 0 0 0; H 0 0.87 0.67; H 0 -0.87 0.67', basis='sto-3g', verbose=0)).run(conv_tol=1e-12)
+    with pytest.raises(ValueError, match='linear molecule'):
+        dirac.kramers_pairs(mf)
+    mf = scf.addons.convert_to_ghf(scf.UHF(gto.M(atom='O 0 0 0; H 0 0 1', basis='sto-3g', spin=1, verbose=0)).run())
+    with pytest.raises(ValueError):
+        dirac.integrals(mf)
+

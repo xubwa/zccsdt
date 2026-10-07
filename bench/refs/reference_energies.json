@@ -549,5 +549,33 @@
    "e_ccsdtq(p)/A": -24.20416972062,
    "e_ccsdtq(p)/B": -24.204169721493
   }
+ },
+ "h2o_631g_pyscf_mdcint": {
+  "description": "H2O (O 0 0 0; H 0 +-0.757 0.587 Angstrom), 6-31G as built into PySCF, RHF as GHF spin orbitals: 10 occupied + 16 virtual, all active.  MO integrals of PySCF in Kramers pairs written as MRCONEE and MDCINT by zccsdt.dirac (bench/dirac/write_integrals.py); MRCC (release Feb 2018) through its interface to DIRAC (iface=dirac) on those files, the reference flagged as Hartree-Fock (bench/dirac/mrcc_rel.sh); zccsdt on the same files (bench/dirac/run_integrals.py) agrees to 1e-12.",
+  "recommended": {
+   "e_scf": -75.983948498106,
+   "e_ccsd": -76.119346383609,
+   "e_ccsd[t]": -76.120441613129,
+   "e_ccsd(t)": -76.120342806985,
+   "e_ccsdt": -76.12042524193,
+   "e_ccsdt[q]": -76.120873756589,
+   "e_ccsdt(q)": -76.120881746521,
+   "e_ccsdtq": -76.120856118031,
+   "e_ccsdtq(p)": -76.120864383878
+  }
+ },
+ "hbr_ccpvdzdk_x2c_mdcint": {
+  "description": "HBr on the z axis (1.4145 Angstrom), cc-pVDZ-DK of PySCF, X2C (pyscf.x2c.UHF, spinors adapted to m_j: real integrals), spin-orbit splitting of the Br 4p shell 13 mEh: 28 spinors frozen, 8 occupied + the 16 lowest virtual spinors active.  MO integrals of PySCF in Kramers pairs written as MRCONEE and MDCINT by zccsdt.dirac (bench/dirac/write_integrals.py); MRCC (release Feb 2018) through its interface to DIRAC (iface=dirac) on those files, the reference flagged as Hartree-Fock (bench/dirac/mrcc_rel.sh); zccsdt on the same files (bench/dirac/run_integrals.py) agrees to 1e-12.",
+  "recommended": {
+   "e_scf": -2604.846440770764,
+   "e_ccsd": -2604.934959554418,
+   "e_ccsd[t]": -2604.935663399241,
+   "e_ccsd(t)": -2604.935644656922,
+   "e_ccsdt": -2604.93575872969,
+   "e_ccsdt[q]": -2604.935855183769,
+   "e_ccsdt(q)": -2604.935858921859,
+   "e_ccsdtq": -2604.935868926205,
+   "e_ccsdtq(p)": -2604.935870892496
+  }
  }
 }

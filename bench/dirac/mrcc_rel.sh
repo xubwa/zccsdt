@@ -4,10 +4,13 @@
 #
 #   usage: bench/dirac/mrcc_rel.sh DIR 'CALC'      e.g.  ... run/bh 'CCSDT(Q)'
 #
-# DIR has MRCONEE and MDCINT of DIRAC (pam --get="MRCONEE MDCINT", .4INDEX,
-# a real group given explicitly in the .mol file: C2v, D2 or D2h - with the
-# linear supersymmetry that DIRAC finds itself MRCC stops at 'Invalid
-# spatial symmetry').  Three things that the interface does not do:
+# DIR has MRCONEE and MDCINT: those of DIRAC (pam --get="MRCONEE MDCINT",
+# .4INDEX, a real group given explicitly in the .mol file: C2v, D2 or D2h -
+# with the linear supersymmetry that DIRAC finds itself MRCC stops at
+# 'Invalid spatial symmetry'), or the integrals of a PySCF calculation
+# written by zccsdt.dirac (bench/dirac/write_integrals.py; zccsdt on the same
+# files: bench/dirac/run_integrals.py).  Three things that the interface
+# does not do:
 #
 # - DIRAC 23 writes one of the integrals related by a permutation; this MRCC
 #   (release of 2018) does not complete the list and its reference energy is
