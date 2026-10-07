@@ -20,11 +20,13 @@ arrays and the antisymmetrizing reductions):
   indices in two pairs times Wq, reduced over the splits (ab|cd).  The same
   view gives, by thin products, the T4 part of Xo and the T4 terms of R2
   and of R3 with <vm||vv>.
-- ring: T4 as t(m jkl; e bcd) in batches of the columns (bcd) times Wr,
-  the slabs of the four splits (i|jkl) of a quadruple summed and reduced
-  once over (a|bcd); the kernels walk through the block of columns.  The
-  same view gives the T4 part of Xv and the T4 terms of R3 with f_ov and
-  <oo||vo>.
+- ring: T4 as t(m jkl; e bcd) in batches of the columns (bcd), for every
+  occupied triple (jkl) the o - 3 indices m outside it, times the block of
+  Wr with i and m outside the triple - ((o - 3) / o)^2 of the product over
+  all i and m; the slabs of the four splits (i|jkl) of a quadruple summed
+  and reduced once over (a|bcd); the kernels walk through the block of
+  columns.  The same view gives the T4 part of Xv and the T4 terms of R3
+  with f_ov and <oo||vo>.
 - hh ladder: rows of T4 by two occupied pairs, in batches of columns.
 - the two products with a six-index intermediate and the two of T3 with
   T3: for one occupied quadruple at a time, as in (Q)
@@ -135,7 +137,7 @@ def _columns(no, nv, isz, batch_bytes):
 
     def cols(n, rows, passes):
         return int(min(n, max(-(-n // passes), batch_bytes // (isz * max(rows, 1)))))
-    return (cols(nQ, nQ, PASSES), cols(nA3, nv, PASSES), cols(nA3, no * nv * nI3, RING_PASSES),
+    return (cols(nQ, nQ, PASSES), cols(nA3, nv, PASSES), cols(nA3, max(no - 3, 1) * nv * nI3, RING_PASSES),
             cols(nA, nP * nP, RING_PASSES), cols(nI, nQ * nQ, nI))
 
 
@@ -146,7 +148,7 @@ def memory(no, nv, isz, batch_bytes=None):
     batch_bytes = batch_bytes or BATCH_BYTES
     nP, nQ, nI3, nA3, nI, nA = _sizes(no, nv)
     c22, c13, cring, chh, cpp = _columns(no, nv, isz, batch_bytes)
-    ov, n = no * nv, no + nv
+    ov, n, nmv = no * nv, no + nv, max(no - 3, 1) * nv
     # the layouts of T2 and of the integrals, the results
     small = 3 * nP * nQ + 2 * no * no * nQ + 2 * nP * nv * nv + nP * nv * no + nv * no * nQ + n * n
     res = nI * nA + nI3 * nA3 + nP * nQ
@@ -167,7 +169,8 @@ def memory(no, nv, isz, batch_bytes=None):
         first + y3 + hs + nQ * nQ + wsmall + w3 + xo + no * nP * nQ + 6 * nI3 * nQ,     # Xo
         kept + nQ * nQ + xv + no * nv * nP + nv * nv * ov * 2 + nv * nv * nQ + 2 * rows_w * nv * nv,    # Xv
         kept + nQ * nQ + xv + 2 * nQ * cpp * nQ + nI3 * nv * nQ + (no + 8) * n * nQ,    # pp ladder
-        kept + xv + 2 * ov * nI3 * cring + no * nP * cring + ov * ov + (no + 6) * n * ov + 3 * n * cring,   # ring
+        kept + xv + 2 * nmv * nI3 * cring + no * nP * cring + ov * ov + nmv * nmv + (no + 6) * n * ov
+        + (3 * n + 1) * cring,                                                  # ring
         kept + xv + 2 * nP * nP * chh + nP * nP,                                # hh ladder
         kept + xv + nQ * c22 + nv * c13 + 8 * n * nQ,                           # one occupied quadruple
     ]
@@ -181,8 +184,8 @@ def min_batch_bytes(no, nv, isz):
     of the pp ladder, the other products in their largest numbers of
     batches.'''
     nP, nQ, nI3, nA3, nI, nA = _sizes(no, nv)
-    return isz * max(nQ * nQ, no * nv * nI3 * -(-nA3 // RING_PASSES), nP * nP * -(-nA // RING_PASSES),
-                     nQ * -(-nQ // PASSES), nv * -(-nA3 // PASSES))
+    return isz * max(nQ * nQ, max(no - 3, 1) * nv * nI3 * -(-nA3 // RING_PASSES),
+                     nP * nP * -(-nA // RING_PASSES), nQ * -(-nQ // PASSES), nv * -(-nA3 // PASSES))
 
 
 class _Pool:
@@ -417,45 +420,67 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
             work.clear()
     del Wq
 
-    # ---- ring, in batches of the columns (bcd) of t(m jkl; e bcd); from the same view of T4
-    # the T4 part of Xv and the T4 terms of R3 with f_ov and <mn||ek>
-    if want('ring', 'b2'):
+    # ---- ring, in batches of the columns (bcd) of t(m jkl; e bcd), for every triple J = (jkl)
+    # the indices m outside it; from the same view of T4 the T4 part of Xv and the T4 terms of
+    # R3 with f_ov and <mn||ek>
+    if want('ring', 'b2') and nI:
         with timer('t4.ring'):
+            nm = no - 3
+            nmv = nm * nv
+            rest = np.array([np.setdiff1d(np.arange(no), J) for J in P.tuples(no, 3)]).reshape(nI3, nm)
+            place = np.zeros((nI3, no), dtype=np.int64)
+            np.put_along_axis(place, rest, np.arange(nm)[None, :], axis=1)
+            # the slab [e or a, K] of t(m J; e, K) and of the product at (i J; a, K): [J, m or i, e or a, K]
+            erow = np.repeat(np.arange(nI), 4)
+            slab = ((o13.idx2 * nm + place[o13.idx2, o13.idx1]) * nv).ravel()
+            esg = o13.sgn.ravel().astype(np.float64)
+            sel = (rest[:, :, None] * nv + np.arange(nv)).reshape(nI3, nmv)     # (m e), m outside J
             Wr2 = c_(Wr.transpose(3, 1, 0, 2)).reshape(no * nv, no * nv)        # [(i a), (m e)]
+            WJ = np.empty((nmv, nmv), dtype=dtype)
             fov_flat = fov.ravel()
             if want('b2'):
                 # per n: - 1/2 <mn||ek> as [k, (m e)] above 1/2 <mn||ef> as [e, (m f)]
                 GB = c_(np.concatenate((-0.5 * oovo.transpose(1, 3, 0, 2).reshape(no, no, no * nv),
                                         0.5 * oovv.transpose(1, 2, 0, 3).reshape(no, nv, no * nv)), axis=1))
-                L3 = np.empty((3 * (no + nv), no * nv), dtype=dtype)
-            erow, ebase, esg = P.occ_expand(o13, nv * nI3, 1)
-            rrow, rbase, rsg = P.occ_reduce(o13, nv * nI3, 1)
+                nl = no + nv
+                L3 = np.empty((3 * nl, nmv), dtype=dtype)
+                # the rows of a product: [k] to U[k, (ij)], [e] to Xv[(ij), e]
+                q3 = np.arange(3)[:, None]
+                srcU, srcX = (q3 * nl + np.arange(no)).ravel(), (q3 * nl + no + np.arange(nv)).ravel()
+                tgtU = (np.arange(no)[None, None, :] * nP + o12.idx2[:, :, None]).reshape(nI3, 3 * no)
+                tgtX = (o12.idx2[:, :, None] * nv + np.arange(nv)).reshape(nI3, 3 * nv)
+                oneU, oneX = np.ones(3 * no), np.ones(3 * nv)
+                Xv2 = Xv.reshape(nP * nv, nA3)
             for c in _batches(nA3, cring):
                 nc = c[1] - c[0]
-                M = work('M', (no * nv, nI3 * nc), dtype)               # t(m J; e K) as [(m e), (J K)]
+                M = work('M', (nI3, nmv, nc), dtype)                    # t(m J; e K) as [J, (m e), K]
                 with timer('expand'):
-                    P.tn_expand1(M, T4, nv, 3, (erow, ebase * nc, esg), nI3 * nc, cols=c)
+                    P.tn_expand1(M, T4, nv, 3, (erow, slab * nc, esg), nc, cols=c)
                 if want('ring'):
-                    R3[:, c[0]:c[1]] += (fov_flat @ M).reshape(nI3, nc)
-                    X = mm(Wr2, M, work('X', (no * nv, nI3 * nc), dtype))
-                    with timer('reduce'):
-                        P.tn_reduce1(R4, X, nv, 3, (rrow, rbase * nc, rsg), nI3 * nc, cols=c)
+                    X = work('X', (nI3, nmv, nc), dtype)
                 if want('b2'):
-                    U = work('U', (no, nP, nc), dtype)                  # - <mn||ek> t(mn ij; e, abc) as [k, (ij), (abc)]
+                    U = work('U', (no * nP, nc), dtype)                 # - <mn||ek> t(mn ij; e, abc) as [(k (ij)), (abc)]
                     P.zero(U)
-                    for J in range(nI3):
-                        ns, ps, sg = o12.idx1[J], o12.idx2[J], o12.sgn[J]
+                for J in range(nI3):
+                    if want('ring'):
+                        mm(fov_flat[sel[J]][None, :], M[J], R3[J:J + 1, c[0]:c[1]], beta=1.0)
+                        np.take(Wr2[sel[J]], sel[J], axis=1, out=WJ)
+                        mm(WJ, M[J], X[J])
+                    if want('b2'):
+                        ns, sg = o12.idx1[J], o12.sgn[J]
                         for q in range(3):
-                            np.multiply(GB[ns[q]], sg[q], out=L3[q * (no + nv):(q + 1) * (no + nv)])
-                        out = mm(L3, M[:, J * nc:(J + 1) * nc], work('O', (3 * (no + nv), nc), dtype))
-                        out = out.reshape(3, no + nv, nc)
-                        for q in range(3):
-                            U[:, ps[q]] += out[q, :no]
-                            Xv[ps[q], :, c[0]:c[1]] += out[q, no:]
+                            np.multiply(GB[ns[q]][:, sel[J]], sg[q], out=L3[q * nl:(q + 1) * nl])
+                        out = mm(L3, M[J], work('O', (3 * nl, nc), dtype))
+                        axpy_rows(U, out, tgtU[J], srcU * nc, oneU)
+                        axpy_rows(Xv2, out, tgtX[J], srcX * nc, oneX, col0=c[0])
+                if want('ring'):
+                    with timer('reduce'):
+                        P.tn_reduce1(R4, X, nv, 3, (erow, slab * nc, esg), nc, cols=c)
+                if want('b2'):
                     row, off, sg = P.occ_reduce(o12, nP * nc, nc)
-                    axpy_rows(R3, U.reshape(no * nP, nc), row, off, sg, col0=c[0])
+                    axpy_rows(R3, U, row, off, sg, col0=c[0])
             del Wr2
-            M = X = U = out = None
+            M = X = U = out = Xv2 = None
             work.clear()
 
     # ---- hh ladder with F_oo: batches of virtual quadruples

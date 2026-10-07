@@ -21,10 +21,11 @@ print(mycc.e_tot, mycc.e_tot_q)
 |---|---|---|
 | `zccsdt.RCCSDT` | RHF | spin-adapted closed-shell CCSDT on spatial orbitals (`zccsdt.sa.rccsdt`), (Q) |
 | `zccsdt.UCCSDT` | UHF, ROHF | spin orbitals in spin blocks, U-form integrals (`zccsdt.eris_spin`) |
-| `zccsdt.GCCSDT` | GHF, X2C spinors | spin orbitals or spinors without spin blocks, real or complex (`zccsdt.eris`) |
+| `zccsdt.GCCSDT` | GHF, X2C spinors | spin orbitals or spinors without spin blocks, real or complex (`zccsdt.eris`), (Q) |
+| `zccsdt.GCCSDTQ` | GHF, X2C spinors | CCSDTQ on spin orbitals or spinors, real or complex (`zccsdt.cc.ccsdtq`) |
 
-`zccsdt.CCSDT(mf)` picks the class from the type of `mf`.  More examples are
-in `examples/`.
+`zccsdt.CCSDT(mf)` and `zccsdt.CCSDTQ(mf)` pick the class from the type of
+`mf`.  More examples are in `examples/`.
 
 ## Options
 
@@ -32,7 +33,7 @@ As in PySCF: `conv_tol` (energy, default 1e-10), `conv_tol_normt` (1e-7
 for the residual norm of RCCSDT, 1e-8 for the step norm of the others),
 `max_cycle` (100), `diis_space` (8), `diis_file`, `incore_complete`,
 `frozen` (core orbitals: spatial for RCCSDT, per spin for UCCSDT, spin
-orbitals or spinors for GCCSDT), `verbose`, `stdout`, `callback`.  In
+orbitals or spinors for GCCSDT and GCCSDTQ), `verbose`, `stdout`, `callback`.  In
 addition:
 
 - `max_memory`: MB for the whole process.  Unlike PySCF's objects the
@@ -46,7 +47,8 @@ addition:
 
 Results: `converged`, `e_hf`, `e_corr`, `e_tot`, `cycles`, `t1`, `t2`,
 `t3`, `plan_used`, `timings` (wall time per iteration), `peak_memory`, and
-after `ccsdt_q()` `e_q`, `e_q5`, `e_tot_q`.
+after `ccsdt_q()` `e_q`, `e_q5`, `e_tot_q`; for GCCSDTQ in addition `t4`,
+`e_ccsdt` and `ccsdt_run`, and `e_corr`, `e_tot` are those of CCSDTQ.
 
 ## Output
 
@@ -137,6 +139,75 @@ For H2O/cc-pVTZ with one frozen core orbital (4 threads; abridged):
 
 The functions underneath (`zccsdt.sa.rccsdt.kernel`, `zccsdt.cc.solver.kernel`)
 keep their own interface for scripts and the benchmarks.
+
+## CCSDT(Q) and CCSDTQ on spinors
+
+```python
+from pyscf import gto, x2c
+import zccsdt
+
+mol = gto.M(atom='Br 0 0 0; H 0 0 1.4145', basis='cc-pvdz-dk', verbose=4)
+mf = x2c.UHF(mol).run()                 # spinors of the X2C Hamiltonian
+
+mycc = zccsdt.CCSDT(mf, frozen=28)      # GCCSDT; frozen counts spinors
+mycc.kernel()
+e_q = mycc.ccsdt_q()                    # (Q): e_q, e_q5 ([Q]), e_tot_q
+
+myq = zccsdt.CCSDTQ(mf, frozen=28)      # GCCSDTQ
+myq.kernel()                            # CCSDT first, then CCSDTQ
+print(myq.e_ccsdt, myq.e_tot)           # myq.ccsdt_run is the GCCSDT object of the first step
+```
+
+Both work on spin orbitals or spinors without spin blocks, with real or
+complex integrals, and use no point-group symmetry.  T3 and T4 are stored
+on their unique blocks (i<j<k(<l), a<b<c(<d)).
+
+- **(Q)** (`zccsdt.cc.quadruples`) is the correction of Bomble, Stanton,
+  Kallay and Gauss for canonical Hartree-Fock orbitals: `e_q5` is its
+  fifth-order part, CCSDT[Q].  It is computed one occupied quadruple at a
+  time; `max_memory` decides how many columns of the products are formed
+  at once.
+- **CCSDTQ** (`zccsdt.cc.ccsdtq`, `zccsdt.cc.t4engine`): `kernel()` runs
+  CCSDT and continues from its amplitudes; `kernel(t1, t2, t3, t4)` starts
+  from the amplitudes given.  The report has the size of T4, the memory
+  plan (the batches of the products of the T4 equation; the DIIS vectors
+  of T4 in memory or in the scratch file), a column `|dT4|` in the table
+  of the iterations and the stages of the T4 equation in the timings.
+  T4, its residual and a six-index intermediate are held in memory: below
+  that the calculation stops with a MemoryError that names the size.
+- An RHF, UHF or ROHF reference given to `zccsdt.CCSDTQ` is taken as GHF
+  spin orbitals (there is no spin-adapted CCSDTQ here); `frozen` then
+  counts orbitals per spin, as in the CCSDT class of that reference.
+
+### Integrals from another program, and for another program
+
+The classes for spin orbitals and spinors also run on an integral container
+that was not made from a PySCF object:
+
+```python
+from zccsdt import dirac
+eris = dirac.from_dirac('MRCONEE', 'MDCINT')     # the MO integrals of a DIRAC calculation
+myq = zccsdt.GCCSDTQ.from_integrals(eris).run()
+```
+
+`zccsdt.dirac` reads the two files that DIRAC's integral transformation
+leaves (`**MOLTRA`, `.4INDEX`; real and complex groups) and writes them:
+
+```python
+x = dirac.integrals(mf, frozen=28, nvir=16)      # PySCF spinors in Kramers pairs (psi, T psi)
+dirac.write('run', x)                            # run/MRCONEE, run/MDCINT
+eris = dirac.container(x)                        # the same integrals for the classes here
+```
+
+That is the route to an independent reference for the high-order methods
+on spinors: MRCC reads DIRAC's files (`iface=dirac`) and does CCSDT(Q),
+CCSDTQ and CCSDTQ(P) on them, for real integrals.  `dirac.integrals()`
+gives real integrals for an RHF reference taken as GHF spin orbitals and
+for the X2C spinors of a linear molecule on the z axis (it adapts them to
+m_j); `bench/dirac/write_integrals.py`, `bench/dirac/mrcc_rel.sh` and
+`bench/dirac/run_integrals.py` run the two programs on the same files.
+The energies agree to 1e-12 Eh (Section "CCSDT(Q) and CCSDTQ on spinors"
+of `docs/benchmarks.md`).
 
 ## Spinor CCSD(T): `zccsdt.zccsd.DirectZCCSD`
 
