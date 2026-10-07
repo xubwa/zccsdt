@@ -21,8 +21,9 @@ from math import comb
 
 import numpy as np
 
+from zccsdt import memory
 from zccsdt.cc import ccsd, ccsdt_opt, solver, t4engine, t4pack as P
-from zccsdt.cc.diis import DIIS
+from zccsdt.cc.diis import DIIS, INCORE_SIZE
 from zccsdt.timing import timer
 
 
@@ -34,10 +35,71 @@ class Options:
     diis_space: int = 8
     diis_file: str = None       # HDF5 file of the DIIS vectors (default: temporary)
     incore_complete: bool = False   # keep all DIIS vectors in memory
-    batch_bytes: int = None     # an operand or a product of one batch of the T4 engine
+    max_memory: float = None    # MB for the whole process, as in PySCF (default:
+                                # 80% of what the node and the job limit leave)
+    plan: object = None         # a Plan given explicitly
     mem_mb: float = 2000.0      # batch buffers of the CCSDT step
     verbose: bool = False
     callback: object = None     # callback(info) after every iteration
+
+
+@dataclass
+class Plan:
+    '''Where the memory of a CCSDTQ calculation goes (plan()).'''
+    batch_bytes: int            # an operand or a product of one batch of the T4 engine
+    diis_file: bool             # the T4 vectors of DIIS in the scratch file
+    need: int                   # bytes of ordinary memory besides the integrals
+    floor: int                  # the least that a calculation takes
+    t4: int                     # bytes of T4
+
+
+def _dressed_bytes(no, nv, isz):
+    '''The dressed integrals of the T4 engine and what their dressing takes
+    on the way: <vv||vv> and <vv||vo> on pairs, <vo||vv>.'''
+    nQ = comb(nv, 2)
+    return isz * (nQ * nQ + nv * nv * nQ + 2 * nQ * nv * no + 4 * no * nv ** 3 + 4 * (no * nv) ** 2)
+
+
+def plan(nocc, nvir, isz, budget=None, diis_space=8, incore_complete=False, step_bytes=0):
+    '''The Plan for ``budget`` bytes of ordinary memory (None: no limit).
+    T4, its residual and the six-index intermediate Xv of the engine are
+    held in memory: that, with the smallest batches and the DIIS vectors in
+    the scratch file, is the floor (MemoryError below it).  From there the
+    batches of the engine grow, up to its default; with what is left then
+    the DIIS vectors of T4 stay in memory (``incore_complete``: in any
+    case).  ``step_bytes``: what the CCSDT step takes (its own plan).'''
+    t4 = isz * comb(nocc, 4) * comb(nvir, 4)
+    t3 = isz * comb(nocc, 3) * comb(nvir, 3)
+    fixed = step_bytes + t4 + t3 + _dressed_bytes(nocc, nvir, isz)
+    lo, top = t4engine.min_batch_bytes(nocc, nvir, isz), t4engine.BATCH_BYTES
+    top = max(lo, top)
+    diis = 2 * diis_space * (t4 + t3)
+    floor = fixed + t4engine.memory(nocc, nvir, isz, lo) + (diis if incore_complete else 0)
+    if budget is None:
+        batch = top
+        on_file = not incore_complete and comb(nocc, 4) * comb(nvir, 4) >= INCORE_SIZE
+    else:
+        if budget < floor:
+            raise MemoryError(
+                'CCSDTQ needs %.0f MB besides the integrals for %d occupied and %d virtual spin orbitals '
+                '(T4 and its residual: %.0f MB each); %.0f MB are left'
+                % (floor / 1e6, nocc, nvir, t4 / 1e6, budget / 1e6))
+        rest = budget - fixed - (diis if incore_complete else 0)
+        # the largest batch that fits: memory() grows with it
+        if t4engine.memory(nocc, nvir, isz, top) <= rest:
+            batch = top
+        else:
+            batch, hi = lo, top
+            while hi - batch > max(1 << 16, batch // 64):
+                mid = (batch + hi) // 2
+                if t4engine.memory(nocc, nvir, isz, mid) <= rest:
+                    batch = mid
+                else:
+                    hi = mid
+        on_file = not incore_complete and not (
+            batch == top and fixed + t4engine.memory(nocc, nvir, isz, batch) + diis <= budget)
+    need = fixed + t4engine.memory(nocc, nvir, isz, batch) + (0 if on_file else diis)
+    return Plan(int(batch), bool(on_file), int(need), int(floor), int(t4))
 
 
 @dataclass
@@ -51,6 +113,7 @@ class Result:
     t3: np.ndarray              # packed, flat
     t4: np.ndarray              # packed [C(no,4), C(nv,4)]
     timings: list = None        # wall time per iteration
+    plan: object = None         # the Plan of the run
 
 
 def _jacobi4(T4, R4, eo4, ev4):
@@ -81,18 +144,23 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     d3 = (eo[P.tuples(nocc, 3)].sum(axis=1)[:, None] - P.tuple_sums(ev, 3)[None, :]).ravel() if nI3 else 0
     eo4, ev4 = eo[P.tuples(nocc, 4)].sum(axis=1), P.tuple_sums(ev, 4)
     step = solver.Options(mem_mb=opts.mem_mb)                   # (of the CCSDT step: no level shift)
-    adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=opts.incore_complete)
+    step_plan = ccsdt_opt.plan_for(eris, dtype, solver.Options(mem_mb=opts.mem_mb, incore_complete=True))
+    pl = opts.plan or plan(nocc, nvir, np.dtype(dtype).itemsize, memory.budget(opts.max_memory),
+                           opts.diis_space, opts.incore_complete, step_plan.need)
+    adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=not pl.diis_file,
+                 incore_size=min(INCORE_SIZE, max(1, nI * nA)))
     e_old = ccsd.energy(t1, t2, eris)
     conv, timings = False, []
     try:
         for cycle in range(opts.max_cycle):
             t0, c0 = time.perf_counter(), time.process_time()
             with timer('ccsdtq.t3'):
-                t1n, t2n, t3n = ccsdt_opt.update_amps(step, t1, t2, T3, eris, mem_mb=opts.mem_mb)
+                t1n, t2n, t3n = ccsdt_opt.update_amps(step, t1, t2, T3, eris, mem_mb=opts.mem_mb,
+                                                      plan=step_plan)
             with timer('ccsdtq.dress'):
                 ints = t4engine.Dressed.from_eris(eris, t1)
             with timer('ccsdtq.t4'):
-                R4, r3, r2 = t4engine.residual(t2, T3, T4, ints, opts.batch_bytes)
+                R4, r3, r2 = t4engine.residual(t2, T3, T4, ints, pl.batch_bytes)
             del ints
             with timer('ccsdtq.update'):
                 t2n = t2n + P.unpack(r2 / d2, nocc, nvir, 2)
@@ -131,4 +199,4 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     finally:
         adiis.close()
     return Result(e_corr=float(np.real(e_old)), e_tot=eris.e_hf + float(np.real(e_old)), converged=conv,
-                  ncycle=cycle + 1, t1=t1, t2=t2, t3=T3, t4=T4, timings=timings)
+                  ncycle=cycle + 1, t1=t1, t2=t2, t3=T3, t4=T4, timings=timings, plan=pl)

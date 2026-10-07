@@ -52,6 +52,8 @@ from zccsdt.cc import t4pack as P
 from zccsdt.timing import timer
 
 BATCH_BYTES = 1 << 30           # an operand or a product of one batch, at most
+PASSES = 16                     # batches of columns of a product of one occupied quadruple, at most
+RING_PASSES = 64                # batches of columns of the ring and of the hh ladder, at most
 PIECES = ('pp', 'hh', 'r2', 'ring', 'b1', 'b2', 't3t3h', 't3t3r')
 
 
@@ -121,6 +123,68 @@ class Dressed:
                    blk['ovvo'], blk['vovv'], blk['ovoo'], vvvo, vpp)
 
 
+def _sizes(no, nv):
+    return comb(no, 2), comb(nv, 2), comb(no, 3), comb(nv, 3), comb(no, 4), comb(nv, 4)
+
+
+def _columns(no, nv, isz, batch_bytes):
+    '''Columns per batch: (pairs (cd) and triples (bcd) of the products of
+    one occupied quadruple, triples of the ring, quadruples of the hh
+    ladder, occupied quadruples of the pp ladder).'''
+    nP, nQ, nI3, nA3, nI, nA = _sizes(no, nv)
+
+    def cols(n, rows, passes):
+        return int(min(n, max(-(-n // passes), batch_bytes // (isz * max(rows, 1)))))
+    return (cols(nQ, nQ, PASSES), cols(nA3, nv, PASSES), cols(nA3, no * nv * nI3, RING_PASSES),
+            cols(nA, nP * nP, RING_PASSES), cols(nI, nQ * nQ, nI))
+
+
+def memory(no, nv, isz, batch_bytes=None):
+    '''Bytes that residual() allocates at most (its results included: the
+    residual of T4 is one of them), for products of ``batch_bytes`` per
+    batch - the largest of its stages, each counted array by array.'''
+    batch_bytes = batch_bytes or BATCH_BYTES
+    nP, nQ, nI3, nA3, nI, nA = _sizes(no, nv)
+    c22, c13, cring, chh, cpp = _columns(no, nv, isz, batch_bytes)
+    ov, n = no * nv, no + nv
+    # the layouts of T2 and of the integrals, the results
+    small = 3 * nP * nQ + 2 * no * no * nQ + 2 * nP * nv * nv + nP * nv * no + nv * no * nQ + n * n
+    res = nI * nA + nI3 * nA3 + nP * nQ
+    t3 = no * nP * nA3 + 2 * nP * ov * nQ                   # T3 by rows, T3 on two groups, Z
+    g = no * no * nP * nQ
+    hs = nv * no * nI3 * nv
+    y3, xo = nI3 * nv * nP, nI3 * no * nQ
+    w3 = nQ * nv * no                                       # <vv||vo> on pairs
+    wsmall = no ** 4 + 2 * no * no * nP + 3 * ov * ov + 2 * nP * nP + 2 * nP * ov
+    first = small + res + t3 + g + w3 + no * nP * nv
+    kept = small + res + t3 + y3 + xo + w3 + nP * ov + wsmall      # after the intermediates
+    xv = nP * nv * nA3
+    rows_w = min(nQ, max(1, batch_bytes // (2 * isz * nv * nv)))
+    stages = [
+        first + 3 * nv * nP * nQ + 2 * no * nv * nv,                            # the pass over T3
+        first + nQ * nI3 * nv + 2 * y3 + hs,                                    # .. its end
+        first + y3 + hs + nQ * nQ + wsmall + 2 * w3 + nv ** 3 * no + 2 * w3,    # Wv
+        first + y3 + hs + nQ * nQ + wsmall + w3 + xo + no * nP * nQ + 6 * nI3 * nQ,     # Xo
+        kept + nQ * nQ + xv + no * nv * nP + nv * nv * ov * 2 + nv * nv * nQ + 2 * rows_w * nv * nv,    # Xv
+        kept + nQ * nQ + xv + 2 * nQ * cpp * nQ + nI3 * nv * nQ + (no + 8) * n * nQ,    # pp ladder
+        kept + xv + 2 * ov * nI3 * cring + no * nP * cring + ov * ov + (no + 6) * n * ov + 3 * n * cring,   # ring
+        kept + xv + 2 * nP * nP * chh + nP * nP,                                # hh ladder
+        kept + xv + nQ * c22 + nv * c13 + 8 * n * nQ,                           # one occupied quadruple
+    ]
+    # tables of the splits of the occupied tuples and of the ring's block of columns, small arrays
+    tables = 300 * nI + 9 * nP * nP + 60 * nI3 + 9 * nv * cring + (1 << 20)
+    return isz * max(stages) + tables
+
+
+def min_batch_bytes(no, nv, isz):
+    '''The smallest ``batch_bytes`` that is of use: one occupied quadruple
+    of the pp ladder, the other products in their largest numbers of
+    batches.'''
+    nP, nQ, nI3, nA3, nI, nA = _sizes(no, nv)
+    return isz * max(nQ * nQ, no * nv * nI3 * -(-nA3 // RING_PASSES), nP * nP * -(-nA // RING_PASSES),
+                     nQ * -(-nQ // PASSES), nv * -(-nA3 // PASSES))
+
+
 class _Pool:
     '''Work arrays by name, kept between batches (a fresh large array pays
     its page faults again).'''
@@ -132,9 +196,15 @@ class _Pool:
         n = int(np.prod(shape))
         a = self.arrays.get(name)
         if a is None or a.size < n or a.dtype != dtype:
-            self.arrays[name] = None                    # (free before allocating again)
-            a = self.arrays[name] = np.empty(max(n, 1), dtype=dtype)
-        return a[:n].reshape(shape)
+            # free before allocating again (the views that a caller still holds pin the old
+            # array: every stage of residual() deletes its own)
+            del a
+            self.arrays[name] = None
+            self.arrays[name] = np.empty(max(n, 1), dtype=dtype)
+        return self.arrays[name][:n].reshape(shape)
+
+    def clear(self):
+        self.arrays.clear()
 
 
 def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
@@ -155,6 +225,7 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
     i2, j2 = _pairs(no)
     a2, b2 = _pairs(nv)
     pairs_o = P.tuples(no, 2)
+    c22, c13, cring, chh, cpp = _columns(no, nv, isz, batch_bytes)
     work = _Pool()
 
     def c_(x):
@@ -222,6 +293,7 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
             P.tn_expand2(S2, T3, nv, 2, 1, (o12.pos[x], np.arange(nP) * nv, o12.psg[x]), nP * nv, 1)
             gemm(c_(oovv_xp[:, x]), S2, WoT, beta=1.0)
             del S, S2
+        work.clear()
         WoT = WoT.reshape(no, nP, nv).transpose(0, 2, 1)                # [m, d, (kl)]
         # t(jkl; ef c) as [(ef), (jkl), c]
         T3y = np.empty((nQ, nI3 * nv), dtype=dtype)
@@ -240,16 +312,19 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
         Whh = np.asarray(ints.oooo) + 0.5 * _E('mnef,klef->mnkl', oovv, t2)
         Whh_p = c_(Whh[:, :, i2, j2])                                   # [m, n, (jk)]
         Wr = c_(np.asarray(ints.ovvo) + _E('mnef,lndf->mdel', oovv, t2))        # [m, d, e, l]
-        Wq = c_(Wpp + _one_body_pairs(Fv, nv) / 3)
         Wh = c_(Whh[i2, j2][:, i2, j2] - _one_body_pairs(Fo, no) / 3)   # [(mn), (ij)]
         # Wv[(cd), e, l]
         Wv = np.array(ints.vvvo_p, dtype=dtype, order='C', copy=True)
         gemm(t2_pp.T, oovo_pp.reshape(nP, nv * no), Wv.reshape(nQ, nv * no), beta=1.0)
         x = _E('dmef,lmce->cdfl', vovv, t2)
-        Wv += (x - x.transpose(1, 0, 2, 3))[a2, b2]
+        Wv += x[a2, b2]
+        Wv -= x[b2, a2]
+        del x
         Wv += _E('me,lmQ->Qel', fov, t2_xp)
         Wv += WvT
+        del WvT
         Wv_t = c_(Wv.transpose(2, 1, 0))                                # [i, e, (ab)]
+        del Wv
         # Wo[m, d, (kl)]
         Wo = np.array(np.asarray(ints.ovoo)[:, :, i2, j2], dtype=dtype, order='C', copy=True)
         x = _E('nmek,lnde->mdkl', oovo, t2)
@@ -258,14 +333,16 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
         Wo -= _E('me,Pde->mdP', fov, t2_px)
         Wo -= WoT
         Wo_t = c_(Wo.transpose(2, 0, 1))                                # [(ij), m, a]
-        del x, WvT, WoT, Wv, Wo
-        # the part of Xo without T4, as [(jkl), m, (cd)]
+        del x, WoT, Wo
+        # the part of Xo without T4, as [(jkl), m, (cd)], for one m at a time:
+        # P(l/jk) [ <mn||el> t(njk,ecd) + 1/2 Whh(mn,jk) t(nl,cd) ] - <dm||ef> t(jkl,efc) + (c <-> d)
         Gm = G.reshape(no, no, nP, nQ)
-        Gm += 0.5 * _E('mnJ,nlQ->mlJQ', Whh_p, t2_xp)
         Xo = np.empty((nI3, no, nQ), dtype=dtype)
+        t2_n = t2_xp.reshape(no, no * nQ)                               # [n, (l (cd))]
         for m in range(no):
-            Xo[:, m] = P.fold(Gm[m], o12, 0, 1)                         # P(l/jk)
-        Xo -= _antisym_cd(Hs, a2, b2).transpose(1, 0, 2)                # - <dm||ef> t(jkl,efc), c and d exchanged
+            Gm[m] += 0.5 * gemm(c_(Whh_p[m].T), t2_n).reshape(nP, no, nQ).transpose(1, 0, 2)
+            Xo[:, m] = P.fold(Gm[m], o12, 0, 1)
+            Xo[:, m] -= (Hs[b2, m, :, a2] - Hs[a2, m, :, b2]).T
         del G, Gm, Hs
 
     # ---- the part of Xv without T4, for all pairs: [(kl), e, (bcd)]
@@ -294,6 +371,11 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
                     M2 = gemm(W, t2_px[p], work('X', (nr * nv, nv), dtype))             # [(bc), e, d]
                     P.tn_reduce(Xv[p], M2.reshape(nr, nv, nv), nv, 2, 1, rows=(r0, r1), scale=0.5, outer=1)
             del oovo_t, vovv_ed, Wr_k
+            Mx = W = M2 = None
+            work.clear()
+    # Wq = Wpp + F_vv on pairs / 3, in the storage of Wpp
+    from zccsdt.cc import ccsdt_opt, t3pack
+    Wq = ccsdt_opt.add_one_body_pairs(Wpp, c_(Fv), t3pack.triple_map(nv), 1.0 / 3)
     del Wpp
 
     # ---- pp ladder with F_vv, in batches of occupied quadruples; from the same view of T4
@@ -305,7 +387,7 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
                 GL = c_(np.concatenate((oovv_xp.transpose(1, 0, 2), -vovv_p.transpose(1, 0, 2)), axis=1))
                 L4 = np.empty((4 * (no + nv), nQ), dtype=dtype)
                 U3 = np.zeros((nI3, nv, nQ), dtype=dtype)               # [(ijk), c, (ab)]
-            for I0, I1 in _batches(nI, batch_bytes // (isz * nQ * nQ)):
+            for I0, I1 in _batches(nI, cpp):
                 nb = I1 - I0
                 ent = (np.arange(I0, I1), np.arange(nb) * nQ, np.ones(nb))
                 Tv = work('M', (nQ, nb * nQ), dtype)                    # t(I; ef, cd) as [(ef), (I, (cd))]
@@ -331,6 +413,8 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
             if want('b1'):
                 P.tn_reduce(R3, U3, nv, 1, 2, outer=0)
                 del GL, L4, U3
+            Tv = X = out = None                 # (views of the work arrays: they would pin them)
+            work.clear()
     del Wq
 
     # ---- ring, in batches of the columns (bcd) of t(m jkl; e bcd); from the same view of T4
@@ -346,7 +430,7 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
                 L3 = np.empty((3 * (no + nv), no * nv), dtype=dtype)
             erow, ebase, esg = P.occ_expand(o13, nv * nI3, 1)
             rrow, rbase, rsg = P.occ_reduce(o13, nv * nI3, 1)
-            for c in _batches(nA3, batch_bytes // (isz * no * nv * nI3)):
+            for c in _batches(nA3, cring):
                 nc = c[1] - c[0]
                 M = work('M', (no * nv, nI3 * nc), dtype)               # t(m J; e K) as [(m e), (J K)]
                 with timer('expand'):
@@ -371,18 +455,22 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
                     row, off, sg = P.occ_reduce(o12, nP * nc, nc)
                     axpy_rows(R3, U.reshape(no * nP, nc), row, off, sg, col0=c[0])
             del Wr2
+            M = X = U = out = None
+            work.clear()
 
     # ---- hh ladder with F_oo: batches of virtual quadruples
     if want('hh'):
         with timer('t4.hh'):
             WhT = c_(Wh.T)                                              # [(ij), (mn)]
             row, base, sg = P.occ_reduce(o22, nP, 1)
-            for c0, c1 in _batches(nA, batch_bytes // (isz * nP * nP)):
+            for c0, c1 in _batches(nA, chh):
                 nc = c1 - c0
                 Th = work('M', (nP * nP, nc), dtype)                    # t(mn kl; A)
                 rows(Th, T4, o22.pos.ravel(), o22.psg.ravel(), (c0, c1))
                 X = mm(WhT, Th.reshape(nP, nP * nc), work('X', (nP, nP * nc), dtype))
                 axpy_rows(R4, X.reshape(nP * nP, nc), row, base * nc, sg, col0=c0)
+            Th = X = None
+            work.clear()
 
     # ---- one occupied quadruple at a time: the products with the six-index intermediates
     # and T3 with T3, the splits of the quadruple summed by the products
@@ -391,53 +479,50 @@ def residual(t2, T3, T4, ints, batch_bytes=None, only=None):
             Zt3 = Zt.reshape(nP, nQ, no * nv)
             LA, RA = (np.empty((4 * nv, nQ), dtype=dtype) for _ in range(2))
             LB, RB = (np.empty((4 * no, nQ), dtype=dtype) for _ in range(2))
-            X22, X13 = work('M', (nQ, nQ), dtype), work('X', (nv, nA3), dtype)
             for I in range(nI):
                 xs, Js, s13 = o13.idx1[I], o13.idx2[I], o13.sgn[I]
                 ps, qs, s22 = o22.idx1[I], o22.idx2[I], o22.sgn[I]
-                if want('b1', 't3t3r'):
-                    # X[(ab),(cd)]
+                if want('b1'):
+                    # - sum_e Wv(ab,e,i) t(jkl,cde) + sum_m t(im,ab) Xo(m;jkl;cd), the splits (i|jkl)
+                    with timer('operands'):
+                        for q in range(4):
+                            x, J, sg = xs[q], Js[q], int(s13[q])
+                            np.multiply(Wv_t[x], -sg, out=LA[q * nv:(q + 1) * nv])      # [e, (ab)]
+                            P.tn_expand(RA[q * nv:(q + 1) * nv], T3[J], nv, 1, 2)       # t(jkl; e, cd)
+                            np.multiply(t2_xp[x], sg, out=LB[q * no:(q + 1) * no])      # [m, (ab)]
+                            RB[q * no:(q + 1) * no] = Xo[J]                             # [m, (cd)]
+                # X[(ab),(cd)], in batches of the columns (cd)
+                for c in (_batches(nQ, c22) if want('b1', 't3t3r') else ()):
+                    X22 = work('M', (nQ, c[1] - c[0]), dtype)
                     beta = 0.0
                     if want('b1'):
-                        # - sum_e Wv(ab,e,i) t(jkl,cde) + sum_m t(im,ab) Xo(m;jkl;cd), the splits (i|jkl)
-                        with timer('operands'):
-                            for q in range(4):
-                                x, J, sg = xs[q], Js[q], int(s13[q])
-                                np.multiply(Wv_t[x], -sg, out=LA[q * nv:(q + 1) * nv])  # [e, (ab)]
-                                P.tn_expand(RA[q * nv:(q + 1) * nv], T3[J], nv, 1, 2)   # t(jkl; e, cd)
-                                np.multiply(t2_xp[x], sg, out=LB[q * no:(q + 1) * no])  # [m, (ab)]
-                                RB[q * no:(q + 1) * no] = Xo[J]                         # [m, (cd)]
-                        mm(LA.T, RA, X22)
-                        mm(LB.T, RB, X22, beta=1.0)
+                        mm(LA.T, RA[:, c[0]:c[1]], X22)
+                        mm(LB.T, RB[:, c[0]:c[1]], X22, beta=1.0)
                         beta = 1.0
                     if want('t3t3r'):
                         # sum_{nf} Z(nf;ij;ab) t(nkl, fcd): the same for (ij,ab | kl,cd) and
                         # (kl,cd | ij,ab) - the three splits with i in the first pair, twice (the 1/2)
                         for q in range(3):
-                            mm(Zt3[ps[q]], T3x[qs[q]], X22, alpha=float(s22[q]), beta=beta)
+                            mm(Zt3[ps[q]], T3x[qs[q]][:, c[0]:c[1]], X22, alpha=float(s22[q]), beta=beta)
                             beta = 1.0
                     with timer('reduce'):
-                        P.tn_reduce(R4[I], X22, nv, 2, 2)
-                if want('b2', 't3t3h'):
-                    # X[a,(bcd)]
+                        P.tn_reduce(R4[I], X22, nv, 2, 2, cols=c)
+                # X[a,(bcd)], in batches of the columns (bcd)
+                for c in (_batches(nA3, c13) if want('b2', 't3t3h') else ()):
+                    X13 = work('X', (nv, c[1] - c[0]), dtype)
                     beta = 0.0
                     if want('b2'):
                         # sum_m Wo(m,a,ij) t(mkl,bcd) + sum_e t(ij,ae) Xv(e;kl;bcd), the splits (ij|kl)
                         for q in range(6):
                             sg = float(s22[q])
-                            mm(Wo_t[ps[q]].T, t3o[:, qs[q]], X13, alpha=sg, beta=beta)
-                            mm(t2_px[ps[q]], Xv[qs[q]], X13, alpha=sg, beta=1.0)
+                            mm(Wo_t[ps[q]].T, t3o[:, qs[q], c[0]:c[1]], X13, alpha=sg, beta=beta)
+                            mm(t2_px[ps[q]], Xv[qs[q]][:, c[0]:c[1]], X13, alpha=sg, beta=1.0)
                             beta = 1.0
                     if want('t3t3h'):
                         # - sum_{m<n} Y(mn;jkl;a) t(mni, bcd), the splits (i|jkl)
                         for q in range(4):
-                            mm(Y3[Js[q]], t3o[xs[q]], X13, alpha=-float(s13[q]), beta=beta)
+                            mm(Y3[Js[q]], t3o[xs[q]][:, c[0]:c[1]], X13, alpha=-float(s13[q]), beta=beta)
                             beta = 1.0
                     with timer('reduce'):
-                        P.tn_reduce(R4[I], X13, nv, 1, 3)
+                        P.tn_reduce(R4[I], X13, nv, 1, 3, cols=c)
     return R4, R3, R2
-
-
-def _antisym_cd(Hs, a2, b2):
-    '''[m, J, (cd)] = H[d, m, J, c] - H[c, m, J, d] for c < d.'''
-    return (Hs[b2, :, :, a2] - Hs[a2, :, :, b2]).transpose(1, 2, 0)

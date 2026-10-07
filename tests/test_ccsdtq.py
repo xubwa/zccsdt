@@ -205,3 +205,100 @@ def test_x2c_spinors_solve_the_reference_equations():
     for k, res in enumerate(R.residuals(amps, fock, g, nocc)):
         assert abs(res).max() < 1e-8, k
     assert abs(R.energy(r.t1, r.t2, fock, g, nocc) - r.e_corr) < 1e-11
+
+
+def _packed_data(no, nv, cplx, seed=1):
+    '''Random dressed integrals in blocks, t2 and packed T3 and T4 (sizes
+    that the dense term table cannot take).'''
+    from math import comb
+    rng = np.random.default_rng(seed)
+
+    def rnd(*shape):
+        x = rng.standard_normal(shape)
+        return x + 1j * rng.standard_normal(shape) if cplx else x
+    o, v, nQ = no, nv, nv * (nv - 1) // 2
+    ints = T.Dressed(no, nv, rnd(o + v, o + v), rnd(o, o, v, v), rnd(o, o, o, o), rnd(o, o, v, o), rnd(o, v, v, o),
+                     rnd(v, o, v, v), rnd(o, v, o, o), rnd(nQ, v, o), rnd(nQ, nQ))
+    t2 = rnd(o, o, v, v)
+    t2 = t2 - t2.transpose(1, 0, 2, 3)
+    return ints, t2 - t2.transpose(0, 1, 3, 2), rnd(comb(o, 3), comb(v, 3)), rnd(comb(o, 4), comb(v, 4))
+
+
+@pytest.mark.parametrize('no,nv,cplx', [(7, 14, True), (8, 12, False)])
+def test_engine_memory(no, nv, cplx):
+    '''t4engine.memory(): the arrays that residual() allocates (tracemalloc
+    follows numpy's allocations) stay within it for the default batches,
+    for small ones and for the smallest, and it is not a loose bound; every
+    batch size gives the same residuals.'''
+    import gc
+    import tracemalloc
+    ints, t2, T3, T4 = _packed_data(no, nv, cplx)
+    isz = 16 if cplx else 8
+    ref = T.residual(t2, T3, T4, ints)
+    floor = T.min_batch_bytes(no, nv, isz)
+    assert T.memory(no, nv, isz, floor) < T.memory(no, nv, isz, 4 * floor) < T.memory(no, nv, isz)
+    for batch in (None, 4 * floor, floor):
+        gc.collect()
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        res = T.residual(t2, T3, T4, ints, batch)
+        peak = tracemalloc.get_traced_memory()[1] - base
+        tracemalloc.stop()
+        need = T.memory(no, nv, isz, batch)
+        for a, b in zip(res, ref):
+            assert abs(a - b).max() < 1e-11 * abs(b).max()
+        assert peak <= need, (batch, peak, need)
+        if batch is None:               # (below, the megabyte of slack of the account weighs more)
+            assert peak > 0.9 * need, (peak, need)
+        del res
+
+
+def test_solver_plan():
+    '''ccsdtq.plan(): the batches of the engine grow with the budget and
+    then the DIIS vectors come into memory, nothing shrinks; a plan needs
+    no more than its budget; MemoryError below the floor.'''
+    no, nv, isz = 10, 40, 16
+    full = ccsdtq.plan(no, nv, isz)
+    assert full.batch_bytes == T.BATCH_BYTES and full.diis_file
+    incore = ccsdtq.plan(no, nv, isz, incore_complete=True)
+    assert not incore.diis_file and incore.need > full.need + 15 * full.t4
+    budgets = np.linspace(full.floor, incore.need * 1.05, 80)
+    plans = [ccsdtq.plan(no, nv, isz, int(b)) for b in budgets]
+    for a, b in zip(plans, plans[1:]):
+        assert a.batch_bytes <= b.batch_bytes and a.diis_file >= b.diis_file
+    assert all(p.need <= b for p, b in zip(plans, budgets))
+    assert plans[0].batch_bytes < 1.05 * T.min_batch_bytes(no, nv, isz) and plans[0].diis_file
+    assert plans[-1].batch_bytes == T.BATCH_BYTES and not plans[-1].diis_file
+    # (the largest batch that fits: within the step of the search)
+    mid = plans[len(plans) // 4]
+    assert mid.need > 0.9 * budgets[len(plans) // 4] or mid.batch_bytes == T.BATCH_BYTES
+    with pytest.raises(MemoryError, match='CCSDTQ needs'):
+        ccsdtq.plan(no, nv, isz, full.floor - 1)
+
+
+def test_solver_memory():
+    '''Three iterations of H2O / 6-31G under plans from the floor up: the
+    same energy, allocations within the plan (the DIIS vectors in the
+    scratch file are not ordinary memory).'''
+    import gc
+    import tracemalloc
+    from zccsdt.cc import ccsdt_opt
+    eris = E.from_scf(scf.addons.convert_to_ghf(_scf('h2o', '6-31G')), packed_vvvv=True)
+    no, nv = eris.nocc, eris.nmo - eris.nocc
+    r3 = solver.kernel(eris, 'ccsdt', solver.Options(conv_tol=1e-8, conv_tol_normt=1e-6))
+    step = ccsdt_opt.plan_for(eris, eris.dtype, solver.Options(incore_complete=True)).need
+    full = ccsdtq.plan(no, nv, 8, None, step_bytes=step)
+    energies = []
+    for budget in (None, 0.5 * (full.floor + full.need)):
+        pl = full if budget is None else ccsdtq.plan(no, nv, 8, int(budget), step_bytes=step)
+        gc.collect()
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        r = ccsdtq.kernel(eris, ccsdtq.Options(max_cycle=3, plan=pl), t1=r3.t1, t2=r3.t2, t3=r3.t3)
+        peak = tracemalloc.get_traced_memory()[1] - base
+        tracemalloc.stop()
+        assert r.plan is pl and peak <= pl.need - 0.9 * step, (peak, pl)
+        energies.append(r.e_corr)
+        del r
+    assert pl.diis_file and pl.batch_bytes < full.batch_bytes
+    assert abs(energies[0] - energies[1]) < 1e-12
