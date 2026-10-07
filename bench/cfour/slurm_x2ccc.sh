@@ -107,7 +107,7 @@ $geom
 
 *CFOUR(CALC=${CFOUR_CALC:-CCSD(T)},BASIS=SPECIAL
 SYM=OFF,COORDINATES=CARTESIAN,UNITS=$units,CHARGE=0,MULT=${CFOUR_MULT:-1}
-RELATIVISTIC=X2C1E,X2CKEY=SOATMX,ABCDTYPE=AOBASIS
+RELATIVISTIC=X2C1E,X2CKEY=SOATMX,ABCDTYPE=${CFOUR_ABCD:-AOBASIS}
 $scf
 CC_CONV=${CFOUR_CONV:-7},CC_MAXCYC=${CFOUR_MAXCYC:-50}$extra
 MEMORY_SIZE=${CFOUR_MEM_GB:-24},MEM_UNIT=GB)
@@ -118,22 +118,16 @@ $(printf '%b' "${CFOUR_SECTIONS:-}")
 
 ZEOF
   echo "=== CFOUR $mol/$basis  $(date)  run dir $run (kept: $keep)"
-  for p in ${CFOUR_PROGS:-xjoda xsox2catm xsox2chf xx2cvtran xx2cccsd}; do
-    [ $p = xsox2chf ] && [ -n "$CFOUR_GUESS" ] && \
-      (eval "$CFOUR_GUESS") 2>&1 | grep -v "plugins found\|PYSCF_EXT_PATH\|^/home/"
-    # xx2camf is C++: where the libstdc++ of the environment is too old for
-    # it, the one of the Python installation is loaded first
-    pre=
-    [ -n "$(ldd $cfour/$p 2>&1 | grep 'GLIBCXX.*not found')" ] && \
-      pre="env LD_PRELOAD=${CFOUR_STDCXX:-/home/xwang405/apps/conda/lib/libstdc++.so.6}"
-    /usr/bin/time -f "$p wall %e s  user %U s  max RSS %M KB" $pre $cfour/$p > $p.out 2> $p.time
-    status=$?
-    tail -n 1 $p.time
-    cp $p.out $p.time $keep/
-    if [ $status -ne 0 ] || grep -q "Something very wrong" $p.out; then
-      echo "$p FAILED"; tail -n 20 $p.out; break
-    fi
-  done
+  # the programs one after the other, each one checked - exit status, the
+  # last line of CFOUR's programs, the files it must leave - by the runner
+  # of zccsdt.cfour (which also loads the libstdc++ of the Python
+  # installation, or CFOUR_STDCXX, for xx2camf); CFOUR_GUESS runs before
+  # xsox2chf, with the variables of this script
+  export root cfour mol basis tag keep run
+  PYTHONPATH=$root/src:$PYTHONPATH python -u -m zccsdt.cfour --chain --no-cc --bin $cfour \
+    --programs "${CFOUR_PROGS:-xjoda xsox2catm xsox2chf xx2cvtran xx2cccsd}" \
+    ${CFOUR_GUESS:+--before "xsox2chf=$CFOUR_GUESS"} $run 2>&1 | grep -v "plugins found\|PYSCF_EXT_PATH\|^/home/"
+  cp *.out *.time $keep/ 2>/dev/null
   cp ZMAT MOL $keep/
   [ -n "$CFOUR_POST" ] && (eval "$CFOUR_POST") 2>&1 | grep -v "plugins found\|PYSCF_EXT_PATH\|^/home/"
   grep -E "Integral transformation Elapsed|MO Integral sorting Elapsed|AO Integral Elapsed" \

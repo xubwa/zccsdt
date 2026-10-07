@@ -89,7 +89,12 @@ equations (A1)-(A8) (Gauss-Stanton intermediates).
   (full o^2 v^2). <ab||ci> (a<=b) stays on disk, one file per occupied
   index (`PPPH000k`), and is read back slab by slab by every term that
   needs it. <ab||cd> exists only when `ABCDTYPE` is not `AOBASIS`
-  (`moinpppp`, v^4/4 complex, in core). Complex numbers as interleaved
+  (`moinpppp`, v^4/4 complex, in core; `x2cvtran/vsort.f90` and
+  `vtranso2.f90`, in the tree since 2026-08 - the binaries in `bin/`, of
+  2026-04, do not have that path: with them `ABCDTYPE=STANDARD` changes
+  nothing and no `moinpppp` is written, checked 2026-10-07). The layout
+  of all files, and how `zccsdt.cfour` completes them: the docstring of
+  `src/zccsdt/cfour.py`. Complex numbers as interleaved
   re/im; only the 4-fold complex symmetry (pq|rs) = (rs|pq) = (qp|sr)* is
   assumed.
 - AO integrals: the scalar (spin-free) two-electron integrals are real.

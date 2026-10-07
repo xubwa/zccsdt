@@ -259,6 +259,129 @@ energies (Section "CCSDT(Q), CCSDTQ and CCSDTQ(P) on spinors" of
 `zccsdt.eris.drop_virtuals(eris, nvir)` cuts a container down to its lowest
 virtual spinors.
 
+#### CFOUR's two-component programs (X2CSO)
+
+`zccsdt.cfour` runs the high-order methods on the spinors of CFOUR's
+spin-orbit X2C programs, whose own coupled cluster ends at CCSD(T).  CFOUR
+does the SCF and the integral transformation; the ZMAT of the run says what
+is done here.
+
+```python
+from zccsdt import cfour
+eris = cfour.from_cfour('rundir')                # the MO integrals xx2cvtran left there
+myq = zccsdt.GCCSDTQ.from_integrals(eris).run()
+```
+
+or, without writing Python:
+
+```
+python -m zccsdt.cfour RUNDIR                    # the CC step on a finished CFOUR run
+python -m zccsdt.cfour --chain [--scratch /tmp] RUNDIR     # CFOUR's programs first
+```
+
+**The CFOUR side.**  The two-component programs are not chained by
+`xcfour`; in a directory with `ZMAT` and `GENBAS` they are called one after
+the other:
+
+```
+xjoda; [xx2camf;] xsox2catm; xsox2chf; xx2cvtran
+```
+
+(`xx2camf` only for X2CAMF, i.e. a `%amfiMethod` section in the ZMAT).
+`--chain` does exactly that - the list comes from the ZMAT, `--programs`
+overrides it, the executables are taken from `--bin`, else `$CFOUR_BIN`,
+else `~/apps/cfour-x2cso/bin` - and checks every program before the next
+one starts: exit status, the last line of a CFOUR program (`@CHECKOUT-I`;
+`xx2camf FINISHED!`), no "Something very wrong", and the files it has to
+leave.  A failure stops the chain with the name of the program and the end
+of its output.  Each program writes `<program>.out` and `<program>.time`.
+With `--scratch DIR` the input files are copied to a new directory under
+`DIR` (node-local disk for real runs), everything runs there, the outputs
+come back to `RUNDIR` and the directory is removed (`--keep`: not).
+`bench/cfour/slurm_x2ccc.sh` runs CFOUR through the same code.
+
+Nothing has to be told to CFOUR to keep the files: its programs leave
+everything in the directory they run in.  What is read: `JOBARC` and
+`JAINDX` (SCF energy, frozen pairs, dropped virtual spinors, joda's flags),
+`nmototal`, `scf2ceig`, `dgcosym`, `moinhhhh`, `moinhhhp`, `moinhhpp`,
+`moinpphh`, `moinphhp`, `PPPH0001` ... (one per occupied spinor) and
+`moinpppp`.  The ZMAT needs
+
+- `ABCDTYPE=STANDARD`: only then does `xx2cvtran` transform and write
+  `<ab||cd>` (`moinpppp`); with `ABCDTYPE=AOBASIS` CFOUR's CCSD contracts
+  the AO integrals and the file is never made.  **This needs an
+  `xx2cvtran` built from sources that contain `x2cvtran/vsort.f90` and
+  `vtranso2.f90`.**  The binary installed in `~/apps/cfour-x2cso/bin`
+  (April 2026) is older than these files of its source tree (August 2026):
+  it takes the AO path whatever `ABCDTYPE` says and writes no `moinpppp`,
+  and `from_cfour()` then stops with a message that says so.  Everything
+  else is in the files of that binary too.
+- `SYM=OFF`, `RELATIVISTIC=X2C1E`, `X2CKEY=SOATMX`, `BASIS=SPECIAL` with
+  one line per atom after the keywords, as for CFOUR's own CCSD.
+- frozen core as `DROPMO=1>n` (n Kramers pairs), virtual spinors above an
+  energy dropped with a section `%vircut`: both are CFOUR's business - the
+  integral files hold the active spinors only, and how many were frozen
+  and dropped is read from what CFOUR wrote, not from the ZMAT.
+
+**What the ZMAT says to the CC step.**
+
+| ZMAT | here |
+|---|---|
+| `CALC=CCSD`, `CCSDT`, `CCSDT[Q]`, `CCSDT(Q)`, `CCSDTQ` | the method (joda accepts all of these in a two-component input, and the chain up to `xx2cvtran` runs with each of them) |
+| `CC_CONV=N` | `conv_tol_normt = 1e-N`, `conv_tol = 1e-(N+2)` |
+| `CC_MAXCYC` | `max_cycle` |
+| `MEMORY_SIZE`, `MEM_UNIT` | `max_memory` (CFOUR counts 1 GB as 1e9 bytes) |
+| section `%zccsdt` | `method=`, `max_memory=` (MB), `conv_tol=`, `conv_tol_normt=`, `max_cycle=`: one per line, they override the keywords |
+
+The thresholds and the memory are taken as joda understood them (the
+flags in `JOBARC`), so abbreviated keywords and defaults are CFOUR's.
+`CCSDTQ(P)` is not a `CALC` of CFOUR: joda warns and falls back to
+`CALC=SCF` (the chain still makes the integrals), so it is asked for in
+the section, which CFOUR ignores like every section it does not know:
+
+```
+*CFOUR(CALC=CCSDTQ,BASIS=SPECIAL
+...
+MEMORY_SIZE=24,MEM_UNIT=GB)
+
+O:PVDZ
+H:PVDZ
+H:PVDZ
+
+%zccsdt
+method=ccsdtq(p)
+max_memory=20000
+
+```
+
+(a section ends at an empty line).  `--method` and `--max-memory` on the
+command line override both.  `--jobarc` writes the final total energy into
+`JOBARC` as `TOTENERG`, the record that CFOUR's own `xx2cccsd` leaves
+there for joda.
+
+**Conventions.**  The spinors are those of CFOUR's list `scf2ceig` without
+the frozen and the dropped ones, in its order (occupied first, each set by
+energy); `eris.spinors` are their numbers in that list.  The files hold
+antisymmetrized integrals `<pq||rs> = (pr|qs) - (ps|qr)`, complex, each
+block once (`<ij||kl>`, `<ij||ka>`, `<ab||ij>`, `<ab||ci>`, `<ab||cd>` on
+pairs p<=q; `<ij||ab>` and `<ia||bj>` in full); `<ia||bc>` and the other
+triangles are completed from the antisymmetry and
+`<pq||rs> = <rs||pq>^*`.  There is no one-electron matrix: the spinors are
+canonical, the Fock matrix is the diagonal of their energies, and the SCF
+energy is the one in `JOBARC`.
+
+**Checks.**  `bench/cfour/check_integrals.py RUNDIR BASIS` compares every
+block that is in the files, element by element, with the integrals PySCF
+makes for CFOUR's own spinors (`scf2ccmo`), and - with the amplitudes
+`xx2cccsd` converged to - the CCSD energy, the (T) correction and the T1
+equation with CFOUR's numbers; none of this needs `<ab||cd>`.  For H2O
+(STO-3G and 6-31G; all electrons, and with a frozen pair and two dropped
+virtual spinors; X2C-1e and X2CAMF) and HBr / cc-pVDZ-DK with 28 frozen
+spinors: integrals to 1e-14, the energies to 1e-15 Eh, the T1 residual
+below 1e-12.  `moinpppp` has not been read from a file CFOUR wrote (see
+above): its layout is the one of `vsort.f90`, and is tested only against
+`cfour.write()`, the writer of the same files in `tests/test_cfour.py`.
+
 ## Spinor CCSD(T): `zccsdt.zccsd.DirectZCCSD`
 
 The two-component CCSD(T) that started from socutils' `DirectZCCSD` (pp

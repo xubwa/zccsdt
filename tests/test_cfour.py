@@ -1,0 +1,269 @@
+'''The MO integrals of CFOUR's two-component programs as an integral
+container (zccsdt.cfour).
+
+tests/data/cfour/h2o_sto3g: the files that xjoda, xsox2catm, xsox2chf,
+xx2cvtran and xx2cccsd of cfour-x2cso left for H2O / STO-3G (X2C-1e with
+spin-orbit coupling, no symmetry, CCSD(T), all electrons; 10 occupied and 4
+virtual spinors, complex integrals), with the converged amplitudes of
+xx2cccsd.  The installed xx2cvtran does not write <ab||cd> (moinpppp), so
+what is compared with CFOUR is what does not need it: the second-order
+energy, and with CFOUR's amplitudes the CCSD energy, (T) and the T1
+equation.  (bench/cfour/check_integrals.py compares every block with the
+integrals PySCF makes for CFOUR's spinors.)
+
+The whole way - a container written in CFOUR's files, read back, and the
+calculation that the ZMAT asks for - is tested on integrals of PySCF.'''
+import io
+import lzma
+import os
+import stat
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+from pyscf import gto, x2c
+from pyscf.cc import gccsd, gccsd_t
+
+import zccsdt
+from zccsdt import cfour, eris as E
+from zccsdt.cc import ccsd, solver
+
+HERE = os.path.dirname(__file__)
+# printed by xsox2chf, xx2cvtran and xx2cccsd
+REF = {'e_scf': -75.002378932014523, 'e_mp2': -3.558664173578302e-02, 'e_ccsd': -0.049502919581008,
+       'e_t': -0.000067244390488, 'e_ccsd_t_tot': -75.051949095986018}
+
+
+@pytest.fixture(scope='module')
+def rundir(tmp_path_factory):
+    d = tmp_path_factory.mktemp('h2o_sto3g')
+    src = os.path.join(HERE, 'data', 'cfour', 'h2o_sto3g')
+    for name in os.listdir(src):
+        with lzma.open(os.path.join(src, name)) as f:
+            open(d / name[:-3], 'wb').write(f.read())
+    return str(d)
+
+
+def test_read(rundir):
+    '''The files as they are, and the container: 10 + 4 spinors, the SCF
+    energy of JOBARC, complex antisymmetrized integrals, <ij||ab> the same
+    in its two files, the second-order energy of xx2cvtran.  Without
+    moinpppp there is no container for the CC classes, and the message
+    says which keyword is missing.'''
+    x = cfour.read(rundir)
+    assert (x.nocc, x.nvir, x.nfrozen, x.ndropped) == (10, 4, 0, 0)
+    assert abs(x.e_scf - REF['e_scf']) < 1e-12 and x.pppp is None
+    assert x.hhhh.shape == (55, 55) and x.ppph.shape == (10, 4, 10) and x.hhpp.shape == (4, 10, 4, 10)
+    assert np.all(np.diff(x.energy[:10]) > -1e-9) and x.energy[9] < 0 < x.energy[10]
+    eris = cfour.container(x)
+    assert eris.nocc == 10 and eris.nmo == 14 and eris.vvvv is None and not hasattr(eris, '_vvvv_pp')
+    assert eris.dtype == np.complex128 and abs(eris.ovvv.imag).max() > 0.01
+    for key in ('oooo', 'ooov', 'oovv'):
+        blk = getattr(eris, key)
+        assert abs(blk + blk.transpose(1, 0, 2, 3)).max() < 1e-13
+    assert abs(eris.oooo - eris.oooo.conj().transpose(2, 3, 0, 1)).max() < 1e-12
+    assert abs(eris.ovvo - eris.ovvo.conj().transpose(3, 2, 1, 0)).max() < 1e-12
+    assert abs(eris.ovvv + eris.ovvv.transpose(0, 1, 3, 2)).max() < 1e-13
+    assert abs(cfour.mp2(eris) - REF['e_mp2']) < 1e-13
+    with pytest.raises(FileNotFoundError, match='ABCDTYPE'):
+        cfour.from_cfour(rundir)
+    # files of two calculations
+    y = cfour.read(rundir)
+    y.pphh = y.pphh * 1.001
+    with pytest.raises(ValueError, match='moinpphh'):
+        cfour.container(y)
+
+
+def test_amplitudes_of_cfour(rundir):
+    '''With the amplitudes xx2cccsd converged to (t1guess, t2guess): its
+    CCSD correlation energy and its (T) correction from the container, and
+    the T1 equation, which has every block but <ab||cd> and <ij||kl>.'''
+    x = cfour.read(rundir)
+    eris = cfour.container(x, packed_vvvv=False)
+    no, nv = x.nocc, x.nvir
+    t1 = np.ascontiguousarray(cfour._complex(os.path.join(rundir, 't1guess'), (nv, no)).T)
+    t2 = cfour._complex(os.path.join(rundir, 't2guess'), (nv * (nv + 1) // 2, no * (no + 1) // 2))
+    t2 = np.ascontiguousarray(cfour._unpack(cfour._unpack(t2, nv, 0), no, 2).transpose(2, 3, 0, 1))
+    assert abs(ccsd.energy(t1, t2, eris) - REF['e_ccsd']) < 1e-13
+    pe = gccsd._PhysicistsERIs()
+    for key in ('fock', 'mo_energy', 'oovv', 'ooov', 'ovvv'):
+        setattr(pe, key, getattr(eris, key))
+    e_t = gccsd_t.kernel(SimpleNamespace(verbose=0, stdout=None), pe, t1, t2, verbose=0)
+    assert abs(e_t - REF['e_t']) < 1e-13
+    assert abs(x.e_scf + REF['e_ccsd'] + REF['e_t'] - REF['e_ccsd_t_tot']) < 1e-11
+    eris.vvvv = np.zeros((nv,) * 4, dtype=np.complex128)
+    n1, _ = ccsd.update_amps(SimpleNamespace(level_shift=0.0), t1, t2, eris, alg='dense')
+    r1 = (n1 - t1) * (eris.mo_energy[:no, None] - eris.mo_energy[None, no:])
+    assert abs(r1).max() < 1e-11 and abs(t1).max() > 1e-3
+
+
+def test_zmat_and_job(rundir, tmp_path):
+    '''The keywords and sections of a ZMAT, and what the CC step makes of
+    them: CALC and the section %zccsdt for the method, CC_CONV, CC_MAXCYC
+    and MEMORY_SIZE as joda understood them (JOBARC).'''
+    kw, sections = cfour.parse_zmat(os.path.join(rundir, 'ZMAT'))
+    assert kw['CALC'] == 'CCSD(T)' and kw['ABCDTYPE'] == 'STANDARD' and kw['CC_CONV'] == '12' and kw['MEM_UNIT'] == 'GB'
+    assert sections == {}
+    with pytest.raises(ValueError, match=r'ccsd\(t\)'):
+        cfour.job(rundir)
+    j = cfour.job(rundir, method='CCSDT(Q)')
+    assert (j.method, j.conv_tol_normt, j.conv_tol, j.max_cycle) == ('ccsdt(q)', 1e-12, 1e-14, 50)
+    assert abs(j.max_memory - 2000.0) < 1e-9 and j.source['max_memory'] == 'MEMORY_SIZE'
+    assert cfour.programs(rundir) == ['xjoda', 'xsox2catm', 'xsox2chf', 'xx2cvtran']
+    # a section of our own, and one of CFOUR's
+    d = tmp_path / 'run'
+    d.mkdir()
+    for name in ('JOBARC', 'JAINDX'):
+        open(d / name, 'wb').write(open(os.path.join(rundir, name), 'rb').read())
+    text = open(os.path.join(rundir, 'ZMAT')).read().rstrip() + '\n\n%amfiMethod*\n0\n1\n1\n0\n\n'
+    open(d / 'ZMAT', 'w').write(text + '%zccsdt\nmethod=CCSDTQ(P)\nmax_memory 3000\nconv_tol=1e-9\n\n')
+    kw, sections = cfour.parse_zmat(str(d / 'ZMAT'))
+    assert sections['amfimethod'] == ['0', '1', '1', '0'] and len(sections['zccsdt']) == 3
+    j = cfour.job(str(d))
+    assert (j.method, j.max_memory, j.conv_tol, j.conv_tol_normt) == ('ccsdtq(p)', 3000.0, 1e-9, 1e-12)
+    assert j.source['method'] == '%zccsdt' and cfour.job(str(d), max_memory=500).max_memory == 500
+    assert cfour.programs(str(d))[:2] == ['xjoda', 'xx2camf']
+    open(d / 'ZMAT', 'w').write(text + '%zccsdt\nmemory=3\n\n')
+    with pytest.raises(ValueError, match='memory'):
+        cfour.job(str(d))
+
+
+def test_jobarc_records(rundir, tmp_path):
+    '''JOBARC: a record written over (TOTENERG, which xx2cccsd left), a new
+    one appended as PUTREC does, the others untouched.'''
+    for name in ('JOBARC', 'JAINDX'):
+        open(tmp_path / name, 'wb').write(open(os.path.join(rundir, name), 'rb').read())
+    old = cfour.JobArc(rundir)
+    assert abs(old.get('TOTENERG', '<f8')[0] - REF['e_ccsd_t_tot']) < 1e-12
+    arc = cfour.JobArc(str(tmp_path))
+    arc.put('TOTENERG', np.array([-75.5]))
+    arc.put('ZCCSDTEN', np.array([1.5, 2.5, 3.5]))
+    new = cfour.JobArc(str(tmp_path))
+    assert new.get('TOTENERG', '<f8')[0] == -75.5 and list(new.get('ZCCSDTEN', '<f8')) == [1.5, 2.5, 3.5]
+    k = new.names.index('ZCCSDTEN')
+    assert new.names[k - 1] == 'TOTENERG' and new.loc[k] == new.loc[k - 1] + 1
+    assert os.path.getsize(tmp_path / 'JOBARC') % 1024 == 0
+    assert os.path.getsize(tmp_path / 'JAINDX') == os.path.getsize(os.path.join(rundir, 'JAINDX'))
+    for key in ('IFLAGS', 'NUMDROPA', 'COORD'):
+        assert np.array_equal(new.get(key), old.get(key))
+    assert new.get('SCFENEG', '<f8')[0] == old.get('SCFENEG', '<f8')[0]
+    with pytest.raises(ValueError):
+        arc.put('TOTENERG', np.zeros(2))
+    with pytest.raises(KeyError):
+        arc.get('NOTTHERE')
+
+
+@pytest.fixture(scope='module')
+def bh():
+    '''BH / STO-3G away from the z axis: X2C spinors, complex integrals.'''
+    mol = gto.M(atom='B 0 0 0; H 0.5 0.3 1.0', basis='sto-3g', verbose=0)
+    mf = x2c.UHF(mol)
+    mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-8
+    mf.kernel()
+    return mf
+
+
+@pytest.mark.parametrize('frozen,packed', [(0, True), (2, False)])
+def test_written_and_read(bh, tmp_path, frozen, packed):
+    '''A container of PySCF's integrals in CFOUR's files and back: every
+    block, the packed <ab||cd> in the order of the CC code, the energies,
+    the frozen pair.'''
+    ref = E.from_scf(bh, frozen=frozen, packed_vvvv=packed)
+    cfour.write(str(tmp_path), ref, nfrozen=frozen)
+    x = cfour.read(str(tmp_path))
+    assert (x.nocc, x.nvir, x.nfrozen, x.ndropped) == (6 - frozen, 6, frozen, 0)
+    eris = cfour.from_cfour(str(tmp_path), packed_vvvv=packed)
+    assert abs(eris.e_hf - bh.e_tot) < 1e-10 and list(eris.spinors) == list(range(frozen, 12))
+    for key in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv'):
+        assert abs(np.asarray(getattr(eris, key)) - np.asarray(getattr(ref, key))).max() < 1e-13, key
+    assert abs(eris.fock - np.diag(np.diag(ref.fock))).max() < 1e-12
+    if packed:
+        assert eris.vvvv is None and abs(eris._vvvv_pp - ref._vvvv_pp).max() < 1e-13
+        assert abs(ref._vvvv_pp.imag).max() > 1e-3
+    else:
+        assert abs(eris.vvvv - ref.vvvv).max() < 1e-13
+
+
+def test_calculation_of_the_zmat(bh, tmp_path, capsys):
+    '''The front end on a directory in CFOUR's files: the method from CALC
+    (CCSDT(Q)) and from the section %zccsdt (CCSDTQ(P), which joda does not
+    know), thresholds and memory from joda's flags; the energies of the
+    classes on the original container; the final energy in JOBARC.'''
+    ref = E.from_scf(bh, packed_vvvv=True)
+    d = str(tmp_path)
+    cfour.write(d, ref, flags={2: 54, 4: 9, 7: 60, 36: 500000000})
+    zmat = 'BH\nB\nH 1 1.2\n\n*CFOUR(CALC=CCSDT(Q),BASIS=STO-3G\nABCDTYPE=STANDARD,CC_CONV=9)\n\n'
+    open(os.path.join(d, 'ZMAT'), 'w').write(zmat)
+    buf = io.StringIO()
+    e = cfour.run(d, stdout=buf, jobarc=True)
+    out = buf.getvalue()
+    assert 'CCSDT(Q) (CALC of the ZMAT)' in out and '6 occupied, 6 virtual spinors; 0 frozen' in out
+    assert 'conv_tol 1e-11 (CC_CONV)' in out and 'max_cycle 60 (CC_MAXCYC)' in out and '4000 MB (MEMORY_SIZE)' in out
+    assert 'integrals given (CFOUR, %s)' % d in out
+    cc = zccsdt.GCCSDTQ.from_integrals(ref, verbose=0)
+    cc.conv_tol, cc.conv_tol_normt = 1e-11, 1e-9
+    cc.kernel()
+    e_q, e_p = cc.ccsdt_q(), cc.ccsdtq_p()
+    assert abs(e['scf'] - bh.e_tot) < 1e-10 and abs(e['ccsdt'] - cc.ccsdt_run.e_tot) < 1e-9
+    assert abs(e['ccsdt(q)'] - (cc.ccsdt_run.e_tot + e_q)) < 1e-9 and abs(e_q) > 1e-6
+    assert abs(e['ccsdt[q]'] - (cc.ccsdt_run.e_tot + cc.ccsdt_run.e_q5)) < 1e-9
+    assert cfour.JobArc(d).get('TOTENERG', '<f8')[0] == e['ccsdt(q)']
+    # the section of our own, through the command line
+    open(os.path.join(d, 'ZMAT'), 'w').write(zmat + '%zccsdt\nmethod=ccsdtq(p)\nmax_memory=2000\n\n')
+    assert cfour.main([d, '--verbose', '0']) == 0
+    out = capsys.readouterr().out
+    assert 'CCSDTQ(P) (%zccsdt)' in out and '2000 MB (%zccsdt)' in out
+    last = {line.split()[0]: float(line.split()[2]) for line in out.splitlines() if line.startswith('E(')}
+    assert abs(last['E(CCSDTQ)'] - cc.e_tot) < 1e-9 and abs(last['E(CCSDTQ(P))'] - cc.e_tot_p) < 1e-9
+    assert abs(e_p) > 1e-9
+    # CCSD, by the argument
+    r = solver.kernel(ref, 'ccsd', solver.Options(conv_tol=1e-12, conv_tol_normt=1e-9))
+    assert abs(cfour.run(d, method='ccsd', stdout=io.StringIO())['ccsd'] - r.e_tot) < 1e-9
+    assert cfour.main([d, '--method', 'ccsd(t)']) == 1 and 'not one of' in capsys.readouterr().err
+
+
+def _program(path, body):
+    with open(path, 'w') as f:
+        f.write('#!/bin/sh\n' + body + '\n')
+    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+
+
+def test_chain_of_programs(tmp_path, capsys):
+    '''The runner of CFOUR's programs, on stand-ins: the order, an output
+    and a line of times per program, the command before a program; a
+    program that ends with a status, one without the last line of CFOUR's
+    programs and one that does not leave its files stop the chain, named.'''
+    bindir, d = tmp_path / 'bin', tmp_path / 'run'
+    bindir.mkdir()
+    d.mkdir()
+    open(d / 'ZMAT', 'w').write('x\nH\n\n*CFOUR(CALC=CCSDT)\n\n')
+    open(d / 'GENBAS', 'w').write('\n')
+    ok = 'echo " @CHECKOUT-I, Total execution time"'
+    _program(bindir / 'xjoda', 'cat ZMAT > MOL; touch JOBARC JAINDX; echo joda >> order; ' + ok)
+    _program(bindir / 'xsox2catm', 'echo atm >> order; ' + ok)
+    _program(bindir / 'xsox2chf', 'test -f guess || exit 3; touch scf2ceig nmototal; echo hf >> order; ' + ok)
+    _program(bindir / 'xx2cvtran', 'echo vtran >> order; ' + ok)
+    with pytest.raises(cfour.ProgramFailed, match='xsox2chf FAILED: exit status 3'):
+        cfour.run_programs(str(d), bindir=str(bindir), log=lambda s: None)
+    with pytest.raises(cfour.ProgramFailed, match='xx2cvtran FAILED: it did not write moinhhhh'):
+        cfour.run_programs(str(d), bindir=str(bindir), before={'xsox2chf': 'touch guess'}, log=lambda s: None)
+    assert open(d / 'order').read().split() == ['joda', 'atm', 'joda', 'atm', 'hf', 'vtran']
+    assert 'CHECKOUT' in open(d / 'xsox2chf.out').read() and 'xsox2chf wall' in open(d / 'xsox2chf.time').read()
+    _program(bindir / 'xsox2catm', 'echo "Something very wrong"; ' + ok)
+    with pytest.raises(cfour.ProgramFailed, match='xsox2catm FAILED: its output has'):
+        cfour.run_programs(str(d), bindir=str(bindir), log=lambda s: None)
+    _program(bindir / 'xsox2catm', 'echo stopped early')
+    with pytest.raises(cfour.ProgramFailed, match='xsox2catm FAILED: its output does not end'):
+        cfour.run_programs(str(d), bindir=str(bindir), log=lambda s: None)
+    with pytest.raises(cfour.ProgramFailed, match='no executable'):
+        cfour.run_programs(str(d), ['xjoda', 'xnothing'], bindir=str(bindir))
+    # the command line: the chain in a scratch directory, the outputs back, the message of the failure
+    start = tmp_path / 'start'
+    start.mkdir()
+    for name in ('ZMAT', 'GENBAS'):
+        open(start / name, 'w').write(open(d / name).read())
+    code = cfour.main([str(start), '--chain', '--bin', str(bindir), '--scratch', str(tmp_path / 'scr'), '--no-cc'])
+    captured = capsys.readouterr()
+    assert code == 1 and 'xsox2catm FAILED' in captured.err and 'xjoda wall' in captured.out
+    assert sorted(os.listdir(start)) == ['GENBAS', 'ZMAT', 'xjoda.out', 'xjoda.time', 'xsox2catm.out', 'xsox2catm.time']
+    assert os.listdir(tmp_path / 'scr') == []
