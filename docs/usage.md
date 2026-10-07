@@ -187,9 +187,11 @@ integral and amplitude is real.  The classes do that by themselves
 degenerate level of the reference is rotated into its m_j components - a
 Kramers pair into m_j and -m_j - and the report says so.  The energies are
 the same and the arithmetic is two to three times faster.  It applies to
-closed shells and to open shells whose SCF kept the symmetry of the axis;
-in any other orientation, or with `real_spinors = False`, the spinors are
-taken as they are (complex).
+closed shells and to open shells whose SCF kept the symmetry of the axis
+(the doublet of BeH from `pyscf.x2c.UHF` on the axis did not); for every
+other molecule and orientation, or with `real_spinors = False`, the
+spinors are taken as they are and the calculation is complex - the general
+case, and the one the timings of `docs/benchmarks.md` are about.
 
 - **(Q)** (`zccsdt.cc.quadruples`) is the correction of Bomble, Stanton,
   Kallay and Gauss for canonical Hartree-Fock orbitals: `e_q5` is its
