@@ -174,3 +174,38 @@ def test_against_mrcc(name, how):
     assert abs(e_p - want) < 3e-12 and abs(e_p) > 1e-9
     assert abs(r.e_tot + e_p - ref['e_ccsdtq(p)']) < 5e-11
     assert r.t4.dtype == (np.complex128 if how == 'mixed' else np.float64)
+
+
+def test_open_shell_spinors_against_the_dense_reference():
+    '''BeH / STO-3G, a doublet, turned away from the z axis, with the X2C
+    Hamiltonian: five occupied and seven virtual spinors that are not
+    Kramers pairs, complex integrals.  The amplitudes of CCSDTQ solve the
+    equations of the dense reference, and (Q) and (P) are its numbers - the
+    general case of the code, which no other program here takes.'''
+    from pyscf import x2c
+    from zccsdt.cc import solver
+    mol = gto.M(atom='Be 0 0 0; H 0.5 0.7 1.03', basis='sto-3g', spin=1, verbose=0)
+    mf = x2c.UHF(mol)
+    mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-9
+    mf.kernel()
+    eris = E.from_scf(mf, packed_vvvv=True)
+    no, nv = eris.nocc, eris.nmo - eris.nocc
+    # (the SCF stops short of its flag at these thresholds; the Fock matrix is diagonal)
+    assert abs(eris.fock - np.diag(eris.fock.diagonal())).max() < 1e-7
+    assert (no, nv) == (5, 7) and abs(np.asarray(eris.oovv).imag).max() > 1e-5
+    e = np.sort(mf.mo_energy)
+    assert abs(e[1::2] - e[:-1:2]).max() > 1e-2                         # (no pairs: an open shell)
+    r3 = solver.kernel(eris, 'ccsdt', solver.Options(conv_tol=1e-12, conv_tol_normt=1e-9))
+    e_q5, e_q = QD.kernel(eris, r3.t2, r3.t3)
+    r4 = ccsdtq.kernel(eris, ccsdtq.Options(conv_tol=1e-12, conv_tol_normt=1e-9), t1=r3.t1, t2=r3.t2, t3=r3.t3)
+    assert r3.converged and r4.converged and r4.t4.dtype == np.complex128
+    e_p = PT.kernel(eris, r4.t2, r4.t3, r4.t4)
+    fock, g, mo_e, nocc = R.integrals(E.from_scf(mf))
+    dense = lambda t, k: Q.expand(np.asarray(t).reshape(len(P.tuples(no, k)), -1), no, nv, k)
+    ref = R.quadruples(r3.t2, dense(r3.t3, 3), g, mo_e, nocc)
+    assert abs(e_q5 - ref[0]) < 1e-12 and abs(e_q - ref[1]) < 1e-12 and abs(e_q) > 1e-8
+    amps = [r4.t1, r4.t2, dense(r4.t3, 3), dense(r4.t4, 4)]
+    for k, res in enumerate(R.residuals(amps, fock, g, nocc)):
+        assert abs(res).max() < 1e-8, k
+    ref_p = R.pentuples(amps[1], amps[2], amps[3], g, mo_e, nocc)
+    assert abs(e_p - ref_p) < 1e-13 and abs(e_p) > 1e-12
