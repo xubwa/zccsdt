@@ -119,20 +119,21 @@ def _variable(no, nv, isz, cols22, cols13, xv, rows):
 
 def plan(no, nv, isz, budget=None, batch_bytes=None):
     '''The Plan for ``budget`` bytes (None: no limit).  The floor - below it
-    MemoryError - is the products in PASSES batches of columns and Xv for
-    three x; from there first Xv for more x, up to all, then the products in
+    MemoryError - is the products in PASSES batches of columns, Xv for
+    three x and formed from <vv||vv> in PASSES steps (a kernel walks
+    through all tuples in every batch: more batches cost more than they
+    save); from there first Xv for more x, up to all, then the products in
     fewer batches (of ``batch_bytes`` at most), then more rows per step of
     the formation of Xv.'''
     batch_bytes = batch_bytes or BATCH_BYTES
     nP, nQ, nI3, nA3, nA = _sizes(no, nv)
     base, work, xo = _fixed(no, nv, isz)
     xfull = max(3, no - 1)
-    top22 = int(max(1, min(nQ, batch_bytes // (isz * nQ))))
-    top13 = int(max(1, min(nA3, batch_bytes // (isz * nv))))
-    min22, min13 = -(-nQ // PASSES), -(-nA3 // PASSES)
-    top22, top13 = max(top22, min22), max(top13, min13)
-    top_rows = int(max(1, min(nQ, batch_bytes // (isz * nv * nv * (1 + xfull)))))
-    least = work + _variable(no, nv, isz, min22, min13, 3, 1)
+    min22, min13, min_rows = _least(nv)
+    top22 = int(max(min22, min(nQ, batch_bytes // (isz * nQ))))
+    top13 = int(max(min13, min(nA3, batch_bytes // (isz * nv))))
+    top_rows = int(max(min_rows, min(nQ, batch_bytes // (isz * nv * nv * (1 + xfull)))))
+    least = work + _variable(no, nv, isz, min22, min13, 3, min_rows)
     floor = base + max(xo, least)
     if budget is None:
         cols22, cols13, xv, rows = top22, top13, xfull, top_rows
@@ -143,28 +144,32 @@ def plan(no, nv, isz, budget=None, batch_bytes=None):
         # one after the other, each to its top before the next starts (so that
         # no part of a plan shrinks when the budget grows)
         rest = budget - base - least
-        per_x = isz * nv * (nA3 + 2 * nv)
+        per_x = isz * nv * (nA3 + nv * (1 + min_rows))
         xv = int(min(xfull, 3 + rest // per_x))
-        cols22, cols13, rows = min22, min13, 1
+        cols22, cols13, rows = min22, min13, min_rows
         if xv == xfull:
             rest -= (xv - 3) * per_x
             # the two products grow together, by the same fraction of what they lack
             lack = isz * (nQ * (top22 - min22) + nv * (top13 - min13))
             if rest >= lack:
                 cols22, cols13 = top22, top13
-                rows = int(min(top_rows, 1 + (rest - lack) // (isz * nv * nv * (1 + xv))))
+                rows = int(min(top_rows, min_rows + (rest - lack) // (isz * nv * nv * (1 + xv))))
             else:
                 cols22 = int(min22 + rest / lack * (top22 - min22))
                 cols13 = int(min13 + rest / lack * (top13 - min13))
     return explicit_plan(no, nv, isz, cols22, cols13, xv, rows)
 
 
+def _least(nv):
+    '''The smallest batches of a plan: (columns (cd), columns (bcd), rows (bc)).'''
+    nQ, nA3 = comb(nv, 2), comb(nv, 3)
+    return -(-nQ // PASSES), -(-nA3 // PASSES), -(-nQ // PASSES)
+
+
 def explicit_plan(no, nv, isz, cols22, cols13, xv, rows):
     '''The Plan with these batch sizes.'''
-    nP, nQ, nI3, nA3, nA = _sizes(no, nv)
     base, work, xo = _fixed(no, nv, isz)
-    min22, min13 = -(-nQ // PASSES), -(-nA3 // PASSES)
-    floor = base + max(xo, work + _variable(no, nv, isz, min22, min13, 3, 1))
+    floor = base + max(xo, work + _variable(no, nv, isz, *_least(nv)[:2], 3, _least(nv)[2]))
     need = base + max(xo, work + _variable(no, nv, isz, cols22, cols13, xv, rows))
     return Plan(cols22, cols13, xv, rows, need, base + work, floor)
 

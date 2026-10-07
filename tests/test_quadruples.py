@@ -142,8 +142,8 @@ def test_memory_plan(no, nv, cplx):
     with pytest.raises(MemoryError, match=r'\(Q\) needs'):
         QD.plan(no, nv, isz, full.floor - 1)
     e0 = QD.kernel(eris, t2, T3, plan_=full)
-    least = QD.explicit_plan(no, nv, isz, -(-full.cols22 // QD.PASSES), -(-full.cols13 // QD.PASSES), 3, 1)
-    assert least.need < full.need
+    least = QD.explicit_plan(no, nv, isz, *QD._least(nv)[:2], 3, QD._least(nv)[2])
+    assert least.need == least.floor < full.need and least.need >= plans[0].need
     seen = []
     for pl in [least, plans[0], plans[len(plans) // 2], full]:
         gc.collect()
