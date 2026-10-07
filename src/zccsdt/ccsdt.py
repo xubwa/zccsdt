@@ -8,14 +8,15 @@ CCSDT in the style of PySCF's coupled-cluster classes
     mf = scf.RHF(mol).run()
     mycc = zccsdt.CCSDT(mf).run()      # RCCSDT for RHF, UCCSDT for UHF / ROHF,
                                        # GCCSDT for GHF and X2C spinors
-    e_q = mycc.ccsdt_q()               # (Q) correction (closed shell)
+    e_q = mycc.ccsdt_q()               # (Q) correction (RCCSDT and GCCSDT)
 
 RCCSDT   RHF reference: spin-adapted closed-shell CCSDT on spatial orbitals
          (zccsdt.sa.rccsdt), with (Q) (zccsdt.sa.rccsdt_q)
 UCCSDT   UHF or ROHF reference: spin orbitals in spin blocks, integrals in U
          form (zccsdt.eris_spin, zccsdt.cc.solver)
 GCCSDT   GHF or two-component (X2C) spinor reference: spin orbitals or
-         spinors without spin blocks, real or complex (zccsdt.eris)
+         spinors without spin blocks, real or complex (zccsdt.eris), with
+         (Q) (zccsdt.cc.quadruples)
 
 The classes follow PySCF's conventions (attributes such as ``conv_tol``,
 ``max_cycle``, ``diis_space``, ``frozen``, ``verbose``, ``stdout``; kernel(),
@@ -607,7 +608,8 @@ class CCSDTBase(lib.StreamObject):
 
     def ccsdt_q(self, t2=None, t3=None):
         raise NotImplementedError('%s: the (Q) correction is implemented for closed shells '
-                                  '(RCCSDT)' % self.__class__.__name__)
+                                  '(RCCSDT) and for spin orbitals or spinors without spin '
+                                  'blocks (GCCSDT)' % self.__class__.__name__)
 
 
 class RCCSDT(CCSDTBase):
@@ -910,8 +912,8 @@ class UCCSDT(CCSDTBase):
 class GCCSDT(UCCSDT):
     __doc__ = '''CCSDT on a GHF or two-component spinor (X2C) reference: spin
     orbitals or spinors without spin blocks, real or complex
-    (zccsdt.eris, the dense T3 engine).  ``frozen`` counts spin orbitals or
-    spinors, as in PySCF's GCCSD.
+    (zccsdt.eris, the dense T3 engine), and its (Q) correction (ccsdt_q()).
+    ``frozen`` counts spin orbitals or spinors, as in PySCF's GCCSD.
 
 ''' + CCSDTBase.__doc__
 
@@ -954,6 +956,45 @@ class GCCSDT(UCCSDT):
         occ = np.where(np.asarray(self.mo_occ) > 0)[0][self.ncore:]
         vir = np.where(np.asarray(self.mo_occ) == 0)[0]
         return ['%d' % (i + 1) for i in occ], ['%d' % (a + 1) for a in vir]
+
+    def ccsdt_q(self, t2=None, t3=None):
+        '''(Q) correction of the converged CCSDT amplitudes on spin orbitals
+        or spinors (zccsdt.cc.quadruples; canonical orbitals); returns E(Q)
+        and stores e_q, e_q5 (its fifth-order part, [Q]) and e_tot_q.'''
+        from math import comb
+        from zccsdt.cc import quadruples
+        log = logger.new_logger(self)
+        pr = _Printer(log)
+        t2 = self.t2 if t2 is None else t2
+        t3 = self.t3 if t3 is None else t3
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        no, nv = eris.nocc, eris.nmo - eris.nocc
+        dtype = np.result_type(t2, t3, eris.oovv)
+        snap0 = timing.snapshot()
+        pr.line(' (Q) correction: %d occupied x %s virtual quadruples, %s'
+                % (comb(no, 4), _count(comb(nv, 4)),
+                   'complex' if np.iscomplexobj(np.zeros(0, dtype)) else 'real'))
+        if no < 4 or nv < 4:
+            self.e_q5 = self.e_q = 0.0
+        else:
+            pl = quadruples.plan(no, nv, np.dtype(dtype).itemsize, memory.budget(self.max_memory))
+            xfull = max(3, no - 1)
+            pr.kv('memory', '%s besides T3 and the integrals' % _size(pl.need), indent=3)
+            pr.kv('plan', 'products in %d and %d batches of columns; T2 <vv||vv> intermediate for %s'
+                  % (-(-comb(nv, 2) // pl.cols22), -(-comb(nv, 3) // pl.cols13),
+                     'all occupied indices' if pl.xv >= xfull else
+                     '%d of %d occupied indices at a time' % (pl.xv, xfull)), indent=3)
+            with _PeakMemory() as peak, timing.timer(ROOT_Q):
+                self.e_q5, self.e_q = quadruples.kernel(eris, t2, t3, plan_=pl)
+            w, c, k = timing.since(snap0)[(ROOT_Q,)]
+        pr.kv('E[Q]', '%20.12f   (fifth order)' % self.e_q5, indent=3)
+        pr.kv('E(Q)', '%20.12f' % self.e_q, indent=3)
+        pr.kv('E(CCSDT(Q))', '%20.12f' % self.e_tot_q, indent=3)
+        if no >= 4 and nv >= 4:
+            pr.kv('time', '%.2f s wall, %.2f s CPU (%.1f cores); peak memory %s anonymous'
+                  % (w, c, c / w if w > 0 else 0, _size(peak.peak or 0)), indent=3)
+        pr.rule(char='=')
+        return self.e_q
 
 
 def CCSDT(mf, frozen=None, mo_coeff=None, mo_occ=None):

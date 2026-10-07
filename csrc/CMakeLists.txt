@@ -20,6 +20,14 @@ target_link_libraries(zc_t3pack PUBLIC OpenMP::OpenMP_C m)
 set_target_properties(zc_t3pack PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
 
+# packed antisymmetric tuples of any rank: expansion into two groups of
+# indices and antisymmetrizing reduction (zccsdt/cc/t4pack.py)
+add_library(zc_tnpack SHARED tnpack.c)
+target_compile_options(zc_tnpack PRIVATE -O3 -march=native -fcx-limited-range)
+target_link_libraries(zc_tnpack PUBLIC OpenMP::OpenMP_C m)
+set_target_properties(zc_tnpack PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
+
 # kernels of the spinor CCSD amplitude equations (zccsdt/zccsd/amps.py) and of
 # its (T) correction (zccsdt/zccsd/triples.py)
 add_library(zc_zccsd SHARED zccsd_kernels.c zccsd_t.c)

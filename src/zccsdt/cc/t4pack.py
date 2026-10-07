@@ -24,15 +24,41 @@ antisymmetrized result of a product back onto the packed block: for every
 split of the target, sgn * X[its groups].  Both take ranges of the second
 groups, so that a product can be done in batches of columns.
 
-These are the numpy versions (fancy indexing, one thread): the reference of
-the kernels and good for small cases.
+These are the numpy versions (fancy indexing, one thread, tables of the size
+of the tuples): the reference of the kernels and good for small cases.
+
+tn_expand(), tn_reduce() and tn_rows() are the kernels (csrc/tnpack.c): one
+group pair at a time - a packed row as t[g1, g2] and the antisymmetrizing
+reduction of X[g1, g2] onto the sorted tuples -, threaded and without
+tables; they fall back on the tables where the library is not built.
 '''
 
+import ctypes
 import functools
+import os
 from itertools import combinations
 from math import comb
 
 import numpy as np
+
+
+def _load_lib():
+    path = os.environ.get('ZCCSDT_TNPACK_LIB') or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib', 'libzc_tnpack.so')
+    try:
+        return ctypes.CDLL(path)
+    except OSError:
+        return None
+
+
+_lib = _load_lib()
+USE_C = _lib is not None        # set False to force the numpy implementations
+_SFX = {np.dtype(np.float64): 'd', np.dtype(np.complex128): 'z'}
+_I64, _INT, _DBL = ctypes.c_int64, ctypes.c_int, ctypes.c_double
+
+
+def _p(a):
+    return ctypes.c_void_p(a.ctypes.data)
 
 
 @functools.lru_cache(maxsize=None)
@@ -151,6 +177,130 @@ def reduce(R, X, so, sv, jo=None, jv=None, scale=1.0):
                 vals = vals * fo[:, None]
             R[Is[:, None], As[None, :]] += vals
     return R
+
+
+def fold(G, sp, axis1, axis2):
+    '''sum over the splits of the sorted tuples of ``sp`` of
+    sgn * G[.., group 1, .., group 2, ..] (the two groups on axis1 and
+    axis2): the antisymmetrizer of an array that is antisymmetric within
+    each group.  The tuple is the first axis of the result, the other axes
+    follow in their order.'''
+    G = np.moveaxis(G, (axis1, axis2), (0, 1))
+    out = 0
+    for s in range(sp.nsplit):
+        out = out + G[sp.idx1[:, s], sp.idx2[:, s]] * sp.sgn[:, s].reshape((-1,) + (1,) * (G.ndim - 2))
+    return out
+
+
+# ------------------------------------------------- kernels on one group pair
+
+def _layout(X, outer):
+    '''(strides of group 1, group 2 and the outer index in elements, number
+    of outer indices) of X[g1, g2] or of X with one more axis ``outer``.'''
+    assert X.flags.c_contiguous
+    st = [x // X.itemsize for x in X.strides]
+    if X.ndim == 2:
+        assert outer is None
+        return st[0], st[1], 0, 1
+    assert X.ndim == 3 and outer in (0, 1, 2)
+    g = [ax for ax in range(3) if ax != outer]
+    return st[g[0]], st[g[1]], st[outer], X.shape[outer]
+
+
+def _ranges(n, k1, k2, rows, cols):
+    return (rows or (0, comb(n, k1))) + (cols or (0, comb(n, k2)))
+
+
+def tn_reduce(R, X, n, k1, k2, rows=None, cols=None, scale=1.0, outer=None):
+    '''R[A] += scale * sum over the splits (g1 | g2) of the sorted
+    (k1+k2)-tuples A of range(n) of sgn * X[g1 - rows[0], g2 - cols[0]], for
+    the groups inside the block of X: rows = (b0, b1) of the k1-tuples and
+    cols = (c0, c1) of the k2-tuples (default: all).  X may have one more
+    axis ``outer`` (in any place); R is then [outer, A].'''
+    s1, s2, so, nout = _layout(X, outer)
+    b0, b1, c0, c1 = _ranges(n, k1, k2, rows, cols)
+    nA = comb(n, k1 + k2)
+    assert R.flags.c_contiguous and R.dtype == X.dtype and R.shape == ((nA,) if outer is None else (nout, nA))
+    if USE_C:
+        getattr(_lib, 'zc_tn_reduce_' + _SFX[R.dtype])(
+            _p(R), _I64(nout), _I64(nA), _INT(n), _INT(k1), _INT(k2), _I64(b0), _I64(b1), _I64(c0),
+            _I64(c1), _p(X), _I64(s1), _I64(s2), _I64(so), _DBL(scale))
+        return R
+    sp = split(n, k1, k2)
+    Xo = X[None] if outer is None else np.moveaxis(X, outer, 0)
+    Ro = R.reshape(nout, nA)
+    for s in range(sp.nsplit):
+        i1, i2 = sp.idx1[:, s], sp.idx2[:, s]
+        sel = np.where((i1 >= b0) & (i1 < b1) & (i2 >= c0) & (i2 < c1))[0]
+        Ro[:, sel] += scale * sp.sgn[sel, s] * Xo[:, i1[sel] - b0, i2[sel] - c0]
+    return R
+
+
+def tn_expand(X, T, n, k1, k2, rows=None, cols=None, scale=1.0, outer=None):
+    '''X[g1 - rows[0], g2 - cols[0]] = scale * t[g1, g2] of the packed tuples
+    T[A] (zero where the groups share an index), the inverse layout of
+    tn_reduce: X [b1 - b0, c1 - c0], with one more axis ``outer`` for
+    T [outer, A].'''
+    s1, s2, so, nout = _layout(X, outer)
+    b0, b1, c0, c1 = _ranges(n, k1, k2, rows, cols)
+    nA = comb(n, k1 + k2)
+    assert T.flags.c_contiguous and T.dtype == X.dtype and T.shape == ((nA,) if outer is None else (nout, nA))
+    if USE_C:
+        _lib.zc_tn_zero(_p(X), _I64(X.nbytes))
+        getattr(_lib, 'zc_tn_expand_' + _SFX[X.dtype])(
+            _p(T), _I64(nout), _I64(nA), _INT(n), _INT(k1), _INT(k2), _I64(b0), _I64(b1), _I64(c0),
+            _I64(c1), _p(X), _I64(s1), _I64(s2), _I64(so), _DBL(scale))
+        return X
+    sp = split(n, k1, k2)
+    Xo = X[None] if outer is None else np.moveaxis(X, outer, 0)
+    Xo[...] = scale * T.reshape(nout, nA)[:, sp.pos[b0:b1, c0:c1]] * sp.psg[b0:b1, c0:c1]
+    return X
+
+
+def tn_rows(out, M, rows, sgn, cols=None):
+    '''out[r] = sgn[r] * M[rows[r], c0:c1]: rows of a packed block with their
+    signs (sgn 0: zeros).'''
+    c0, c1 = cols or (0, M.shape[1])
+    rows = np.ascontiguousarray(rows, dtype=np.int64)
+    sgn = np.ascontiguousarray(sgn, dtype=np.int8)
+    assert out.flags.c_contiguous and out.shape == (len(rows), c1 - c0) and out.dtype == M.dtype
+    if USE_C and M.flags.c_contiguous:
+        getattr(_lib, 'zc_tn_rows_' + _SFX[out.dtype])(
+            _p(M), _I64(M.shape[1]), _p(rows), _p(sgn), _I64(len(rows)), _I64(c0), _I64(c1), _p(out),
+            _I64(out.shape[1]))
+        return out
+    np.multiply(M[rows, c0:c1], sgn[:, None], out=out)
+    return out
+
+
+def zero(a):
+    '''a[...] = 0 on all threads.'''
+    if USE_C and a.flags.c_contiguous:
+        _lib.zc_tn_zero(_p(a), _I64(a.nbytes))
+    else:
+        a[...] = 0
+    return a
+
+
+def tuple_sums(e, k):
+    '''sum_t e[a_t] of the sorted k-tuples of range(len(e)): [C(n,k)].'''
+    e = np.ascontiguousarray(e, dtype=np.float64)
+    if USE_C:
+        out = np.empty(comb(len(e), k))
+        _lib.zc_tn_tuple_sums(_p(e), _INT(len(e)), _INT(k), _p(out))
+        return out
+    return e[tuples(len(e), k)].sum(axis=1)
+
+
+def energy2(z, r1, r2, ev, eo):
+    '''(sum Re(conj(z) (r1 + r2)) / (eo - ev), sum Re(conj(r1) (r1 + r2)) / (eo - ev)).'''
+    if USE_C:
+        e = np.zeros(2)
+        getattr(_lib, 'zc_tn_energy2_' + _SFX[z.dtype])(_p(z), _p(r1), _p(r2), _p(ev), _DBL(eo),
+                                                       _I64(len(z)), _p(e))
+        return float(e[0]), float(e[1])
+    r = (r1 + r2) / (eo - ev)
+    return float(np.vdot(z, r).real), float(np.vdot(r1, r).real)
 
 
 def pack(t):
