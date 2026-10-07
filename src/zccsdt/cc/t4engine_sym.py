@@ -62,7 +62,8 @@ BATCH_BYTES = 1 << 30           # an operand or a product of one batch, at most
 PIECES = t4engine.PIECES
 _I64, _INT = ctypes.c_int64, ctypes.c_int
 _BUFS = ('t12', 'oovv', 'z', 'oovoG', 'g', 'wvA', 'gB', 'la13', 'y3A', 't3p', 'r13', 'xo', 't2A', 'x22',
-         'x13', 'oovoA', 'vo', 'wrB', 't2xq', 'mx', 'wblk', 't2px', 'u3')
+         'x13', 'oovoA', 'vo', 'wrB', 't2xq', 'mx', 'wblk', 't2px', 'ws', 'mb', 'xb', 'r3',
+         'ls', 'tv', 'r2', 'u3')
 _B = {name: k for k, name in enumerate(_BUFS)}
 
 
@@ -450,7 +451,7 @@ class Layout:
             no, nv, ncls, ko, o12, o13 = self.no, self.nv, self.ncls, self.ko, self.o12, self.o13
             kJ = self.kO3[J]
             rest = [m for m in range(no) if m not in self.o3[J]]
-            blocks, moff, xoff = {}, 0, 0
+            blocks, moff, xoff = {}, 0, 0       # (xoff: of the stacked operator [ntot, nr])
             for d in range(-(ncls - 1), ncls):
                 kK = kJ + d
                 if not (0 <= kK < self.n3 and self.nK[kK]):
@@ -489,51 +490,78 @@ class Layout:
                                  rows=np.array(rows, dtype=np.int64), cols=np.array(cols, dtype=np.int64),
                                  base=base, moff=moff, xoff=xoff)
                 moff += nr * self.nK[kK]
-                xoff += len(rows) * self.nK[kK]
+                xoff += len(rows) * nr
             ents = {}
             for m in rest:
                 I = int(o13.pos[m, J])
                 M = int(self.kO4[I])
                 if M not in self.sectors:
                     continue
-                xm, xx = np.full(ncls, -1, dtype=np.int64), np.full(ncls, -1, dtype=np.int64)
-                s1 = np.ones(ncls, dtype=np.int64)
+                xm, s1 = np.full(ncls, -1, dtype=np.int64), np.ones(ncls, dtype=np.int64)
                 for p in range(ncls):
                     b = blocks.get(int(ko[m] - p))
                     if b is not None and m in b['base']:
                         xm[p] = b['moff'] + b['base'][m] * b['nK']
-                        xx[p] = b['xoff'] + b['base'][m] * b['nK']
                         s1[p] = b['nK']
-                ents.setdefault(M, []).append((int(self.posO4[I]), float(o13.psg[m, J]), xm, xx, s1))
+                ents.setdefault(M, []).append((int(self.posO4[I]), float(o13.psg[m, J]), xm, s1))
             return blocks, int(moff), int(xoff), ents
         return self.cached(('ring', J), make)
 
+    def ring_size(self, J):
+        '''Elements that the ring of the triple J takes in a batch: the
+        operand, the product, the operators.'''
+        _, msz, wsz, _ = self.ring(J)
+        return 2 * msz + wsz
+
     def ring_entries(self, Js):
-        '''The entries of a batch of occupied triples per sector, the blocks
-        of the triples one after the other: {M: (row, sgn, xoff of the
-        operand, xoff of the product, s1, s2)}, and where the operand and
-        the product of each triple start.'''
-        out, mb, xb = {}, [], []
-        m0 = x0 = 0
+        '''A batch of occupied triples, their blocks one after the other:
+        the entries per sector {M: (row, sgn, xoff, s1, s2)} (the operand and
+        the product have one layout), where the blocks and the operators of
+        each triple start, their sizes, and the tables of the products: the
+        ring, the rows that go to R3 (f_ov; <mn||ek>) and those that go to Xv.'''
+        out, base = {}, []
+        m0 = w0 = 0
+        ring, r3, xv = _Tab(), {}, {}
+        pr, pb = _PIECE['ring'], _PIECE['b2']
         for J in Js:
-            _, msz, xsz, ents = self.ring(J)
-            mb.append(m0)
-            xb.append(x0)
+            blocks, msz, wsz, ents = self.ring(J)
+            base.append((m0, w0))
             for M, es in ents.items():
-                for row, sg, xm, xx, s1 in es:
-                    out.setdefault(M, []).append((row, sg, np.where(xm >= 0, xm + m0, -1),
-                                                  np.where(xx >= 0, xx + x0, -1), s1))
+                for row, sg, xm, s1 in es:
+                    out.setdefault(M, []).append((row, sg, np.where(xm >= 0, xm + m0, -1), s1))
+            kJ = self.kO3[J]
+            for b in blocks.values():
+                nK, nr, w, m = b['nK'], b['nr'], w0 + b['xoff'], m0 + b['moff']
+                ring.term(pr, 'ws', w, nr, 0, 'mb', m, nK, 'xb', m, nK, nr, nK, nr, 1.0)
+                ring.group()
+                if b['fov'] >= 0:
+                    tgt = int(self.t3off[kJ] + self.posO3[J] * nK)
+                    r3.setdefault(tgt, []).append((pr, w + b['fov'] * nr, nr, m, nK, 1, nK, nr, 1.0))
+                for a0, a1, a2, tgt, x, sg in b['thin']:
+                    for k, (rowJ, sgk) in enumerate(tgt):
+                        if sgk:
+                            t = int(self.t3off[b['kK']] + rowJ * nK)
+                            r3.setdefault(t, []).append((pb, w + (a0 + k) * nr, nr, m, nK, 1, nK, nr, sgk))
+                    if x >= 0 and a2 > a1:
+                        xv.setdefault(int(x), []).append((pb, w + a1 * nr, nr, m, nK, a2 - a1, nK, nr, sg))
             m0 += msz
-            x0 += xsz
+            w0 += wsz
         tabs = {}
         for M, es in out.items():
             es.sort(key=lambda e: e[0])
             tabs[M] = (np.array([e[0] for e in es], dtype=np.int64), np.array([e[1] for e in es]),
                        np.ascontiguousarray([e[2] for e in es], dtype=np.int64),
                        np.ascontiguousarray([e[3] for e in es], dtype=np.int64),
-                       np.ascontiguousarray([e[4] for e in es], dtype=np.int64),
                        np.ones((len(es), self.ncls), dtype=np.int64))
-        return tabs, mb, xb, m0, x0
+        thin = []
+        for name, terms in (('r3', r3), ('r13', xv)):
+            tab = _Tab()
+            for tgt in sorted(terms):
+                for piece, aoff, lda, boff, ldb, m, n, k, al in terms[tgt]:
+                    tab.term(piece, 'ws', aoff, lda, 0, 'mb', boff, ldb, name, tgt, n, m, n, k, al)
+                tab.group()
+            thin.append(tab.done())
+        return tabs, base, m0, w0, ring.done(), thin[0], thin[1]
 
     # ---------------------------------------------------------------- tables of products
     def tasks_t3(self):
@@ -728,6 +756,52 @@ class Layout:
                     t13.group(row)
             return t22.done(), t13.done()
         return self.cached(('rows', M), make)
+
+    def tasks_pp(self, M, r0, r1):
+        '''The thin products of the rows r0:r1 of sector M with T4 as
+        [(ef), (row, (cd))]: the T4 term of R2, and the T4 parts of Xo and of
+        R3 before its reduction - each a table in groups of one target.'''
+        def make():
+            no, nb, nQt = self.no, r1 - r0, len(self.kQ)
+            nO, nV, nQ, o13, o22 = self.nO, self.nV, self.nQ, self.o13, self.o22
+            tgt = ({}, {}, {})
+            lsoff = np.concatenate(([0], np.cumsum([self.pp_rows(q)[0] * nQ[q] for q in range(self.n2)])))
+            for r in range(r0, r1):
+                I = self.O4cls[M][r]
+                for q in range(self.n2):
+                    o = self.off22[M, q]
+                    if o < 0 or not self.pp_rows(q)[0]:
+                        continue
+                    nc, per = int(nQ[M - q]), self.pp_rows(q)[1]
+                    B = (int(o * nb + (r - r0) * nc), nb * nc, nc, int(nQ[q]))
+                    for s in range(6):
+                        P1, P2 = int(o22.idx1[I, s]), int(o22.idx2[I, s])
+                        if self.kO2[P1] == q:
+                            tgt[0].setdefault((P2 * nQt + self.qoff[M - q], nQt), []).append(
+                                (lsoff[q] + self.posO2[P1] * nQ[q], 1, float(o22.sgn[I, s])) + B)
+                    for s in range(4):
+                        n, J, sg = int(o13.idx1[I, s]), int(o13.idx2[I, s]), float(o13.sgn[I, s])
+                        if per[n] is None:
+                            continue
+                        a0, c, a1 = per[n]
+                        if nO[c]:
+                            tgt[1].setdefault(((J * no + self.o0[c]) * nQt + self.qoff[M - q], nQt), []).append(
+                                (lsoff[q] + a0 * nQ[q], int(nO[c]), sg) + B)
+                        kJ = self.kO3[J]
+                        ou = self.t12off[kJ, c]
+                        if ou >= 0:
+                            tgt[2].setdefault((ou + self.posO3[J] * nc, self.nJ[kJ] * nc), []).append(
+                                (lsoff[q] + a1 * nQ[q], int(nV[c]), sg) + B)
+            tabs = []
+            for name, piece, terms in (('r2', 'r2', tgt[0]), ('xo', 'b1', tgt[1]), ('u3', 'b1', tgt[2])):
+                tab = _Tab()
+                for coff, ldc in sorted(terms):
+                    for aoff, m, al, boff, ldb, n, k in terms[coff, ldc]:
+                        tab.term(_PIECE[piece], 'ls', aoff, k, 0, 'tv', boff, ldb, name, coff, ldc, m, n, k, al)
+                    tab.group()
+                tabs.append(tab.done())
+            return tabs
+        return self.cached(('pptasks', M, r0, r1), make)
 
     def pp_rows(self, q):
         '''The rows of the thin operator of the pp ladder for the pairs (ef)
@@ -1058,78 +1132,69 @@ def residual(lay, t2, T3, T4, ints, batch_bytes=None, only=None, out=None):
         with timer('t4.pp'):
             U3 = np.zeros(max(lay.t12size, 1), dtype=dtype) if want('b1') else None     # [c, J, (ab)]
             thin = want('r2', 'b1')
-            Ls = {}
             if thin:
+                # the thin operator per label q of (ef): the occupied pairs, then per n the m and the c
+                sizes = [lay.pp_rows(q)[0] * nQ[q] for q in range(lay.n2)]
+                Ls = np.zeros(max(sum(sizes), 1), dtype=dtype)
+                o = 0
                 for q in range(lay.n2):
                     nrow, per = lay.pp_rows(q)
-                    if not nQ[q] or not nrow:
-                        continue
-                    L = np.zeros((nrow, nQ[q]), dtype=dtype)
-                    L[:lay.nO2[q]] = oovv_pq[lay.O2cls[q]][:, qs(q)]
-                    for n in range(no):
-                        if per[n] is not None:
-                            r0, c, r1 = per[n]
-                            L[r0:r1] = oovv_xq[o0[c]:o0[c + 1], n, qs(q)]       # <mn||ef>
-                            L[r1:r1 + nV[c]] = -vovv_q[v0[c]:v0[c + 1], n, qs(q)]   # - <cn||ef>
-                    Ls[q] = L
+                    if sizes[q]:
+                        L = Ls[o:o + sizes[q]].reshape(nrow, nQ[q])
+                        L[:lay.nO2[q]] = oovv_pq[lay.O2cls[q]][:, qs(q)]
+                        for n in range(no):
+                            if per[n] is not None:
+                                r0, c, r1 = per[n]
+                                L[r0:r1] = oovv_xq[o0[c]:o0[c + 1], n, qs(q)]           # <mn||ef>
+                                L[r1:r1 + nV[c]] = -vovv_q[v0[c]:v0[c + 1], n, qs(q)]   # - <cn||ef>
+                    o += sizes[q]
+                bufs.update(ls=Ls, r2=R2)
+                if want('b1'):
+                    bufs['u3'] = U3
             for M in lay.sectors:
                 T, R = lay.block(T4, M), lay.block(R4, M)
                 n22 = int(lay.n22[M])
                 if not n22:
                     continue
-                Is = lay.O4cls[M]
                 for r0, r1 in _batches(lay.nI[M], batch_bytes // (isz * n22)):
                     nb = r1 - r0
                     ent = lay.ent_rows(M, r0, r1, 'pp')
                     Tv = P.zero(np.empty(nb * n22, dtype=dtype))
                     with timer('expand'):
                         _x22(lay, 0, T, M, ent, Tv)
-                    X = np.empty(nb * n22, dtype=dtype) if want('pp') else None
-                    for q in range(lay.n2):
-                        o = lay.off22[M, q]
-                        if o < 0:
-                            continue
-                        nc = nQ[M - q]
-                        Tq = Tv[o * nb:(o + nQ[q] * nc) * nb].reshape(nQ[q], nb * nc)
-                        if want('pp'):
-                            with timer('gemm'):
-                                gemm(Wq[q], Tq, X[o * nb:(o + nQ[q] * nc) * nb].reshape(nQ[q], nb * nc))
-                        if q not in Ls:
-                            continue
-                        with timer('gemm'):
-                            O = gemm(Ls[q], Tq).reshape(-1, nb, nc)
-                        per = lay.pp_rows(q)[1]
-                        cs = qs(M - q)
-                        for r in range(r0, r1):
-                            I = Is[r]
-                            if want('r2'):
-                                for s in range(6):
-                                    P1 = o22.idx1[I, s]
-                                    if lay.kO2[P1] == q:
-                                        R2[o22.idx2[I, s], cs] += o22.sgn[I, s] * O[lay.posO2[P1], r - r0]
-                            if want('b1'):
-                                # Xo(m;jkl;cd) += <mn||ef> t(n jkl; ef, cd);
-                                # R3 -= P(c/ab) <cm||ef> t(m ijk; ef, ab)
-                                for s in range(4):
-                                    n, J, sg = o13.idx1[I, s], o13.idx2[I, s], o13.sgn[I, s]
-                                    if per[n] is None:
-                                        continue
-                                    a0, c, a1 = per[n]
-                                    if nO[c]:
-                                        Xo[J, o0[c]:o0[c + 1], cs] += sg * O[a0:a1, r - r0]
-                                    ou = lay.t12off[lay.kO3[J], c]
-                                    if ou >= 0:
-                                        U3[ou:ou + nV[c] * nJ[lay.kO3[J]] * nc].reshape(nV[c], -1, nc)[
-                                            :, lay.posO3[J]] += sg * O[a1:a1 + nV[c], r - r0]
+                    if thin:
+                        # R2 += <kl||ef> t(ijkl; ef, cd);  Xo(m;jkl;cd) += <mn||ef> t(n jkl; ef, cd);
+                        # R3 -= P(c/ab) <cm||ef> t(m ijk; ef, ab)
+                        bufs['tv'] = Tv
+                        tr2, txo, tu3 = lay.tasks_pp(M, r0, r1)
+                        if want('r2'):
+                            _run(tr2, bufs, dtype)
+                        if want('b1'):
+                            _run(txo, bufs, dtype)
+                            _run(tu3, bufs, dtype)
+                        del bufs['tv']
                     if want('pp'):
+                        X = np.empty(nb * n22, dtype=dtype)
+                        for q in range(lay.n2):
+                            o = lay.off22[M, q]
+                            if o < 0:
+                                continue
+                            sl = slice(o * nb, (o + nQ[q] * nQ[M - q]) * nb)
+                            with timer('gemm'):
+                                gemm(Wq[q], Tv[sl].reshape(nQ[q], -1), X[sl].reshape(nQ[q], -1))
                         with timer('reduce'):
                             _x22(lay, 1, R, M, ent, X)
-                    del Tv, X, Tq
+                        del X
+                    del Tv
+            if thin:
+                for name in ('ls', 'r2', 'u3'):
+                    bufs.pop(name, None)
+                del Ls
             if want('b1'):
                 for k in range(lay.n3):
                     if nJ[k] and nK[k]:
                         _x12(lay, 1, R3b[k], k, lay.ent_t12(k), U3)
-            del U3, Ls
+            del U3
     del Wq, Wpp
 
     # ---- ring, for every occupied triple J = (jkl) and label of (m, e) the block
@@ -1145,44 +1210,37 @@ def residual(lay, t2, T3, T4, ints, batch_bytes=None, only=None, out=None):
                 -0.5 * oovo.transpose(1, 3, 0, 2).reshape(no, no, no * nv)
             S[no * nv + 1:].reshape(no, no + nv, no * nv)[:, no:] = \
                 0.5 * oovv.transpose(1, 2, 0, 3).reshape(no, nv, no * nv)
+            bufs['r3'] = R3
+            pieces = [_PIECE[x] for x in ('ring', 'b2') if want(x)]
             for Js in _ring_batches(lay, isz, batch_bytes):
-                tabs, mb, xb, msz, xsz = lay.cached(('ringb', tuple(Js)), lambda: lay.ring_entries(Js))
+                tabs, base, msz, wsz, tring, tr3, txv = lay.cached(('ringb', tuple(Js)),
+                                                                   lambda: lay.ring_entries(Js))
                 if not msz:
                     continue
                 Mb = P.zero(np.empty(msz, dtype=dtype))
-                Xb = np.empty(xsz, dtype=dtype)
                 with timer('expand'):
-                    for M, (row, sgn, xm, xx, s1, s2) in tabs.items():
-                        _x13(lay, 0, lay.block(T4, M), M, (row, sgn, xm, s1, s2), Mb)
-                for J, m0, x0 in zip(Js, mb, xb):
-                    kJ = lay.kO3[J]
-                    for d, b in lay.ring(J)[0].items():
-                        nK_, nr, ntot = b['nK'], b['nr'], b['ntot']
-                        rows = b['rows'] if want('b2') else b['rows'][:nr + (b['fov'] >= 0)]
-                        if not want('ring'):
-                            rows = rows[nr:]
-                        if not len(rows):
-                            continue
-                        Xj = Xb[x0 + b['xoff']:x0 + b['xoff'] + ntot * nK_].reshape(ntot, nK_)
-                        first = 0 if want('ring') else nr
-                        with timer('gemm'):
-                            gemm(c_(S[np.ix_(rows, b['cols'])]),
-                                 Mb[m0 + b['moff']:m0 + b['moff'] + nr * nK_].reshape(nr, nK_),
-                                 Xj[first:first + len(rows)])
-                        if want('ring') and b['fov'] >= 0:
-                            R3b[kJ][lay.posO3[J]] += Xj[b['fov']]
-                        if want('b2'):
-                            for a0, a1, a2, tgt, xv, sg in b['thin']:
-                                for k, (rowJ, sgk) in enumerate(tgt):
-                                    if sgk:
-                                        R3b[b['kK']][rowJ] += sgk * Xj[a0 + k]
-                                if xv >= 0:
-                                    R13[xv:xv + (a2 - a1) * nK_].reshape(a2 - a1, nK_)[...] += sg * Xj[a1:a2]
+                    for M, ent in tabs.items():
+                        _x13(lay, 0, lay.block(T4, M), M, ent, Mb)
+                # the stacked operators of the blocks: [(i a) | f_ov | k, e of three n; (m e)]
+                Ws = np.empty(wsz, dtype=dtype)
+                for J, (m0, w0) in zip(Js, base):
+                    for b in lay.ring(J)[0].values():
+                        o = w0 + b['xoff']
+                        Ws[o:o + b['ntot'] * b['nr']].reshape(b['ntot'], b['nr'])[...] = S[np.ix_(b['rows'], b['cols'])]
+                bufs.update(ws=Ws, mb=Mb)
                 if want('ring'):
+                    Xb = P.zero(np.empty(msz, dtype=dtype))
+                    bufs['xb'] = Xb
+                    _run(tring, bufs, dtype)
                     with timer('reduce'):
-                        for M, (row, sgn, xm, xx, s1, s2) in tabs.items():
-                            _x13(lay, 1, lay.block(R4, M), M, (row, sgn, xx, s1, s2), Xb)
-                del Mb, Xb, Xj
+                        for M, ent in tabs.items():
+                            _x13(lay, 1, lay.block(R4, M), M, ent, Xb)
+                    del bufs['xb'], Xb
+                _run(tr3, bufs, dtype, pieces)
+                if want('b2'):
+                    _run(txv, bufs, dtype)
+                del bufs['ws'], bufs['mb'], Mb, Ws
+            del bufs['r3']
             del S
 
     # ---- hh ladder with F_oo: a matrix on the occupied quadruples of a sector
@@ -1230,7 +1288,7 @@ def _ring_batches(lay, isz, batch_bytes):
     operand and the product (a triple by itself where it takes more).'''
     Js, batches, n = [], [], 0
     for J in range(len(lay.o3)):
-        size = sum(lay.ring(J)[1:3])
+        size = lay.ring_size(J)
         if Js and (n + size) * isz > batch_bytes:
             batches.append(Js)
             Js, n = [], 0
@@ -1243,7 +1301,7 @@ def _ring_batches(lay, isz, batch_bytes):
 def min_batch_bytes(lay, isz):
     '''The smallest ``batch_bytes`` that is of use: one row of a sector and
     one occupied triple of the ring at a time.'''
-    ring = max((sum(lay.ring(J)[1:3]) for J in range(len(lay.o3))), default=0)
+    ring = max((lay.ring_size(J) for J in range(len(lay.o3))), default=0)
     return int(isz * max(int(lay.n22.max(initial=0)), int(lay.n13.max(initial=0)), ring, 1))
 
 
@@ -1281,7 +1339,7 @@ def memory(lay, isz, batch_bytes=None, r4=True):
             if size:
                 rows = max(rows, min(int(lay.nI[M]), max(1, batch_bytes // (isz * size))) * size)
     # (a batch of the ring: at most batch_bytes, or one triple - counted so that it grows with the batch)
-    ring = [sum(lay.ring(J)[1:3]) for J in range(nI3)]
+    ring = [lay.ring_size(J) for J in range(nI3)]
     ring = min(sum(ring), max(batch_bytes // isz, max(ring, default=0)))
     nS = ov + 1 + no * n
     stages = [
