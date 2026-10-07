@@ -1145,16 +1145,7 @@ def residual(lay, t2, T3, T4, ints, batch_bytes=None, only=None, out=None):
                 -0.5 * oovo.transpose(1, 3, 0, 2).reshape(no, no, no * nv)
             S[no * nv + 1:].reshape(no, no + nv, no * nv)[:, no:] = \
                 0.5 * oovv.transpose(1, 2, 0, 3).reshape(no, nv, no * nv)
-            sizes = [lay.ring(J)[1:3] for J in range(nI3)]
-            Js, batches, n = [], [], 0
-            for J in range(nI3):
-                if Js and (n + sum(sizes[J])) * isz > batch_bytes:
-                    batches.append(Js)
-                    Js, n = [], 0
-                Js.append(J)
-                n += sum(sizes[J])
-            batches.append(Js)
-            for Js in batches:
+            for Js in _ring_batches(lay, isz, batch_bytes):
                 tabs, mb, xb, msz, xsz = lay.cached(('ringb', tuple(Js)), lambda: lay.ring_entries(Js))
                 if not msz:
                     continue
@@ -1232,3 +1223,88 @@ def residual(lay, t2, T3, T4, ints, batch_bytes=None, only=None, out=None):
     out2 = np.empty_like(R2)
     out2[:, lay.qperm] = R2
     return R4, R3, out2
+
+
+def _ring_batches(lay, isz, batch_bytes):
+    '''The occupied triples of the ring in batches of ``batch_bytes`` for the
+    operand and the product (a triple by itself where it takes more).'''
+    Js, batches, n = [], [], 0
+    for J in range(len(lay.o3)):
+        size = sum(lay.ring(J)[1:3])
+        if Js and (n + size) * isz > batch_bytes:
+            batches.append(Js)
+            Js, n = [], 0
+        Js.append(J)
+        n += size
+    batches.append(Js)
+    return batches
+
+
+def min_batch_bytes(lay, isz):
+    '''The smallest ``batch_bytes`` that is of use: one row of a sector and
+    one occupied triple of the ring at a time.'''
+    ring = max((sum(lay.ring(J)[1:3]) for J in range(len(lay.o3))), default=0)
+    return int(isz * max(int(lay.n22.max(initial=0)), int(lay.n13.max(initial=0)), ring, 1))
+
+
+def memory(lay, isz, batch_bytes=None, r4=True):
+    '''Bytes that residual() allocates at most (its results included: the
+    residual of T4 is one of them unless ``r4`` is False - an array given to
+    it), for products of ``batch_bytes`` per batch: the largest of its
+    stages, each counted array by array.'''
+    batch_bytes = batch_bytes or BATCH_BYTES
+    no, nv, ncls = lay.no, lay.nv, lay.ncls
+    n = no + nv
+    nP, nQ, nI3, nI = len(lay.o2), len(lay.kQ), len(lay.o3), len(lay.o4)
+    ov = no * nv
+    res = (lay.size if r4 else 0) + int(lay.t3off[-1]) + 2 * nP * nQ
+    # the layouts of the integrals and of T2
+    small = no * no * nv * nv + 3 * nP * nQ + 2 * no * no * nQ + nP * nv * no + nv * no * nQ + nP * nv * nv
+    imds = 2 * no ** 4 + 2 * no * no * nP + 2 * ov * ov + 2 * nP * nP + n * n
+    wv = nQ * nv * no
+    la13 = nP * nv * n
+    t12, z, t3p, r13 = int(lay.t12size), int(lay.zsize), int(lay.t3psize), int(lay.r13size)
+    xo, y3 = nI3 * no * nQ, nI3 * nv * nP
+    qmax = int(lay.nQ.max(initial=0))
+    wq = int((lay.nQ ** 2).sum())
+    kept = res + small + imds + wv + la13 + t12 + z + t3p + r13 + xo + y3       # after the pass over T3
+    nrow = [lay.pp_rows(q)[0] for q in range(lay.n2)]
+    ls = sum(nrow[q] * int(lay.nQ[q]) for q in range(lay.n2))
+    pp = rows = 0
+    for M in lay.sectors:
+        n22, n13 = int(lay.n22[M]), int(lay.n13[M])
+        if n22:
+            nb = min(int(lay.nI[M]), max(1, batch_bytes // (isz * n22)))
+            thin = max(nrow[q] * int(lay.nQ[M - q]) for q in range(lay.n2) if lay.off22[M, q] >= 0)
+            pp = max(pp, nb * (2 * n22 + 2 * thin))
+        for size in (n22, n13):
+            if size:
+                rows = max(rows, min(int(lay.nI[M]), max(1, batch_bytes // (isz * size))) * size)
+    # (a batch of the ring: at most batch_bytes, or one triple - counted so that it grows with the batch)
+    ring = [sum(lay.ring(J)[1:3]) for J in range(nI3)]
+    ring = min(sum(ring), max(batch_bytes // isz, max(ring, default=0)))
+    nS = ov + 1 + no * n
+    stages = [
+        res + small + imds + 3 * wv + 4 * no * nv ** 3 + 2 * no * no * nv * nv + la13 + 2 * nv * no * nP,   # T2
+        res + small + imds + wv + la13 + t12 + z + t3p + r13 + y3 + 2 * xo + no ** 3 * nv + no * no * nQ
+        + nP * no * no * nQ + nv * nv * no * nI3 + 4 * nI3 * nQ + 4 * no * nP * nQ,     # the pass over T3
+        kept + wq + 6 * qmax * qmax + no * nv * nP + int(lay.vosize) + int(lay.wrsize) + int(lay.wbsize)
+        + 2 * int(lay.mxsize.max(initial=0)) + 3 * qmax * nv * nv,                      # Xv
+        kept + wq + t12 + ls + pp,                                                      # pp ladder
+        kept + nS * ov + ring + nS * ov,                                                # ring
+        kept + 3 * nI * nI + rows + no * no * nQ,                                       # hh ladder, rows
+    ]
+    # the tables of the entries of a batch, small arrays
+    tables = 200 * (nI + nI3) * ncls + 64 * n * n + (4 << 20)
+    return isz * max(stages) + tables
+
+
+def table_bytes(lay):
+    '''Bytes of the tables that a Layout keeps (the lists of the virtual
+    quadruples and triples, the tables of products).'''
+    nv = lay.nv
+    quads = 8 * int(lay.nA.sum())
+    tri = (6 + 4 + 24 + 8 * 3) * comb(nv, 3) + 60 * comb(nv, 2) + 4 * nv * nv
+    nI, nP, ncls = len(lay.o4), len(lay.o2), lay.ncls
+    tasks = 120 * (nI * (lay.n2 * 30 + ncls * 10) + nP * lay.no * ncls * (2 * lay.no + 20))
+    return quads + tri + tasks + (1 << 20)
