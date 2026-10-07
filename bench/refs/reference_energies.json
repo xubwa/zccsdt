@@ -110,7 +110,9 @@
     "e_nuc": 9.188258417746,
     "ccsdt_iterations": 22,
     "e_ccsdt[q]": -76.243768714649,
-    "e_ccsdt(q)": -76.243816460608
+    "e_ccsdt(q)": -76.243816460608,
+    "e_ccsdtq": -76.243786573522,
+    "e_ccsdtq(p)": -76.243801090687
    },
    "angstrom": {
     "e_scf": -76.02676567309783,
@@ -171,9 +173,11 @@
    "e_ccsdt": -76.243328878432,
    "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis",
    "e_ccsdt[q]": -76.243768714649,
-   "e_ccsdt(q)": -76.243816460608
+   "e_ccsdt(q)": -76.243816460608,
+   "e_ccsdtq": -76.243786573522,
+   "e_ccsdtq(p)": -76.243801090687
   },
-  "notes": "CCSDT spread MRCC/NCC/ECC/VCC at bohr geometry: 1.5e-12. MRCC-vs-PySCF(builtin basis) RHF diff: -2.8e-14; MRCC-vs-PySCF(GENBAS basis) RHF diff: 1.4e-13."
+  "notes": "CCSDT spread MRCC/NCC/ECC/VCC at bohr geometry: 1.5e-12. MRCC-vs-PySCF(builtin basis) RHF diff: -2.8e-14; MRCC-vs-PySCF(GENBAS basis) RHF diff: 1.4e-13. CCSDTQ and CCSDTQ(P): MRCC, closed shell, with C2v and with symm=off the same to all digits (bench/mrcc_nr.sh, MINP.tqp.sym.bohr and MINP.tqp.bohr), and its spinor code on the integrals of PySCF."
  },
  "h2o_ccpvdz_fc": {
   "description": "H2O / cc-pVDZ (spherical), frozen core: 1 spatial orbital (O 1s) frozen, no frozen virtuals",

@@ -3230,6 +3230,49 @@ zccsdt no symmetry.
   products - is where the factor comes from, not the speed of the
   arithmetic (190 GFLOP/s for MRCC by that count).
 
+### Against the closed-shell code of MRCC
+
+H2O / cc-pVDZ once more, where MRCC can use what a nonrelativistic closed
+shell offers: its own integrals and RHF, the spin symmetry and the point
+group (`bench/mrcc_nr.sh`).  c105 (2 x Xeon Gold 6248R), 8 cores for each
+run, one after the other in one job (31712375): MRCC with C2v, MRCC with
+`symm=off`, MRCC on spinors for CCSDT(Q) (the integral files, two fermion
+irreps), then zccsdt 072f31b on the same files - spin orbitals of RHF, no
+symmetry, no spin.
+
+| | MRCC, closed shell, C2v | MRCC, closed shell, no point group | MRCC, spinors, two irreps | zccsdt |
+|---|---|---|---|---|
+| quadruples | 1,201,298 | 4,803,960 | 7,751,430 | 15,501,150 |
+| operations per iteration | 6.5e10 | 1.04e12 | 7.7e12 | about 8e11 |
+| CCSDTQ: iterations, per iteration | 23, 4.41 s | 23, 20.1 s | 25, 39.7 s (c349, above) | 17, 3.93 s |
+| (P) | 31 s | 61 s | 205 s (c349) | 14.1 s |
+| CCSDT iteration; (Q) | | | 1.17 s; 5.1 s | 0.14 s; 0.91 s |
+| CCSDTQ and (P) together | 133 s | 523 s | 1202 s (c349) | 83 s, with the CCSDT that starts it |
+| memory: allocated by MRCC, besides its files; peak of zccsdt | 0.1 GB | 0.4 GB | 0.7 GB | 6.1 GB |
+| E(CCSDTQ) | -76.243786573522 | the same | the same | -76.243786573525 |
+| E(CCSDTQ(P)) | -76.243801090687 | the same | the same | -76.243801090690 |
+
+- Without any symmetry zccsdt is level per iteration with MRCC at its
+  best for this molecule - spin and four irreps: a thirteenth of the
+  amplitudes and a twelfth of the operations - and 2.2 times faster in
+  (P); against the closed-shell code without the point group it is 5.1 and
+  4.3 times faster, against the spinor code 8.6 times per CCSDT iteration
+  and 5.6 times in (Q) (CCSDTQ and (P): the section above).
+- The operations are MRCC's own estimates and, for zccsdt, the
+  multiplications and additions of its products.  By these counts MRCC
+  runs at 15 GFLOP/s with the point group, 52 without and 190 in the
+  spinor code, zccsdt at about 200.
+- What the point group gives MRCC: a sixteenth of the operations (four
+  irreps: 1/g^2), 1/4.6 of the time of an iteration and a half of that of
+  (P) - blocks a quarter the size do not run at the same speed.  A count
+  of multiplications in symmetry blocks is not a prediction of time.
+- Not measured: molecules with D2h, where the same rule gives MRCC a
+  quarter of the operations of C2v again, and larger basis sets, where
+  its blocks grow.  This is one molecule.
+- The memory is the other way round: 0.1 to 0.7 GB for MRCC, 6.1 GB for
+  zccsdt with its defaults (batches of 1 GB, the DIIS vectors of T4 in
+  memory; less with `max_memory`, at the prices of the next section).
+
 ### Complex spinors, larger cases, less memory
 
 zccsdt alone, the same node and batch (jobs 31703734 and 31703874), 8
