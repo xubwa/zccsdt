@@ -384,7 +384,7 @@ def write(directory, eris, nfrozen=0, flags=None):
 
 # CALC of joda (IFLAGS(2)) -> method
 LEVELS = {0: 'scf', 10: 'ccsd', 22: 'ccsd(t)', 18: 'ccsdt', 30: 'ccsdt[q]', 54: 'ccsdt(q)', 46: 'ccsdtq'}
-METHODS = ('ccsd', 'ccsdt', 'ccsdt[q]', 'ccsdt(q)', 'ccsdtq', 'ccsdtq(p)')
+METHODS = ('ccsd', 'ccsd(t)', 'ccsdt', 'ccsdt[q]', 'ccsdt(q)', 'ccsdtq', 'ccsdtq(p)')
 SECTION = 'zccsdt'              # the section of the ZMAT with what CFOUR does not know
 PROGRAMS = ('xjoda', 'xsox2catm', 'xsox2chf', 'xx2cvtran')
 BIN = '/home/xwang405/apps/cfour-x2cso/bin'
@@ -570,7 +570,116 @@ def run_programs(directory='.', progs=None, bindir=None, before=None, log=print)
     return progs
 
 
-def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, jobarc=False):
+def read_mol(path='MOL'):
+    '''[(symbol, (x, y, z))] of CFOUR's MOL file: its frame, bohr, its order.'''
+    import re
+    atoms = []
+    with open(path) as f:
+        for line in f:
+            m = re.match(r'^([A-Za-z]{1,2})\s*#\s*\d+\s+(\S+)\s+(\S+)\s+(\S+)\s*$', line)
+            if m:
+                atoms.append((m.group(1).capitalize(), tuple(float(x) for x in m.groups()[1:])))
+    if not atoms:
+        raise ValueError('no atoms found in %s' % path)
+    return atoms
+
+
+def molecule(directory='.'):
+    '''The PySCF molecule of a run directory: CFOUR's geometry in its own
+    frame (MOL, bohr) with the basis of the ZMAT read from the GENBAS file
+    there - BASIS=SPECIAL with one line ATOM:NAME per atom after the
+    keywords, or BASIS=NAME for all atoms.'''
+    import re
+    from pyscf import gto
+    from zccsdt.genbas import read_genbas
+    atoms = read_mol(os.path.join(directory, 'MOL'))
+    keywords, _ = parse_zmat(os.path.join(directory, 'ZMAT'))
+    name = keywords.get('BASIS', '')
+    if name.upper() == 'SPECIAL':
+        with open(os.path.join(directory, 'ZMAT')) as f:
+            keys = [s.strip() for s in f.read().splitlines() if re.match(r'^\s*[A-Za-z]{1,2}:\S+\s*$', s)]
+        if len(keys) != len(atoms):
+            raise ValueError('%s: %d basis lines in the ZMAT for %d atoms' % (directory, len(keys), len(atoms)))
+    else:
+        keys = ['%s:%s' % (sym.upper(), name) for sym, _ in atoms]
+    genbas = os.path.join(directory, 'GENBAS')
+    basis, geom = {}, []
+    for k, ((sym, xyz), key) in enumerate(zip(atoms, keys)):
+        if key.split(':')[0].upper() != sym.upper():
+            raise ValueError('%s: basis line %s for the atom %s (the order of MOL is not that of the ZMAT)'
+                             % (directory, key, sym))
+        label = '%s%d' % (sym, k + 1)
+        basis[label] = read_genbas(genbas, key)
+        geom.append((label, xyz))
+    return gto.M(atom=geom, unit='Bohr', basis=basis, verbose=0)
+
+
+def reference(directory='.'):
+    '''CFOUR's SCF as a PySCF object without an SCF calculation here: the
+    molecule (molecule()), CFOUR's spinors in PySCF's spinor basis
+    (scf2ccmo; socutils maps the basis), their energies and occupations and
+    CFOUR's SCF energy.  The one-electron Hamiltonian is PySCF's X2C-1e -
+    what the Fock matrix of the AO-driven CCSD is made with -, which is
+    CFOUR's RELATIVISTIC=X2C1E; with an atomic mean-field section
+    (%amfimethod) this is not the Hamiltonian of the run and is refused.'''
+    from pyscf import x2c
+    try:
+        from socutils.tools.label import Labels
+    except ImportError as err:
+        raise ImportError('socutils is needed to map CFOUR\'s spinor basis to PySCF\'s (socutils.tools.label)') from err
+    keywords, sections = parse_zmat(os.path.join(directory, 'ZMAT'))
+    if keywords.get('RELATIVISTIC', '').upper() != 'X2C1E' or 'amfimethod' in sections:
+        raise NotImplementedError('%s: only RELATIVISTIC=X2C1E without %%amfiMethod is taken on CFOUR\'s spinors '
+                                  'by the AO-driven CCSD' % directory)
+    mol = molecule(directory)
+    n = mol.nao_2c()
+    ntot = int(_record(os.path.join(directory, 'nmototal'), _I8)[0])
+    if ntot != n:
+        raise ValueError('%s: %d spinors in CFOUR, %d in the basis read from GENBAS' % (directory, ntot, n))
+    arc = JobArc(directory)
+    C = Labels.spinor_cfour2pyscf(mol).conj().T @ _complex(os.path.join(directory, 'scf2ccmo'), (n, n))
+    S = mol.intor('int1e_ovlp_spinor')
+    err = abs(C.conj().T @ S @ C - np.eye(n)).max()
+    if err > 1e-8:
+        raise ValueError('%s: CFOUR\'s spinors are not orthonormal in the basis read from GENBAS (%.1e)'
+                         % (directory, err))
+    mf = x2c.UHF(mol)
+    mf.mo_coeff = C
+    mf.mo_energy = _record(os.path.join(directory, 'scf2ceig'))[0::2].copy()
+    nfrozen = 2 * int(arc.get('NUMDROPA')[0])
+    ndropped = int(arc.get('NUMVIRTA', default=[0])[0])
+    mf.mo_occ = (np.arange(n) < mol.nelectron).astype(float)
+    mf.e_tot, mf.converged = float(arc.get('SCFENEG', _F8)[0]), True
+    return mf, nfrozen, ndropped
+
+
+def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True):
+    '''CCSD and CCSD(T) of zccsdt.zccsd.DirectZCCSD - AO integrals made
+    here, the particle-particle ladder in the AO basis, Kramers pairs - on
+    CFOUR's spinors (reference()): after xjoda, xsox2catm and xsox2chf, no
+    integral file of xx2cvtran is read.  Returns {name: total energy}.'''
+    import sys
+    from zccsdt.zccsd import DirectZCCSD
+    stdout = stdout or sys.stdout
+    j = j or job(directory)
+    mf, nfrozen, ndropped = reference(directory)
+    n = len(mf.mo_energy)
+    frozen = list(range(nfrozen)) + list(range(n - ndropped, n)) if ndropped else nfrozen
+    cc = DirectZCCSD(mf, frozen=frozen)
+    cc.verbose, cc.stdout, cc.kramers = verbose, stdout, kramers
+    cc.conv_tol, cc.conv_tol_normt, cc.max_cycle = j.conv_tol, j.conv_tol_normt, j.max_cycle
+    if j.max_memory:
+        cc.max_memory = j.max_memory
+    cc.kernel()
+    if not cc.converged:
+        raise RuntimeError('CCSD did not converge in %d cycles' % j.max_cycle)
+    e = {'scf': float(mf.e_tot), 'ccsd': float(mf.e_tot + cc.e_corr)}
+    if j.method == 'ccsd(t)':
+        e['ccsd(t)'] = e['ccsd'] + float(cc.ccsd_t())
+    return e
+
+
+def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, jobarc=False, mo_integrals=False):
     '''The CC calculation that the ZMAT of ``directory`` asks for (job()) on
     the integral files there.  Returns {name: total energy}, 'scf' and the
     methods done on the way.  ``jobarc``: write the final energy into JOBARC
@@ -580,9 +689,25 @@ def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, job
     from zccsdt.cc import solver
     stdout = stdout or sys.stdout
     j = job(directory, method, max_memory)
+    say = lambda s: print(s, file=stdout, flush=True)
+    scf_files = all(os.path.isfile(os.path.join(directory, f)) for f in ('scf2ccmo', 'MOL', 'GENBAS', 'ZMAT'))
+    if j.method == 'ccsd(t)' and not scf_files:
+        raise FileNotFoundError('%s: CCSD(T) is done on CFOUR\'s spinors with AO integrals made here and needs '
+                                'the files scf2ccmo, MOL, GENBAS and ZMAT of the run' % directory)
+    if j.method in ('ccsd', 'ccsd(t)') and scf_files and not (mo_integrals and j.method == 'ccsd'):
+        # the AO-driven code on CFOUR's spinors: no integral files are read
+        say('CFOUR run directory %s: %s (%s), AO-driven on CFOUR\'s spinors'
+            % (os.path.abspath(directory), j.method.upper(), j.source['method']))
+        e = run_direct(directory, j, verbose, stdout)
+        for name, value in e.items():
+            say('E(%s)%s = %.12f%s' % (name.upper(), ' ' * (10 - len(name)), value,
+                                        '' if name == 'scf' else '   correlation %.12f' % (value - e['scf'])))
+        if jobarc:
+            JobArc(directory).put('TOTENERG', np.array([e[j.method]], dtype=_F8))
+            say('TOTENERG of JOBARC: %.12f' % e[j.method])
+        return e
     eris = from_cfour(directory)
     x = eris.cfour
-    say = lambda s: print(s, file=stdout, flush=True)
     say('CFOUR run directory %s: %s (%s)' % (os.path.abspath(directory), j.method.upper(), j.source['method']))
     say('  %d occupied, %d virtual spinors; %d frozen, %d virtual ones dropped; E(SCF) = %.12f'
         % (x.nocc, x.nvir, x.nfrozen, x.ndropped, x.e_scf))
@@ -648,6 +773,8 @@ def main(argv=None):
     ap.add_argument('--no-cc', action='store_true', help="only CFOUR's programs")
     ap.add_argument('--method', help='instead of the method of the ZMAT: ' + ', '.join(METHODS))
     ap.add_argument('--max-memory', type=float, help='MB, instead of the memory of the ZMAT')
+    ap.add_argument('--mo-integrals', action='store_true',
+                    help="CCSD on the integral files of xx2cvtran (needs moinpppp) instead of the AO-driven code")
     ap.add_argument('--jobarc', action='store_true', help='write the final energy into JOBARC (TOTENERG)')
     ap.add_argument('--verbose', type=int, default=4)
     a = ap.parse_args(argv)
@@ -675,7 +802,7 @@ def main(argv=None):
                         if name.endswith(('.out', '.time')):
                             shutil.copy(os.path.join(work, name), start)
         if not a.no_cc:
-            run(work, a.method, a.max_memory, a.verbose, jobarc=a.jobarc)
+            run(work, a.method, a.max_memory, a.verbose, jobarc=a.jobarc, mo_integrals=a.mo_integrals)
     except (ProgramFailed, FileNotFoundError, ValueError, RuntimeError) as err:
         print('zccsdt.cfour: %s' % err, file=sys.stderr)
         return 1

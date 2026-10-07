@@ -104,8 +104,9 @@ def test_zmat_and_job(rundir, tmp_path):
     kw, sections = cfour.parse_zmat(os.path.join(rundir, 'ZMAT'))
     assert kw['CALC'] == 'CCSD(T)' and kw['ABCDTYPE'] == 'STANDARD' and kw['CC_CONV'] == '12' and kw['MEM_UNIT'] == 'GB'
     assert sections == {}
-    with pytest.raises(ValueError, match=r'ccsd\(t\)'):
-        cfour.job(rundir)
+    assert cfour.job(rundir).method == 'ccsd(t)'
+    with pytest.raises(FileNotFoundError, match='scf2ccmo'):        # (the files of the SCF are not in the test data)
+        cfour.run(rundir, verbose=0, stdout=io.StringIO())
     j = cfour.job(rundir, method='CCSDT(Q)')
     assert (j.method, j.conv_tol_normt, j.conv_tol, j.max_cycle) == ('ccsdt(q)', 1e-12, 1e-14, 50)
     assert abs(j.max_memory - 2000.0) < 1e-9 and j.source['max_memory'] == 'MEMORY_SIZE'
@@ -219,7 +220,7 @@ def test_calculation_of_the_zmat(bh, tmp_path, capsys):
     # CCSD, by the argument
     r = solver.kernel(ref, 'ccsd', solver.Options(conv_tol=1e-12, conv_tol_normt=1e-9))
     assert abs(cfour.run(d, method='ccsd', stdout=io.StringIO())['ccsd'] - r.e_tot) < 1e-9
-    assert cfour.main([d, '--method', 'ccsd(t)']) == 1 and 'not one of' in capsys.readouterr().err
+    assert cfour.main([d, '--method', 'ccsd(t)']) == 1 and 'scf2ccmo' in capsys.readouterr().err
 
 
 def _program(path, body):
@@ -267,3 +268,24 @@ def test_chain_of_programs(tmp_path, capsys):
     assert code == 1 and 'xsox2catm FAILED' in captured.err and 'xjoda wall' in captured.out
     assert sorted(os.listdir(start)) == ['GENBAS', 'ZMAT', 'xjoda.out', 'xjoda.time', 'xsox2catm.out', 'xsox2catm.time']
     assert os.listdir(tmp_path / 'scr') == []
+
+
+def test_ao_driven_ccsd_t_on_cfours_spinors(tmp_path):
+    '''CCSD and CCSD(T) of DirectZCCSD on the spinors of CFOUR's SCF
+    (scf2ccmo), the basis read from GENBAS and the geometry from MOL, no
+    integral file of xx2cvtran: the energies of xx2cccsd.'''
+    pytest.importorskip('socutils.tools.label')
+    src = os.path.join(HERE, 'data', 'cfour', 'h2o_sto3g_scf')
+    for name in os.listdir(src):
+        if name.endswith('.xz'):
+            with lzma.open(os.path.join(src, name)) as f:
+                open(tmp_path / name[:-3], 'wb').write(f.read())
+    open(tmp_path / 'GENBAS', 'w').write(open(os.path.join(src, 'GENBAS.txt')).read())
+    mol = cfour.molecule(str(tmp_path))
+    assert mol.nao_2c() == 14 and mol.nelectron == 10
+    buf = io.StringIO()
+    e = cfour.run(str(tmp_path), method='ccsd(t)', verbose=0, stdout=buf)
+    assert 'AO-driven' in buf.getvalue()
+    assert abs(e['scf'] - REF['e_scf']) < 1e-9
+    assert abs(e['ccsd'] - e['scf'] - REF['e_ccsd']) < 1e-9
+    assert abs(e['ccsd(t)'] - e['ccsd'] - REF['e_t']) < 1e-9
