@@ -73,3 +73,93 @@ def test_sectors_against_dense(hbr):
     e1 = copy.copy(eris)
     e1.labels = np.zeros_like(eris.labels)
     assert abs(PS.kernel(e1, t2, t3, t4) - ref) < 1e-13
+
+
+def test_intermediates_in_blocks(hbr):
+    """Xv and Xq in blocks are the elements of those of the dense code that
+    the labels allow, and the others vanish there."""
+    eris, t2, t3, t4 = hbr
+    no, nv = eris.nocc, len(eris.labels) - eris.nocc
+    d = PT.Pentuples(eris, t2, t3, t4)
+    s = PS.Pentuples(eris, t2, t3, t4, PS.plan(eris, 8))
+    sec = s.sec
+    for dense, blocks, rows, k in ((d.Xv, s.Xv, sec.V, 1), (d.Xq, s.Xq, sec.O, -1)):
+        scale = abs(dense).max()
+        assert scale > 1e-6 and len(blocks) == len(dense)
+        seen = 0
+        for p, blk in enumerate(blocks):
+            rest = np.array(dense[p])
+            kp = sec.kpair[p] if k == 1 else sec.k4[p]
+            for kr, x in blk.items():
+                at = np.ix_(rows[kr], sec.A3[int(sec.red(k * kr + kp))])
+                assert abs(x - rest[at]).max() < 1e-13 * scale
+                rest[at] = 0
+                seen += x.size
+            assert abs(rest).max() < 1e-13 * scale
+        assert seen < 0.3 * dense.size
+
+
+def test_complex_amplitudes(hbr):
+    """A phase on every spinor: complex integrals and amplitudes with the
+    labels they had, and the energy of the real ones."""
+    eris, t2, t3, t4 = hbr
+    no = eris.nocc
+    nv = len(eris.labels) - no
+    u = np.exp(2j * np.pi * np.random.default_rng(5).random(no + nv))
+    uo, uv = u[:no], u[no:]
+    ec = copy.copy(eris)
+    for key in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv'):
+        x = np.asarray(getattr(eris, key)).astype(complex)
+        for ax, c in enumerate(key):
+            f = uo if c == 'o' else uv
+            x = x * (f.conj() if ax < 2 else f).reshape([-1 if a == ax else 1 for a in range(4)])
+        setattr(ec, key, x)
+    a, b = np.triu_indices(nv, 1)
+    ec.__dict__.pop('_vvvv_blocks', None)       # (the cache of the real block)
+    ec._vvvv_pp = np.asarray(eris._vvvv_pp) * (uv[a] * uv[b]).conj()[:, None] * (uv[a] * uv[b])[None, :]
+    t2c = t2 * (uo[:, None, None, None] * uo[None, :, None, None]
+                * uv.conj()[None, None, :, None] * uv.conj()[None, None, None, :])
+    amps = [t2c]
+    for k, t in ((3, t3), (4, t4)):
+        ok, vk = P.tuples(no, k), P.tuples(nv, k)
+        amps.append(t * uo[ok].prod(axis=1)[:, None] * uv[vk].prod(axis=1).conj()[None, :])
+    ref = PT.kernel(eris, t2, t3, t4)
+    assert abs(PT.kernel(ec, *amps) - ref) < 1e-13
+    assert abs(PS.kernel(ec, *amps) - ref) < 1e-13
+    # real amplitudes of higher rank with complex integrals
+    ec.labels = np.zeros_like(eris.labels)
+    assert abs(PS.kernel(ec, t2c, 0 * amps[1], amps[2]) - PT.kernel(ec, t2c, 0 * amps[1], amps[2])) < 1e-13
+
+
+@pytest.mark.parametrize('how', ['2 m_j', 'modulo 4', 'one label'])
+def test_memory_plan(hbr, how):
+    """The arrays that a run allocates (tracemalloc follows numpy's
+    allocations) stay within Plan.need, and the blocks take less than the
+    arrays of the dense code; MemoryError where the blocks do not fit."""
+    eris, t2, t3, t4 = hbr
+    eris = copy.copy(eris)
+    if how == 'modulo 4':
+        eris.modulus = 4
+    elif how == 'one label':
+        eris.labels = np.zeros_like(eris.labels)
+    no, nv = eris.nocc, len(eris.labels) - eris.nocc
+    PT.kernel(eris, t2, t3, t4)                 # (the tables of the occupied tuples: made once)
+    pl = PS.plan(eris, 8)
+    with pytest.raises(MemoryError, match='in blocks of the symmetry labels'):
+        PS.plan(eris, 8, pl.need - 1)
+    assert PS.plan(eris, 8, pl.need).need == pl.need
+    gc.collect()
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    PS.kernel(eris, t2, t3, t4, plan_=pl)
+    peak = tracemalloc.get_traced_memory()[1] - base
+    tracemalloc.stop()
+    assert peak <= pl.need, (peak, pl.need)
+    print(how, 'peak / plan', peak / pl.need, 'plan / dense plan', pl.need / PT.plan(no, nv, 8).need)
+    assert peak > 0.5 * pl.need, (peak, pl.need)
+    dense = PT.plan(no, nv, 8)
+    if how != 'one label':
+        assert pl.need < dense.need
+        # (two classes of the triples modulo 4: half of the dense arrays)
+        part = 0.3 if how == '2 m_j' else 0.5
+        assert pl.parts['Xv'] <= part * PT._big(no, nv, 8)[1] and pl.parts['Xq'] <= part * PT._kept(no, nv, 8)[1]
