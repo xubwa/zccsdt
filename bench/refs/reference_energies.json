@@ -523,5 +523,31 @@
    "e_ccsdtq(p)": -107.652810233524,
    "source": "MRCC, bohr (PySCF-consistent) geometry, GENBAS basis"
   }
+ },
+ "bh_sto2g_x2c_dirac": {
+  "description": "BH on the z axis (2.3288985 bohr), uncontracted STO-2G of DIRAC, X2C Hamiltonian (DIRAC 23): 6 occupied + 18 virtual spinors, all active.  DIRAC: bench/refs/dirac/bh_sto2g (x2c.inp with bh_c2v.mol or bh_c1.mol; the same energies).  MRCC (release Feb 2018) through its interface to DIRAC (iface=dirac) on MRCONEE and the MDCINT completed by zccsdt.dirac.write_mdcint, with the reference flagged as Hartree-Fock (12th entry of fort.56 = 1): bench/dirac/mrcc_rel.sh.",
+  "recommended": {
+   "e_scf": -24.12798465196832,
+   "e_ccsd": -24.203230058099,
+   "e_ccsd(t)": -24.203955978053,
+   "e_ccsdt": -24.204084921564,
+   "e_ccsdt[q]": -24.204135308562,
+   "e_ccsdt(q)": -24.2041438651,
+   "e_ccsdtq": -24.20416966243,
+   "e_ccsdtq(p)": -24.204169721468
+  },
+  "dirac": {
+   "e_scf": -24.12798465196832,
+   "e_ccsd": -24.203230058121918,
+   "e_ccsd(t)": -24.20395597807656,
+   "note": "RELCCSD of the same run (C2v); C1: -24.127984651968358, -24.203230058121964, -24.203955978076603"
+  },
+  "mrcc": {
+   "note": "with HF flag 0 (the interface default) MRCC gives the variants of Kallay and Gauss 2008 instead of the original (Q) and (P)",
+   "e_ccsdt(q)/A": -24.204143646866,
+   "e_ccsdt(q)/B": -24.204143765662,
+   "e_ccsdtq(p)/A": -24.20416972062,
+   "e_ccsdtq(p)/B": -24.204169721493
+  }
  }
 }

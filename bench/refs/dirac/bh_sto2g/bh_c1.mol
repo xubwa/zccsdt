@@ -1,0 +1,11 @@
+INTGRL
+ BH on the z axis, point group c1 given explicitly
+ STO-2G, uncontracted
+C   2    0
+        5.    1
+B     0.0000000000        0.0000000000        0.0000000000
+LARGE BASIS STO-2G
+        1.    1
+H     0.0000000000        0.0000000000        2.3288985000
+LARGE BASIS STO-2G
+FINISH
