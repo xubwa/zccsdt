@@ -22,7 +22,7 @@ print(mycc.e_tot, mycc.e_tot_q)
 | `zccsdt.RCCSDT` | RHF | spin-adapted closed-shell CCSDT on spatial orbitals (`zccsdt.sa.rccsdt`), (Q) |
 | `zccsdt.UCCSDT` | UHF, ROHF | spin orbitals in spin blocks, U-form integrals (`zccsdt.eris_spin`) |
 | `zccsdt.GCCSDT` | GHF, X2C spinors | spin orbitals or spinors without spin blocks, real or complex (`zccsdt.eris`), (Q) |
-| `zccsdt.GCCSDTQ` | GHF, X2C spinors | CCSDTQ on spin orbitals or spinors, real or complex (`zccsdt.cc.ccsdtq`) |
+| `zccsdt.GCCSDTQ` | GHF, X2C spinors | CCSDTQ on spin orbitals or spinors, real or complex (`zccsdt.cc.ccsdtq`), (P) |
 
 `zccsdt.CCSDT(mf)` and `zccsdt.CCSDTQ(mf)` pick the class from the type of
 `mf`.  More examples are in `examples/`.
@@ -33,7 +33,8 @@ As in PySCF: `conv_tol` (energy, default 1e-10), `conv_tol_normt` (1e-7
 for the residual norm of RCCSDT, 1e-8 for the step norm of the others),
 `max_cycle` (100), `diis_space` (8), `diis_file`, `incore_complete`,
 `frozen` (core orbitals: spatial for RCCSDT, per spin for UCCSDT, spin
-orbitals or spinors for GCCSDT and GCCSDTQ), `verbose`, `stdout`, `callback`.  In
+orbitals or spinors - or a list of them - for GCCSDT and GCCSDTQ), `verbose`,
+`stdout`, `callback`.  In
 addition:
 
 - `max_memory`: MB for the whole process.  Unlike PySCF's objects the
@@ -48,7 +49,8 @@ addition:
 Results: `converged`, `e_hf`, `e_corr`, `e_tot`, `cycles`, `t1`, `t2`,
 `t3`, `plan_used`, `timings` (wall time per iteration), `peak_memory`, and
 after `ccsdt_q()` `e_q`, `e_q5`, `e_tot_q`; for GCCSDTQ in addition `t4`,
-`e_ccsdt` and `ccsdt_run`, and `e_corr`, `e_tot` are those of CCSDTQ.
+`e_ccsdt` and `ccsdt_run`, `e_corr` and `e_tot` are those of CCSDTQ, and
+after `ccsdtq_p()` `e_p`, `e_tot_p`.
 
 ## Output
 
@@ -140,7 +142,7 @@ For H2O/cc-pVTZ with one frozen core orbital (4 threads; abridged):
 The functions underneath (`zccsdt.sa.rccsdt.kernel`, `zccsdt.cc.solver.kernel`)
 keep their own interface for scripts and the benchmarks.
 
-## CCSDT(Q) and CCSDTQ on spinors
+## CCSDT(Q), CCSDTQ and CCSDTQ(P) on spinors
 
 ```python
 from pyscf import gto, x2c
@@ -156,11 +158,27 @@ e_q = mycc.ccsdt_q()                    # (Q): e_q, e_q5 ([Q]), e_tot_q
 myq = zccsdt.CCSDTQ(mf, frozen=28)      # GCCSDTQ
 myq.kernel()                            # CCSDT first, then CCSDTQ
 print(myq.e_ccsdt, myq.e_tot)           # myq.ccsdt_run is the GCCSDT object of the first step
+e_p = myq.ccsdtq_p()                    # (P): e_p, e_tot_p = E(CCSDTQ(P))
 ```
 
-Both work on spin orbitals or spinors without spin blocks, with real or
-complex integrals, and use no point-group symmetry.  T3 and T4 are stored
-on their unique blocks (i<j<k(<l), a<b<c(<d)).
+All of it works on spin orbitals or spinors without spin blocks, with real
+or complex integrals, and uses no point-group symmetry.  T3 and T4 are
+stored on their unique blocks (i<j<k(<l), a<b<c(<d)).
+
+`frozen` is a number - the lowest occupied spinors - or, as in PySCF, a list
+of spinor indices: the occupied ones in it are frozen and the virtual ones
+are left out of the calculation (and of the integral transformation).  For
+a truncated virtual space:
+
+```python
+import numpy as np
+order = np.argsort(mf.mo_energy)
+nocc = int((mf.mo_occ > 0).sum())
+frozen = list(order[:28]) + list(order[nocc + 16:])     # the core; all but the 16 lowest virtual spinors
+myq = zccsdt.CCSDTQ(mf, frozen=frozen)
+```
+
+(cut between Kramers pairs, not through one).
 
 - **(Q)** (`zccsdt.cc.quadruples`) is the correction of Bomble, Stanton,
   Kallay and Gauss for canonical Hartree-Fock orbitals: `e_q5` is its
@@ -173,11 +191,20 @@ on their unique blocks (i<j<k(<l), a<b<c(<d)).
   plan (the batches of the products of the T4 equation; the DIIS vectors
   of T4 in memory or in the scratch file), a column `|dT4|` in the table
   of the iterations and the stages of the T4 equation in the timings.
-  T4, its residual and a six-index intermediate are held in memory: below
-  that the calculation stops with a MemoryError that names the size.
+- **(P)** (`zccsdt.cc.pentuples`) is the correction of CCSDTQ(P) as MRCC
+  computes it for a Hartree-Fock reference (its CCSDTQ[P] is the same
+  number), for canonical orbitals: one occupied pentuple at a time, nothing
+  of the size of T5 is kept.  It needs the second-order quadruples (an
+  array as large as T4) and less memory than the CCSDTQ iterations.
 - An RHF, UHF or ROHF reference given to `zccsdt.CCSDTQ` is taken as GHF
   spin orbitals (there is no spin-adapted CCSDTQ here); `frozen` then
   counts orbitals per spin, as in the CCSDT class of that reference.
+- What does not fit: the plans of the three steps follow `max_memory` (the
+  products in more batches, DIIS vectors in the scratch file,
+  intermediates for a few indices at a time); T4 itself, its residual and
+  the six-index intermediate of the T4 equation are held in memory, and
+  below that the calculation stops with a MemoryError that says how much
+  is missing.
 
 ### Integrals from another program, and for another program
 
@@ -206,8 +233,13 @@ gives real integrals for an RHF reference taken as GHF spin orbitals and
 for the X2C spinors of a linear molecule on the z axis (it adapts them to
 m_j); `bench/dirac/write_integrals.py`, `bench/dirac/mrcc_rel.sh` and
 `bench/dirac/run_integrals.py` run the two programs on the same files.
-The energies agree to 1e-12 Eh (Section "CCSDT(Q) and CCSDTQ on spinors"
-of `docs/benchmarks.md`).
+The energies agree to 1e-12 Eh, and the same molecule turned away from the
+axis - complex spinors, which MRCC cannot take - gives the same correlation
+energies (Section "CCSDT(Q), CCSDTQ and CCSDTQ(P) on spinors" of
+`docs/benchmarks.md`).
+
+`zccsdt.eris.drop_virtuals(eris, nvir)` cuts a container down to its lowest
+virtual spinors.
 
 ## Spinor CCSD(T): `zccsdt.zccsd.DirectZCCSD`
 

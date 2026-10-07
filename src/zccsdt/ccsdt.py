@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 '''
-CCSDT in the style of PySCF's coupled-cluster classes
+CCSDT, CCSDT(Q), CCSDTQ and CCSDTQ(P) in the style of PySCF's coupled-cluster
+classes
 
     from pyscf import gto, scf
     import zccsdt
@@ -17,6 +18,8 @@ UCCSDT   UHF or ROHF reference: spin orbitals in spin blocks, integrals in U
 GCCSDT   GHF or two-component (X2C) spinor reference: spin orbitals or
          spinors without spin blocks, real or complex (zccsdt.eris), with
          (Q) (zccsdt.cc.quadruples)
+GCCSDTQ  the same references: CCSDTQ (zccsdt.cc.ccsdtq), with (P)
+         (zccsdt.cc.pentuples); zccsdt.CCSDTQ(mf).run(), then ccsdtq_p()
 
 The classes follow PySCF's conventions (attributes such as ``conv_tol``,
 ``max_cycle``, ``diis_space``, ``frozen``, ``verbose``, ``stdout``; kernel(),

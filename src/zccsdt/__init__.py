@@ -1,4 +1,4 @@
-'''zccsdt: spin-orbital / spinor CCSDT, CCSDT(Q) and CCSDTQ.'''
+'''zccsdt: spin-orbital / spinor CCSDT, CCSDT(Q), CCSDTQ and CCSDTQ(P).'''
 
 import os
 
