@@ -140,7 +140,7 @@ def _name(stages, key, short=False):
     if part in _PARTS:
         return _PARTS[part]
     return key
-ROOT_INTS, ROOT_ITER, ROOT_Q = 'zccsdt.integrals', 'zccsdt.iterations', 'zccsdt.q'
+ROOT_INTS, ROOT_ITER, ROOT_Q, ROOT_P = 'zccsdt.integrals', 'zccsdt.iterations', 'zccsdt.q', 'zccsdt.p'
 
 
 # ------------------------------------------------------------------ helpers
@@ -1064,20 +1064,27 @@ class GCCSDTQ(GCCSDT):
     amplitudes; with amplitudes given (t1, t2, t3 packed, optionally t4) it
     starts from those.  Afterwards e_corr, e_tot, t1 .. t4, converged,
     cycles and timings are those of CCSDTQ, e_ccsdt the total energy of the
-    CCSDT step.  ``frozen`` counts spin orbitals or spinors.
+    CCSDT step.  ccsdtq_p() gives the (P) correction (zccsdt.cc.pentuples):
+    e_p and e_tot_p = E(CCSDTQ(P)).  ``frozen`` counts spin orbitals or
+    spinors.
 
 ''' + CCSDTBase.__doc__
 
     _title = 'GCCSDTQ'
     _subtitle = 'CCSDTQ on spin orbitals or spinors (GHF, X2C), real or complex'
     _stages = Q_STAGES
-    _keys = GCCSDT._keys | {'t4', 'e_ccsdt', 'ccsdt_run'}
+    _keys = GCCSDT._keys | {'t4', 'e_ccsdt', 'ccsdt_run', 'e_p'}
 
     def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
         GCCSDT.__init__(self, mf, frozen, mo_coeff, mo_occ)
         self.t4 = None
         self.e_ccsdt = None
         self.ccsdt_run = None
+        self.e_p = None
+
+    @property
+    def e_tot_p(self):
+        return None if self.e_p is None else self.e_tot + self.e_p
 
     def kernel(self, t1=None, t2=None, t3=None, t4=None):
         if t1 is None or t2 is None or t3 is None:
@@ -1159,6 +1166,54 @@ class GCCSDTQ(GCCSDT):
         pr.rule(char='=')
         log.timer(self.__class__.__name__, *cput0)
         return self.e_corr, self.t1, self.t2, self.t3, self.t4
+
+
+    def ccsdtq_p(self, t2=None, t3=None, t4=None):
+        '''(P) correction of the converged CCSDTQ amplitudes on spin orbitals
+        or spinors (zccsdt.cc.pentuples; canonical orbitals); returns E(P)
+        and stores e_p and e_tot_p, the energy of CCSDTQ(P).'''
+        from math import comb
+        from zccsdt.cc import ccsdt_opt, pentuples
+        log = logger.new_logger(self)
+        pr = _Printer(log)
+        t2 = self.t2 if t2 is None else t2
+        t3 = self.t3 if t3 is None else t3
+        t4 = self.t4 if t4 is None else t4
+        if t4 is None:
+            raise RuntimeError('GCCSDTQ.ccsdtq_p(): no CCSDTQ amplitudes (kernel() first)')
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        ccsdt_opt.release_cached(eris)          # (what the iterations kept: not part of this budget)
+        no, nv = eris.nocc, eris.nmo - eris.nocc
+        dtype = np.result_type(t2, t3, t4, eris.oovv)
+        snap0 = timing.snapshot()
+        pr.line(' (P) correction: %s occupied x %s virtual pentuples, %s'
+                % (_count(comb(no, 5)), _count(comb(nv, 5)),
+                   'complex' if np.iscomplexobj(np.zeros(0, dtype)) else 'real'))
+        if no < 5 or nv < 5:
+            self.e_p = 0.0
+        else:
+            pl = pentuples.plan(no, nv, np.dtype(dtype).itemsize, memory.budget(self.max_memory))
+            pr.kv('memory', '%s besides T3, T4 and the integrals' % _size(pl.need), indent=3)
+            pr.kv('plan', 'products in %d and %d batches of columns; T2 T2 T2 intermediate for %s'
+                  % (-(-comb(nv, 3) // pl.cols23), -(-comb(nv, 4) // pl.cols14),
+                     'all occupied quadruples' if pl.store_xq else 'the quadruples of one pentuple at a time'),
+                  indent=3)
+            with _PeakMemory() as peak, timing.timer(ROOT_P):
+                self.e_p = pentuples.kernel(eris, t2, t3, t4, plan_=pl)
+            w, c, k = timing.since(snap0)[(ROOT_P,)]
+        pr.kv('E(P)', '%20.12f' % self.e_p, indent=3)
+        pr.kv('E(CCSDTQ(P))', '%20.12f' % self.e_tot_p, indent=3)
+        if no >= 5 and nv >= 5:
+            pr.kv('time', '%.2f s wall, %.2f s CPU (%.1f cores); peak memory %s anonymous'
+                  % (w, c, c / w if w > 0 else 0, _size(peak.peak or 0)), indent=3)
+            parts = timing.children(timing.since(snap0), (ROOT_P,))
+            names = {'p.gemm': 'products', 'p.reduce': 'reductions', 'p.operands': 'operands',
+                     'p.xq': 'T2 T2 T2 intermediate', 'p.xv': 'Xv', 'p.xo': 'Xo', 'p.y4': 'second-order quadruples',
+                     'p.energy': 'energy', 'p.blocks': 'integral blocks'}
+            pr.kv('of which', ', '.join('%s %.2f s' % (names.get(n, n), w2) for n, w2, c2, k2 in parts
+                                        if w2 >= 0.01 * w), indent=3, level=logger.INFO)
+        pr.rule(char='=')
+        return self.e_p
 
 
 def CCSDTQ(mf, frozen=None, mo_coeff=None, mo_occ=None):

@@ -119,7 +119,7 @@ def test_dispatch_and_frozen(rhf, uhf):
 def test_ccsdtq_front_end(rhf):
     '''zccsdt.CCSDTQ: the class by the kind of reference; H2O / 6-31G, RHF
     taken as GHF spin orbitals - CCSDT first, then CCSDTQ, (Q) from the
-    CCSDT step - against MRCC on the same integrals (bench/refs:
+    CCSDT step, (P) - against MRCC on the same integrals (bench/refs:
     h2o_631g_pyscf_mdcint); the report; a second run from the amplitudes;
     the frozen core in the unit of the reference.'''
     import json
@@ -149,8 +149,13 @@ def test_ccsdtq_front_end(rhf):
     assert abs(e_q - (ref['e_ccsdt(q)'] - ref['e_ccsdt'])) < 1e-10
     assert abs(mycc.ccsdt_run.e_q5 - (ref['e_ccsdt[q]'] - ref['e_ccsdt'])) < 1e-10
     assert mycc.t4.shape == (210, 1820) and mycc.t4.dtype == np.float64 and len(mycc.timings) == mycc.cycles
+    e_p = mycc.ccsdtq_p()
+    assert abs(e_p - (ref['e_ccsdtq(p)'] - ref['e_ccsdtq'])) < 1e-10 and mycc.e_p == e_p
+    assert abs(mycc.e_tot_p - ref['e_ccsdtq(p)']) < 2e-9
+    out = buf.getvalue()
     for text in ('zccsdt GCCSDT:', 'zccsdt GCCSDTQ:', '|dT4|', 'T4 382,200', 'GCCSDTQ converged',
-                 'E(CCSDTQ) - E(CCSDT)', 'T4 equation', 'products by occupied quadruple', 'peak memory'):
+                 'E(CCSDTQ) - E(CCSDT)', 'T4 equation', 'products by occupied quadruple', 'peak memory',
+                 '(P) correction: 252 occupied x 4,368 virtual pentuples, real', 'E(CCSDTQ(P))'):
         assert text in out, text
     # from the converged amplitudes: nothing left to do
     again = zccsdt.GCCSDTQ(scf.addons.convert_to_ghf(rhf))
@@ -160,6 +165,8 @@ def test_ccsdtq_front_end(rhf):
     assert again.cycles <= 2 and abs(again.e_tot - mycc.e_tot) < 1e-9 and again.e_ccsdt is None
     with pytest.raises(RuntimeError):
         again.ccsdt_q()
+    with pytest.raises(RuntimeError):
+        zccsdt.GCCSDTQ(scf.addons.convert_to_ghf(rhf)).ccsdtq_p()
     # frozen core: orbitals per spin of the RHF reference, spin orbitals of the class
     small = scf.RHF(_water('sto-3g')).run(conv_tol=1e-12)
     fc = zccsdt.CCSDTQ(small, frozen=1)

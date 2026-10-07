@@ -187,8 +187,9 @@ def test_what_cannot_be_paired():
 
 def test_hbr_spinors_against_mrcc_on_the_same_integrals(hbr):
     '''HBr / cc-pVDZ-DK, X2C spinors, 28 frozen, 8 + 16 active: CCSDT,
-    CCSDT[Q], CCSDT(Q) and CCSDTQ through the front end on the integrals in
-    Kramers pairs, against MRCC on the files written from them.'''
+    CCSDT[Q], CCSDT(Q), CCSDTQ and CCSDTQ(P) through the front end on the
+    integrals in Kramers pairs, against MRCC on the files written from
+    them.'''
     ref = REFS['hbr_ccpvdzdk_x2c_mdcint']['recommended']
     x = dirac.integrals(hbr, frozen=28, nvir=16)
     assert len(x.energy) == 24 and x.g.dtype == np.float64
@@ -208,5 +209,41 @@ def test_hbr_spinors_against_mrcc_on_the_same_integrals(hbr):
     assert abs(cc.ccsdt_run.e_corr + e_q - corr('e_ccsdt(q)')) < 2e-10
     assert abs(cc.e_corr - corr('e_ccsdtq')) < 2e-10
     assert abs(cc.e_tot - ref['e_ccsdtq']) < 1e-9 and abs(cc.e_ccsdt - ref['e_ccsdt']) < 1e-9
+    e_p = cc.ccsdtq_p()
+    assert abs(e_p - (ref['e_ccsdtq(p)'] - ref['e_ccsdtq'])) < 3e-12 and abs(e_p) > 1e-6
+    assert abs(cc.e_tot_p - ref['e_ccsdtq(p)']) < 1e-9
+    assert '(P) correction: 56 occupied x 4,368 virtual pentuples, real' in buf.getvalue()
     with pytest.raises(RuntimeError):
         cc.set_frozen()
+
+
+def test_hbr_turned_off_the_axis():
+    '''The same molecule turned away from the z axis: complex spinors and
+    integrals (no m_j to adapt to), complex T3 and T4 - and the correlation
+    energies of the molecule on the axis, which are those of MRCC: CCSDT,
+    CCSDT[Q], CCSDT(Q), CCSDTQ, CCSDTQ(P).'''
+    ref = REFS['hbr_ccpvdzdk_x2c_mdcint']['recommended']
+    a, b = np.radians(37.0), np.radians(61.0)
+    h = 1.4145 * np.array([np.cos(a) * np.sin(b), np.sin(a) * np.sin(b), np.cos(b)])
+    mf = x2c.UHF(gto.M(atom=[['Br', (0, 0, 0)], ['H', tuple(h)]], basis='cc-pvdz-dk', verbose=0))
+    mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-8
+    mf.kernel()
+    assert abs(mf.e_tot - ref['e_scf']) < 1e-9
+    with pytest.raises(ValueError):
+        dirac.kramers_pairs(mf)
+    full = E.from_scf(mf, frozen=28, packed_vvvv=True)
+    eris = E.drop_virtuals(full, 16)
+    assert eris.nmo == 24 and eris._vvvv_pp.shape == (120, 120) and E.drop_virtuals(full, 28) is full
+    assert abs(np.asarray(eris.oovv).imag).max() > 0.01 and abs(eris._vvvv_pp.imag).max() > 0.005
+    cc = zccsdt.GCCSDTQ.from_integrals(eris, verbose=0)
+    cc.conv_tol, cc.conv_tol_normt = 1e-11, 1e-9
+    cc.kernel()
+    e_q, e_p = cc.ccsdt_q(), cc.ccsdtq_p()
+    assert cc.t4.dtype == np.complex128 and abs(cc.t4.imag).max() > 1e-5
+    corr = lambda key: ref[key] - ref['e_scf']
+    assert abs(cc.ccsdt_run.e_corr - corr('e_ccsdt')) < 2e-10
+    assert abs(cc.ccsdt_run.e_corr + cc.ccsdt_run.e_q5 - corr('e_ccsdt[q]')) < 2e-10
+    assert abs(cc.ccsdt_run.e_corr + e_q - corr('e_ccsdt(q)')) < 2e-10
+    assert abs(cc.e_corr - corr('e_ccsdtq')) < 2e-10
+    assert abs(cc.e_corr + e_p - corr('e_ccsdtq(p)')) < 2e-10
+    assert abs(e_p - (ref['e_ccsdtq(p)'] - ref['e_ccsdtq'])) < 3e-12

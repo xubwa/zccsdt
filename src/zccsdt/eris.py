@@ -47,6 +47,46 @@ class ERIs:
         return np.result_type(self.fock, self.oovv)
 
 
+def drop_virtuals(eris, nvir):
+    '''The container with the ``nvir`` lowest virtual spin orbitals or
+    spinors of ``eris`` only: a truncated virtual space (canonical orbitals;
+    a Kramers pair should not be cut in two).  <vv||vv> full or on pairs, as
+    ``eris`` has it.'''
+    no = eris.nocc
+    e = np.asarray(eris.mo_energy)
+    nv = len(e) - no
+    if nvir >= nv:
+        return eris
+    keep = np.sort(np.argsort(e[no:], kind='stable')[:nvir])
+    idx = np.concatenate((np.arange(no), no + keep))
+    fock = np.asarray(eris.fock)
+    if abs(fock[np.ix_(idx, np.setdiff1d(np.arange(no + nv), idx))]).max() > 1e-7:
+        raise ValueError('the virtual orbitals that are dropped are coupled to the others by the Fock matrix: '
+                         'not canonical orbitals')
+
+    def cut(key):
+        x = getattr(eris, key)
+        if x is None:
+            return None
+        x = np.asarray(x)
+        for axis, c in enumerate(key):
+            if c == 'v':
+                x = np.take(x, keep, axis=axis)
+        return np.ascontiguousarray(x)
+    out = ERIs(nocc=no, fock=np.ascontiguousarray(fock[np.ix_(idx, idx)]), mo_energy=e[idx].copy(),
+               e_hf=eris.e_hf, e_nuc=eris.e_nuc, source=eris.source,
+               spin_occ=eris.spin_occ, spin_vir=None if eris.spin_vir is None else np.asarray(eris.spin_vir)[keep],
+               **{k: cut(k) for k in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv')})
+    pp = getattr(eris, '_vvvv_pp', None)
+    if pp is not None:
+        a, b = np.triu_indices(nvir, 1)
+        rank = np.zeros((nv, nv), dtype=np.int64)
+        rank[np.triu_indices(nv, 1)] = np.arange(nv * (nv - 1) // 2)
+        sel = rank[keep[a], keep[b]]
+        out._vvvv_pp = np.ascontiguousarray(np.asarray(pp)[np.ix_(sel, sel)])
+    return out
+
+
 def _mo_chemist(mol, C, kind):
     '''Full MO chemist-notation integrals (pq|rs) for the columns of C.'''
     if kind == 'spinor':
