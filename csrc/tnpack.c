@@ -261,6 +261,128 @@ void zc_tn_expand_##SFX(const T *R, int64_t nout, int64_t sR, int n, int k1,   \
     free(sp.cb);                                                               \
 }                                                                              \
                                                                                \
+/* The same with a list of entries o in the place of the outer index: each    \
+ * has a row of the packed array, an offset in X and a sign,                   \
+ *                                                                             \
+ *   R[row[o] * ldR + A] += scale * osgn[o] * sum_splits sgn                   \
+ *                          * X[xoff[o] + (r1 - b0) * s1 + (r2 - c0) * s2]     \
+ *                                                                             \
+ * - the reduction of a product on two groups of occupied and two groups of    \
+ * virtual indices: an entry per split of an occupied tuple (its row), the     \
+ * kernel does the virtual side.  Entries with the same row must follow each   \
+ * other: the parallel loop is over (rows) x (chunks of tuples), so that no    \
+ * two threads write the same element, and a thread stays within one slab of   \
+ * X for a while. */                                                           \
+void zc_tn_reduce2_##SFX(T *R, int64_t ldR, int64_t nout, const int64_t *row,  \
+                         const int64_t *xoff, const double *osgn, int n,       \
+                         int k1, int k2, int64_t b0, int64_t b1, int64_t c0,   \
+                         int64_t c1, const T *X, int64_t s1, int64_t s2,       \
+                         double scale)                                         \
+{                                                                              \
+    tn_split sp;                                                               \
+    if (nout <= 0 || tn_setup(&sp, n, k1, k2))                                 \
+        return;                                                                \
+    const int64_t nA = sp.ntuple, nchunk = (nA + CHUNK - 1) / CHUNK;           \
+    const int ns = sp.nsplit;                                                  \
+    int64_t *gs = (int64_t *)malloc(sizeof(int64_t) * (size_t)(nout + 1));     \
+    int64_t ng = 0;                                                            \
+    for (int64_t o = 0; o < nout; o++)                                         \
+        if (o == 0 || row[o] != row[o - 1])                                    \
+            gs[ng++] = o;                                                      \
+    gs[ng] = nout;                                                             \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        int64_t *off = (int64_t *)malloc(sizeof(int64_t) * CHUNK * ns);        \
+        _Pragma("omp for collapse(2) schedule(dynamic, 16)")                   \
+        for (int64_t g = 0; g < ng; g++)                                       \
+        for (int64_t ch = 0; ch < nchunk; ch++) {                              \
+            int64_t A0 = ch * CHUNK, cnt = (nA - A0 < CHUNK) ? nA - A0 : CHUNK; \
+            tn_offsets(&sp, A0, cnt, b0, b1, c0, c1, s1, s2, off);             \
+            T *r = R + row[gs[g]] * ldR + A0;                                  \
+            for (int64_t o = gs[g]; o < gs[g + 1]; o++) {                      \
+                if (osgn[o] == 0)                                              \
+                    continue;                                                  \
+                const T *x = X + xoff[o];                                      \
+                const double sg = scale * osgn[o];                             \
+                for (int64_t t = 0; t < cnt; t++) {                            \
+                    const int64_t *f = off + t * ns;                           \
+                    T v = 0;                                                   \
+                    for (int s = 0; s < ns; s++)                               \
+                        if (f[s] >= 0)                                         \
+                            v += sp.sgn[s] * x[f[s]];                          \
+                    r[t] += sg * v;                                            \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        free(off);                                                             \
+    }                                                                          \
+    free(gs);                                                                  \
+    free(sp.cb);                                                               \
+}                                                                              \
+                                                                               \
+/* X[xoff[o] + ..] = scale * osgn[o] * sgn * M[row[o] * ldM + A]: packed rows  \
+ * on two groups, each at its place in X (not written: elements with a         \
+ * repeated index, entries with osgn 0) */                                     \
+void zc_tn_expand2_##SFX(const T *M, int64_t ldM, int64_t nout,                \
+                         const int64_t *row, const int64_t *xoff,              \
+                         const double *osgn, int n, int k1, int k2,            \
+                         int64_t b0, int64_t b1, int64_t c0, int64_t c1,       \
+                         T *X, int64_t s1, int64_t s2, double scale)           \
+{                                                                              \
+    tn_split sp;                                                               \
+    if (nout <= 0 || tn_setup(&sp, n, k1, k2))                                 \
+        return;                                                                \
+    const int64_t nA = sp.ntuple, nchunk = (nA + CHUNK - 1) / CHUNK;           \
+    const int ns = sp.nsplit;                                                  \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        int64_t *off = (int64_t *)malloc(sizeof(int64_t) * CHUNK * ns);        \
+        _Pragma("omp for collapse(2) schedule(dynamic, 16)")                   \
+        for (int64_t o = 0; o < nout; o++)                                     \
+        for (int64_t ch = 0; ch < nchunk; ch++) {                              \
+            if (osgn[o] == 0)                                                  \
+                continue;                                                      \
+            int64_t A0 = ch * CHUNK, cnt = (nA - A0 < CHUNK) ? nA - A0 : CHUNK; \
+            tn_offsets(&sp, A0, cnt, b0, b1, c0, c1, s1, s2, off);             \
+            const T *r = M + row[o] * ldM + A0;                                \
+            T *x = X + xoff[o];                                                \
+            const double sg = scale * osgn[o];                                 \
+            for (int64_t t = 0; t < cnt; t++) {                                \
+                const int64_t *f = off + t * ns;                               \
+                T v = sg * r[t];                                               \
+                for (int s = 0; s < ns; s++)                                   \
+                    if (f[s] >= 0)                                             \
+                        x[f[s]] = sp.sgn[s] * v;                               \
+            }                                                                  \
+        }                                                                      \
+        free(off);                                                             \
+    }                                                                          \
+    free(sp.cb);                                                               \
+}                                                                              \
+                                                                               \
+/* R[tgt[e] * ldR + c] += sgn[e] * X[src[e] + c], c < ncol: rows of X added    \
+ * to rows of R - the reduction over the splits of the occupied tuples alone,  \
+ * one entry per split (threads take blocks of columns) */                     \
+void zc_tn_axpy_rows_##SFX(T *R, int64_t ldR, int64_t nent,                    \
+                           const int64_t *tgt, const int64_t *src,             \
+                           const double *sgn, const T *X, int64_t ncol)        \
+{                                                                              \
+    const int64_t blk = 2048, nblk = (ncol + blk - 1) / blk;                   \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t b = 0; b < nblk; b++) {                                       \
+        int64_t lo = b * blk, hi = (lo + blk < ncol) ? lo + blk : ncol;        \
+        for (int64_t e = 0; e < nent; e++) {                                   \
+            const double sg = sgn[e];                                          \
+            if (sg == 0)                                                       \
+                continue;                                                      \
+            T *r = R + tgt[e] * ldR;                                           \
+            const T *x = X + src[e];                                           \
+            for (int64_t c = lo; c < hi; c++)                                  \
+                r[c] += sg * x[c];                                             \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
 /* out[r, :] = sgn[r] * M[rows[r], c0:c1]  (rows of a packed block with their  \
  * signs; sgn 0: zeros) */                                                     \
 void zc_tn_rows_##SFX(const T *M, int64_t ld, const int64_t *rows,             \

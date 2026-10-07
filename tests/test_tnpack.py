@@ -100,3 +100,59 @@ def test_rows_sums_energy(both, dtype):
     assert abs(a[0] - b[0]) < 1e-11 and abs(a[1] - b[1]) < 1e-11
     x = _rnd(rng, dtype, 7, 9)
     assert not P.zero(x).any()
+
+
+@pytest.mark.parametrize('dtype', [np.float64, np.complex128])
+def test_two_sided(dtype):
+    '''tn_expand2 / tn_reduce2 with the entries of the occupied splits
+    (occ_expand, occ_reduce) against the numpy view and reduce: in the
+    natural layout [g1o, g2o, g1v, g2v] and in the layout of a matrix
+    product [g1o, g1v, g2o, g2v], whole and in batches; the occupied side
+    alone (tn_axpy_rows) and the virtual side alone.'''
+    rng = np.random.default_rng(0)
+    no, nv = 6, 7
+    T = _rnd(rng, dtype, comb(no, 4), comb(nv, 4))
+    for ko, kv in (((1, 3), (1, 3)), ((2, 2), (2, 2)), ((1, 3), (2, 2)), ((2, 2), (1, 3)), ((1, 3), (3, 1))):
+        so, sv = P.split(no, *ko), P.split(nv, *kv)
+        for jo, jv in ((None, None), ((1, min(4, so.n2)), (2, min(9, sv.n2)))):
+            b0, b1 = jo or (0, so.n2)
+            c0, c1 = jv or (0, sv.n2)
+            want = P.view(T, so, sv, jo, jv)
+            X = np.empty(want.shape, dtype=dtype)
+            st = [x // X.itemsize for x in X.strides]
+            P.tn_expand2(X, T, nv, kv[0], kv[1], P.occ_expand(so, st[0], st[1], jo), st[2], st[3], cols=(c0, c1))
+            assert abs(X - want).max() < 1e-13, (ko, kv, jo)
+            Y = np.empty((so.n1, sv.n1, b1 - b0, c1 - c0), dtype=dtype)
+            st = [x // Y.itemsize for x in Y.strides]
+            P.tn_expand2(Y, T, nv, kv[0], kv[1], P.occ_expand(so, st[0], st[2], jo), st[1], st[3], cols=(c0, c1))
+            assert abs(Y - want.transpose(0, 2, 1, 3)).max() < 1e-13
+            Z = _rnd(rng, dtype, *want.shape)
+            ref = P.reduce(np.zeros_like(T), Z, so, sv, jo, jv, scale=0.7)
+            st = [x // Z.itemsize for x in Z.strides]
+            got = P.tn_reduce2(np.zeros_like(T), Z, nv, kv[0], kv[1], P.occ_reduce(so, st[0], st[1], jo),
+                               st[2], st[3], cols=(c0, c1), scale=0.7)
+            assert abs(got - ref).max() < 1e-12, (ko, kv, jo)
+            Zt = np.ascontiguousarray(Z.transpose(0, 2, 1, 3))
+            st = [x // Zt.itemsize for x in Zt.strides]
+            got = P.tn_reduce2(np.zeros_like(T), Zt, nv, kv[0], kv[1], P.occ_reduce(so, st[0], st[2], jo),
+                               st[1], st[3], cols=(c0, c1), scale=0.7)
+            assert abs(got - ref).max() < 1e-12
+    so, sv = P.split(no, 2, 2), P.split(nv, 2, 2)
+    for jv in (None, (3, 20)):
+        c0, c1 = jv or (0, T.shape[1])
+        Z = _rnd(rng, dtype, so.n1, so.n2, c1 - c0)
+        ref = P.reduce(np.zeros_like(T), Z, so, None, jv=jv)
+        row, off, sg = P.occ_reduce(so, so.n2 * (c1 - c0), c1 - c0)
+        assert abs(P.tn_axpy_rows(np.zeros_like(T), Z, row, off, sg, col0=c0) - ref).max() < 1e-12
+    # half of the splits of the occupied quadruples (the first pair has the smallest index)
+    Z = _rnd(rng, dtype, so.n1, so.n2, T.shape[1])
+    half = P.tn_axpy_rows(np.zeros_like(T), Z, *P.occ_reduce(so, so.n2 * T.shape[1], T.shape[1], only=(0, 1, 2)))
+    rest = P.tn_axpy_rows(np.zeros_like(T), Z, *P.occ_reduce(so, so.n2 * T.shape[1], T.shape[1], only=(3, 4, 5)))
+    assert abs(half + rest - P.reduce(np.zeros_like(T), Z, so, None)).max() < 1e-12
+    for I in range(len(T)):
+        assert (so.idx1[I, :3] < so.idx2[I, :3]).all() and (so.idx1[I, 3:] > so.idx2[I, 3:]).all()
+    Z = _rnd(rng, dtype, 5, sv.n1, sv.n2)
+    ref = P.reduce(np.zeros_like(T), Z, None, sv, jo=(3, 8))
+    got = P.tn_reduce2(np.zeros_like(T), Z, nv, 2, 2, (np.arange(3, 8), np.arange(5) * sv.n1 * sv.n2, np.ones(5)),
+                       sv.n2, 1)
+    assert abs(got - ref).max() < 1e-12

@@ -257,6 +257,93 @@ def tn_expand(X, T, n, k1, k2, rows=None, cols=None, scale=1.0, outer=None):
     return X
 
 
+def _entries(row, xoff, osgn):
+    row = np.ascontiguousarray(row, dtype=np.int64)
+    xoff = np.ascontiguousarray(xoff, dtype=np.int64)
+    osgn = np.ascontiguousarray(osgn, dtype=np.float64)
+    assert row.shape == xoff.shape == osgn.shape and row.ndim == 1
+    return row, xoff, osgn
+
+
+def tn_reduce2(R, X, n, k1, k2, entries, s1, s2, rows=None, cols=None, scale=1.0):
+    '''R[row, A] += scale * osgn * sum over the splits (g1 | g2) of the sorted
+    (k1+k2)-tuples A of sgn * X.flat[xoff + (g1 - rows[0]) * s1 + (g2 - cols[0]) * s2]
+    for every entry (row, xoff, osgn) of ``entries`` (three arrays): the
+    reduction of a product on two groups of occupied and two groups of
+    virtual indices - an entry per split of an occupied tuple (occ_reduce()),
+    the splits of the virtual tuples here.  R: [rows, A]; X: any layout, as
+    the strides (in elements) and the offsets say.'''
+    row, xoff, osgn = _entries(*entries)
+    b0, b1, c0, c1 = _ranges(n, k1, k2, rows, cols)
+    assert R.flags.c_contiguous and X.flags.c_contiguous and R.dtype == X.dtype and R.ndim == 2
+    assert R.shape[1] == comb(n, k1 + k2)
+    order = np.argsort(row, kind='stable')          # (the kernel wants the entries of a row together)
+    row, xoff, osgn = row[order], xoff[order], osgn[order]
+    getattr(_lib, 'zc_tn_reduce2_' + _SFX[R.dtype])(
+        _p(R), _I64(R.shape[1]), _I64(len(row)), _p(row), _p(xoff), _p(osgn), _INT(n), _INT(k1), _INT(k2),
+        _I64(b0), _I64(b1), _I64(c0), _I64(c1), _p(X), _I64(s1), _I64(s2), _DBL(scale))
+    return R
+
+
+def tn_expand2(X, M, n, k1, k2, entries, s1, s2, rows=None, cols=None, scale=1.0):
+    '''X.flat[xoff + (g1 - rows[0]) * s1 + (g2 - cols[0]) * s2] = scale * osgn * t[g1, g2]
+    of the packed tuples M[row] for every entry (row, xoff, osgn): rows of a
+    packed block on two groups of virtual indices, each at its place
+    (occ_expand(): the rows that two groups of occupied indices make).  X
+    is zeroed first.'''
+    row, xoff, osgn = _entries(*entries)
+    b0, b1, c0, c1 = _ranges(n, k1, k2, rows, cols)
+    assert M.flags.c_contiguous and X.flags.c_contiguous and M.dtype == X.dtype and M.ndim == 2
+    assert M.shape[1] == comb(n, k1 + k2)
+    _lib.zc_tn_zero(_p(X), _I64(X.nbytes))
+    getattr(_lib, 'zc_tn_expand2_' + _SFX[X.dtype])(
+        _p(M), _I64(M.shape[1]), _I64(len(row)), _p(row), _p(xoff), _p(osgn), _INT(n), _INT(k1), _INT(k2),
+        _I64(b0), _I64(b1), _I64(c0), _I64(c1), _p(X), _I64(s1), _I64(s2), _DBL(scale))
+    return X
+
+
+def tn_axpy_rows(R, X, tgt, src, sgn, col0=0):
+    '''R[tgt[e], col0 + c] += sgn[e] * X.flat[src[e] + c] for c < X.shape[-1]:
+    rows of X added to rows of R - the reduction over the splits of the
+    occupied tuples alone (occ_reduce() with the packed virtual tuple last
+    in X).'''
+    tgt, src, sgn = _entries(tgt, src, sgn)
+    ncol = X.shape[-1]
+    assert R.flags.c_contiguous and X.flags.c_contiguous and R.dtype == X.dtype and R.ndim == 2
+    assert col0 + ncol <= R.shape[1]
+    getattr(_lib, 'zc_tn_axpy_rows_' + _SFX[R.dtype])(
+        ctypes.c_void_p(R.ctypes.data + col0 * R.itemsize), _I64(R.shape[1]), _I64(len(tgt)), _p(tgt),
+        _p(src), _p(sgn), _p(X), _I64(ncol))
+    return R
+
+
+def occ_reduce(so, s1, s2, jo=None, only=None):
+    '''The entries (row, offset, sign) of the reduction over the splits of
+    the occupied tuples of ``so``: for every tuple I and split s whose
+    second group is in jo = (b0, b1), X at idx1 * s1 + (idx2 - b0) * s2.
+    ``only``: the splits to take (default: all).'''
+    b0, b1 = jo or (0, so.n2)
+    row, off, sg = [], [], []
+    for s in (range(so.nsplit) if only is None else only):
+        Is = so.select(s, b0, b1)
+        row.append(Is)
+        off.append(so.idx1[Is, s] * s1 + (so.idx2[Is, s] - b0) * s2)
+        sg.append(so.sgn[Is, s])
+    return np.concatenate(row), np.concatenate(off), np.concatenate(sg).astype(np.float64)
+
+
+def occ_expand(so, s1, s2, jo=None):
+    '''The entries (row, offset, sign) of t[g1, g2] for all first groups and
+    the second groups in jo = (b0, b1) of the occupied split ``so``: the
+    packed row that the two groups make, X at g1 * s1 + (g2 - b0) * s2.'''
+    b0, b1 = jo or (0, so.n2)
+    g1, g2 = np.meshgrid(np.arange(so.n1), np.arange(b0, b1), indexing='ij')
+    sg = so.psg[:, b0:b1].ravel()
+    keep = sg != 0
+    return (so.pos[:, b0:b1].ravel()[keep], (g1 * s1 + (g2 - b0) * s2).ravel()[keep],
+            sg[keep].astype(np.float64))
+
+
 def tn_rows(out, M, rows, sgn, cols=None):
     '''out[r] = sgn[r] * M[rows[r], c0:c1]: rows of a packed block with their
     signs (sgn 0: zeros).'''
