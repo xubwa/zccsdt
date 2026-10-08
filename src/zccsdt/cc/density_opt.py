@@ -248,7 +248,7 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
             return None, None, None, 0
         pairs = 1 if way == 'y' else 0
         cap = None if left is None else left
-        fp = source.plan(cap, lambda nk: frozen_own(o, v, nk, itemsize, pairs))
+        fp = source.plan(cap, lambda nk: frozen_own(o, v, nk, itemsize, pairs), nfrozen)
         nk, nbf = fp.nket, None
         work = fp.work
         if way == 'y':
@@ -557,17 +557,18 @@ class _Given:
     def __init__(self, nfrozen, function, nmo):
         self.n, self.function, self.nmo = nfrozen, function, nmo
 
-    def plan(self, left, own):
+    def plan(self, left, own, most=None):
         slab = 2 * 16 * self.nmo ** 3
+        most = self.n if most is None else min(most, self.n)
 
         def work(nk):
             return nk * slab + own(nk)
-        nk = int(max(1, min(self.n, FROZEN_BYTES // max(work(1), 1))))
+        nk = int(max(1, min(most, FROZEN_BYTES // max(work(1), 1))))
         if left is not None:
             if work(1) > left:
                 raise MemoryError('the integrals of one frozen spinor and their blocks take %.2f GB, '
                                   '%.2f GB are left' % (work(1) / 1e9, left / 1e9))
-            lo, hi = 1, self.n
+            lo, hi = 1, most
             while lo < hi:
                 mid = (lo + hi + 1) // 2
                 lo, hi = (mid, hi) if work(mid) <= left else (lo, mid - 1)
@@ -822,7 +823,7 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         route = plan.route or frozen_route(o, v, ntr)
         if plan.frozen is None:         # a plan given without them: as if memory were not short
             if plan.nk is None:
-                plan.frozen = source.plan(None, lambda nk: frozen_own(o, v, nk, isz, int(route == 'y')))
+                plan.frozen = source.plan(None, lambda nk: frozen_own(o, v, nk, isz, int(route == 'y')), ntr)
             elif hasattr(source, 'slab_plan'):
                 plan.frozen = source.slab_plan(plan.nk)
             else:
@@ -1249,9 +1250,10 @@ class FrozenIntegrals:
         plan.nket = nk
         return plan
 
-    def plan(self, left, own):
+    def plan(self, left, own, most=None):
         '''The ao2mo.Plan of the slabs within ``left`` bytes (None: no limit
-        known): the most frozen spinors at a time (Plan.nket) that fit with
+        known): the most frozen spinors at a time (Plan.nket; not more than
+        ``most``, the number that will be asked for) that fit with
         own(nket) bytes of the caller for them, by bisection - a larger
         slab leaves less for the passes of the transformation (as
         zccsd.orbgrad_frozen.slab_plan).  Plan.work has own(nket) in it.
@@ -1264,7 +1266,8 @@ class FrozenIntegrals:
                               'for what the integrals of one are cut into)'
                               % (str(err) or 'no memory for one frozen spinor', own(1) / 1e9)) from None
         lo = 1
-        hi = int(min(self.n, ao2mo.plan_slabs(self.mol, self.n, self.nmo, None, sort_arrays=0).nket))
+        hi = int(min(self.n if most is None else most,
+                     ao2mo.plan_slabs(self.mol, self.n, self.nmo, None, sort_arrays=0).nket))
         if left is None:        # (not more than FROZEN_BYTES of slab where nothing is known)
             hi = int(max(1, min(hi, FROZEN_BYTES // (16 * self.nmo ** 3))))
         while lo < hi:
