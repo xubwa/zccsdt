@@ -103,6 +103,7 @@ class Plan:
     nk: int = None              # frozen spinors per batch of their integrals
     nbf: int = None             # route 'y': occupied pairs per batch of the pass for a batch of them
     frozen: object = None       # the plan of the integral transformation (FrozenIntegrals.plan)
+    kramers: bool = False       # half of the frozen spinors were done, the others are their images
 
 
 @dataclass
@@ -520,10 +521,11 @@ class _Given:
             nk = min(nk, lo)
         return SimpleNamespace(nket=nk, work=work(nk))
 
-    def batches(self, plan):
+    def batches(self, plan, first=None):
         nk = plan.nket
-        for f0 in range(0, self.n, nk):
-            f1 = min(f0 + nk, self.n)
+        a, b = first or (0, self.n)
+        for f0 in range(a, b, nk):
+            f1 = min(f0 + nk, b)
             S0 = np.asarray(self.function(f0, f1))
             G = np.ascontiguousarray(S0.transpose(0, 2, 1, 3))
             G *= 0.5
@@ -583,12 +585,33 @@ def _frozen_stage(c):
                 _cut(X, vi, vi, oc, (0, 2, 3, 1)),              # T[f, e1, e2, m] as [f, e2, m, e1]
                 _cut_pairs(X, vm, o, 0, o), _cut_pairs(X, vm, o, o, v))
 
-    it = c.source.batches(c.plan.frozen)
+    # Kramers pairs: the frozen spinors are [unbarred, barred] and U[y, x] = <y|K x> for the
+    # active ones; B and K of the barred half are the images of those of the unbarred one
+    # if t and lambda are symmetric under time reversal - which the first barred one tells
+    U = getattr(c.source, 'kramers', None)
+    half = nfz // 2
+    if nfz < 4:
+        U = None
+    it = c.source.batches(c.plan.frozen, (0, nfz) if U is None else (0, half + 1))
     X = None
     checked = False
+
+    def image(x, kind):
+        return x.conj() @ (U.conj().T if kind == 'b' else U.T)
     while True:
         with timer('dens.frozen.ao2mo'):
             item = next(it, None)
+        if item is None and U is not None:
+            scale = max(abs(bf[0]).max(), abs(kf[0]).max(), 1e-300)
+            err = max(abs(bf[half] - image(bf[0], 'b')).max(), abs(kf[half] - image(kf[0], 'k')).max())
+            if err < 1e-7 * scale:
+                bf[half + 1:], kf[half + 1:] = image(bf[1:half], 'b'), image(kf[1:half], 'k')
+                c.plan.kramers = True
+            else:                       # not symmetric: the other half as well
+                it = c.source.batches(c.plan.frozen, (half + 1, nfz))
+                with timer('dens.frozen.ao2mo'):
+                    item = next(it, None)
+            U = None
         if item is None:
             break
         f0, f1, G = item
@@ -734,13 +757,15 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     nfz, source = frozen if frozen and gradient and frozen[0] else (0, None)
     if nfz and not hasattr(source, 'batches'):
         source = _Given(nfz, source, n)
+    # (with Kramers pairs the integrals of half of them, and of one more as a check)
+    ntr = nfz // 2 + 1 if nfz >= 4 and getattr(source, 'kramers', None) is not None else nfz
     if plan is None:
         from zccsdt.scratch import is_mapped
         plan = plan_memory(o, v, isz, memory.budget(max_memory),
-                           is_mapped(getattr(eris, '_vvvv_pp', None)), nfz, source)
+                           is_mapped(getattr(eris, '_vvvv_pp', None)), ntr, source)
     route = None
     if nfz:
-        route = plan.route or frozen_route(o, v, nfz)
+        route = plan.route or frozen_route(o, v, ntr)
         if plan.frozen is None:         # a plan given without them: as if memory were not short
             if plan.nk is None:
                 plan.frozen = source.plan(None, lambda nk: frozen_own(o, v, nk, isz, int(route == 'y')))
@@ -1018,7 +1043,7 @@ class Relaxed:
 
 
 def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dropped_vir=None,
-                 tol=1e-9, max_memory=None, verbose=None, plan=None):
+                 tol=1e-9, max_memory=None, verbose=None, plan=None, kramers=None):
     '''The relaxed one-particle density of CCSDT: kernel() for the density
     of t and lambda and the orbital gradient, the Z-vector equations of the
     SCF ``mf`` (zccsd.zvector.solve) and zvector.relaxed_rdm1.
@@ -1030,7 +1055,14 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     of zccsd.zvector and pyscf.cc.gccsd_rdm, D[p,q] = <q+ p>, Hermitian, in
     the basis of all spinors, Relaxed.mo_coeff - so that an expectation
     value is sum V[p,q] D[q,p] with V = C^+ V(AO) C, and the density in the
-    AO basis C D C^+.'''
+    AO basis C D C^+.
+
+    ``kramers``: use the Kramers pairs of the frozen spinors (kramers_pairs;
+    default: where they are found - the integrals with one frozen index and
+    their contractions are then made for half of the frozen spinors and one
+    more, whose image tells whether t and lambda have the symmetry; if not,
+    the other half is done as well).  Not with real integrals of complex
+    spinors (zccsdt.eris.axial_spinors).'''
     from pyscf.lib import logger
     from zccsdt.zccsd import zvector
     log = logger.new_logger(mf, verbose)
@@ -1047,9 +1079,28 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     if nf or nd:
         held_out = np.hstack([np.asarray(c) for c in (frozen_occ, dropped_vir) if c is not None and c.shape[1]])
     real = not np.iscomplexobj(np.zeros(0, dtype=np.result_type(eris.fock, eris.oovv)))
+    source = rot = None
+    if held_out is not None:
+        fock = held_out.conj().T @ mf.get_fock() @ np.hstack((held_out, mo_coeff))
+        pairs = None
+        if kramers is not False and (_motype(mf) == 'ghf' or not real):
+            with timer('dens.kramers'):
+                pairs = kramers_pairs(mf, mo_coeff, held_out, fock.diagonal().real)
+        if pairs is None:
+            source = frozen_integrals(mf, mo_coeff, held_out, real, max_memory)
+        else:
+            cp, rot, U, cact = pairs
+            if real:
+                if max(abs(cp.imag).max(), abs(U.imag).max(), abs(rot.imag).max()) > 1e-10:
+                    raise ValueError('Kramers pairs of real spin orbitals that are not real')
+                cp, rot, U = cp.real, rot.real, U.real
+            source = FrozenIntegrals(mf, cact, cp, real, max_memory, components=True)
+            source.kramers = U
+            del cp, cact
     res = kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=max_memory, plan=plan,
-                 frozen=None if held_out is None else (
-                     nf + nd, frozen_integrals(mf, mo_coeff, held_out, real, max_memory)))
+                 frozen=None if held_out is None else (nf + nd, source))
+    if rot is not None:         # from the pairs back to the frozen spinors given
+        res.bf, res.kf = rot.conj().T @ res.bf, rot.T @ res.kf
     dm1 = res.d1.T
     dm1 = 0.5 * (dm1 + dm1.conj().T)
     mo_e = np.asarray(eris.mo_energy, dtype=np.float64)
@@ -1069,7 +1120,6 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     frozen, act = np.arange(nf), nf + np.arange(o)
     vir, fvir = nf + o + np.arange(n - o), nf + n + np.arange(nd)
     both, held = np.concatenate((act, vir)), np.concatenate((frozen, fvir))
-    fock = held_out.conj().T @ mf.get_fock() @ np.hstack((held_out, mo_coeff))
     eh = fock.diagonal().real.copy()
     fock[np.arange(nf + nd), np.arange(nf + nd)] = 0
     off = abs(fock).max()
@@ -1122,15 +1172,15 @@ class FrozenIntegrals:
     never all in memory.  plan() sizes the slabs: as many frozen spinors as
     fit with the arrays that kernel() cuts a slab into.'''
 
-    def __init__(self, mf, mo_coeff, frozen_coeff, real=False, max_memory=None):
-        from zccsdt import eris as E
+    def __init__(self, mf, mo_coeff, frozen_coeff, real=False, max_memory=None, components=False):
         from zccsdt.zccsd import ao2mo
         self.mol = mf.mol
-        motype = 'ghf' if E._orbital_kind(mf) == 'ghf' else 'j-spinor'
         C = np.hstack((np.asarray(frozen_coeff), np.asarray(mo_coeff)))
-        self.Ca, self.Cb = ao2mo.spin_components(self.mol, C, motype)
+        # (``components``: the coefficients are given in the (spin, AO) basis)
+        self.Ca, self.Cb = ao2mo.spin_components(self.mol, C, 'ghf' if components else _motype(mf))
         self.n, self.nmo = np.asarray(frozen_coeff).shape[1], np.asarray(mo_coeff).shape[1]
         self.real, self.max_memory = real, max_memory
+        self.kramers = None         # U[y, x] = <y|K x> of the active spinors: see kramers_pairs
 
     def slab_plan(self, nk, left=None, own=0):
         '''The ao2mo.Plan with slabs of ``nk`` frozen spinors, ``own`` bytes
@@ -1171,12 +1221,13 @@ class FrozenIntegrals:
                 hi = mid - 1
         return best
 
-    def batches(self, plan=None):
+    def batches(self, plan=None, first=None):
         '''Generator of (f0, f1, G): G[f - f0, q, r, s] = (f q|r s), a buffer
-        that the next batch overwrites.'''
+        that the next batch overwrites; ``first``: the range of frozen
+        spinors (default: all).'''
         from zccsdt.zccsd import ao2mo
         nf = self.n
-        yield from ao2mo.slabs(self.mol, self.Ca, self.Cb, (0, nf), (nf, nf + self.nmo), plan)
+        yield from ao2mo.slabs(self.mol, self.Ca, self.Cb, first or (0, nf), (nf, nf + self.nmo), plan)
 
     def __call__(self, f0, f1):
         '''The antisymmetrized <fu||vw> = (fv|uw) - (fw|uv) of the frozen
@@ -1188,6 +1239,47 @@ class FrozenIntegrals:
         for i0, i1, g in ao2mo.slabs(self.mol, self.Ca, self.Cb, (f0, f1), (nf, nf + self.nmo)):
             out[i0 - f0:i1 - f0] = g.transpose(0, 2, 1, 3) - g.transpose(0, 2, 3, 1)
         return E._real_part(out) if self.real else out
+
+
+def _motype(mf):
+    from zccsdt import eris as E
+    return 'ghf' if E._orbital_kind(mf) == 'ghf' else 'j-spinor'
+
+
+def kramers_pairs(mf, mo_coeff, frozen_coeff, frozen_energy, tol=1e-8):
+    '''The frozen spinors as Kramers pairs, for a reference that is
+    symmetric under time reversal K (closed shells, no magnetic field):
+    (cp, R, U, ca) or None.  cp[(spin, AO), f]: the paired spinors,
+    [unbarred, barred] with cp[:, f + nf/2] = K cp[:, f] (zccsd.kramers.pair:
+    they mix only frozen spinors of one orbital energy); R: frozen_coeff =
+    cp R; U[y, x] = <y|K x> for the active spinors mo_coeff, which is
+    unitary if they are closed under K; ca: mo_coeff in the (spin, AO)
+    basis.  None if a level of the frozen spinors is not closed under K or
+    the active ones are not.
+
+    With g2 of amplitudes and lambda that are symmetric under K, the
+    contractions of kernel() for a barred frozen spinor follow from those of
+    its partner: B[K f, :] = conj(B[f, :]) U^+ and K[K f, :] = conj(K[f, :])
+    U^T - the integral transformation and the contractions for half of the
+    frozen spinors.'''
+    from zccsdt.zccsd import ao2mo, kramers
+    mol = mf.mol
+    nf = np.asarray(frozen_coeff).shape[1]
+    if nf % 2 or nf < 4:
+        return None
+    ca, cb = ao2mo.spin_components(mol, np.hstack((np.asarray(frozen_coeff), np.asarray(mo_coeff))), _motype(mf))
+    c2 = np.vstack((ca, cb))
+    s2 = np.kron(np.eye(2), mol.intor('int1e_ovlp'))
+    ch, cact = c2[:, :nf], c2[:, nf:]
+    order = np.argsort(frozen_energy, kind='stable')
+    found = kramers.pair(ch[:, order], s2, np.asarray(frozen_energy)[order])
+    if found is None:
+        return None
+    cp = found[0]
+    U = cact.conj().T @ s2 @ kramers.time_reverse(cact)
+    if abs(U.conj().T @ U - np.eye(U.shape[0])).max() > tol:
+        return None
+    return cp, cp.conj().T @ s2 @ ch, U, cact
 
 
 def frozen_integrals(mf, mo_coeff, frozen_coeff, real=False, max_memory=None):

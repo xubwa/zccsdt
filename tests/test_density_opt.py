@@ -584,6 +584,66 @@ def test_relaxed_dipole_with_frozen_spinors(basis, nfrozen, ndrop):
     assert abs(unrelaxed - relaxed) > 5e-6
 
 
+@pytest.mark.parametrize('kind', ['x2c', 'ghf'])
+def test_kramers_pairs_of_the_frozen_spinors(kind):
+    '''With the Kramers pairs of the frozen spinors (the default where they
+    are found) the integrals with one frozen index are made for half of
+    them and one more: the same orbital gradient and relaxed density as
+    with all of them.  And for a lambda that is not symmetric under time
+    reversal the image of the first one tells it, and all are done.
+    CCSDT of H2O / 6-31G, two frozen and four dropped spinors: X2C spinors
+    and the real spin orbitals of an RHF.'''
+    mol = gto.M(atom=WATER, basis='6-31g', verbose=0)
+    if kind == 'x2c':
+        mf = _x2c_in_field(mol)[0](0.0)
+    else:
+        rhf = scf.RHF(mol)
+        rhf.conv_tol, rhf.conv_tol_grad = 1e-13, 1e-10
+        rhf.kernel()
+        mf = scf.addons.convert_to_ghf(rhf)
+    C, n = mf.mo_coeff, mf.mo_coeff.shape[1]
+    eris = E.from_scf(mf, mo_coeff=C[:, :n - 4], mo_occ=mf.mo_occ[:n - 4], frozen=2)
+    r = _ccsdt(eris, 1e-13)
+    l1, l2, l3, _ = _lambda(eris, r)
+    kw = dict(frozen_occ=C[:, :2], dropped_vir=C[:, n - 4:], tol=1e-11)
+
+    def both(l1):
+        out = [D.relaxed_rdm1(mf, eris, r.t1, r.t2, r.t3, l1, l2, l3, C[:, 2:n - 4], kramers=k, **kw)
+               for k in (None, False)]
+        assert not out[1].result.plan.kramers
+        for a, b in ((out[0].result.bf, out[1].result.bf), (out[0].result.kf, out[1].result.kf),
+                     (out[0].gradient, out[1].gradient), (out[0].relaxed, out[1].relaxed)):
+            assert abs(a - b).max() < 1e-9 * abs(b).max(), abs(a - b).max() / abs(b).max()
+        return out[0]
+    rel = both(l1)
+    assert rel.result.plan.kramers
+    assert abs(rel.relaxed - rel.unrelaxed).max() > 1e-4
+    rng = np.random.default_rng(8)
+    bad = l1 + 1e-3 * (rng.standard_normal(l1.shape) + (1j * rng.standard_normal(l1.shape) if kind == 'x2c' else 0))
+    assert not both(bad).result.plan.kramers
+
+
+def test_kramers_pairs_are_found_or_not():
+    '''kramers_pairs: the pairs of frozen X2C spinors of H2O span the frozen
+    spinors, cp[:, f + nf/2] = K cp[:, f], and U is unitary; None for frozen
+    spinors that are not closed under time reversal (one of a pair left
+    out) and for active ones that are not.'''
+    from zccsdt.zccsd import kramers
+    mol = gto.M(atom=WATER, basis='6-31g', verbose=0)
+    mf = _x2c_in_field(mol)[0](0.0)
+    C, e = mf.mo_coeff, mf.mo_energy
+    held = [0, 1, 22, 23, 24, 25]
+    act = [p for p in range(C.shape[1]) if p not in held]
+    cp, rot, U, ca = D.kramers_pairs(mf, C[:, act], C[:, held], e[held])
+    assert abs(cp[:, 3:] - kramers.time_reverse(cp[:, :3])).max() < 1e-12
+    assert abs(rot.conj().T @ rot - np.eye(6)).max() < 1e-10 and abs(U.conj().T @ U - np.eye(len(act))).max() < 1e-10
+    c2 = np.vstack(mol.sph2spinor_coeff()) @ C[:, held]
+    assert abs(cp @ rot - c2).max() < 1e-10
+    assert D.kramers_pairs(mf, C[:, act], C[:, [0, 1, 21, 23, 24, 25]], e[[0, 1, 21, 23, 24, 25]]) is None
+    assert D.kramers_pairs(mf, C[:, act[:-1]], C[:, held], e[held]) is None
+    assert D.kramers_pairs(mf, C[:, act], C[:, :2], e[:2]) is None      # (nothing to gain below four)
+
+
 def test_frozen_spin_orbitals_real_and_complex():
     '''The same with RHF orbitals as spin orbitals (real integrals: the
     transformation of pyscf.ao2mo) and with every pair mixed by its own

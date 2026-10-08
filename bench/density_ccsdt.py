@@ -218,7 +218,9 @@ def profile(mol, kind, niter, nfrozen=0, ndrop=0):
               'peak anonymous memory %.2f GB (%.2f GB before the call); plan: %d pairs per batch, slab %s, need %.2f GB%s'
               % (attempt + 1, wall, cpu / wall, wall / t_iter, peak / 1e9, base / 1e9, rel.result.plan.nb,
                  rel.result.plan.slab_bytes, rel.result.plan.need / 1e9,
-                 '; frozen spinors: route %s, %s at a time' % (rel.result.plan.route, rel.result.plan.nk)
+                 '; frozen spinors: route %s, %s at a time%s' % (
+                     rel.result.plan.route, rel.result.plan.nk,
+                     ', Kramers pairs (half of them)' if rel.result.plan.kramers else '')
                  if getattr(rel.result.plan, 'route', None) else ''))
         tree(timing.snapshot())
     print('Z-vector converged: %s; trace of the density %.10f' % (rel.converged, np.trace(rel.relaxed).real))
