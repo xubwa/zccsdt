@@ -143,6 +143,36 @@ def quadruples_gradient(t2, t3, l2, l3, g, mo_energy, nocc):
     return Gradient(complex(e), *res, de.real.copy())
 
 
+def fock_density(t2, t3, l2, l3, g, mo_energy, nocc):
+    '''Gamma[p,q], the derivative of e with respect to the Fock matrix in the
+    form that needs no canonical orbitals, e = sum z4 y4 with y4 the
+    solution of D y = r4 for the whole occupied-occupied and virtual-virtual
+    blocks of f (the same number for canonical orbitals): de = sum Gamma[p,q]
+    df[p,q],
+
+        Gamma[a,e] = sum w[ijkl,abcd] y[ijkl,ebcd]      (i<j<k<l, b<c<d),
+        Gamma[m,i] = -sum w[ijkl,abcd] y[mjkl,abcd]     (j<k<l, a<b<c<d),
+
+    qgrad_ref.fock_density without the conjugation; the real part of its
+    diagonal is Gradient.de.  That form does not change when the occupied
+    or the virtual spin orbitals are rotated among themselves with t and
+    lambda, so the orbital gradient of CCSDT(Q)_Lambda among them is
+
+        G[p,q] = (e_q - e_p) (Gamma[q,p] + conj(Gamma[p,q])) / 2.
+
+    From all quadruples as full arrays: for a few spin orbitals.'''
+    n = g.shape[0]
+    nvir = n - nocc
+    x, d = R._pieces(RIGHT, 4, {'v': g, 't2': t2, 't3': t3}, mo_energy, nocc)
+    z = R._pieces(LEFT, 4, {'v': _swap(g), 't2': l2, 't3': l3}, mo_energy, nocc)[0]
+    y = Q.expand((x[RIGHT[0]] + x[RIGHT[1]]) / d, nocc, nvir, 4)
+    w = Q.expand((z[LEFT[0]] + z[LEFT[1]]) / d, nocc, nvir, 4)
+    out = np.zeros((n, n), dtype=complex)
+    out[nocc:, nocc:] = np.einsum('ijklabcd,ijklebcd->ae', w, y) / 144
+    out[:nocc, :nocc] = -np.einsum('ijklabcd,mjklabcd->mi', w, y) / 144
+    return out
+
+
 # ------------------------------------------------------ directional derivatives
 
 def directional(f, amps, zeta):
@@ -292,6 +322,7 @@ class Relaxed:
     amps: list
     lams: list                  # lambda of CCSDT
     terms: Terms = None
+    gradient_e: np.ndarray = None   # the part of ``gradient`` from the densities of e (d2, de)
 
 
 def relaxed_rdm1(mf, mo_coeff, nfrozen=0, ndrop=0, amps=None, lams=None, tol=1e-11,
@@ -334,9 +365,10 @@ def relaxed_rdm1(mf, mo_coeff, nfrozen=0, ndrop=0, amps=None, lams=None, tol=1e-
     d1 = np.zeros((n, n), dtype=complex)
     d1[np.arange(n)[a], np.arange(n)[a]] = t.q.de
     Gq = zvector.gradient_nh(zvector.t_fock(fock, o), g, d2, d1, o)
-    Gr = Gr + 0.5 * (Gq - Gq.conj().T)
+    Ge = 0.5 * (Gq - Gq.conj().T)
+    Gr = Gr + Ge
     dm1 = dm1 + d1
     spaces = (np.arange(nfrozen, o), np.arange(nfrozen), np.arange(o, n - ndrop), np.arange(n - ndrop, n))
     relaxed, z = zvector._relax(mf, mf, np.asarray(mo_coeff), mo_e, o, Gr, dm1, spaces, True,
                                 zvector.DEGENERATE_DENSE, tol, verbose)
-    return Relaxed(relaxed, dm1, z, Gr, e_corr, float(t.e.real), amps, lams, t)
+    return Relaxed(relaxed, dm1, z, Gr, e_corr, float(t.e.real), amps, lams, t, Ge)

@@ -220,3 +220,39 @@ def test_relaxed_dipole_against_finite_field(name, cplx, nfrozen, ndrop):
     for with_q in (False, True):
         other = G.relaxed_rdm1(mf, C, nfrozen, ndrop, with_q=with_q, amps=rel.amps)
         assert abs(np.einsum('pq,qp', zmo, other.relaxed).real - value) > (1e-7 if with_q else 1e-6)
+
+
+@pytest.mark.parametrize('name', ['lih', 'bh'])
+def test_gradient_among_occupied_and_among_virtual(name):
+    '''The orbital gradient of CCSDT(Q)_Lambda among the occupied and among
+    the virtual spin orbitals (complex ones), from the densities of the
+    Lagrangian - those of lambda', of zeta and of e:
+
+    - the whole of it is (e_q - e_p) times the Hermitian part of the
+      Fock-matrix density of (Q)_Lambda, transposed, as for CCSDT(Q);
+    - the part without the densities of e follows from the sources of the
+      two equations, s = de/dt with t and q = de/dlambda with lambda: L and
+      zeta . W do not change when t, lambda, zeta, lambda' and the integrals
+      are rotated together.'''
+    mol, make_scf, z = _molecule(name, True)
+    mf, C = make_scf(0.0)
+    rel = QL.relaxed_rdm1(mf, C)
+    fock, g, mo_e, o = R.integrals(E.from_scf(mf, mo_coeff=C))
+    t2, t3, l2, l3 = rel.amps[1], rel.amps[2], rel.lams[1], rel.lams[2]
+    gam = QL.fock_density(t2, t3, l2, l3, g, mo_e, o)
+    q = rel.terms.q
+    assert abs(gam.diagonal().real - q.de).max() < 1e-14
+    want = (mo_e[None, :] - mo_e[:, None]) * 0.5 * (gam.T + gam.conj())
+    es = np.einsum
+    nh = np.zeros_like(want)
+    nh[:o, :o] = (-0.5 * es('jkab,ikab->ji', q.s2, t2) - es('jklabc,iklabc->ji', q.s3, t3) / 12
+                  + 0.5 * es('ikab,jkab->ji', q.q2, l2) + es('iklabc,jklabc->ji', q.q3, l3) / 12)
+    nh[o:, o:] = (0.5 * es('ijac,ijbc->ba', q.s2, t2) + es('ijkacd,ijkbcd->ba', q.s3, t3) / 12
+                  - 0.5 * es('ijbc,ijac->ba', q.q2, l2) - es('ijkbcd,ijkacd->ba', q.q3, l3) / 12)
+    lag = rel.gradient - rel.gradient_e
+    size = [0.0, 0.0]
+    for s in (slice(0, o), slice(o, None)):
+        assert abs(rel.gradient[s, s] - want[s, s]).max() < 1e-11
+        assert abs(lag[s, s] - 0.5 * (nh - nh.conj().T)[s, s]).max() < 1e-11
+        size = [max(size[0], abs(want[s, s]).max()), max(size[1], abs(lag[s, s]).max())]
+    assert size[0] > 1e-9 and size[1] > 1e-8
