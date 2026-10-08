@@ -31,6 +31,10 @@ there once: nothing of <ia||bc> or <ka||ij> (they are the conjugates of
 <ab||ci> and <ij||ka>), and of the blocks on pairs the other three
 quarters follow from the antisymmetry.  from_cfour() completes them.
 
+xzlabels         optional, not a file of CFOUR: a symmetry label per spinor (text;
+                 read_labels()), for the native program cfour/xzccsdt and, on
+                 request, for from_cfour().
+
 ``moinpppp`` is the one file that is not always there.  xx2cvtran writes it
 when ABCDTYPE is not AOBASIS (ABCDTYPE=STANDARD: then the whole (pq|rs) is
 transformed, n^4 complex numbers in core); with ABCDTYPE=AOBASIS, which the
@@ -174,6 +178,41 @@ class Integrals:
     ppph: np.ndarray            # [a<=b, c, i]   <ab||ci>
     pppp: np.ndarray = None     # [a<=b, c<=d]   <ab||cd>; None: the file is not there
     directory: str = ''
+    labels: np.ndarray = None   # symmetry labels of the active spinors (the file xzlabels); None: no file
+    modulus: int = 0            # the labels add modulo this (0: no modulus)
+
+
+LABELS = 'xzlabels'             # the file of the symmetry labels
+
+
+def write_labels(directory, labels, modulus=0):
+    '''The file ``xzlabels`` of a run directory: one integer label per
+    spinor of the SCF, in the order of scf2ceig (frozen, active occupied,
+    active virtual, dropped) - a label that adds, such that <pq||rs> is zero
+    unless l_p + l_q = l_r + l_s (modulo ``modulus`` if that is not 0): 2 m_j
+    of a linear molecule (no modulus), the irrep of an Abelian group as a
+    number modulo its order.  A text file: the number of spinors and the
+    modulus on the first line, then the labels, in free format; lines that
+    start with # are comments.'''
+    labels = np.asarray(labels, dtype=np.int64)
+    with open(os.path.join(directory, LABELS), 'w') as f:
+        f.write('# symmetry label per spinor (order of scf2ceig); first line: spinors, modulus\n')
+        f.write('%d %d\n' % (len(labels), modulus))
+        for k in range(0, len(labels), 16):
+            f.write(' '.join('%d' % x for x in labels[k:k + 16]) + '\n')
+
+
+def read_labels(directory):
+    '''(labels of all spinors, modulus) of the file ``xzlabels`` of a run
+    directory (write_labels()); None if the file is not there.'''
+    path = os.path.join(directory, LABELS)
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        numbers = [int(x) for line in f if not line.lstrip().startswith('#') for x in line.split()]
+    if len(numbers) < 2 or len(numbers) != numbers[0] + 2:
+        raise ValueError('%s: the number of spinors, the modulus and one label per spinor expected' % path)
+    return np.array(numbers[2:], dtype=np.int64), numbers[1]
 
 
 def _pairs(n):
@@ -224,7 +263,11 @@ def read(directory='.', pppp=True):
     ppph = np.empty((pv, nv, no), dtype=np.complex128, order='F')
     for i in range(no):
         ppph[:, :, i] = _complex(d('PPPH%04d' % (i + 1)), (pv, nv))
+    lab = read_labels(directory)
+    if lab is not None and len(lab[0]) != ntot:
+        raise ValueError('%s: %s has %d labels for %d spinors' % (directory, LABELS, len(lab[0]), ntot))
     return Integrals(
+        labels=None if lab is None else lab[0][act].copy(), modulus=0 if lab is None else lab[1],
         nocc=no, nvir=nv, nfrozen=nfrozen, ndropped=ndropped, energy=e[0::2][act].copy(), irrep=irrep,
         e_scf=float(arc.get('SCFENEG', _F8)[0]),
         hhhh=_complex(d('moinhhhh'), (po, po)), hhhp=_complex(d('moinhhhp'), (po, no, nv)),
@@ -250,7 +293,7 @@ def _unpack(a, n, axis):
     return np.moveaxis(out, (0, 1), (axis, axis + 1))
 
 
-def container(x, packed_vvvv=True, tol=1e-9):
+def container(x, packed_vvvv=True, tol=1e-9, labels=False):
     '''The integral container (zccsdt.eris.ERIs) of the Integrals ``x``:
     the active spinors in CFOUR's order, occupied first.  ``packed_vvvv``:
     keep <ab||cd> for a<b, c<d only (as the CC code wants it); otherwise
@@ -260,7 +303,13 @@ def container(x, packed_vvvv=True, tol=1e-9):
     iteration.
 
     <ij||ab> is in the files twice (moinhhpp, and moinpphh conjugated): the
-    two are compared (``tol``), which tells files of two calculations apart.'''
+    two are compared (``tol``), which tells files of two calculations apart.
+
+    ``labels``: give the container the symmetry labels of the file xzlabels
+    (if it is there; they are not checked against the integrals here).  The
+    CC classes work in the blocks of the labels then - where the spinors are
+    in the order of their labels, as zccsdt.cc.t3pack.classes_of() wants
+    them.'''
     no, nv = x.nocc, x.nvir
     oooo = _unpack(_unpack(x.hhhh, no, 0), no, 2)                               # [i, j, k, l]
     ooov = _unpack(x.hhhp, no, 0)                                               # [i, j, k, a]
@@ -291,21 +340,24 @@ def container(x, packed_vvvv=True, tol=1e-9):
             out.vvvv = np.ascontiguousarray(_unpack(_unpack(x.pppp, nv, 0), nv, 2))
     out.spinors = x.nfrozen + np.arange(no + nv)
     out.irrep, out.cfour = x.irrep, x
+    if labels and x.labels is not None:
+        out.labels, out.modulus = x.labels.copy(), x.modulus
     return out
 
 
-def from_cfour(directory='.', packed_vvvv=True):
+def from_cfour(directory='.', packed_vvvv=True, labels=False):
     '''The integral container of the active spinors of a calculation of
     CFOUR's two-component programs (closed shell) from the files that
     xx2cvtran left in ``directory``: container() of read().  The CC classes
-    need <ab||cd>, the file moinpppp (ABCDTYPE=STANDARD).'''
+    need <ab||cd>, the file moinpppp (ABCDTYPE=STANDARD).  ``labels``: with
+    the symmetry labels of the file xzlabels (container()).'''
     x = read(directory)
     if x.pppp is None:
         raise FileNotFoundError(
             '%s: no file moinpppp.  xx2cvtran writes <ab||cd> only when ABCDTYPE is not AOBASIS '
             '(ABCDTYPE=STANDARD), and only if it was built from sources that have vsort.f90'
             % directory)
-    out = container(x, packed_vvvv)
+    out = container(x, packed_vvvv, labels=labels)
     for name in ('hhhh', 'hhhp', 'hhpp', 'pphh', 'phhp', 'ppph', 'pppp'):         # (the copies of the files)
         setattr(x, name, None)
     return out
@@ -341,7 +393,9 @@ def write(directory, eris, nfrozen=0, flags=None):
     fresh JOBARC that holds the SCF energy, the frozen pairs and joda's
     flags (``flags``: {number from 1: value} of IFLAGS, e.g. 2: the level
     of the calculation, 4: CC_CONV, 7: CC_MAXCYC, 36: the memory in words).
-    The energies of the ``nfrozen`` frozen spinors are written as zeros.'''
+    The energies of the ``nfrozen`` frozen spinors are written as zeros.
+    A container with symmetry labels also gets the file xzlabels
+    (write_labels(); the labels of the frozen spinors written as zeros).'''
     os.makedirs(directory, exist_ok=True)
     d = lambda name: os.path.join(directory, name)
     no, nv = eris.nocc, eris.nmo - eris.nocc
@@ -378,6 +432,9 @@ def write(directory, eris, nfrozen=0, flags=None):
     arc.put('IFLAGS', iflags)
     arc.put('NUMDROPA', np.array([nfrozen // 2], dtype=_I8))
     arc.put('SCFENEG', np.array([eris.e_hf], dtype=_F8))
+    if getattr(eris, 'labels', None) is not None:
+        write_labels(directory, np.concatenate((np.zeros(nfrozen, dtype=np.int64), np.asarray(eris.labels))),
+                     getattr(eris, 'modulus', 0) or 0)
 
 
 # ---------------------------------------------------------------------------
