@@ -1375,7 +1375,7 @@ class Relaxed:
 
 def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dropped_vir=None,
                  tol=1e-9, max_memory=None, verbose=None, plan=None, kramers=None, blocks=False,
-                 plan_only=False, q=None, zeta=None, lams=None, stencil='exact'):
+                 plan_only=False, q=None, zeta=None, lams=None, stencil='exact', solver=None):
     '''The relaxed one-particle density of CCSDT: kernel() for the density
     of t and lambda and the orbital gradient, the Z-vector equations of the
     SCF ``mf`` (zccsd.zvector.solve) and zvector.relaxed_rdm1.
@@ -1426,7 +1426,11 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     densities are polynomials of degree <= 4 in t), two with 'central' -,
     the integrals with one frozen index included, and the terms of e as
     for (Q) (quadruples_lambda_grad.orbital_gradient).  One more array of
-    the size of t3, the shifted amplitudes, is there during the passes.'''
+    the size of t3, the shifted amplitudes, is there during the passes.
+
+    ``solver``: another solver of the Z-vector equations, as in
+    zccsd.zvector.kernel - (gvo, D, C, mo_energy, nocc, veff) -> (converged,
+    z) with R(z) = gvo, D the density that z is added to.'''
     from pyscf.lib import logger
     from zccsdt.zccsd import zvector
     log = logger.new_logger(mf, verbose)
@@ -1536,13 +1540,16 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
         with timer('dens.zvector'):
             veff = zvector.scf_veff(mf, max_memory)
             relaxed, z = zvector._relax(mf, mf, mo_coeff, mo_e, o, Ga, dm1, (np.arange(o), none, np.arange(o, n), none),
-                                        True, zvector.DEGENERATE, tol, verbose, veff)
+                                        True, zvector.DEGENERATE, tol, verbose, veff, solver)
         return Relaxed(relaxed, dm1, z, mo_coeff, mo_e, o, True, res, Ga)
     if held_out is None:
         with timer('dens.zvector'):
             veff = zvector.scf_veff(mf, max_memory)
-            conv, z = zvector.solve(mf, mo_coeff, mo_e, o, -0.5 * res.gnh, tol=tol, verbose=verbose,
-                                    veff=veff)
+            if solver is None:
+                conv, z = zvector.solve(mf, mo_coeff, mo_e, o, -0.5 * res.gnh, tol=tol, verbose=verbose,
+                                        veff=veff)
+            else:
+                conv, z = solver(-0.5 * res.gnh, dm1, mo_coeff, mo_e, o, veff)
         if not conv:
             log.warn('Z-vector equations not converged')
         return Relaxed(zvector.relaxed_rdm1(dm1, z, o), dm1, z, mo_coeff, mo_e, o, bool(conv), res)
@@ -1596,7 +1603,7 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
         Gf = V[np.ix_(fvir, frozen)]
         G[np.ix_(fvir, frozen)], G[np.ix_(frozen, fvir)] = Gf, -Gf.conj().T
         relaxed, z = zvector._relax(mf, mf, C, mo_e, nf + o, G, full, (act, frozen, vir, fvir), q is not None,
-                                    zvector.DEGENERATE, tol, verbose, veff)
+                                    zvector.DEGENERATE, tol, verbose, veff, solver)
     return Relaxed(relaxed, full, z, C, mo_e, nf + o, True, res, G)
 
 

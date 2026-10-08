@@ -376,7 +376,7 @@ def frozen_virtuals(mycc):
 
 
 def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-9,
-           verbose=None, with_t=False):
+           verbose=None, with_t=False, solver=None):
     '''(dm1 relaxed, dm1 unrelaxed, z[a,i]) for the CCSD of ``mycc`` in the
     basis of all spinors (full_space): the density of t and lambda from the
     packed amplitudes (zccsd.rdm), the orbital gradient of zccsd.orbgrad and
@@ -402,7 +402,13 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     virtual-virtual blocks of the gradient do not vanish then: the rotations
     among occupied and among virtual spinors follow from the Fock matrix
     staying diagonal, y_pq = G_pq / (e_q - e_p), as those between frozen and
-    active spinors do; none between spinors closer than DEGENERATE.'''
+    active spinors do; none between spinors closer than DEGENERATE.
+
+    ``solver``: instead of solve(), a function (gvo, D, C, mo_energy, nocc,
+    veff) -> (converged, z) for the equations R(z) = gvo, D the density
+    that z is added to (the unrelaxed one with the rotations that follow
+    from the Fock matrix staying diagonal) - for another program's Z-vector
+    solver (zccsdt.cfour.handover).'''
     from pyscf.cc import gccsd_rdm
     from zccsdt.zccsd import orbgrad, rdm
     from zccsdt.zccsd import kernels as K
@@ -540,11 +546,11 @@ def kernel(mycc, t1=None, t2=None, l1=None, l2=None, eris=None, mf=None, tol=1e-
     del coulomb
     with timer('zv.solve'):
         relaxed, z = _relax(mycc, mf, C, mo_e, o, G, dm1, (act, frozen, vir, fvir), with_t,
-                            DEGENERATE, tol, verbose, veff)
+                            DEGENERATE, tol, verbose, veff, solver)
     return relaxed, dm1, z
 
 
-def _relax(mycc, mf, C, mo_e, o, G, dm1, spaces, with_t, degenerate, tol, verbose, veff=None):
+def _relax(mycc, mf, C, mo_e, o, G, dm1, spaces, with_t, degenerate, tol, verbose, veff=None, solver=None):
     '''(relaxed density, z) from the orbital gradient G[y, x] of all spinors
     and the density dm1: the rotations that follow from the Fock matrix
     staying diagonal - between frozen and active spinors of the same kind
@@ -579,7 +585,10 @@ def _relax(mycc, mf, C, mo_e, o, G, dm1, spaces, with_t, degenerate, tol, verbos
     if pairs:
         gvo = gvo - C[:, o:].conj().T @ veff(C @ y @ C.conj().T) @ C[:, :o]
         out += y
-    conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose, veff=veff)
+    if solver is None:
+        conv, z = solve(mf, C, mo_e, o, gvo, tol=tol, verbose=verbose, veff=veff)
+    else:
+        conv, z = solver(gvo, out, C, mo_e, o, veff)
     if not conv:
         logger.warn(mycc, 'Z-vector equations not converged')
     return relaxed_rdm1(out, z, o), z

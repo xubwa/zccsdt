@@ -809,6 +809,137 @@ def write_density(directory, mf, dm_ao):
     return D
 
 
+# ---------------------------------------------------------------------------
+# the orbital response by CFOUR's own Z-vector program (docs/native.md,
+# "Relaxed density through xx2czvec")
+
+HANDOVER = ('xfull', 'dpoo', 'dpvv', 'dii0', 'daa0', 'dpopo', 'dpvpv')
+
+
+def handover_files(D, x, nocc, nfrozen=0, ndropped=0, tol=1e-10):
+    """{name: array} of the files xx2czvec reads instead of solving the
+    Z-vector equations here.  All in the basis of CFOUR's spinors, in its
+    order [frozen occupied, active occupied, active virtual, dropped
+    virtual]; ``nocc``: all occupied spinors.
+
+    D[p,q] = <q+ p>: the Hermitian one-particle density without the response
+    of the virtual-occupied rotations - the unrelaxed one, reference
+    included, with the rotations that follow from the Fock matrix staying
+    diagonal (frozen with active spinors; among the active occupied and
+    among the active virtual ones for (T) and (Q): y of
+    zccsd.zvector._relax).  x[a,i], all virtual by all occupied spinors:
+    minus the orbital Hessian of the SCF on the virtual-occupied block of
+    the final density, x = -R(D_vo + z) = -(gvo + R(D_vo)) with R(z) = gvo
+    the Z-vector equations of zccsd.zvector.
+
+        xfull  x                                 [a, i]
+        dpoo   (D - 1) / 2, active occupied      [i, j]
+        dpvv   D / 2, active virtual             [a, b]
+        dii0, daa0   zeros (xx2czvec adds their diagonals to those of
+                     dpoo + dpoo^+ and dpvv + dpvv^+: the split is free)
+        dpopo  D[frozen, active occupied]
+        dpvpv  D[dropped, active virtual]
+
+    xx2czvec makes of them D[a,i] = (R^-1 (-x))[a,i] and its conjugate
+    transpose, D_oo = 1 + dpoo + dpoo^+ + diag(dii0), D_vv = dpvv + dpvv^+ +
+    diag(daa0), the two blocks with a frozen index and their conjugate
+    transposes, 1 on the diagonal of the frozen spinors and nothing else:
+    a density with other elements between frozen spinors or between dropped
+    ones cannot be handed over (ValueError)."""
+    D, x = np.asarray(D, dtype=np.complex128), np.asarray(x, dtype=np.complex128)
+    n = D.shape[0]
+    f, o, v = nfrozen, nocc, n - ndropped
+    if x.shape != (n - nocc, nocc):
+        raise ValueError('x is %s, not (all virtual, all occupied) = %s' % (x.shape, (n - nocc, nocc)))
+    for what, err in (('not Hermitian', abs(D - D.conj().T).max()),
+                      ('not 1 between the frozen spinors', abs(D[:f, :f] - np.eye(f)).max() if f else 0.0),
+                      ('not 0 between the dropped spinors', abs(D[v:, v:]).max() if ndropped else 0.0)):
+        if err > tol:
+            raise ValueError('the density is %s (%.1e): not what xx2czvec assembles' % (what, err))
+    return {'xfull': x, 'dpoo': 0.5 * (D[f:o, f:o] - np.eye(o - f)), 'dpvv': 0.5 * D[o:v, o:v],
+            'dii0': np.zeros((o - f, o - f), dtype=np.complex128), 'daa0': np.zeros((v - o, v - o), dtype=np.complex128),
+            'dpopo': D[:f, f:o], 'dpvpv': D[v:, o:v]}
+
+
+def write_handover(directory, files):
+    '''The files of handover_files() in the directory, each one record as
+    CFOUR's wfile writes it (complex numbers, the first index fastest).'''
+    for name in HANDOVER:
+        _write_complex(os.path.join(directory, name), files[name])
+
+
+def read_handover(directory, n, nocc, nfrozen=0, ndropped=0):
+    '''{name: array} of the files of the directory - those written here or
+    those of CFOUR's xx2cccdenocbp.'''
+    no, nv = nocc - nfrozen, n - nocc - ndropped
+    shapes = {'xfull': (n - nocc, nocc), 'dpoo': (no, no), 'dpvv': (nv, nv), 'dii0': (no, no), 'daa0': (nv, nv),
+              'dpopo': (nfrozen, no), 'dpvpv': (ndropped, nv)}
+    return {name: _complex(os.path.join(directory, name), shapes[name]) for name in HANDOVER}
+
+
+def handover_density(files, dvo):
+    '''The density xx2czvec writes as ``denfinal`` for the files of
+    handover_files() and its solution ``dvo`` (the file dpvofull: D[a,i],
+    all virtual by all occupied spinors).'''
+    nf, no = files['dpopo'].shape
+    nd, nv = files['dpvpv'].shape
+    o, v = nf + no, nf + no + nv
+    D = np.zeros((v + nd, v + nd), dtype=np.complex128)
+    D[o:, :o], D[:o, o:] = dvo, np.asarray(dvo).conj().T
+    D[nf:o, nf:o] = files['dpoo'] + files['dpoo'].conj().T + np.diag(np.diag(files['dii0']))
+    D[o:v, o:v] = files['dpvv'] + files['dpvv'].conj().T + np.diag(np.diag(files['daa0']))
+    D[:nf, nf:o], D[nf:o, :nf] = files['dpopo'], files['dpopo'].conj().T
+    D[v:, o:v], D[o:v, v:] = files['dpvpv'], files['dpvpv'].conj().T
+    D[np.arange(o), np.arange(o)] += 1
+    return D
+
+
+def handover(directory, mf, nfrozen=0, ndropped=0, bindir=None, log=print, run=True):
+    """A solver for zccsd.zvector.kernel and CCSDT.make_rdm1
+    (``zvector_solver``) that leaves the Z-vector equations to CFOUR: it
+    writes the files of handover_files() for the right-hand side and the
+    density it is given - transformed to CFOUR's spinors, the columns of
+    mf.mo_coeff (reference()) -, runs xx2czvec, which writes ``denfinal``
+    for xsox2cprop, and returns the solution read from ``dpvofull`` in the
+    spinors of the caller.  One Fock build here (R on the virtual-occupied
+    block of the unrelaxed density), none of the iterations.  A denfinal
+    that is there already is kept once as denfinal.cfour.  ``run=False``:
+    only write the files (the solution returned is None)."""
+    from zccsdt.zccsd import zvector
+    C0 = np.asarray(mf.mo_coeff)
+    S = mf.mol.intor('int1e_ovlp_spinor')
+    name = lambda f: os.path.join(directory, f)                     # noqa: E731
+
+    def solver(gvo, D, C, mo_energy, nocc, veff):
+        n = C.shape[1]
+        U = C0.conj().T @ S @ C             # CFOUR's spinors in those of the caller
+        if abs(U @ U.conj().T - np.eye(n)).max() > 1e-8 or abs(U[:nocc, nocc:]).max() > 1e-8:
+            raise ValueError('the spinors of the density are not those of CFOUR\'s SCF up to a rotation among '
+                             'the occupied and among the virtual ones')
+        R = zvector.response(mf, C, mo_energy, nocc, veff)[0]
+        x = -(gvo + R(D[nocc:, :nocc]))
+        Uo, Uv = U[:nocc, :nocc], U[nocc:, nocc:]
+        files = handover_files(U @ D @ U.conj().T, Uv @ x @ Uo.conj().T, nocc, nfrozen, ndropped)
+        write_handover(directory, files)
+        if not run:
+            return True, None
+        if os.path.isfile(name('denfinal')) and not os.path.isfile(name('denfinal.cfour')):
+            shutil.copy(name('denfinal'), name('denfinal.cfour'))
+        for f in ('denfinal', 'dpvofull'):
+            if os.path.isfile(name(f)):
+                os.remove(name(f))
+        run_programs(directory, ['xx2czvec'], bindir, log=log)
+        with open(name('xx2czvec.out'), errors='replace') as f:
+            conv = 'Z-vector equation converged' in f.read()
+        dvo = _complex(name('dpvofull'), (n - nocc, nocc))
+        err = abs(_complex(name('denfinal'), (n, n)) - handover_density(files, dvo)).max()
+        if err > 1e-10:
+            raise ProgramFailed('xx2czvec: its denfinal is not the density of the files handed over (%.1e)' % err)
+        return conv, Uv.conj().T @ dvo @ Uo - D[nocc:, :nocc]
+
+    return solver
+
+
 def wants_density(directory='.'):
     '''Whether the ZMAT asks for first-order properties (PROPS other than
     OFF), i.e. for the relaxed density.'''
@@ -818,21 +949,30 @@ def wants_density(directory='.'):
     return value.upper() not in ('OFF', '0', '')
 
 
-def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True, density=False):
+def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True, density=False, zvector='python',
+               bindir=None):
     '''CCSD and CCSD(T) of zccsdt.zccsd.DirectZCCSD - AO integrals made
     here, the particle-particle ladder in the AO basis, Kramers pairs -, or
     CCSDT of zccsdt.CCSDT, on CFOUR's spinors (reference()): after xjoda,
     xsox2catm and xsox2chf, no integral file of xx2cvtran is read.
     ``density``: also Lambda, the orbital gradient and the Z-vector
     equations, and the relaxed one-particle density written for xsox2cprop
-    (write_density).  Returns {name: total energy}.'''
+    (write_density).  ``zvector='cfour'``: the Z-vector equations by CFOUR's
+    xx2czvec (handover(); ``bindir``: where it is), which writes the
+    relaxed density itself.  Returns {name: total energy}.'''
     import sys
     from zccsdt.zccsd import DirectZCCSD
+    if zvector not in ('python', 'cfour'):
+        raise ValueError('zvector=%r: python or cfour' % (zvector,))
     stdout = stdout or sys.stdout
     j = j or job(directory)
     mf, nfrozen, ndropped = reference(directory)
     n = len(mf.mo_energy)
     frozen = list(range(nfrozen)) + list(range(n - ndropped, n)) if ndropped else nfrozen
+    solver = None
+    if density and zvector == 'cfour':
+        solver = handover(directory, mf, nfrozen, ndropped, bindir,
+                          log=lambda s: print(s, file=stdout, flush=True))
     if j.method in ('ccsdt', 'ccsdt(q)'):
         import zccsdt
         with_q = j.method == 'ccsdt(q)'
@@ -853,7 +993,9 @@ def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True, dens
             cc.solve_lambda(with_q=with_q)
             if not cc.converged_lambda:
                 raise RuntimeError('the Lambda equations did not converge in %d cycles' % j.max_cycle)
-            write_density(directory, mf, cc.make_rdm1(with_q=with_q, ao_repr=True))
+            dm = cc.make_rdm1(with_q=with_q, ao_repr=True, zvector_solver=solver)
+            if solver is None:
+                write_density(directory, mf, dm)
         return e
     cc = DirectZCCSD(mf, frozen=frozen)
     cc.verbose, cc.stdout, cc.kramers = verbose, stdout, kramers
@@ -870,18 +1012,21 @@ def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True, dens
     if density:
         from zccsdt.zccsd import zvector
         cc.solve_lambda(with_t='gradient') if with_t else cc.solve_lambda()
-        relaxed = zvector.kernel(cc, tol=10 * j.conv_tol_normt, with_t=with_t)[0]
-        C = zvector.full_space(cc)[0]
-        write_density(directory, mf, C @ relaxed @ C.conj().T)
+        relaxed = zvector.kernel(cc, tol=10 * j.conv_tol_normt, with_t=with_t, solver=solver)[0]
+        if solver is None:
+            C = zvector.full_space(cc)[0]
+            write_density(directory, mf, C @ relaxed @ C.conj().T)
     return e
 
 
 def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, jobarc=False, mo_integrals=False,
-        density=None):
+        density=None, zvector='python', bindir=None):
     '''The CC calculation that the ZMAT of ``directory`` asks for (job()) on
     the integral files there.  Returns {name: total energy}, 'scf' and the
     methods done on the way.  ``jobarc``: write the final energy into JOBARC
-    as TOTENERG, the record CFOUR's own CC programs leave for joda.'''
+    as TOTENERG, the record CFOUR's own CC programs leave for joda.
+    ``zvector``: who solves the Z-vector equations of the relaxed density,
+    'python' or 'cfour' (run_direct).'''
     import sys
     import zccsdt
     from zccsdt.cc import solver
@@ -903,9 +1048,10 @@ def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, job
         say('CFOUR run directory %s: %s (%s), AO-driven on CFOUR\'s spinors%s'
             % (os.path.abspath(directory), j.method.upper(), j.source['method'],
                '; relaxed density for xsox2cprop' if density else ''))
-        e = run_direct(directory, j, verbose, stdout, density=density)
+        e = run_direct(directory, j, verbose, stdout, density=density, zvector=zvector, bindir=bindir)
         if density:
-            say('relaxed density written: %s' % os.path.join(os.path.abspath(directory), 'denfinal'))
+            say('relaxed density written%s: %s' % (' by xx2czvec' if zvector == 'cfour' else '',
+                                                   os.path.join(os.path.abspath(directory), 'denfinal')))
         for name, value in e.items():
             say('E(%s)%s = %.12f%s' % (name.upper(), ' ' * (10 - len(name)), value,
                                         '' if name == 'scf' else '   correlation %.12f' % (value - e['scf'])))
@@ -991,6 +1137,9 @@ def main(argv=None):
     ap.add_argument('--density', action='store_true', default=None,
                     help='the relaxed density as the file denfinal (default: if the ZMAT has PROPS)')
     ap.add_argument('--properties', action='store_true', help='xsox2cprop afterwards, on the density written here')
+    ap.add_argument('--zvector', choices=('python', 'cfour'), default='python',
+                    help="who solves the Z-vector equations of the relaxed density: this program (default), or "
+                         "CFOUR's xx2czvec on the files written here (xfull, dpoo, dpvv, dii0, daa0, dpopo, dpvpv)")
     ap.add_argument('--jobarc', action='store_true', help='write the final energy into JOBARC (TOTENERG)')
     ap.add_argument('--verbose', type=int, default=4)
     a = ap.parse_args(argv)
@@ -1019,7 +1168,7 @@ def main(argv=None):
                             shutil.copy(os.path.join(work, name), start)
         if not a.no_cc:
             run(work, a.method, a.max_memory, a.verbose, jobarc=a.jobarc, mo_integrals=a.mo_integrals,
-                density=True if a.properties else a.density)
+                density=True if a.properties else a.density, zvector=a.zvector, bindir=a.bin)
             if a.properties:
                 run_programs(work, ['xsox2cprop'], a.bin, log=lambda s: print(s, flush=True))
                 if work != start:

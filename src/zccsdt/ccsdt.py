@@ -1475,7 +1475,7 @@ class GCCSDT(UCCSDT):
         self._l_with_q = bool(with_q)
         return self.l1, self.l2, self.l3
 
-    def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-11, with_q=False):
+    def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-11, with_q=False, zvector_solver=None):
         '''The one-particle density of CCSDT, D[p,q] = <q+ p>, in the basis
         of all spinors of the SCF in the order [frozen occupied, active
         occupied, active virtual, dropped virtual] (``ao_repr``: in the AO
@@ -1509,7 +1509,10 @@ class GCCSDT(UCCSDT):
         the densities of (t, lambda') and the derivative of those of (t,
         lambda) along zeta (``response_stencil``: four or two more passes
         of the density code), and the terms of the correction as for
-        CCSDT(Q) (zccsdt.cc.quadruples_lambda_grad; docs/lambda.md 12).'''
+        CCSDT(Q) (zccsdt.cc.quadruples_lambda_grad; docs/lambda.md 12).
+
+        ``zvector_solver``: another solver of the Z-vector equations
+        (density_opt.relaxed_rdm1, ``solver``; zccsdt.cfour.handover).'''
         from zccsdt.cc import density_blk, density_opt
         if isinstance(self._scf, _Given):
             raise RuntimeError('the integrals were given: no SCF to take the response of the spinors from')
@@ -1536,7 +1539,7 @@ class GCCSDT(UCCSDT):
         Cs = np.asarray(self.mo_coeff) if axial is None else axial
         Ca = Cs[:, np.concatenate((o, v))]
         kw = dict(frozen_occ=Cs[:, fo] if len(fo) else None, dropped_vir=Cs[:, fv] if len(fv) else None,
-                  tol=tol, max_memory=self.max_memory, **kw_q)
+                  tol=tol, max_memory=self.max_memory, solver=zvector_solver, **kw_q)
         # in the blocks of the symmetry labels where T3 and l3 are in them and the plan fits
         plan = None
         if (self.symmetry and getattr(eris, 'use_labels', False) and np.size(l3) == np.size(self.t3)
