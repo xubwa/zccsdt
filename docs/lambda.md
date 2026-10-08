@@ -1762,3 +1762,376 @@ of it - CCSDT 9.0 s (22 iterations), (Q) as it does it for a density
 zccsdt has no spin adaptation and no point group on this path (GCCSDT on
 116 spin orbitals: 84 s for CCSDT, 46 s for (Q), 259 s for the property):
 the numbers agree, the times are not a comparison of like with like.
+
+## 12. First derivatives of CCSDT(Q)_Lambda
+
+Theory and dense reference only; nothing here runs on packed amplitudes
+yet (12.6 lists what that needs).
+
+| File | What |
+|---|---|
+| `src/zccsdt/cc/qlgrad_ref.py` | the dense reference: the derivatives of E(Q)_L, the two linear equations, the densities, the relaxed density from full arrays |
+| `tests/test_qlgrad_ref.py` | the checks of 12.7 |
+| `bench/qlgrad_ccsdt_ql.py` | finite fields at several steps (a dipole field, or a point charge as MRCC can have it) |
+
+### 12.1 The functional
+
+With canonical Hartree-Fock spin orbitals and bare integrals (section 5),
+
+    E(Q)_L = Re e,   e = sum z r / D               (i<j<k<l, a<b<c<d),
+    r = A(g, t3) + B(g, t2, t2),                   A = <Q| [V,T3] |0>,  B = <Q| 1/2 [[V,T2],T2] |0>,
+    z = Z(g^T, l2) + A(g^T, l3) = <0| (Lambda_2 + Lambda_3) V |Q>,     g^T[p,q,r,s] = g[r,s,p,q],
+
+Z the disconnected product `<Q| V T2 |0>` of the term table. **Nothing is
+conjugated**: `<0| Lambda V |Q>` has lambda as it is and the integrals with
+bra and ket exchanged, so e is a holomorphic function of t2, t3, l2, l3 and
+g, like the Lagrangian L of CCSDT (section 1), and E(Q)_L is the real part
+of it as E(CCSDT) is the real part of L. (`lambda_ref.quadruples_lambda`
+and the production code write z as `conj(Z(g, conj(lambda)))`, conjugating
+twice: the same number for Hermitian integrals. `qlgrad_ref.energy` is e
+for any g, which the derivative with respect to g needs. For a Hamiltonian
+with a symmetry that makes the energy real - every molecule here - Im e
+vanishes, 1e-16 and less in the X2C runs of 12.7; the model of the tests
+has 1.2e-4 of it next to Re e = -2.6e-4.)
+
+This is what makes (Q)_L simpler than (Q) of section 11 in one respect and
+harder in another:
+
+- no Wirtinger derivatives. (Q) has `conj(z)` and is a real, non-holomorphic
+  function, t and conj(t) independent; here every derivative is an ordinary
+  complex one and the real part is taken once, at the end, by making the
+  densities Hermitian;
+- e depends on lambda, and lambda is not a variational parameter of
+  anything: it is the solution of the Lambda equations of CCSDT. So the
+  Lagrangian needs those equations as a second constraint, with a second
+  set of multipliers.
+
+t1 and l1 do not enter e, and neither does the off-diagonal Fock matrix.
+
+### 12.2 The Lagrangian and its two linear equations
+
+Constraints: the amplitude equations `R_k(t) = 0` and the Lambda equations
+`W_k(t, lambda) = dL/dt_k = 0`, `L(t, lambda) = E(t) + sum lambda_mu R_mu(t)`
+(sums over the unique elements, as everywhere below). Multipliers: zeta
+for W - a vector like t, `[z1[i,a], z2[i,j,a,b], z3[i,j,k,a,b,c]]` - and
+lambda-bar for R:
+
+    F = L(t, lambda) + e(t, lambda; g, e_p) + sum zeta_mu W_mu(t, lambda) + sum lambda-bar_mu R_mu(t)
+      = L(t, lambda') + e(t, lambda) + sum zeta_mu W_mu(t, lambda),        lambda' = lambda + lambda-bar,
+
+since L is linear in lambda. F is holomorphic in everything; the energy
+is Re F.
+
+**Stationary in lambda** (at fixed lambda'). W is linear in lambda with
+`dW_mu/dl_nu = dR_nu/dt_mu`, so
+
+    sum_mu (dR_nu/dt_mu) zeta_mu + q_nu = 0,      q_nu = de/dl_nu                (1)
+
+**the Jacobian of the CCSDT amplitude equations on zeta**: a right-hand
+linear response equation, the transpose of the matrix of the Lambda
+equations. Its source is
+
+    q_nu = sum_Q (dz_Q/dl_nu) y_Q = <nu| V Y4 |0>,     Y4 = r / D,
+
+what T4 = Y4 adds to the doubles and triples equations of CCSDTQ (the
+groups `R2: [V,T4]` and `R3: [V,T4]` of `ccsdtq_terms`): **zeta is the first
+order response of the CCSDT amplitudes to the perturbative quadruples.**
+q1 = 0; zeta_1 is not zero (the Jacobian couples the ranks). A Jacobi step
+is `zeta += (J zeta + q) / D`, as for the amplitudes.
+
+**Stationary in t.**
+
+    W_k(t, lambda') + s_k = 0,
+    s_k = de/dt_k + sum_mu zeta_mu (dW_mu/dt_k)(t, lambda)                      (2)
+
+**the Lambda equations of CCSDT for lambda' with constant sources**
+(`lambda_ref.kernel(sources=)`, as in section 11). The first part of s is
+the analogue of the sources of (Q), with w = z / D as the left-hand
+quadruples: `<0| L(w) [V, tau3] |0>` for rank 3, `<0| L(w) [[V,T2], tau2] |0>`
+for rank 2 - no term of rank 1, and not the disconnected one of (Q): that
+one is q2 here. The second part is the second derivative of the CCSDT
+Lagrangian with respect to t, contracted with zeta - the term bilinear in
+zeta and lambda (and one without lambda, from the energy); it is the
+directional derivative of the Lambda residuals along zeta in t at fixed
+lambda, and it has a rank-1 part: **s1 is not zero** (4.8e-7 for H2O /
+STO-3G, 1.9e-6 for BH).
+
+Order of the calculation:
+
+1. CCSDT: t. The Lambda equations of CCSDT: lambda. E(Q)_L and, in the
+   same pass over the quadruples, its derivatives q2, q3 (with respect to
+   l2, l3), the part of s2, s3 from e, the densities d2 of e, and `de`.
+2. Equation (1) for zeta.
+3. The directional derivative of W along zeta: s.
+4. Equation (2) for lambda'.
+5. Densities, orbital gradient, Z-vector equations (12.3).
+
+CFOUR's ncc has the same structure for CCSD(T)_Lambda (two more iterative
+solvers after Lambda, `upsilon_it` and `pi_it` in its task list), and
+refuses CCSDT(Q)_Lambda (12.7).
+
+### 12.3 Densities and the response of the spin orbitals
+
+With zeta and lambda' the derivative of F is that of its explicit
+dependence on the integrals:
+
+- `L(t, lambda')`: the densities d1, d2 of the CCSDT Lagrangian with
+  lambda' in the place of lambda (section 1);
+- `sum zeta_mu W_mu(t, lambda)`: W is the derivative of L with respect to t,
+  so its coefficients of the integrals are the **directional derivative of
+  the densities d1(t, lambda), d2(t, lambda) along zeta in t** (the
+  reference drops out);
+- e: its own d2 (`de = sum d2 d<pq||rs>`: y times l2 and l3 on the
+  integrals of z, `<kl||cd>`, `<ie||ab>`, `<ij||ma>`; w times t3 and t2 t2 on
+  those of r) and `de[p]` on the orbital energies, -/+ the sum of Re(w y)
+  over the quadruples with p.
+
+The first two are added and made Hermitian (`lambda_ref.pyscf_rdms`: the
+real part); from there on everything is as for CCSDT(Q) (section 11.2):
+`de` on the diagonal of the one-particle density, the spin orbitals follow
+as canonical Hartree-Fock spin orbitals - occupied-virtual rotations
+through the Z-vector equations with G[a,i] = (Gnh[a,i] - conj(Gnh[i,a])) / 2
+of all the densities, occupied-occupied and virtual-virtual ones through
+y_pq = G_pq / (e_q - e_p) (`zccsd.zvector._relax`), none between degenerate
+spin orbitals.
+
+Frozen occupied and dropped virtual spinors: t, lambda, zeta and lambda'
+are those of the active spinors, E(Q)_L too. The frozen ones are occupied
+in the densities (`qgrad_ref.full_densities`; the sum of the two Lagrangian
+densities goes in, the second has no reference of its own), and the
+gradient between a frozen and an active spinor of the same kind gives a
+rotation by the canonical condition, as before.
+
+### 12.4 The dense reference (`zccsdt.cc.qlgrad_ref`)
+
+`quadruples_gradient(t2, t3, l2, l3, g, mo_energy, nocc)`: one occupied
+quadruple at a time as `qgrad_ref`, r from the terms of `R4` on (g, t2, t3)
+and z from those of `Z4` on (g^T, l2, l3); the derivative of every term
+with respect to every factor with w (terms of r) or y (terms of z) as the
+left-hand quadruples: s2, s3 (from e), q2, q3, d2, de.
+
+**The directional derivatives** (`directional`): exp(-T) H exp(T) ends at
+the fourth power of T, so the amplitude residuals, the Lambda residuals
+and the densities are polynomials of degree <= 4 in the amplitudes (t1
+included), and
+
+    [8 (f(t + zeta) - f(t - zeta)) - (f(t + 2 zeta) - f(t - 2 zeta))] / 12
+
+is their derivative along zeta exactly, not a numerical approximation:
+`jacobian` (on `ccsdtq_ref.residuals`), `lambda_response` (on
+`lambda_ref.residuals`), `density_response` (on `lambda_ref.densities`).
+No new table of terms was derived. `jacobian_dressed` is the same Jacobian
+from three evaluations in the T1-dressed formalism, where the residuals
+P(H~; t2, t3) are linear in the dressed integrals and quadratic in (t2, t3):
+
+    J zeta = [P(H~; t2 + z2, t3 + z3) - P(H~; t2 - z2, t3 - z3)] / 2 + P(dH~; t2, t3),
+
+dH~ = [H~, z1] the dressed integrals one-index transformed with zeta_1.
+
+`solve_zeta` (Jacobi steps with DIIS), `kernel` (steps 1 to 4 and the
+densities of the Lagrangian at fixed orbitals), `lagrangian` (F for any
+arguments), `relaxed_rdm1(mf, mo_coeff, nfrozen, ndrop)` (everything, from
+full arrays over all spin orbitals; `zvector.orbital_gradient` on the
+densities, `zvector.gradient_nh` for those of e, `zvector._relax`). None of
+the identities of 12.5 is used.
+
+### 12.5 Identities for an implementation on packed amplitudes
+
+The three of section 11.2 carry over; each is checked against the dense
+densities (`tests/test_qlgrad_ref.py::test_gradient_among_occupied_and_among_virtual`,
+LiH and BH with complex spin orbitals).
+
+1. *The Lagrangian among occupied and among virtual spin orbitals.* L and
+   zeta . W do not change when t, lambda, zeta, lambda' and the integrals
+   are rotated together, and at the solution dF/dt and dF/dlambda leave
+   only the derivatives of e. So the part of the gradient that comes from
+   the densities of lambda' and of zeta is made of the sources of the two
+   equations - s **from e only**, without the zeta term (the two parts
+   with the directional derivative of W cancel, s1 with them) - and q:
+
+       Gnh[j,i] = -1/2 sum s2[j,k,a,b] t2[i,k,a,b] - 1/12 sum s3[j,k,l,a,b,c] t3[i,k,l,a,b,c]
+                  +1/2 sum q2[i,k,a,b] l2[j,k,a,b] + 1/12 sum q3[i,k,l,a,b,c] l3[j,k,l,a,b,c]
+       Gnh[b,a] =  1/2 sum s2[i,j,a,c] t2[i,j,b,c] + 1/12 sum s3[i,j,k,a,c,d] t3[i,j,k,b,c,d]
+                  -1/2 sum q2[i,j,b,c] l2[i,j,a,c] - 1/12 sum q3[i,j,k,b,c,d] l3[i,j,k,a,c,d]
+
+   with lambda of CCSDT (lambda rotates the other way round). (LiH and BH:
+   1e-14 and 8e-14 off, blocks of 1.3e-7 and 7e-6; with the other sign of
+   the q terms 5e-8 and 5e-6 off.)
+
+2. *The table `GRADIENT`* for the occupied-virtual block: applied to
+   (t, lambda'), plus its directional derivative along zeta at (t, lambda),
+   plus the two blocks of identity 1 with t1,
+
+       Gnh[a,i] = GRADIENT(t, lambda')[a,i] + d_zeta GRADIENT(t, lambda)[a,i]
+                  + sum_j t1[j,a] Gnh[j,i] - sum_b t1[i,b] Gnh[a,b].
+
+   The terms with the excitation block (t1 t1 times the Lambda_1 residual,
+   which does not vanish any more: s1) cancel between the two pieces.
+   (LiH, BH, H2O / STO-3G: 4e-16 to 3e-15 off the one-index transformation
+   of the full densities; the tables alone 2e-9, 9e-7, 1e-7 off.)
+
+3. *The whole gradient among occupied and among virtual spin orbitals is a
+   one-particle density of (Q)_L*: with y the solution of D y = r for the
+   whole Fock matrix, e does not change under these rotations (with t and
+   lambda), so
+
+       G[p,q] = (e_q - e_p) (Gamma[q,p] + conj(Gamma[p,q])) / 2,
+       Gamma[a,e] =  sum w[ijkl,abcd] y[ijkl,ebcd]     (i<j<k<l, b<c<d),
+       Gamma[m,i] = -sum w[ijkl,abcd] y[mjkl,abcd]     (j<k<l, a<b<c<d)
+
+   (`qlgrad_ref.fock_density`; Re of its diagonal is `de`): Gamma of 11.2
+   without the conjugation of w. (LiH, BH: 1e-14 and 8e-14 off.)
+
+### 12.6 What an implementation on packed amplitudes needs
+
+Measured: only the check named in the first row. The costs are
+**estimates** from the operation counts of the existing codes (sections
+5.1, 9, 10, 11.4, 11.6), not timings.
+
+| Step | Contractions | Existing code | Cost (estimate) |
+|---|---|---|---|
+| (1), J zeta | the linearized amplitude equations: every term of R1 to R3 with one t replaced by zeta, o^3 v^5 as an amplitude iteration | `ccsdt_opt.update_amps` as it is: the five-point formula on the Jacobi step, R = (t_new - t) D, is J zeta to 4e-14 of the dense one (BH, H2O / STO-3G, real and complex; checked by hand, not in a test) - four steps per iteration. Three with an entry for given dressed integrals (`jacobian_dressed`); a linearized residual of its own would be one pass with the T2 T3 and T2 T2 intermediates built twice | 3 to 4 amplitude iterations per iteration as a black box, 1.5 to 2 with a linearized code; 10 to 16 iterations to 1e-11 in the dense runs (lambda': 13 to 19) |
+| q2, q3, s2, s3 of e, d2 of e, de, Gamma | per occupied quadruple, after r and z: every product with its two adjoints. Products of r with w: the five of (Q) (11.4) - s3, s2, the densities of `<ab||ei>`, `<ma||ij>`, `<bc||ef>`, `<mn||jk>`, `<mb||ek>` and the adjoints of Xo, Xv. Products of z with y: `l2 <kl||cd>` (q2 and the density of `<kl||cd>`), the two of Lambda_3 (5.1: q3 and the densities of `<ie||ab>`, `<ij||ma>`) | the kernels of `quadruples_grad` (expansion, adjoint products, reduction onto triples) with the operands of `quadruples_lambda`; no conjugation of the left-hand vectors. In (Q) the `[V,T3]` products serve r and z at once (left-hand vector conj(y) + conj(w)); here r and z have their own products, each with its own adjoints | 3 times the products of (Q)_L, (Q)_L being 1.3 to 1.4 (Q): 4.5 to 5 (Q), against 3.4 to 3.6 (Q) measured for the pass of CCSDT(Q) |
+| s of (2): d_zeta W(t, lambda) | the Lambda residuals with one t replaced by zeta (ranks 2, 3: linear in t2, t3 for given dressed integrals; rank 1 quadratic), and with the dressed integrals one-index transformed by zeta_1 | `lambda_opt.make_intermediates` + `residuals` at shifted amplitudes (not tried) | once: 2 to 4 builds of the intermediates and Lambda residuals |
+| (2), lambda' | the Lambda equations with sources s1, s2, s3 | `lambda_opt.kernel(sources=)`, unchanged (s1 is already an argument) | a second Lambda solve: as many Lambda iterations again, or fewer from lambda as the guess (lambda-bar is 1e-4 to 1e-3 of it) |
+| densities of zeta | the densities and the orbital gradient with one t replaced by zeta | `density_opt.kernel` at shifted amplitudes (not tried): the gradient is linear in the densities, so the directional derivative can be taken of the gradient (identity 2), and with frozen spinors of `bf`, `kf` | once: 2 to 4 density evaluations, each cheaper than an amplitude iteration (section 4) |
+| gradient of e | d2 of e with the integrals of one changed index, as 11.4; with frozen spinors the analogue of `quadruples_grad.FrozenTerms` with the blocks of z (`<kl||cd>` is there; `<ie||ab>`, `<ij||ma>` are the transposed places of `<ab||ei>`, `<ma||ij>`) | `quadruples_grad.orbital_gradient`, `active_terms` with the new blocks | as for (Q): small |
+
+In all (estimate): after CCSDT, Lambda and E(Q)_L - which the energy
+needs anyway - the property costs one zeta solve (N iterations of 2 to 4
+amplitude iterations each), one more Lambda solve, a pass of about 5 (Q),
+and a handful of one-off evaluations; CCSDT(Q) of section 11 costs one
+Lambda solve and a pass of 3.5 (Q). Memory: zeta_3 and its DIIS vectors
+like T3; s3 and q3 the size of T3 each; nothing larger than what the
+existing solvers hold.
+
+### 12.7 Validation
+
+**Derivatives of e** (5 + 5 spin orbitals, random amplitudes, lambda and
+integrals that are antisymmetric and nothing else - not Hermitian -,
+four-point differences of the dense e along random directions, step 1e-3):
+t2, t3, l2, l3, g and the orbital energies to 1.2e-12 of derivatives of
+0.4 to 1100, real and complex (complex numbers compared); q2 and q3 are the terms
+`R2: [V,T4]`, `R3: [V,T4]` with T4 = r / D (1e-12); e is
+`lambda_ref.quadruples_lambda` for Hermitian integrals.
+
+**Directional derivatives** (4 + 5 model with a complex Hermitian
+Hamiltonian, not diagonal in f, random zeta): the five-point formula with
+step 1 against the same with step 1e-2 - J zeta 6e-15 (of 14), the Lambda
+response 1e-14 (of 0.3) -, `jacobian_dressed` 5e-15, and
+zeta . (J^T lambda) = lambda . (J zeta) with J^T lambda the part of the
+Lambda residuals linear in lambda (2e-16 of 0.19).
+
+**The Lagrangian** (the same model with more correlation: e = -2.64e-4 +
+1.18e-4 i, zeta up to 5.5e-4, lambda' - lambda up to 1.2e-3; 35 and 42
+iterations). Derivatives of F along random directions, four-point
+differences, step 1e-3:
+
+| with respect to | at the solution | zeta left out | lambda for lambda' |
+|---|---|---|---|
+| t | 3.7e-12 | 1.1e-3 | 1.0e-1 |
+| lambda | 1.9e-12 | 1.4e-1 | 1.9e-12 |
+| zeta | 2.3e-12 | 2.7e-12 | 2.3e-12 |
+| lambda' | 1.1e-12 | 1.1e-12 | 3.6e-12 |
+
+Derivatives of E(CCSDT) + e at fixed orbitals, the amplitude and the
+Lambda equations solved again for every Hamiltonian (to 1e-12), against
+the traces with the densities; steps 4e-4, 2e-4 and their extrapolation,
+differences finite difference - analytic of the (Q)_L part (what e adds
+to the derivative of CCSDT) and of CCSDT:
+
+| perturbation | (Q)_L part, analytic | 4e-4 | 2e-4 | extrapolated | CCSDT, extrapolated |
+|---|---|---|---|---|---|
+| one-electron, complex Hermitian | -2.969e-4 - 1.448e-3 i | 7.9e-13 | 1.4e-13 | 2.0e-13 | 1.2e-12 (of 5.0) |
+| two-electron, complex Hermitian | -2.652e-3 - 4.390e-3 i | 7.3e-9 | 4.6e-10 | 2.0e-12 | 6.4e-12 (of 5.0) |
+| orbital energies of D | 1.878e-4 | | | 1.6e-16 (step 1e-3) | |
+
+For the one-electron perturbation the explicit part of e is zero: all of
+the first row is zeta and lambda-bar. For the two-electron one the
+explicit part (d2 of e) is 2.06e-3 + 1.43e-3 i.
+
+**Relaxed dipole derivative**, trace(z D) of the dense reference against
+E(SCF) + E_corr(CCSDT) + E(Q)_L with the SCF repeated and Lambda solved
+again in the field (`bench/qlgrad_ccsdt_ql.py`; energies, amplitudes and
+Lambda of the production codes; four-point differences at steps 4e-3,
+2e-3, 1e-3 and the extrapolation of two consecutive steps; SCF converged
+to 1e-13 and 1e-10 in the gradient, CCSDT to 1e-13 and 1e-11, Lambda,
+zeta, lambda' and the Z-vector equations to 1e-11). Differences analytic -
+finite field:
+
+| | o + v | trace(z D), CCSDT(Q)_L | its (Q)_L part | step 4e-3 | 2e-3 | 1e-3 | 4e-3, 2e-3 extrapolated | 2e-3, 1e-3 extrapolated | CCSDT alone, last column |
+|---|---|---|---|---|---|---|---|---|---|
+| H2O / STO-3G | 10 + 4 | 1.582686756789 | 8.24e-5 | 6.0e-10 | 2.1e-11 | -2.2e-11 | -1.7e-11 | -2.5e-11 | -2.5e-11 |
+| H2O / STO-3G, complex spin orbitals | 10 + 4 | 1.582686756789 | 8.24e-5 | 6.0e-10 | 5.2e-11 | -2.0e-11 | 1.6e-11 | -2.4e-11 | -2.4e-11 |
+| H2O / STO-3G, X2C spinors | 10 + 4 | 1.583198446106 | 8.29e-5 | 5.8e-10 | 2.5e-11 | -5.0e-12 | -1.2e-11 | -7.1e-12 | -7.5e-12 |
+| H2O / STO-3G, X2C, 2 frozen | 8 + 4 | 1.583145734039 | 8.29e-5 | 5.9e-10 | 3.5e-11 | -2.5e-11 | -2.3e-12 | -2.9e-11 | -2.9e-11 |
+| BH / STO-3G | 6 + 6 | 2.087292537268 | 2.80e-4 | -1.9e-8 | -1.2e-9 | -7.8e-11 | 5.3e-12 | -4.3e-12 | -1.1e-11 |
+| BH / STO-3G, complex | 6 + 6 | 2.087292537268 | 2.80e-4 | -1.9e-8 | -1.2e-9 | -7.5e-11 | -2.0e-12 | -1.7e-13 | -6.6e-12 |
+| BH / STO-3G, complex, 2 frozen, 2 dropped | 4 + 4 | 2.094213650605 | 2.15e-5 | -1.7e-8 | -1.1e-9 | -8.0e-11 | 2.7e-12 | -1.4e-11 | -1.4e-11 |
+| BH / STO-3G, X2C, 2 frozen, 2 dropped | 4 + 4 | 2.094153685064 | 2.13e-5 | -1.7e-8 | -1.1e-9 | -7.8e-11 | -3.0e-12 | -1.2e-11 | -1.2e-11 |
+| LiH / STO-3G | 4 + 8 | 4.833110085756 | -4.58e-6 | -6.4e-5 | -3.9e-6 | -2.4e-7 | 3.8e-11 (1e-3, 5e-4) | 4.0e-12 (5e-4, 2.5e-4) | 4.5e-12 |
+| LiH / STO-3G, complex | 4 + 8 | 4.833110085756 | -4.58e-6 | -6.4e-5 | -3.9e-6 | -2.4e-7 | 2.2e-11 (1e-3, 5e-4) | 6.9e-12 (5e-4, 2.5e-4) | 7.4e-12 |
+| H2O / 6-31G | 10 + 16 | 1.227832006988 | 1.23e-4 | 1.2e-8 | 7.9e-10 | 2.6e-11 | 5.6e-11 | -2.4e-11 | -2.1e-11 |
+| H2O / 6-31G, complex | 10 + 16 | 1.227832006988 | 1.23e-4 | 1.2e-8 | 7.1e-10 | -2.2e-12 | -3.3e-11 | -4.9e-11 | -4.6e-11 |
+| HF / 6-31G, X2C | 10 + 12 | 16.451085826812 | -3.02e-4 | -5.9e-9 | -3.5e-10 | -4.2e-11 | 2.0e-11 | -2.1e-11 | -2.7e-11 |
+| H2O / 6-31G, X2C, 2 frozen, 4 dropped | 8 + 12 | 1.265705021477 | 5.84e-4 | 1.6e-8 | 9.8e-10 | 6.9e-11 | -2.9e-11 | 7.8e-12 | 8.3e-12 |
+
+(STO-3G rows: on the login node; 6-31G rows: jobs 31770509 to 31770512,
+c158; the dense reference takes 22 minutes for 10 + 16 spin orbitals.)
+CCSDT alone has the same differences in
+every row, to 7e-12: what is left is the error of the differences
+(energies to 1e-13 over steps of 1e-3), as in 11.5, not of the terms of
+(Q)_L - the point-charge runs below, with a hundred times larger energy
+differences, show them to 2e-13. LiH has the truncation error it has in
+11.5; its extrapolations are those of the steps in brackets. Lambda' and
+zeta took 13 to 19 and 10 to 16 iterations. The gradient among the
+occupied spin orbitals is 1e-6 to 1e-5 (LiH: 1e-14), among the virtual
+ones 7e-9 for LiH, 1e-5 to 2e-5 in the 6-31G rows and zero by symmetry in
+the other STO-3G ones.
+
+**External references.**
+
+- CFOUR's ncc (`CALC=CCSDT(Q)_L`, `PROPS=FIRST_ORDER`, the input of
+  `bench/refs/cfour/h2o_sto3g/ZMAT.qprops.bohr` with that `CALC`) stops in
+  `xncc` with `ncc.cxx(134): error: CCSDT(Q)_L derivatives are not supported
+  in NCC`. Its source has a density for CCSD(T)_Lambda
+  (`cc_density/ccsdt/ccsd_t_l_density.cxx`) and none for CCSDT(Q)_Lambda
+  (`cc_density/ccsdtq/`: CCSDT(Q), CCSDTQ and the approximate iterative
+  models).
+- MRCC (`calc=CCSDT(Q)_L`, `dens=1`): `Derivatives are not implemented for
+  approximate CC methods!`
+- So the only number another program gives is a finite difference of its
+  energies. MRCC takes point charges (`qmmm=Amber`, `pointcharges`): H2O
+  with a charge q at (0, 0, 10) bohr, q = +-0.1, +-0.2, +-0.4 (RHF, all
+  electrons, no symmetry; four-point differences at steps 0.2 and 0.1 and
+  their extrapolation), against trace(V D) + the repulsion of the charge
+  and the nuclei, V = -1 / |r - R|
+  (`bench/qlgrad_ccsdt_ql.py CASE charge=0,0,10 steps=0.2,0.1`):
+
+  | | zccsdt, analytic | zccsdt, differences (0.2, 0.1 extrapolated) | MRCC, differences, step 0.2 | step 0.1 | extrapolated |
+  |---|---|---|---|---|---|
+  | H2O / STO-3G, CCSDT | 0.006434729263 | 0.006434729263 | 0.006434729265 | 0.006434729264 | 0.006434729264 |
+  | H2O / STO-3G, CCSDT(Q)_L | 0.006433921675 | 0.006433921675 | 0.006433921676 | 0.006433921673 | 0.006433921673 |
+  | ... its (Q)_L part | -8.07588e-7 | -8.07588e-7 | -8.07589e-7 | -8.07591e-7 | -8.07591e-7 |
+  | H2O / 6-31G, CCSDT | 0.009869336169 | 0.009869336169 | 0.009869336174 | 0.009869336171 | 0.009869336171 |
+  | H2O / 6-31G, CCSDT(Q)_L | 0.009868191549 | 0.009868191549 | 0.009868191557 | 0.009868191550 | 0.009868191550 |
+  | ... its (Q)_L part | -1.144620e-6 | -1.144620e-6 | -1.144617e-6 | -1.144621e-6 | -1.144621e-6 |
+
+  MRCC's SCF, CCSDT and CCSDT(Q)_L energies with the charge are those of
+  zccsdt to all twelve decimals printed (q = 0.1, STO-3G); with twelve
+  decimals its differences are good to 2e-11 at step 0.1, and they are
+  within 2e-12 of the analytic numbers. zccsdt's own differences for this
+  perturbation are 4e-14 (STO-3G) and 2e-13 (6-31G) off the analytic
+  derivative, of a (Q)_L part of 1e-6: six digits of what (Q)_L adds.
+  (STO-3G on the login node, 6-31G: job 31770606 on c158, MRCC first.)
+
+### 12.8 Not done
+
+- anything on packed amplitudes (12.6): the pass over the quadruples, the
+  zeta solver, the one-off directional derivatives through the production
+  codes, the front end;
+- the symmetry labels; memory plans;
+- the two-particle density as an array, geometric gradients,
+  non-canonical or non-Hartree-Fock references;
+- CCSDT[Q]_Lambda (the part of Lambda_2 in z);
+- between degenerate spinors no rotation is made, as in 11.4.
