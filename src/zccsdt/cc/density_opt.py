@@ -813,3 +813,32 @@ def frozen_terms(res, t1, fock_of):
     B = res.bf + ft[0] @ A.T + fa[0] @ tau.T
     K = res.kf + ft[1].T @ A + fa[1].T @ tau
     return B, K
+
+
+def all_blocks(eris, t1, t2, t3, l1, l2, l3, plan=None):
+    '''Gnh[y,x] of zccsd.zvector for all pairs of spinors of ``eris`` - the
+    Lagrangian with the bare integrals one-index transformed, a bra index y
+    going to x and a ket index x to minus y - from all integrals as one
+    full array (n^4: a check for small cases).  Every spinor is taken as a
+    "frozen" one of kernel(frozen=), its integrals <yq||rs> with the same
+    blocks of the densities; then
+
+        Gnh[y,x] = B[y,x] - K[x,y] + (f gamma1^T - gamma1^T f)[y,x]
+                 + (n_x - n_y) (f + V)[y,x].
+
+    For converged t and lambda the blocks among occupied, among virtual
+    spinors and [occupied, virtual] (the Lambda_1 equation) vanish, and
+    [virtual, occupied] is Result.gnh.  Returns (Gnh, Result).'''
+    from zccsdt.cc import ccsdtq_ref
+    fock, g, _, o = ccsdtq_ref.integrals(eris)
+    n = fock.shape[0]
+    res = kernel(eris, t1, t2, t3, l1, l2, l3, plan=plan, frozen=(n, lambda f0, f1: g[f0:f1]))
+
+    def fock_of(M):
+        F = np.einsum('aubw,uw->ab', g, M)
+        return F, F
+    B, K = frozen_terms(res, np.asarray(t1), fock_of)
+    occ = (np.arange(n) < o).astype(np.float64)
+    g1 = res.d1 - np.diag(occ)
+    V = np.einsum('pyqx,pq->yx', g, g1)
+    return B - K.T + fock @ g1.T - g1.T @ fock + (V + fock) * (occ[None, :] - occ[:, None]), res

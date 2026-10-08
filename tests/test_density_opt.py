@@ -535,3 +535,44 @@ def test_front_end_layout_of_a_linear_molecule():
     print('HF / 6-31G X2C through the front end: relaxed %.12f finite field %.12f, difference %.1e'
           % (relaxed, fd, relaxed - fd))
     assert abs(relaxed - fd) < 2e-10
+
+
+@pytest.mark.parametrize('no,nv,seed', [(4, 5, 41), (3, 6, 43)])
+def test_all_blocks_of_the_one_index_transformation(no, nv, seed):
+    '''Every spinor as the one index outside (density_opt.all_blocks): the
+    Lagrangian with the bare integrals one-index transformed, all four
+    blocks, is that of the dense densities (lambda_ref.one_index), for
+    amplitudes that solve nothing - the contractions of the frozen spinors
+    with all blocks of integrals, the Fock matrices of gamma1 and t1, the
+    reference.'''
+    f, v, amps, lams = random_case(no, nv, seed)
+    d1, d2 = LR.densities(amps, lams, no)
+    h = f - np.einsum('piqi->pq', v[:, :no, :, :no])
+    want = -LR.one_index(h, v, d1, d2).T
+    gnh, res = D.all_blocks(container(f, v, no), amps[0], amps[1], packed(amps[2]), lams[0], lams[1],
+                            packed(lams[2]))
+    assert abs(gnh - want).max() < 1e-12 * abs(want).max()
+    assert abs(gnh[no:, :no] - LR.orbital_gradient(f, v, no, amps, lams)).max() < 1e-12 * abs(want).max()
+    # (not the table of the dressed basis: that is the same for converged amplitudes only)
+    assert abs(gnh[no:, :no] - res.gnh).max() > 1e-3 * abs(want).max()
+
+
+def test_other_blocks_vanish_for_converged_amplitudes():
+    '''H2O / STO-3G, converged CCSDT and Lambda: the blocks of Gnh among
+    occupied and among virtual spin orbitals and the excitation block (the
+    Lambda_1 equation) vanish, and the de-excitation block is the table of
+    the dressed basis, Result.gnh.'''
+    mol = gto.M(atom=WATER, basis='sto-3g', verbose=0)
+    ghf = scf.addons.convert_to_ghf(scf.RHF(mol).run(conv_tol=1e-13, conv_tol_grad=1e-10))
+    eris = E.from_scf(ghf, mo_coeff=_spin_mixed(ghf)[0])
+    r = _ccsdt(eris)
+    l1, l2, l3, _ = _lambda(eris, r)
+    gnh, res = D.all_blocks(eris, r.t1, r.t2, r.t3, l1, l2, l3)
+    o = eris.nocc
+    scale = abs(res.gnh).max()
+    print('H2O / STO-3G: |Gnh[v,o]| %.2e; [o,o] %.1e, [v,v] %.1e, [o,v] %.1e; [v,o] off the table %.1e'
+          % (scale, abs(gnh[:o, :o]).max(), abs(gnh[o:, o:]).max(), abs(gnh[:o, o:]).max(),
+             abs(gnh[o:, :o] - res.gnh).max()))
+    assert scale > 1e-5
+    for block in (gnh[:o, :o], gnh[o:, o:], gnh[:o, o:], gnh[o:, :o] - res.gnh):
+        assert abs(block).max() < 1e-7 * scale
