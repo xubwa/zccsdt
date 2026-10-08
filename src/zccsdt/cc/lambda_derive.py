@@ -55,7 +55,7 @@ OCC = 'ijklmno'
 VIR = 'abcdefgh'
 _SUMMED = {'o': 'mnoijkl', 'v': 'efghabcd'}
 _EXTERNAL = {'o': 'ijkl', 'v': 'abcd'}
-_ORDER = {'l1': 0, 'l2': 1, 'l3': 2, 'f': 3, 'v': 4, 't2': 5, 't3': 6}
+_ORDER = {'l1': 0, 'l2': 1, 'l3': 2, 'l4': 3, 'f': 4, 'v': 5, 't2': 6, 't3': 7, 't4': 8}
 
 
 def _cls(letter):
@@ -191,34 +191,36 @@ def _fresh(factors):
 
 # ------------------------------------------------------------ the Lagrangian
 
-def lagrangian(wick=False):
+def lagrangian(wick=False, nmax=3):
     '''[(coefficient, factors)]: L - E0 as a sum of scalars, every letter
     summed.  From the table of the amplitude equations, or (``wick``) from
-    the contractions of zccsdt.cc.wick.'''
+    the contractions of zccsdt.cc.wick.  ``nmax``: the highest rank of T
+    and of Lambda (3: CCSDT, 4: CCSDTQ, the tables of
+    zccsdt.cc.lambda4_terms).'''
     out = [(Fraction(1, 4), (('v', 'mnef'), ('t2', 'mnef')))]
     if wick:
         from zccsdt.cc import wick as W
         out = []
-        for k, kind, ranks, sym in _combinations(range(4)):
+        for k, kind, ranks, sym in _combinations(range(nmax + 1), range(2, nmax + 1)):
             for coef, factors, _ in W.derive(kind, ranks, k, sym):
                 left = (('l%d' % k, Q.EXT[k]),) if k else ()
                 out.append((coef, left + factors))
         return out
     for name, (k, _, kinds, _, terms) in Q.GROUPS.items():
-        if k > 3 or 't4' in kinds:
+        if k > nmax or (nmax < 4 and 't4' in kinds):
             continue
         out += [(coef, (('l%d' % k, Q.EXT[k]),) + factors) for coef, factors in terms]
     return out
 
 
-def _combinations(lranks):
+def _combinations(lranks, tranks=(2, 3)):
     '''(rank of Lambda, kind of H, ranks of the cluster operators, symmetry
     factor) of everything that can be connected: at most two lines of F and
     four of V.'''
     for k in lranks:
         for kind, most in (('f', 2), ('v', 4)):
             for n in range(most + 1):
-                for ranks in combinations_with_replacement((2, 3), n):
+                for ranks in combinations_with_replacement(tuple(tranks), n):
                     sym = 1
                     for r in set(ranks):
                         sym *= factorial(ranks.count(r))
@@ -227,13 +229,14 @@ def _combinations(lranks):
 
 # ------------------------------------------------------- Lambda equations
 
-def lambda_by_wick(rank):
+def lambda_by_wick(rank, nmax=3):
     '''The residual of the Lambda equation of ``rank``,
     <0| (1 + Lambda) [exp(-T) H exp(T), tau] |0> with the dressed H and
-    T = T2 + T3, from Wick's theorem: [(coefficient, factors)], canonical.'''
+    T = T2 + T3 (``nmax`` = 4: + T4, Lambda up to Lambda_4), from Wick's
+    theorem: [(coefficient, factors)], canonical.'''
     from zccsdt.cc import wick as W
     terms = []
-    for k, kind, ranks, sym in _combinations(range(4)):
+    for k, kind, ranks, sym in _combinations(range(nmax + 1), range(2, nmax + 1)):
         if len(ranks) + 1 > (2 if kind == 'f' else 4):
             continue
         terms += W.derive_left(kind, ranks, k, rank, sym)
@@ -242,13 +245,14 @@ def lambda_by_wick(rank):
     return out[Q.EXT[rank]]
 
 
-def lambda_by_differentiation(rank):
+def lambda_by_differentiation(rank, nmax=3):
     '''The same from the Lagrangian: its derivative with respect to t2 or
-    t3 (rank 2, 3), or its one-index transformation by a+_a a_i (rank 1).'''
+    t3 (rank 2, 3; t4 with ``nmax`` = 4), or its one-index transformation
+    by a+_a a_i (rank 1).'''
     if rank == 1:
-        return one_index(excitation=True)
+        return one_index(excitation=True, nmax=nmax)
     terms = []
-    for coef, factors in lagrangian():
+    for coef, factors in lagrangian(nmax=nmax):
         for x, (kind, ix) in enumerate(factors):
             if kind == 't%d' % rank:
                 terms.append((coef, factors[:x] + factors[x + 1:], ix))
@@ -256,7 +260,7 @@ def lambda_by_differentiation(rank):
     return out[Q.EXT[rank]]
 
 
-def one_index(excitation):
+def one_index(excitation, nmax=3):
     '''L with the dressed integrals one-index transformed by a+_a a_i
     (``excitation``: [h~, a+_a a_i], dL/dt1[i,a], external letters 'ia') or
     by a+_i a_a ([a+_i a_a, h~], the orbital gradient of the dressed basis,
@@ -264,7 +268,7 @@ def one_index(excitation):
     I, A = 'i', 'a'                         # (the terms are in upper case meanwhile)
     terms = [(Fraction(1), (('f', 'ia'),), 'ia')] if excitation else [(Fraction(1), (('f', 'ai'),), 'ai')]
     ext = 'ia' if excitation else 'ai'
-    for coef, factors in lagrangian():
+    for coef, factors in lagrangian(nmax=nmax):
         factors = _fresh(factors)
         x = next(y for y, (k, _) in enumerate(factors) if k in ('f', 'v'))      # the integral
         kind, ix = factors[x]
@@ -308,13 +312,13 @@ def _lower(factors):
 
 # ----------------------------------------------------------------- densities
 
-def densities():
+def densities(nmax=3):
     '''{block: [(coefficient, factors)]}: the coefficients of the dressed
     integrals in L - E0.  The block is named by its external letters, those
     of the integral: 'ai' is the coefficient of f[a,i], 'aibc' that of
     <ai||bc>.'''
     terms = []
-    for coef, factors in lagrangian():
+    for coef, factors in lagrangian(nmax=nmax):
         factors = _fresh(factors)
         x = next(y for y, (k, _) in enumerate(factors) if k in ('f', 'v'))
         rest = _lower_all(factors[:x] + factors[x + 1:], factors[x][1])
@@ -349,14 +353,15 @@ def _print_list(name, terms, indent='    '):
     print(']')
 
 
-def tables():
-    '''(LAMBDA, DENSITY, GRADIENT) as lambda_terms holds them.'''
-    lam = {rank: lambda_by_wick(rank) for rank in (1, 2, 3)}
-    return lam, densities(), one_index(excitation=False)
+def tables(nmax=3):
+    '''(LAMBDA, DENSITY, GRADIENT) as lambda_terms holds them (``nmax`` =
+    4: as lambda4_terms does).'''
+    lam = {rank: lambda_by_wick(rank, nmax) for rank in range(1, nmax + 1)}
+    return lam, densities(nmax), one_index(excitation=False, nmax=nmax)
 
 
-def print_tables():
-    lam, dens, grad = tables()
+def print_tables(nmax=3):
+    lam, dens, grad = tables(nmax)
     print('LAMBDA = {')
     for rank, terms in lam.items():
         print('    %d: [' % rank)
@@ -374,4 +379,5 @@ def print_tables():
 
 
 if __name__ == '__main__':
-    print_tables()
+    import sys
+    print_tables(int(sys.argv[1]) if len(sys.argv) > 1 else 3)
