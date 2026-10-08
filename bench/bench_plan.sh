@@ -11,7 +11,8 @@
 #
 # usage (in a Slurm job with a whole node): bench/bench_plan.sh OUT.jsonl
 # environment: BP_GEOM, BP_BASIS, BP_FROZEN, BP_MODES="blocks dense", BP_THREADS="48 24 8",
-#              BP_NITER=4, BP_FRACTION="0.05" ("" or "none": no (Q)), BP_ITER=1 (0: no iterations), BP_FULLQ="", BP_REAL=1, BP_TAG, BP_DRY=1 (print the list only)
+#              BP_NITER=4, BP_FRACTION="0.05" ("" or "none": no (Q)), BP_ITER=1 (0: no iterations), BP_FULLQ="", BP_REAL=1, BP_TAG, BP_DRY=1 (print the list only),
+#              BP_NUMA=interleave, BP_LOGDIR (keep the output of every measurement there)
 set -u
 out=$1
 : "${BP_GEOM:?}" "${BP_BASIS:?}"
@@ -40,6 +41,9 @@ step() {    # threads mode what extra...
   local sel; sel=$(pick "$n"); local cpus=${sel%|*} node=${sel#*|}
   local bind=(taskset -c "$cpus")
   if [ -n "$node" ] && command -v numactl >/dev/null; then bind=(numactl --physcpubind="$cpus" --membind="$node"); fi
+  # BP_NUMA=interleave: the pages of every array spread over the sockets (a run on both sockets whose arrays
+  # are first written by one thread has them all on that thread's socket otherwise)
+  if [ "${BP_NUMA:-}" = interleave ] && command -v numactl >/dev/null; then bind=(numactl --physcpubind="$cpus" --interleave=all); node="all, interleaved"; fi
   echo "=== $(date '+%F %T')  $what $mode, $n threads  load $(cut -d' ' -f1-3 /proc/loadavg)  cores $cpus${node:+, memory of socket $node}"
   [ -n "${BP_DRY:-}" ] && return 0
   local log; log=$(mktemp)
@@ -48,6 +52,7 @@ step() {    # threads mode what extra...
     --mode "$mode" --what "$what" --real "$real" --out "$out" --spinors "$spinors" --tag "$tag" "$@" > "$log" 2>&1
   local rc=$?
   grep -E "^RESULT|already in" "$log" || { echo "!!! no result (exit $rc); the end of the output:"; tail -n 15 "$log"; }
+  if [ -n "${BP_LOGDIR:-}" ]; then mkdir -p "$BP_LOGDIR"; cp "$log" "$BP_LOGDIR/${tag}_${what}_${mode}_${n}_$(date +%H%M%S).log"; fi
   rm -f "$log"
 }
 echo "host $(hostname)  $(date)  $(lscpu | grep 'Model name' | sed 's/  */ /g')"; lscpu | grep -E "NUMA node[0-9]"; free -g | sed -n 2p

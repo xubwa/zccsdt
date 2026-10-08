@@ -28,6 +28,7 @@ import numpy as np
 from pyscf import gto, x2c
 
 import zccsdt
+from zccsdt import timing
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from profile_sa import MemWatch                                         # noqa: E402
@@ -88,10 +89,13 @@ def main():
     cc.max_cycle = a.niter if a.what == 'iter' else 2
     marks = [(time.perf_counter(), time.process_time())]
     cc.callback = lambda info: marks.append((time.perf_counter(), time.process_time()))
+    snap = timing.snapshot()
     watch = MemWatch()
     watch.start()
     cc.kernel()
     watch.stop()
+    stages = {'/'.join(str(x) for x in path): [round(w, 3), round(c, 3), int(k)]
+              for path, (w, c, k) in timing.since(snap).items() if len(path) <= 2}
     wall, cpu = np.diff([m[0] for m in marks]), np.diff([m[1] for m in marks])
     rest = slice(1, None) if len(wall) > 1 else slice(0, None)
     eris = cc._eris
@@ -102,7 +106,8 @@ def main():
            'nocc': no, 'nvir': nv, 'dtype': str(np.asarray(cc.t2).dtype), 't3_elements': int(np.size(cc.t3)),
            'e_scf': float(mf.e_tot), 'iterations': [float(w) for w in wall],
            'iteration': float(wall[rest].mean()), 'iteration_cores': float(cpu[rest].sum() / wall[rest].sum()),
-           'iteration_peak_gb': watch.anon / 1e6, 'e_corr': float(cc.e_corr), 'load_before': load0}
+           'iteration_peak_gb': watch.anon / 1e6, 'e_corr': float(cc.e_corr), 'load_before': load0,
+           'numa': os.environ.get('BP_NUMA', ''), 'stages': stages}      # stages: wall, CPU seconds, calls (all iterations)
     if a.what == 'q':
         watch = MemWatch()
         watch.start()
