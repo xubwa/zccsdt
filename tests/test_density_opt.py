@@ -361,11 +361,12 @@ def _gamma2(amps, lams, no):
 
 
 @pytest.mark.parametrize('no,nv,seed', [(4, 5, 31), (5, 4, 32), (3, 6, 33), (2, 4, 34)])
-def test_integrals_with_a_frozen_index(no, nv, seed, monkeypatch):
+def test_integrals_with_a_frozen_index(no, nv, seed):
     '''The contractions of the two-particle density with integrals <fq||rs>
     that have one index f outside the active space (random numbers,
-    antisymmetric in r and s; three "frozen spinors", one at a time and all
-    at once) against the dense densities: B[f,x] = 1/2 sum <fq||rs>
+    antisymmetric in r and s; three "frozen spinors", one at a time, two
+    and all at once, and both routes of the l3 t3 part of the block abcd)
+    against the dense densities: B[f,x] = 1/2 sum <fq||rs>
     gamma2[x,q,r,s] and K[f,x] = 1/2 sum <pq||fs> gamma2[p,q,x,s] with
     <pq||fs> = conj(<fs||pq>).'''
     f, v, amps, lams = random_case(no, nv, seed)
@@ -385,13 +386,17 @@ def test_integrals_with_a_frozen_index(no, nv, seed, monkeypatch):
     def ints(f0, f1):
         calls.append((f0, f1))
         return S0[f0:f1]
-    for per_batch in (3, 1):
-        monkeypatch.setattr(D, 'frozen_batch', lambda *a: per_batch)
-        r = D.kernel(*args, frozen=(nf, ints), plan=D.Plan(nb=2, slab_bytes=None))
-        Bk, Kk = D.frozen_terms(r, amps[0], fock_of)
-        assert abs(Bk - B).max() < 1e-12 * abs(B).max(), abs(Bk - B).max() / abs(B).max()
-        assert abs(Kk - K).max() < 1e-12 * abs(K).max(), abs(Kk - K).max() / abs(K).max()
-    assert calls == [(0, 3), (0, 3), (0, 1), (1, 2), (2, 3), (0, 1), (1, 2), (2, 3)]
+    for route in ('y', 'gamma'):
+        for per_batch in (3, 1, 2):
+            del calls[:]
+            plan = D.Plan(nb=2, slab_bytes=None, route=route, nk=per_batch)
+            r = D.kernel(*args, frozen=(nf, ints), plan=plan)
+            assert (r.plan.route, r.plan.nk) == (route, per_batch)
+            Bk, Kk = D.frozen_terms(r, amps[0], fock_of)
+            assert abs(Bk - B).max() < 1e-12 * abs(B).max(), abs(Bk - B).max() / abs(B).max()
+            assert abs(Kk - K).max() < 1e-12 * abs(K).max(), abs(Kk - K).max() / abs(K).max()
+            # the integrals of every frozen spinor are asked for once
+            assert calls == [(f0, min(f0 + per_batch, nf)) for f0 in range(0, nf, per_batch)]
     # (the terms of gamma1 and t1 are part of it)
     assert abs(r.bf - B).max() > 1e-3 * abs(B).max()
 

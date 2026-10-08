@@ -202,7 +202,7 @@ def profile(mol, kind, niter, nfrozen=0, ndrop=0):
         isz, nvp = t3.dtype.itemsize, nvir * (nvir - 1) // 2
         slab = max(1, int(float(slab) * 1e6) // (isz * nvp)) * isz * nvp
         dmem = {'plan': D.Plan(nb=int(nb), slab_bytes=slab, need=D.fixed_bytes(nocc, nvir, isz, nfrozen + ndrop) + max(
-            int(nb) * D.pair_bytes(nocc, nvir, isz, nfrozen + ndrop), slab))}
+            int(nb) * D.pair_bytes(nocc, nvir, isz), slab))}
     for attempt in range(2):
         timing.reset()
         base = memory.resident()
@@ -215,9 +215,11 @@ def profile(mol, kind, niter, nfrozen=0, ndrop=0):
         wall, cpu = time.perf_counter() - t0, time.process_time() - c0
         peak = watch.stop()
         print('run %d: densities + orbital gradient + Z-vector %.2f s, %.1f cores busy = %.2f CCSDT iterations; '
-              'peak anonymous memory %.2f GB (%.2f GB before the call); plan: %d pairs per batch, slab %s, need %.2f GB'
+              'peak anonymous memory %.2f GB (%.2f GB before the call); plan: %d pairs per batch, slab %s, need %.2f GB%s'
               % (attempt + 1, wall, cpu / wall, wall / t_iter, peak / 1e9, base / 1e9, rel.result.plan.nb,
-                 rel.result.plan.slab_bytes, rel.result.plan.need / 1e9))
+                 rel.result.plan.slab_bytes, rel.result.plan.need / 1e9,
+                 '; frozen spinors: route %s, %s at a time' % (rel.result.plan.route, rel.result.plan.nk)
+                 if getattr(rel.result.plan, 'route', None) else ''))
         tree(timing.snapshot())
     print('Z-vector converged: %s; trace of the density %.10f' % (rel.converged, np.trace(rel.relaxed).real))
 
