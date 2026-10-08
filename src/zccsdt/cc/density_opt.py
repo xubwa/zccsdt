@@ -997,8 +997,10 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             plan.route, plan.nk = route, plan.frozen.nket
     t1, l1 = (np.ascontiguousarray(x, dtype=dtype) for x in (t1, l1))
     t2, l2 = (np.asarray(x, dtype=dtype) for x in (t2, l2))
-    if eng is not None:
+    if eng is not None and np.size(t3):
         T3p, L3p = eng.view(t3), eng.view(l3)
+    elif eng is not None:       # CCSD
+        T3p = L3p = np.zeros(0, dtype=dtype)
     else:
         T3p, L3p = _packed3(eris, t3, dtype), _packed3(eris, l3, dtype)
     triples = T3p.size > 0

@@ -143,6 +143,20 @@ def test_kernel_against_the_packed_block(labels, cplx):
         D.kernel(_dense(eris), t[0], t[1], T3p, l[0], l[1], L3p, blocks=True)
 
 
+@pytest.mark.parametrize('no,nv,olab,vlab', [(2, 6, [-1, 1], [-3, -1, -1, 1, 1, 3]),
+                                             (4, 6, [-1, -1, 1, 1], [-3, -1, -1, 1, 1, 3])])
+def test_without_triples(no, nv, olab, vlab):
+    '''Two occupied spinors (no triples), and CCSD (t3 = l3 = None) with
+    labels in use: the code of the packed block on the pairs of the groups.'''
+    eris, t, l = _labelled_model(no, nv, olab, vlab, seed=4, cplx=True)
+    fz = (2, _frozen(2, no + nv, True))
+    ref = D.kernel(_dense(eris), t[0], t[1], None, l[0], l[1], None, frozen=fz)
+    r = D.kernel(eris, t[0], t[1], None, l[0], l[1], None, frozen=fz, blocks=True)
+    assert r.plan.blocks
+    for k in ('d1', 'g1', 'gnh', 'bf', 'kf'):
+        assert abs(getattr(ref, k)).max() > 0.1 and _rel(getattr(r, k), getattr(ref, k)) < 1e-13, k
+
+
 # ------------------------------------------------------------------ HBr
 
 RUN = {}
