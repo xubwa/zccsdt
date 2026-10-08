@@ -450,10 +450,12 @@ the density differs from CFOUR's `denfinal` by at most 1.7e-10 for CCSD and
 1.6e-11 for CCSD(T), the dipole moment that `xsox2cprop` prints is
 0.01580313752067 against 0.01580313752033 (CCSD) and 0.01227486493503
 against 0.01227486493556 (CCSD(T)).  CFOUR has no CCSDT density to compare
-with: that one (0.012077140) rests on finite fields.  Not checked through
-this route: frozen core and `%vircut` (the density code has both; with
-most virtual spinors dropped CFOUR's own relaxed density is not the
-derivative of its energy, see below).
+with: that one (0.012077140) rests on finite fields.  With a frozen core
+(`DROPMO=1>1`, the same molecule): the energies of CCSD and CCSD(T) equal
+CFOUR's to all digits printed, the densities differ by at most 4.3e-12 and
+8.8e-12.  Not checked through this route: `%vircut` (the density code has
+it; with most virtual spinors dropped CFOUR's own relaxed density is not
+the derivative of its energy, see below).
 
 **Conventions.**  The spinors are those of CFOUR's list `scf2ceig` without
 the frozen and the dropped ones, in its order (occupied first, each set by
