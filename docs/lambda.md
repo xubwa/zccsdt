@@ -2309,3 +2309,337 @@ the other STO-3G ones.
   non-canonical or non-Hartree-Fock references;
 - CCSDT[Q]_Lambda (the part of Lambda_2 in z);
 - between degenerate spinors no rotation is made, as in 11.4.
+
+## 13. Full CCSDTQ: Lambda, densities and the relaxed density
+
+Equations, tables and a dense reference only; nothing here runs on packed
+T4 (13.5 says what that needs).
+
+| File | What |
+|---|---|
+| `src/zccsdt/cc/lambda4_terms.py` | the tables `LAMBDA[1..4]`, `DENSITY`, `GRADIENT` with T4 and Lambda_4, and their dense evaluation |
+| `src/zccsdt/cc/lambda_derive.py` (`nmax=4`) | their derivation: the functions of section 3 take the highest rank; `python -m zccsdt.cc.lambda_derive 4` prints the tables |
+| `src/zccsdt/cc/lambda4_ref.py` | Lambda by Jacobi steps with DIIS, densities, orbital gradient, the relaxed density with frozen and dropped spinors |
+| `tests/test_lambda4_terms.py`, `tests/test_lambda4_ref.py` | the checks of 13.2 and 13.4 (97 s and 73 s on 4 threads) |
+| `bench/l4grad_ccsdtq.py`, `bench/slurm_l4grad.sh` | finite fields at several steps, the full CI, CFOUR's `ncc`; inputs `bench/refs/cfour/*/ZMAT.ccsdtq_props.bohr` |
+| `bench/l4_scaling.py` | the terms of T4 and Lambda_4 by the cost of their best order of contraction (13.5) |
+
+### 13.1 The tables
+
+Everything of sections 1 to 4 with one rank more:
+`Lambda = Lambda_1 + .. + Lambda_4`, `T = T2 + T3 + T4` in the T1-dressed
+Hamiltonian,
+
+    L = E0 + 1/4 sum <mn||ef>~ t2[m,n,e,f] + sum_(k=1..4) (1/k!)^2 sum l_k R_k,
+
+`R_k` the residuals of CCSDTQ (`ccsdtq_terms`). No table has t1 or a bare
+integral. Numbers of terms:
+
+| Table | Terms | of CCSDT | with l4 | with t4 and no l4 |
+|---|---|---|---|---|
+| `LAMBDA[1]` | 66 | 37 | 26 (8 of them with t4, 14 with t3) | 3 (l3 <..> t4) |
+| `LAMBDA[2]` | 63 | 35 | 28 (7 with t4, 10 with t3) | 0 |
+| `LAMBDA[3]` | 35 | 16 | 19 (none with t4, 7 with t3) | 0 |
+| `LAMBDA[4]` | 16 | - | 12 (none with t4 or t3) | 0; 1 of l2, 3 of l3 |
+| `DENSITY` | 76 in 13 blocks | 38 | 33 | 5 |
+| `GRADIENT` | 168 in 11 blocks of integrals | 81 | 78 | 9 |
+
+(`GRADIENT` by its lambda: 3 without, 10 with l1, 27 with l2, 50 with l3,
+78 with l4.) `DENSITY` by block, terms (of them with t4 or l4):
+f~: `ai` 1 (0), `ia` 6 (3), `ij` 3 (1), `ab` 3 (1); <pq||rs>~: `abij` 1 (0),
+`ijab` 28 (15), `ijkl` 4 (2), `abcd` 4 (2), `iabj` 4 (2), `ijak` 9 (5),
+`iajk` 2 (1), `aibc` 9 (5), `abci` 2 (1).
+
+Two derivations as in section 3, compared coefficient by coefficient as
+rational numbers (`tests/test_lambda4_terms.py::test_tables_equal_derivations`,
+12 s):
+
+1. Wick's theorem: all contractions of `<0| (1 + Lambda) (H~ tau T ..)_C |0>`
+   for tau of rank 1 to 4, Lambda of rank 0 to 4 and every product of T2,
+   T3 and T4 that can be connected (`lambda_by_wick(rank, nmax=4)`);
+2. the Lagrangian built from the table of the amplitude equations of
+   CCSDTQ, differentiated with respect to t2, t3 and t4, and one-index
+   transformed for t1 (`lambda_by_differentiation`, `one_index`,
+   `densities` with `nmax=4`).
+
+The two give the same four lists, term by term; the Lagrangian of the
+contractions is the one of the amplitude table (76 terms). What changed in
+existing code: `lambda_derive` takes `nmax` (default 3) and knows the
+kinds `l4` and `t4`; `wick.py` is unchanged; the tables of CCSDT come out
+as before (`tests/test_lambda_terms.py` passes unchanged).
+
+**The CCSDT limit** (`lambda4_terms.ccsdt_limit`, `test_ccsdt_limit`):
+without the terms that have t4 or l4, `LAMBDA[1..3]`, `DENSITY` and
+`GRADIENT` are the tables of `lambda_terms`, term by term and in the same
+order, and the dense evaluation with `t4 = l4 = 0` gives the same numbers
+to 1e-13. What is left of `LAMBDA[4]` then is
+`<0| (Lambda_2 + Lambda_3) H~ |Q>`: `l2 <kl||cd>`, `l3 f~[l,d]`, and the
+two connected products of l3 with `<el||cd>` and `<kl||dm>` - the
+left-hand quadruples z4 of CCSDT(Q)_Lambda (section 5), with the term of
+`f~[l,d]` that canonical Hartree-Fock orbitals do not have.
+
+### 13.2 Exact check
+
+`tests/fockspace.py::Left` takes any number of ranks.
+`test_tables_equal_operators`: complex t1 to t4 and l1 to l4 that solve
+nothing (scales 0.3, 0.2, 0.1, 0.05), complex f and <pq||rs>, Hermitian and
+not, in **6 + 6 spin orbitals** (Hermitian; the space in which the
+amplitude equations were checked - every term of the tables has at most
+six occupied and six virtual letters, so none is restricted there), 5 + 6
+and 6 + 4 (not Hermitian). Largest deviation relative to the largest
+element:
+
+| | 6 + 6 | 5 + 6 | 6 + 4 |
+|---|---|---|---|
+| `LAMBDA[1..4]` against `<0| (1 + Lambda) [Hbar, tau_mu] |0>` | 1.8e-15, 1.4e-15, 1.3e-15, 1.5e-15 | 1.5e-15, 1.3e-15, 1.0e-15, 1.3e-15 | 8e-16, 1.0e-15, 1.3e-15, 1.2e-15 |
+| d1, d2 against the expectation values | 8e-16, 1.3e-15 | 8e-16, 1.4e-15 | 6e-16, 1.2e-15 |
+| orbital gradient against `[a+_i a_a, H]` between the two states | 2.5e-15 | 2.2e-15 | 2.1e-15 |
+
+(the tests assert 1e-12), and also: the Lagrangian from the densities, the
+gradient of the dressed basis against the same commutator with
+`exp(-T1) H exp(T1)` between the states of T2 + T3 + T4, and the Lambda_1
+residual as the one-index transformation of the dressed integrals with
+the dressed densities. `test_every_term_counts`: the terms of each of
+`LAMBDA[1..4]` and of `GRADIENT`, as vectors for two sets of random
+amplitudes in 6 + 6, are linearly independent.
+
+### 13.3 The dense reference (`zccsdt.cc.lambda4_ref`)
+
+`lambda_ref` with one rank more: `residuals`, `kernel` (Jacobi steps
+`l_k += (dL/dt_k) / D_k` with DIIS from `conj(t)`; real arithmetic for
+real integrals and amplitudes), `densities` (made in the dressed basis and
+transformed back), `orbital_gradient` (from the bare densities, or the
+table of the dressed basis), `relaxed_rdm1`.
+
+The residual of Lambda_4 is made on the unique block. From 2^26 elements
+of l4 its representative products are evaluated for one value of the first
+external occupied index at a time (o^3 v^4 elements in the place of
+o^4 v^4) and each slab is antisymmetrized into the quadruples that hold
+that index (`residual4_unique(blocked=True)`; the same numbers to 1e-14),
+and every other product with t4 or l4 - in the residuals of the lower
+ranks, the densities and the gradient - is summed over the values of one
+occupied index of l4, with views of the arrays of rank eight
+(`lambda4_terms.product_slabs`; `test_products_in_slabs`). l4 and t4
+themselves stay full arrays of rank eight: 5.2 GB each, real, for H2O /
+6-31G (10 + 16). Before that the first attempt at this case ran out of the 30 GB of its job (31773465).
+
+**Relaxation** is that of the CCSD line, as `qgrad_ref.relaxed_rdm1` has
+it for CCSDT (sections 10 and 11): the densities of the active spinors
+completed by the frozen occupied ones (`qgrad_ref.full_densities`), made
+Hermitian (`pyscf_rdms`), the orbital gradient of all blocks from them
+(`zvector.orbital_gradient`), and `zvector._relax`: the rotations between
+frozen and active spinors of one kind from `G_pq / (e_q - e_p)`, their
+Fock matrix on the right-hand side, the Z-vector equations of all virtual
+with all occupied spinors. CCSDTQ is invariant to rotations among the
+active occupied and among the active virtual spinors, so those blocks of
+the gradient vanish and no rotation is made there (`with_t=False`).
+
+**Four electrons.** CCSDTQ is then the full CI, and
+`<0| (1 + Lambda) exp(-T)` is the bra of the normalized ground state:
+d1 and d2 as the tables give them - not made Hermitian - are the density
+matrices of the full CI and Hermitian; the one-index transformed
+Lagrangian vanishes in every block, the Z-vector is zero and the relaxed
+density is the unrelaxed one. The same holds whenever no determinant
+beyond the quadruples exists: **H2O / STO-3G has four virtual spin
+orbitals, so its CCSDTQ is the full CI too** - it tests the densities (and
+CFOUR's) but not the relaxation; BH / STO-3G (6 + 6), NH3 / STO-3G (10 + 6)
+and H2O / 6-31G are the cases with an orbital gradient.
+
+### 13.4 Validation
+
+Tests (`tests/test_lambda4_ref.py`):
+
+- model Hamiltonian of section 7 with five electrons in ten spin orbitals
+  (complex Hermitian, f not diagonal, t1 up to 0.08; CCSDTQ is not the full
+  CI): the iterative Lambda equals the solution of the linear system
+  `<0| (1 + Lambda) (Hbar - E) |mu> = 0` among the 250 determinants to
+  1.5e-14 (25 iterations; lambda differs from conj(t) by 6e-3, 7e-3, 6e-3
+  and 2e-3 in the four ranks); d1 and d2 equal the expectation values to
+  1.5e-14; energy from the densities; trace(d1) = N. The one-index
+  transformed Lagrangian vanishes among occupied, among virtual and for
+  the excitations to 3e-14; the de-excitation block is 6.4e-7 (what
+  pentuples would take away), equal to the table of the dressed basis to
+  5e-15 and twice `zvector.orbital_gradient` of the Hermitian densities;
+- LiH / STO-3G (4 + 8), real and with complex spin orbitals, amplitudes of
+  the production code: against `pyscf.fci.direct_spin1` on the RHF
+  orbitals, its spin-resolved density matrices put into the spin orbitals
+  of `convert_to_ghf` (and rotated like them for the complex case):
+  E 6e-15, **d1 4.5e-13 (complex 3.2e-13), d2 4.6e-13 (3.3e-13)**, d1
+  Hermitian to 4.5e-13, the one-index transformed Lagrangian 6e-14 in
+  every block, |z| 6e-14, relaxed density = that of the full CI to 2e-13;
+  lambda differs from conj(t) by 1e-4 to 3e-3. (`bench/l4grad_ccsdtq.py`
+  has the same against `pyscf.fci.fci_dhf_slow`, the determinants of the
+  spin orbitals themselves and the Hamiltonian matrix diagonalized: 3e-13.)
+- BH / STO-3G relaxed dipole against finite fields, all electrons real and
+  2 frozen + 2 dropped complex (two steps, extrapolated: 2e-10 asserted).
+
+Finite fields (`bench/l4grad_ccsdtq.py`): the derivative of
+E(SCF) + E_corr(CCSDTQ) with respect to a field along z in the
+one-electron Hamiltonian, **the SCF repeated in the field** (conv_tol
+1e-13, conv_tol_grad 1e-10) and CCSDTQ converged to 1e-13 / 1e-11 by the
+production code at every strength; four-point central differences at
+steps 4e-3, 2e-3 and 1e-3 (LiH: down to 2.5e-4) and the Richardson
+extrapolation of the last two. The analytic number is the trace of z with
+the relaxed density of `lambda4_ref` (Lambda to 1e-11). 8 cores of
+a Xeon Gold 6248R, jobs 31773464, 31773781 and 31773465 on c105:
+
+| | o + v (frozen, dropped) | unrelaxed | relaxed, analytic | finite field, extrapolated | difference |
+|---|---|---|---|---|---|
+| H2O / STO-3G, real (the full CI) | 10 + 4 | 1.582732745192 | 1.582732745192 | 1.582732745207 | -1.6e-11 |
+| LiH / STO-3G, complex (the full CI) | 4 + 8 | 4.833110171306 | 4.833110171306 | 4.833110171302 | +4.7e-12 |
+| BH / STO-3G, real | 6 + 6 | 2.087414713232 | 2.087414628999 | 2.087414628973 | +2.5e-11 |
+| BH / STO-3G, complex | 6 + 6 | 2.087414713232 | 2.087414628999 | 2.087414628983 | +1.6e-11 |
+| BH / STO-3G, X2C spinors | 6 + 6 | 2.087390847434 | 2.087390763752 | 2.087390763734 | +1.8e-11 |
+| BH / STO-3G, complex | 4 + 4 (2, 2) | 2.062506898324 | 2.094198594753 | 2.094198594762 | -8.8e-12 |
+| BH / STO-3G, X2C spinors | 4 + 4 (2, 2) | 2.062475560160 | 2.094138546716 | 2.094138546738 | -2.2e-11 |
+| NH3 / STO-3G, real | 10 + 6 | 0.694190145023 | 0.694191215854 | 0.694191215846 | +8.0e-12 |
+| NH3 / STO-3G, complex | 8 + 6 (2, 0) | 0.694249713359 | 0.694235373641 | 0.694235373673 | -3.2e-11 |
+| H2O / 6-31G, real | 8 + 12 (2, 4) | 1.254713917646 | 1.263964106718 | 1.263964106612 | +1.1e-10 |
+(LiH: steps 5e-4 and 2.5e-4; at 1e-3 its differences are still 2.4e-7 off.
+At the single steps 4e-3, 2e-3, 1e-3 the differences are 2e-8, 1e-9 and
+5e-11 to 2e-10 off for BH and H2O / 6-31G: the fourth order of the stencil,
+down to the noise of energies converged to 1e-13, which is 1e-10 in a
+derivative at step 1e-3.  H2O / 6-31G with frozen and dropped spinors: the
+extrapolation of 4e-3 and 2e-3 is -5e-11 off.)  What the rows test: the
+relaxation of all-electron BH and NH3 is 8e-8 and 1e-6 - CCSDTQ is nearly
+invariant to orbital rotations - and is right to 2e-11; with frozen or
+dropped spinors it is 1e-5 to 3e-2.  In every run the residuals of
+Lambda are below 3e-13, the Lagrangian from the densities is the energy
+to 1.2e-13, the one-index transformed Lagrangian vanishes among occupied,
+among virtual and for the excitations to 1.4e-13, and the table of the
+dressed basis is the gradient of the bare densities to 6e-15.  With four
+active electrons (LiH; BH with 2 + 2) d1 and d2 are those of
+`fci_dhf_slow` to 5e-13 and 1e-12, also for X2C spinors.  The X2C SCF of BH
+in the field needed 20 DIIS vectors (with 8 it creeps at the strength
+0.001: jobs 31773723, 31773734).  Dense Lambda iterations: 1.2 s (BH),
+14 s (NH3), 94 s (H2O / 6-31G, 8 + 12).
+
+CFOUR (`CALC=CCSDTQ`, `CC_PROG=NCC`, `PROPS=FIRST_ORDER`, RHF,
+`SYMMETRY=OFF`, all electrons, geometry in bohr; `xncc` solves Lambda and
+writes the densities, `xdens` and `xprops` make the relaxed density and
+the properties). Dipole moment in atomic units, all digits CFOUR prints:
+
+| | CFOUR, relaxed | zccsdt, relaxed | zccsdt, unrelaxed | E(CCSDTQ), CFOUR | zccsdt |
+|---|---|---|---|---|---|
+| H2O / STO-3G (the full CI) | 0.6358057250 | 0.6358057250 | 0.6358057250 | -75.012647118993 | -75.012647118993 |
+| NH3 / STO-3G | 0.6941912159 | 0.6941912159 | 0.6941901450 | -55.520394859243 | -55.520394859243 |
+| H2O / 6-31G | 0.9907198642 | (not run: see below) | | -76.120856115034 | -76.120856115034 (production) |
+(NH3: CFOUR turns the molecule into its principal axes and prints the
+dipole along x, zccsdt has it along -z; the geometry is C3v to all digits
+for that.  CFOUR on the login node and in job 31773464.)  NH3 is the row
+that tests the relaxation: the unrelaxed number differs in the sixth
+digit.  `FROZEN_CORE=ON` does nothing in this `ncc` calculation (the same
+energy as with all electrons), so there is no frozen-core number of CFOUR.
+
+### 13.5 For an implementation on packed T4
+
+Nothing of this section is implemented or timed; the scalings are those
+of the best order of pairwise contractions of every term
+(`bench/l4_scaling.py`, no symmetry counted), the grouping is by reading
+the terms against `zccsdt.cc.t4engine`, and the costs are estimates.
+
+T is fixed while Lambda iterates, so everything made of T and integrals
+alone is made once: the one- and two-body intermediates of the T4 engine
+(`Fv`, `Fo`, `Wq` = pp, `Wh` = hh, `Wr` = ring, each with its T2 part),
+the drives `Wv[(cd), e, l]` and `Wo[m, d, (kl)]` with their T2 and T3
+parts, `Y(mn; jkl; d)` and `Z(nf; ij; ab)` of T3. The coefficients of the
+table say that these are the intermediates of the engine as they are: in
+`LAMBDA[4]` the ladder term of `<ef||cd>` has 1/192 and that of
+`<mn||cd> t2[mn,ef]` 1/384 (`Wq = <ab||ef> + sum_(m<n) t2 <mn||ef>`), the
+ring terms 1/36 and 1/36, the Fock terms 1/144 and 1/288.
+
+**The Lambda_4 equation** (16 terms):
+
+| Terms | What | Engine | Scaling |
+|---|---|---|---|
+| `l4 f[e,d]`, `l4 <mn||df> t2`, `l4 <ef||cd>`, `l4 <mn||cd> t2` | l4 with `Wq`, `Fv` folded in | the pp ladder with the transposed operator: the same view of the amplitudes with the virtual indices in two pairs, `Wq` multiplied from its other side | o^4 v^6 |
+| `l4 f[l,m]`, `l4 <ln||ef> t2`, `l4 <kl||mn>`, `l4 <kl||ef> t2` | l4 with `Wh`, `Fo` folded in | the hh ladder, transposed | o^6 v^4 |
+| `l4 <el||dm>`, `l4 <ln||df> t2` | l4 with `Wr` | the ring, transposed | o^5 v^5 |
+| `l4[ijkm,abef] t2[mn,ef] <ln||cd>` | `Go(n; ijk; ab) = sum l4 t2`, then with `<oo||vv>` | the transpose of `sum_m t2(im,ab) Xo(m;jkl;cd)` in its T4 part: the six-index intermediate is now made of l4 and t2 (a thin product from the pp view, o^5 v^4) and the outer factor is the integral | o^5 v^4, intermediate o^4 v^2 |
+| `l4[ijmn,abce] t2[mn,ef] <kl||df>` | `Gv(f; ij; abc) = sum l4 t2`, then with `<oo||vv>` | the transpose of `sum_e t2(ij,ae) Xv(e;kl;bcd)` in its T4 part; `Gv` has the shape of `Xv`, `[C(o,2), v, C(v,3)]` | o^4 v^5, intermediate o^2 v^4 |
+| `l2 <kl||cd>`, `l3 <el||cd>`, `l3 <kl||dm>`, `l3 f[l,d]` | the left-hand quadruples of the lower ranks | z2 and z3 of `quadruples_lambda` (`csrc/qlambda.c`), per occupied quadruple, in the dressed integrals; the term of `f[l,d]` is new (an outer product like z2) | o^4 v^4 (v + o) |
+
+So the residual of Lambda_4 is the T4 equation without its T3 x T3 terms
+(`Y`, `Z`) and without the T3 drives, with every operator transposed: three
+ladders and two products with a six-index intermediate, and the two
+products of (Q)_Lambda. New kernels: none; new code: the transposed
+operands (as `lambda_opt` has them for the T3 engine, section 9) and the
+intermediates `Go`, `Gv`.
+
+**The terms of l4 in the Lambda_3 equation** (19; none has t4) are the
+transposes of what T3 does in the T4 equation:
+
+| Terms | What | Engine | Scaling |
+|---|---|---|---|
+| 5: `l4 <ef||cm>`, `l4 <en||cg> t2`, `l4 <no||cm> t2`, `l4 <no||cg> t3`; `l4[imno,abef] t3 <jk||cg>` | `sum_(m, e<f) l4(ijkm, abef) Wv(ef, c, m)` with the whole `Wv` (T2 and T3 parts), and one term through `sum l4 t3 -> [i; ab; g]` | the drive `-sum_e Wv(ab,e,i) t(jkl,cde)` transposed: a product per occupied quadruple like z3 of (Q)_Lambda, reduced onto triples | o^4 v^5 |
+| 6: `l4 <ek||mn>`, `l4 <ek||fg> t2`, `l4 <ko||fm> t2`, `l4 <ko||fg> t3`, `l4 f[k,f] t2`; `l4[ijmn,aefg] t3 <ko||bc>` | l4 with the whole `Wo`, and one term through `sum l4 t3 -> [ij; a; o]` | the drive `sum_m Wo(m,a,ij) t(mkl,bcd)` transposed | o^5 v^4 |
+| 5: `l4 t2 f[n,c]`, `l4 t2 <en||bc>`, `l4 t2 <ko||cm>` (through `Go`); `l4 t2 <ek||cg>`, `l4 t2 <jk||fm>` (through `Gv`) | the two six-index intermediates of the Lambda_4 equation with `f~[o,v]`, `<vo||vv>`, `<oo||vo>` | the transposes of the T3 terms of `Xo` and `Xv` | o^5 v^4, o^4 v^5 |
+| 2: `l4[ijkm,aefg] t3[mno,efg] <no||bc>`, `l4[imno,abce] <jk||fg> t3[mno,efg]` | `sum l4 t3 -> [(ijk), a, (no)]` (o^5 v), and l4 with `Y(jk; mno; e)` | `-sum_(m<n) t(mni,abc) Y(mn;jkl;d)` transposed in either T3 | o^6 v^4 |
+| 1: `l4[ijmn,abef] t3[mno,efg] <ko||cg>` | `sum l4 t3 -> [(ij), (ab), (og)]` (o^3 v^3), then with `<ov||vo>` | `1/2 sum_(nf) Z(nf;ij;ab) t(nkl,fcd)` transposed | o^5 v^5 |
+
+**The terms of t4 and l4 in the Lambda_2 and Lambda_1 equations** (28 and
+29) are thin: every one is a contraction of l4 with T4, T3 or T2 over all
+but a few indices - a density-like intermediate - followed by a small
+product with an integral. The intermediates of l4 with T4 (which change in
+every iteration, with l4):
+
+| Intermediate | Elements | Cost | Where |
+|---|---|---|---|
+| `sum l4(i mno, a efg) t4(k mno, h efg)` -> `[ia, kh]` | o^2 v^2 | **o^5 v^5: C(o,3) C(v,3) (ov)^2, the operations of the ring**, as one large GEMM | Lambda_2 (with `<jk||bh>`), Lambda_1; the l4 t4 part of the density `iabj` |
+| `sum l4(ij mn, efgh) t4(ko mn, efgh)` -> `[ij, ko]` | o^4 | o^6 v^4 (the hh ladder's) | Lambda_2, Lambda_1; density `ijkl` |
+| `sum_(g<h) <ij||gh> t4(kmno, efgh)` -> `[(ij), (kmno), (ef)]` (constant: once), then with l4 | o^6 v^2 | o^6 v^4 per iteration | Lambda_2: this is how the term of the density `abcd` = `sum l4(kmno, abef) t4(kmno, efgh)` is done **without an o^4 v^6 step** |
+| one-particle: `sum l4 t4 -> [i, k]`, `[a, h]` | o^2, v^2 | o^5 v^4, o^4 v^5 (one pass over T4 each) | all ranks; densities `ij`, `ab` |
+| `sum_(b,h) <ei||bh> t4(jmno, bfgh)` and `sum <ik||hm> t4` (constant), then with l4 | o^5 v^3 | o^5 v^5, o^6 v^4 | Lambda_1 |
+
+The rest are intermediates of l4 with T3 (`o v^3`, `o^3 v`, `o^2 v^4`,
+`o^4 v^2`, at o^4 v^5 or o^5 v^4) and with T2 (`Go`, `Gv` again), and
+three terms of l3 with T4 in Lambda_1 (o^5 v^4). Leading steps over all
+four equations (`bench/l4_scaling.py`, o = 10, v = 40): one o^4 v^6 (the pp
+ladder of Lambda_4), six o^5 v^5 (two of them the ring terms of Lambda_4),
+nine o^6 v^4, everything else o^4 v^5 or o^5 v^4.
+
+**Densities.** For the unrelaxed one-particle density, of l4 with T4:
+`ij` and `ab` (one pass over T4 each, o^5 v^4 and o^4 v^5), and in `ia`
+`l3 t4` (o^4 v^4) and two terms `l4 t2 t3`. For the relaxed density the 87
+terms of `GRADIENT` with t4 or l4: as for CCSDT no density with three or
+four virtual indices has to be stored and there is **no o^4 v^6 step** -
+five terms at o^5 v^5 (the `[ia, kh]` intermediate above with
+`<am||ej>`-type integrals, and l4 with T3 T3 and T2 T4 in `ijab`), eleven
+at o^6 v^4, the rest o^5 v^4 or o^4 v^5; the largest intermediates are
+o^6 v^2 and o^5 v^3, both smaller than T4 for v > 5 o / 4 or so. The
+intermediates of l4 with T4 are those of the last Lambda iteration. Only
+if the two-particle density is wanted as an array does the block `abcd`
+cost an o^4 v^6 product (the pp ladder's).
+
+**Cost of a Lambda iteration (estimate).** In the measured CCSDTQ
+iteration of H2O / aug-cc-pVDZ (10 + 72, 67.8 s, `docs/benchmarks.md`):
+pp ladder with its thin products 18.2 s, ring with its thin products
+18.5 s, the pass by occupied quadruple (the two six-index products and
+T3 x T3) 20.0 s, `Xv` without T4 3.4 s, hh ladder 2.1 s, the rest 5.6 s.
+A Lambda iteration has the three ladders again (about 39 s), the two
+six-index products with `Go` and `Gv` and the two of (Q)_Lambda in the
+place of the pass by quadruple (the same shapes, without the T3 x T3
+products: 10 to 20 s), the transposed drives and the l4 T3 intermediates
+into Lambda_3 (thin, with one product of the size of `Z`: 5 to 10 s), and
+- what the amplitude equations do not have - the intermediates of l4 with
+T4, of which `[ia, kh]` alone is a second ring (15 to 20 s as GEMMs of
+(ov) x C(o,3) C(v,3) x (ov), the others thin). It dresses no integrals and
+makes no `Xv` of T3 and T2. That is **1.1 to 1.4 amplitude iterations per
+Lambda iteration, an estimate** (the CCSDT codes measure 1.15 to 1.26,
+section 9.5); and before the iterations one pass of the cost of half an
+amplitude iteration for the constant intermediates of T4 (`o^6 v^2`,
+`o^5 v^3`) and of T3. Memory: l4 and its residual next to T4, the DIIS
+vectors of l4 (those of T4 are no longer needed), `Gv` in the place of
+`Xv`. The dense runs need 13 to 29 Lambda iterations for 1e-11, as many as
+the amplitudes.
+
+### 13.6 Not done
+
+- anything on packed amplitudes, symmetry labels, memory plans, the front
+  end (`GCCSDTQ.solve_lambda`, `make_rdm1`);
+- the two-particle density as an array on disk, geometric gradients,
+  non-Hartree-Fock references;
+- (P): the left-hand side of CCSDTQ(P) is not Lambda_4 (`ccsdtq_ref`), and
+  its derivatives would be a Lagrangian of their own, as section 12 for
+  (Q)_Lambda;
+- between degenerate spinors no rotation is made, as in 11.4.
