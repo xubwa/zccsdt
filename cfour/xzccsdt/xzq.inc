@@ -33,6 +33,7 @@ subroutine N(xzq)(w, eq5, eq6)
   use xzdata
   use xzmem
   use xzkern
+  use xzpar
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -42,11 +43,14 @@ subroutine N(xzq)(w, eq5, eq6)
   integer(8) :: kev4, kz, krt3, krtt, kw22, kw13, kla, kra, klb, krb, klc, krc, kxv, kwx, kmx, kwh
   integer(8) :: i, j, k, l, x, n, size, ng, g1, g2, g3, nquad, ndone
   integer(8) :: lo1, hi1, lo2, hi2, lo3, hi3
+  integer(8) :: it, want, nold, nmine, lastl, nlimit, nx, nqnow, nstop
   integer(8) :: slot(0:no-1)
-  logical :: need(0:no-1)
-  real(8) :: e(2), t0, tq(6), tstart
+  logical :: need(0:no-1), first
+  real(8) :: e(2), e1(2), t0, tq(6), tstart, cq, cx, costmine, costleft, costdone, tloop, ttask, txv
+  real(8) :: estimate, part(6), tot(6), tmx(2)
   integer(8), external :: N(xzqslot)
   integer :: ldbg
+  character(len=32) :: arg
 
   eq5 = 0d0
   eq6 = 0d0
@@ -103,29 +107,77 @@ subroutine N(xzq)(w, eq5, eq6)
   end if
   call zc_tn_tuple_sums(w(jeps + no), int(nv, 4), 4_4, w(kev4))
 
-  ndone = 0
-  do l = 3, no - 1
-    slot = -1
-    if (qxv >= l) then
-      size = l
-    else
-      size = max(1_8, qxv / 3)
-    end if
-    ng = (l + size - 1) / size
-    do g1 = 0, ng - 1
+  ! ---- the tasks (xzpar.F90): the list, what an earlier run has finished
+  cq = dble(nvp) * dble(nvp) * dble(4 * nv + 4 * no + 6) + dble(nv) * dble(nvt) * dble(6 * no + 3 * nv) &
+       + 12d0 * dble(na4)
+  cx = dble(nvp) * dble(nv) ** 3 + 3d0 * dble(nv) * dble(nvt)
+  want = 0
+  if (nrank > 1) want = 8 * nrank
+  call get_environment_variable('XZ_QTASKS', arg, ldbg)
+  if (ldbg > 0) read(arg, *) want
+  call xzq_build(no, want, cq, cx)
+  qsample = 0d0
+  call get_environment_variable('XZ_QSAMPLE', arg, ldbg)
+  if (ldbg > 0) read(arg, *) qsample
+  if (qsample <= 0d0 .or. qsample >= 1d0) qsample = 0d0
+  nstop = -1
+  call get_environment_variable('XZ_QSTOP', arg, ldbg)
+  if (ldbg > 0) read(arg, *) nstop
+  nold = 0
+  if (qsample == 0d0) call xzq_restore(no, nv, nwe, ncls, nold)
+  costmine = 0d0
+  costleft = 0d0
+  nmine = 0
+  do it = 1, ntask
+    if (town(it) /= myrank) cycle
+    nmine = nmine + 1
+    costmine = costmine + tcost(it)
+    if (.not. tdone(it)) costleft = costleft + tcost(it)
+  end do
+  write(6, '(/,a,i10,a,i14,a)') '   (Q) correction: ', nquad, ' occupied x ', na4, ' virtual quadruples'
+  write(6, '(a,i6,a,i5,a,i6,a,i5)') '   tasks: ', ntask, '   ranks: ', nrank, '   tasks of this rank: ', nmine, &
+    '   rank ', myrank
+  if (nold > 0) write(6, '(a,i6,a)') '   restart: ', nold, ' tasks were finished by an earlier run (files XZQCHK.*)'
+  if (qsample > 0d0) write(6, '(a,f7.4,a)') '   XZ_QSAMPLE: the fraction ', qsample, &
+    ' of the quadruples of every task is done; the energies are not those of (Q)'
+  flush(6)
+
+  first = .true.
+  lastl = -1
+  costdone = 0d0
+  tloop = omp_get_wtime()
+  estimate = 0d0
+  nqnow = 0
+  do it = 1, ntask
+    if (town(it) /= myrank .or. tdone(it)) cycle
+    l = tl(it)
+    if (l /= lastl) slot = -1
+    lastl = l
+    ttask = omp_get_wtime()
+    txv = 0d0
+    e = 0d0
+    ndone = 0
+    nlimit = tnq(it)
+    if (qsample > 0d0) nlimit = max(1_8, int(qsample * dble(tnq(it)), 8))
+    ! Xv for the x in i0 .. l-1: all at once if they fit, else in three parts
+    nx = l - ti0(it)
+    size = nx
+    if (qxv < nx) size = max(1_8, qxv / 3)
+    ng = (nx + size - 1) / size
+    groups: do g1 = 0, ng - 1
       do g2 = g1, ng - 1
         do g3 = g2, ng - 1
-          ! Xv for the x of the three parts
           need = .false.
-          lo1 = g1 * size
+          lo1 = ti0(it) + g1 * size
           hi1 = min(l, lo1 + size)
-          lo2 = g2 * size
+          lo2 = ti0(it) + g2 * size
           hi2 = min(l, lo2 + size)
-          lo3 = g3 * size
+          lo3 = ti0(it) + g3 * size
           hi3 = min(l, lo3 + size)
           need(lo1:hi1 - 1) = .true.
           need(lo2:hi2 - 1) = .true.
           need(lo3:hi3 - 1) = .true.
+          hi1 = min(hi1, ti1(it))
           ! (a group without a quadruple: three indices do not fit)
           n = 0
           do i = lo1, hi1 - 1
@@ -146,37 +198,92 @@ subroutine N(xzq)(w, eq5, eq6)
             end if
           end do
           tq(2) = tq(2) + omp_get_wtime() - t0
+          txv = txv + omp_get_wtime() - t0
           do i = lo1, hi1 - 1
             do j = max(i + 1, lo2), hi2 - 1
               do k = max(j + 1, lo3), hi3 - 1
-                call N(xzquad)(w, i, j, k, l, na4, w(jotri), w(josgn), w(kt2pp), w(kt2p), w(kt2px), w(kxo), w(kev4), &
-                               w(kz), w(krt3), w(krtt), w(kw22), w(kw13), w(kla), w(kra), w(klb), &
-                               w(krb), w(klc), w(krc), w(kwh), w(kxv), slot, e, tq)
-                eq5 = eq5 + e(1)
-                eq6 = eq6 + e(2)
+                call N(xzquad)(w, i, j, k, l, na4, w(jotri), w(josgn), w(kt2pp), w(kt2p), w(kt2px), w(kxo), &
+                               w(kev4), w(kz), w(krt3), w(krtt), w(kw22), w(kw13), w(kla), w(kra), w(klb), &
+                               w(krb), w(klc), w(krc), w(kwh), w(kxv), slot, e1, tq)
+                e = e + e1
                 ndone = ndone + 1
+                if (ndone >= nlimit) exit groups
               end do
             end do
           end do
         end do
       end do
-    end do
+    end do groups
+    tsec(it) = omp_get_wtime() - ttask
+    nqnow = nqnow + ndone
+    if (qsample > 0d0) then
+      ! what the whole task would take: Xv as it was, the quadruples in proportion
+      estimate = estimate + txv + (tsec(it) - txv) * dble(tnq(it)) / dble(ndone)
+      slot = -1
+    else
+      if (ndone /= tnq(it)) then
+        write(6, '(a,i6,2i12)') ' @XZCCSDT-F, (Q): quadruples done and expected in task ', it, ndone, tnq(it)
+        call errex
+      end if
+      te(:, it) = e
+      tdone(it) = .true.
+      call xzq_save(it, no, nv, nwe, ncls, first)
+      ! (a test hook: XZ_QSTOP=n ends the run after n tasks, as an interruption would)
+      nstop = nstop - 1
+      if (nstop == 0) then
+        write(6, '(a)') ' @XZCCSDT-F, XZ_QSTOP: stopped after the task above.'
+        flush(6)
+        call xzmpi_abort(3_8)
+      end if
+    end if
+    costdone = costdone + tcost(it)
+    t0 = omp_get_wtime() - tloop
+    write(6, '(a,i6,a,i3,a,i3,a,i3,a,i9,a,f8.2,a,f6.1,a,f10.1,a,f10.1,a)') '   task ', it, '  l ', l, '  i ', &
+      ti0(it), ' ..', ti1(it) - 1, '  quadruples ', ndone, '  ', tsec(it), ' s;  done ', &
+      100d0 * (costmine - costleft + costdone) / max(costmine, 1d-30), ' %,  ', t0, ' s,  left about ', &
+      t0 * (costleft - costdone) / max(costdone, 1d-30), ' s'
+    flush(6)
   end do
-  eq6 = eq5 + eq6
   call xzrel(m0)
+
+  ! ---- the sum over the ranks
+  part = 0d0
+  do it = 1, ntask
+    if (town(it) /= myrank .or. .not. tdone(it)) cycle
+    part(1) = part(1) + te(1, it)
+    part(2) = part(2) + te(2, it)
+    part(3) = part(3) + dble(tnq(it))
+  end do
+  part(4) = omp_get_wtime() - tstart
+  part(5) = estimate
+  part(6) = dble(nqnow)
+  call xzmpi_sum(part, tot, 6_8)
+  call xzmpi_max(part(4:5), tmx, 2_8)
+  eq5 = tot(1)
+  eq6 = tot(1) + tot(2)
+  qsampled = qsample > 0d0
   if (qdebug) write(6, '(a,4f18.12)') '   (Q) parts: z.[V,T3], z.T2T2, [V,T3].[V,T3], [V,T3].T2T2', qparts
-  if (ndone /= nquad) then
-    write(6, '(a,2i12)') ' @XZCCSDT-F, (Q): occupied quadruples done and expected: ', ndone, nquad
-    call errex
-  end if
-  write(6, '(/,a,i10,a,i14,a)') '   (Q) correction: ', nquad, ' occupied x ', na4, ' virtual quadruples'
   write(6, '(5x,a28,f12.2,a)') 'Xo', tq(1), ' s'
   write(6, '(5x,a28,f12.2,a)') 'Xv', tq(2), ' s'
   write(6, '(5x,a28,f12.2,a)') 'operands', tq(3), ' s'
   write(6, '(5x,a28,f12.2,a)') 'products (GEMM)', tq(4), ' s'
   write(6, '(5x,a28,f12.2,a)') 'reductions', tq(5), ' s'
   write(6, '(5x,a28,f12.2,a)') 'energy', tq(6), ' s'
-  write(6, '(5x,a28,f12.2,a)') 'total', omp_get_wtime() - tstart, ' s'
+  write(6, '(5x,a28,f12.2,a)') 'total of this rank', part(4), ' s'
+  if (myrank == 0) then
+    if (nrank > 1) write(6, '(5x,a28,f12.2,a,f8.2)') 'slowest rank', tmx(1), ' s;  sum over ranks / slowest ', &
+      tot(4) / max(tmx(1), 1d-30)
+    if (qsampled) then
+      write(6, '(/,a,i10,a,i10,a)') '   sample: ', nint(tot(6), 8), ' of ', nquad, ' quadruples done'
+      write(6, '(a,f12.1,a)') '   estimated wall time of the whole (Q), slowest rank: ', tmx(2) + tq(1), ' s'
+      write(6, '(a)') '   (from above: Xv was formed for every task in full)'
+    else if (nint(tot(3), 8) /= nquad) then
+      write(6, '(a,2i12)') ' @XZCCSDT-F, (Q): occupied quadruples done and expected: ', nint(tot(3), 8), nquad
+      call errex
+    else
+      call xzq_cleanup()
+    end if
+  end if
 end subroutine
 
 ! a slot of the store of Xv that no x < l holds

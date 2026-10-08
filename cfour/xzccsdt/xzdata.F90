@@ -111,6 +111,7 @@ module xzdata
 
   logical :: qdebug = .false.       ! print the parts of (Q) (XZ_QDEBUG)
   real(8) :: qparts(4) = 0d0
+  logical :: qsampled = .false.     ! (Q) ran in sample mode: its energies are not (Q)
 
   ! ---- wall times of the stages of the iterations (seconds)
   integer, parameter :: ntime = 16

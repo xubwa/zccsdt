@@ -16,6 +16,18 @@ MKLROOT ?= /data/lcheng24/intel/oneapi/mkl/2022.1.0
 
 FC      := ifort
 CC      := icc
+# MPI=1: (Q) parallel over ranks with Intel MPI (the wrappers of the oneAPI
+# environment); the default is the serial program, which has no MPI in it
+ifeq ($(MPI),1)
+  BUILD  := ../../build/xzccsdt_mpi
+  LD     := mpiifort
+  MPICC  := mpiicc
+  MPIDEF := -DXZ_MPI
+else
+  LD     := $(FC)
+  MPICC  := $(CC)
+  MPIDEF :=
+endif
 # the flags of CFOUR's x2c programs (make.config: -i8, byte record lengths)
 FCFLAGS := -O3 -xHost -cpp -assume byterecl -assume buffered_io -i8 -qopenmp -mcmodel=medium -DINT64
 CFLAGS  := -O3 -xHost -std=c99 -qopenmp -complex-limited-range -DZC_USE_MKL -DMKL_ILP64 \
@@ -29,32 +41,35 @@ LIBS    := -L$(CFOUR)/lib -llibr $(BLAS) -lrt $(RPATH)
 
 # the C kernels that the program calls
 KERNELS := ccsdt_t3 t3pack tnpack
-MODS    := xzkern xzmem xzdata xzdiis
+MODS    := xzkern xzmem xzdata xzdiis xzpar
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
 INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzq.inc
 
-OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil $(KERNELS)))
+OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil xzmpi $(KERNELS)))
 
 all: $(BUILD)/xzccsdt
 
 $(BUILD)/xzccsdt: $(OBJS)
-	$(FC) $(FCFLAGS) -o $@ $(OBJS) $(LIBS)
+	$(LD) $(FCFLAGS) -o $@ $(OBJS) $(LIBS)
 
 $(BUILD)/%.o: %.F90 $(INCS) | $(BUILD)
 	$(FC) $(FCFLAGS) -module $(BUILD) -I. -c $< -o $@
 
-$(BUILD)/xzccsdt.o: xzccsdt.f | $(BUILD)
-	$(FC) $(FCFLAGS) -extend-source -c $< -o $@
+$(BUILD)/xzccsdt.o: xzccsdt.f $(BUILD)/xzpar.o | $(BUILD)
+	$(FC) $(FCFLAGS) -extend-source -module $(BUILD) -c $< -o $@
 
 $(BUILD)/xzutil.o: xzutil.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/xzmpi.o: xzmpi.c | $(BUILD)
+	$(MPICC) $(CFLAGS) $(MPIDEF) -c $< -o $@
 
 $(BUILD)/%.o: $(CSRC)/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # the modules before what uses them
 $(addprefix $(BUILD)/, $(addsuffix .o, $(SRCS))): $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS)))
-$(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o: $(BUILD)/xzkern.o
+$(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o $(BUILD)/xzpar.o: $(BUILD)/xzkern.o
 
 $(BUILD):
 	mkdir -p $(BUILD)

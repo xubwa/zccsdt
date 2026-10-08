@@ -18,6 +18,8 @@ subroutine xzdrv(w, maxcor)
   use xzdata
   use xzmem
   use xzkern
+  use xzpar
+  use xzpland, only: planq
   use omp_lib
   implicit none
   integer(8), intent(in) :: maxcor
@@ -25,7 +27,8 @@ subroutine xzdrv(w, maxcor)
   integer(8) :: iintln, ifltln, iintfp, ialone, ibitwd
   common /machsp/ iintln, ifltln, iintfp, ialone, ibitwd
   integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2), nmax, status
-  logical :: usefile, converged, uselab, tryreal, isreal, there
+  logical :: usefile, converged, uselab, tryreal, isreal, there, docc
+  real(8) :: sync(2)
   real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall
   character(len=32) :: arg
   integer :: larg
@@ -55,6 +58,8 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f20.12)') '   E(SCF) of JOBARC: ', escf
   write(6, '(a,i14,a,f10.1,a)') '   work array (MAXCOR): ', maxcor, ' words = ', 8d-6 * maxcor, ' MB'
   write(6, '(a,i4,a,i2)') '   threads: ', nthr, '   BLAS integers: bytes ', 4 + 4 * ilp64
+  if (xzmpi_enabled() == 1) write(6, '(a,i5,a,i5,a)') '   MPI: rank ', myrank, ' of ', nrank, &
+    ' ((Q) is parallel over the ranks; each has a work array of this size)'
   if (ilp64 /= 1) then
     write(6, '(a)') ' @XZCCSDT-F, the kernels were not compiled for the 8-byte integers of this BLAS.'
     call errex
@@ -94,6 +99,17 @@ subroutine xzdrv(w, maxcor)
     tryreal = .false.
   end if
 
+  ! ---- which ranks do what: the iterations are those of rank 0; the other
+  !      ranks wait for them here and then read the integrals and the
+  !      amplitudes (file XZAMPS) themselves
+  docc = method(1:5) == 'CCSDT'
+  planq = .not. docc .or. myrank > 0
+  sync = 0d0
+  if (docc .and. myrank > 0) then
+    call xzmpi_bcast(sync, 16_8)
+    if (.not. with_q .or. sync(2) /= 1d0) return
+  end if
+
   ! ---- the integrals: for labels and real numbers first; the memory of a
   !      case is checked before it is read (the floor of its plan)
   isreal = tryreal
@@ -124,24 +140,48 @@ subroutine xzdrv(w, maxcor)
   ! ---- the memory plan
   call xzplan(w, nslot, usefile, nch, .false.)
 
-  ! ---- CCSDT
-  t0 = omp_get_wtime()
-  if (nwe == 2) then
-    call xzcc_z(w, nslot, usefile, nch, ecorr, converged, ncyc)
+  ! ---- CCSDT (rank 0), or the amplitudes of an earlier run
+  tcc = 0d0
+  if (docc .and. myrank == 0) then
+    t0 = omp_get_wtime()
+    if (nwe == 2) then
+      call xzcc_z(w, nslot, usefile, nch, ecorr, converged, ncyc)
+    else
+      call xzcc_d(w, nslot, usefile, nch, ecorr, converged, ncyc)
+    end if
+    tcc = omp_get_wtime() - t0
+    if (.not. converged) then
+      call get_environment_variable('XZ_DEBUG', length=larg)
+      if (larg == 0) write(6, '(/,a,i5,a)') ' @XZCCSDT-F, CCSDT did not converge in ', maxcyc, &
+        ' cycles (CC_MAXCYC).'
+      call xzmpi_bcast(sync, 16_8)
+      if (larg > 0) return
+      call errex
+    end if
+    write(6, '(a,i4,a)') '   CCSDT converged in ', ncyc, ' cycles.'
+    call xztimes(tcc, ncyc)
+    ! the amplitudes for the steps that follow, here or in a later run
+    t0 = omp_get_wtime()
+    if (nwe == 2) then
+      call xzamps_z(w, 'w', ecorr)
+    else
+      call xzamps_d(w, 'w', ecorr)
+    end if
+    write(6, '(/,a,f10.1,a,f8.2,a)') '   amplitudes written to the file XZAMPS (', &
+      8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
+    sync = [ecorr, 1d0]
+    call xzmpi_bcast(sync, 16_8)
   else
-    call xzcc_d(w, nslot, usefile, nch, ecorr, converged, ncyc)
+    if (nwe == 2) then
+      call xzamps_z(w, 'r', ecorr)
+    else
+      call xzamps_d(w, 'r', ecorr)
+    end if
+    write(6, '(/,a,f20.12)') '   amplitudes read from the file XZAMPS; CCSDT correlation energy ', ecorr
   end if
-  tcc = omp_get_wtime() - t0
-  if (.not. converged) then
-    call get_environment_variable('XZ_DEBUG', length=larg)
-    if (larg > 0) return
-    write(6, '(/,a,i5,a)') ' @XZCCSDT-F, CCSDT did not converge in ', maxcyc, ' cycles (CC_MAXCYC).'
-    call errex
-  end if
-  write(6, '(a,i4,a)') '   CCSDT converged in ', ncyc, ' cycles.'
-  call xztimes(tcc, ncyc)
+  flush(6)
 
-  ! ---- (Q)
+  ! ---- (Q), on all ranks
   eq5 = 0d0
   eq6 = 0d0
   tq = 0d0
@@ -153,6 +193,11 @@ subroutine xzdrv(w, maxcor)
       call xzq_d(w, eq5, eq6)
     end if
     tq = omp_get_wtime() - t0
+  end if
+  if (myrank > 0) return
+  if (qsampled) then
+    write(6, '(/,a)') '   XZCCSDT finished: a sample of (Q); no energy of (Q), TOTENERG not written.'
+    return
   end if
 
   ! ---- energies
@@ -167,7 +212,7 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a,f25.12)') '   E(CCSDT[Q])                   ', escf + ecorr + eq5
     write(6, '(a,f25.12)') '   E(CCSDT(Q))                   ', escf + ecorr + eq6
     etot = escf + ecorr + eq6
-    if (method == 'CCSDT[Q]') etot = escf + ecorr + eq5
+    if (method == 'CCSDT[Q]' .or. method == '[Q]') etot = escf + ecorr + eq5
   end if
   write(6, '(a)') '  ' // repeat('-', 62)
   call putrec(20, 'JOBARC', 'TOTENERG', iintfp, etot)
@@ -219,8 +264,9 @@ subroutine xzjob()
       call errex
     end if
   end if
-  if (method /= 'CCSDT' .and. method /= 'CCSDT[Q]' .and. method /= 'CCSDT(Q)') then
-    write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), ': not one of CCSDT, CCSDT[Q], CCSDT(Q).'
+  if (method /= 'CCSDT' .and. method /= 'CCSDT[Q]' .and. method /= 'CCSDT(Q)' .and. method /= '(Q)' &
+      .and. method /= '[Q]') then
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q].'
     call errex
   end if
   with_q = method /= 'CCSDT'

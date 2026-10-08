@@ -100,3 +100,74 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   call N(xzdiis_close)()
   call xzrel(m0)
 end subroutine
+
+! ---------------------------------------------------------------------------
+! The amplitudes in the file XZAMPS of the run directory, the hand-over from
+! the iterations to the steps that follow ((Q), on every rank, or a later
+! run): an unformatted stream,
+!   character(8) 'XZAMPS01'
+!   integer(8)   no, nv, words per element (1 real, 2 complex), classes of
+!                the labels, elements of T3 as stored
+!   real(8)      the CCSDT correlation energy
+!   T1 [i][a], T2 [i][j][a][b], T3 as stored (packed; its blocks one after
+!   the other), in the order of the spinors of the run that wrote it
+! rw = 'w': written from the amplitudes in the work array; 'r': the regions
+! are taken from the stack and filled (a dry run: only taken).
+subroutine N(xzamps)(w, rw, ecorr)
+  use xzdata
+  use xzmem
+  implicit none
+  real(8) :: w(*)
+  character(len=1), intent(in) :: rw
+  real(8), intent(inout) :: ecorr
+  character(len=8) :: tag
+  integer(8) :: head(5), n1, n2
+  integer :: ios
+  logical :: there
+  n1 = NW * no * nv
+  n2 = NW * no * no * nv * nv
+  if (rw == 'w') then
+    open(unit=77, file='XZAMPS', form='unformatted', access='stream', status='replace', iostat=ios)
+    if (ios == 0) write(77, iostat=ios) 'XZAMPS01', no, nv, int(NW, 8), ncls, n3, ecorr
+    if (ios == 0) write(77, iostat=ios) w(jt1:jt1 + n1 - 1)
+    if (ios == 0) write(77, iostat=ios) w(jt2:jt2 + n2 - 1)
+    if (ios == 0) write(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
+    if (ios == 0) close(77, iostat=ios)
+    if (ios /= 0) then
+      write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZAMPS failed (iostat ', ios, '): disk full?'
+      call errex
+    end if
+    return
+  end if
+  jt1 = xzget(n1, 'T1')
+  jt2 = xzget(n2, 'T2')
+  jt3 = xzget(NW * n3, 'T3')
+  if (xzdry) return
+  inquire(file='XZAMPS', exist=there)
+  if (.not. there) then
+    write(6, '(/,a)') ' @XZCCSDT-F, no file XZAMPS: the amplitudes of a converged CCSDT run of xzccsdt.'
+    call errex
+  end if
+  open(unit=77, file='XZAMPS', form='unformatted', access='stream', status='old', action='read', iostat=ios)
+  if (ios == 0) read(77, iostat=ios) tag, head, ecorr
+  if (ios /= 0 .or. tag /= 'XZAMPS01') then
+    write(6, '(/,a)') ' @XZCCSDT-F, the file XZAMPS is not a file of amplitudes of this program.'
+    call errex
+  end if
+  if (head(1) /= no .or. head(2) /= nv .or. head(3) /= NW .or. head(4) /= ncls .or. head(5) /= n3) then
+    write(6, '(/,a)') ' @XZCCSDT-F, the file XZAMPS belongs to another calculation or another mode:'
+    write(6, '(a,5i12)') '   occupied, virtual, words per element, classes, T3 in the file: ', head
+    write(6, '(a,5i12)') '   and here:                                                      ', no, nv, &
+      int(NW, 8), ncls, n3
+    write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: XZ_LABELS, XZ_REAL)'
+    call errex
+  end if
+  read(77, iostat=ios) w(jt1:jt1 + n1 - 1)
+  if (ios == 0) read(77, iostat=ios) w(jt2:jt2 + n2 - 1)
+  if (ios == 0) read(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
+  close(77)
+  if (ios /= 0) then
+    write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZAMPS failed, iostat ', ios
+    call errex
+  end if
+end subroutine

@@ -32,6 +32,7 @@ module xzpland
   integer(8) :: plo(npar), phi(npar)
   integer(8) :: pslot = 0, pchunk = 0
   logical :: pfile = .true.
+  logical :: planq = .false.          ! only (Q) is planned (a rank that does no iterations)
 contains
   subroutine setpar(k, v)
     use xzdata
@@ -148,7 +149,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   pfile = .true.
   pslot = ndiis
   pchunk = min(max(n3, 1_8), 1048576_8)
-  floor_cc = xzpeak_cc(w)
+  floor_cc = 0
+  if (.not. planq) floor_cc = xzpeak_cc(w)
   floor_q = xzpeak_q(w)
   if (flooronly .and. max(floor_cc, floor_q) <= xzsize) return
   write(6, '(/,a,a,a)') '   Memory plan (words of 8 bytes; ', merge('real numbers   ', 'complex numbers', nwe == 1), ')'
@@ -166,12 +168,16 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   end if
 
   ! ---- the batches of the iterations, one after the other
+  if (.not. planq) then
   do k = 1, 4
     call raise(k, .true.)
   end do
+  end if
   ! ---- the DIIS vectors: the work array if all of them fit, else the file
   pfile = .false.
-  if (xzpeak_cc(w) > xzsize) then
+  if (planq) then
+    pslot = 0
+  else if (xzpeak_cc(w) > xzsize) then
     pfile = .true.
     per_vec = 2 * 8 * nwe * n3
     free_bytes = xz_free_disk('.' // c_null_char)
@@ -206,7 +212,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       end if
     end if
   end if
-  need_cc = xzpeak_cc(w)
+  need_cc = 0
+  if (.not. planq) need_cc = xzpeak_cc(w)
   ! ---- (Q)
   if (with_q) then
     do k = 5, 8
@@ -221,9 +228,12 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   nslot = pslot
   usefile = pfile
   nch = pchunk
+  if (.not. planq) then
   write(6, '(a,i16,a,f10.1,a)') '     CCSDT with this plan:           ', need_cc, '  = ', 8d-6 * need_cc, ' MB'
+  end if
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with this plan:             ', need_q, '  = ', &
     8d-6 * need_q, ' MB'
+  if (.not. planq) then
   write(6, '(a,i8,a,i8)') '     rows of a slab of the dressed <ab||cd>:      ', nqs, '  of ', nqmax
   write(6, '(a,i8,a,i8)') '     occupied triples of a pp-ladder batch:       ', nbt, '  of ', nto
   write(6, '(a,i8,a,i8)') '     occupied pairs of a batch of pass 1, pass 2: ', nbp, '  of ', npo
@@ -235,6 +245,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       16d-6 * nwe * n3 * pslot, ' MB)'
   else
     write(6, '(a,i3,a)') '     DIIS: ', pslot, ' vectors in the work array'
+  end if
   end if
   if (with_q) then
     write(6, '(a,i8,a,i8)') '     (Q): occupied indices with Xv at a time:     ', qxv, '  of ', max(3_8, no - 1)

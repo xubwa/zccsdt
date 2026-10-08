@@ -64,8 +64,10 @@ end subroutine xzrfile
 ! moinhhpp (as the Python reader does), checked against nmototal and JOBARC.
 subroutine xzsizes()
   use xzdata
+  use xzpar
   implicit none
-  integer(8) :: nb, po, nel, idrop, k
+  integer(8) :: nb, po, nel, idrop, k, ib(1)
+  real(8) :: rb(1)
   logical :: there
   character(len=8), parameter :: need(6) = &
     [character(len=8) :: 'nmototal', 'scf2ceig', 'moinhhhh', 'moinhhhp', 'moinhhpp', 'moinphhp']
@@ -95,7 +97,17 @@ subroutine xzsizes()
   open(unit=71, file='nmototal', form='unformatted', access='sequential', status='old', action='read')
   read(71) ntot
   close(71)
-  call getrec(20, 'JOBARC', 'NUMDROPA', 1_8, idrop)
+  ! (JOBARC is the business of rank 0)
+  if (myrank == 0) then
+    call getrec(20, 'JOBARC', 'NUMDROPA', 1_8, idrop)
+    call getrec(20, 'JOBARC', 'SCFENEG ', 1_8, escf)
+  end if
+  ib(1) = idrop
+  rb(1) = escf
+  call xzmpi_bcast(ib, 8_8)
+  call xzmpi_bcast(rb, 8_8)
+  idrop = ib(1)
+  escf = rb(1)
   nfrozen = 2 * idrop
   ndropped = ntot - nfrozen - no - nv
   if (ndropped < 0) then
@@ -103,7 +115,6 @@ subroutine xzsizes()
       'spinors, frozen, occupied, virtual', ntot, nfrozen, no, nv
     call errex
   end if
-  call getrec(20, 'JOBARC', 'SCFENEG ', 1_8, escf)
   ny = no + nv
   npo = no * (no - 1) / 2
   nvp = nv * (nv - 1) / 2
