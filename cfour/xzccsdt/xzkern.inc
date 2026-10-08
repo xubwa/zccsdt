@@ -235,6 +235,26 @@
       real(c_double) :: e(2)
     end subroutine
 
+    ! ---- (Q)_Lambda (csrc/qlambda.c)
+    subroutine N(zc_ql_energy)(z2, z3, r1, r2, ev, eo, n, e) bind(C)
+      import
+      integer(c_int64_t), value :: n
+      type(*), dimension(*) :: z2, z3, r1, r2, ev
+      real(c_double), value :: eo
+      real(c_double) :: e(2)
+    end subroutine
+
+    subroutine N(zc_ql_sector_energy)(n, kv, modulus, m, ev, eo, kmin, nk, lid_of, lstart, lmem, qmin, nq, &
+                                      off22, nc22, off13, nc13, posv, posq, pos3, b1, b2, b3, b4, c1, c2, c3, &
+                                      e) bind(C)
+      import
+      integer(c_int), value :: n, modulus, m, kmin, nk, qmin, nq
+      real(c_double), value :: eo
+      type(*), dimension(*) :: kv, ev, lid_of, lstart, lmem, off22, nc22, off13, nc13, posv, posq, pos3
+      type(*), dimension(*) :: b1, b2, b3, b4, c1, c2, c3
+      real(c_double) :: e(2)
+    end subroutine
+
     subroutine N(zc_rows_gemm)(m, ld, rows, sg, nr, cols, nc, l, na, x) bind(C)
       import
       integer(c_int64_t), value :: ld, nr, nc, na

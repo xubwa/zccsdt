@@ -85,7 +85,7 @@ module xzpar
   real(8), allocatable :: tsec(:)                    ! seconds it took
   logical, allocatable :: tdone(:)
   real(8) :: qsample = 0d0                           ! XZ_QSAMPLE: fraction of the quadruples (0: all)
-  character(len=8) :: qkind = '(Q)'                  ! what is on the left: '(Q)' ((Q)_L: not yet)
+  character(len=8) :: qkind = '(Q)'                  ! what is on the left: '(Q)' or '(Q)_L'
 contains
 
   ! quadruples i<j<k<l with i0 <= i < i1

@@ -22,6 +22,21 @@
 !                            + sum_e ( <md||el> t(jk,ce) - <mc||el> t(jk,de) ) ]
 !   Xv(e;kl;bcd) = P(d/bc) 1/2 sum_f <bc||ef> t(kl,fd)
 !
+! (Q)_Lambda (q_left of xzdata; docs/lambda.md, section 5): the same r, with
+!
+!   E[Q]_L = sum z2 r / D,        z2 = <0| Lambda_2 V |Q>
+!   E(Q)_L = sum (z2 + z3) r / D, z3 = <0| Lambda_3 V |Q>
+!
+! on the left, nothing conjugated: z2 is the product of z with l2 and
+! <kl||cd>, z3 the two products of [V,T3] with l3 in the place of T3 and the
+! integrals the other way round (the conjugates of the stacked operands),
+!
+!   X[(ab)][(cd)]  + l(ij,ab) <kl||cd>                  (ij|kl)             z2
+!                  + sum_e <ie||ab> l(jkl,cde)          (i|jkl)             z3
+!   X[a][(bcd)]    + sum_m <ij||ma> l(mkl,bcd)          (ij|kl)             z3
+!
+! in the work arrays of [V,T3] after r is there; lambda is at jl2, jl3.
+!
 ! Xv is held for the pairs (x, l) of one l at a time, for qxv occupied x (all
 ! x < l if they fit; otherwise the quadruples of one l are taken in groups by
 ! the parts of the range of x that their other three indices fall in).  The
@@ -41,12 +56,13 @@ subroutine N(xzq)(w, eq5, eq6)
   integer(8) :: m0, m1, na4, nslot, nxv
   integer(8) :: kt2pp, kt2p, kt2px, kxo, kg, kkm, kb, koo
   integer(8) :: kev4, kz, krt3, krtt, kw22, kw13, kla, kra, klb, krb, klc, krc, kxv, kwx, kmx, kwh
+  integer(8) :: kl2pp, kz3, kc3
   integer(8) :: i, j, k, l, x, n, size, ng, g1, g2, g3, nquad, ndone
   integer(8) :: lo1, hi1, lo2, hi2, lo3, hi3
   integer(8) :: it, want, nold, nmine, lastl, nlimit, nx, nqnow, nstop
   integer(8) :: slot(0:no-1), xnew(0:no-1), nnew
   logical :: need(0:no-1), first
-  real(8) :: e(2), e1(2), t0, tq(6), tstart, cq, cx, costmine, costleft, costdone, tloop, ttask, txv
+  real(8) :: e(2), e1(2), t0, tq(7), tstart, cq, cx, costmine, costleft, costdone, tloop, ttask, txv
   real(8) :: estimate, part(6), tot(6), tmx(2)
   integer(8), external :: N(xzqslot)
   integer :: ldbg
@@ -70,6 +86,8 @@ subroutine N(xzq)(w, eq5, eq6)
   kt2p = xzget(NW * no * no * nvp, '(Q): T2 [i][m][Q]')
   kt2px = xzget(NW * npo * nv * nv, '(Q): T2 [P][e][a]')
   kxo = xzget(NW * nto * no * nvp, '(Q): Xo')
+  kl2pp = kt2pp
+  if (q_left) kl2pp = xzget(NW * npo * nvp, '(Q): L2 [P][Q]')
   m1 = xzmark()
   kg = xzget(NW * no * npo * nvp, '(Q): work of Xo')
   kkm = xzget(NW * npo * nv * nv, '(Q): work of Xo')
@@ -80,6 +98,7 @@ subroutine N(xzq)(w, eq5, eq6)
     call N(xzqt2)(no, nv, npo, nvp, w(jt2), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kt2pp), w(kt2p), w(kt2px))
     call N(xzqxo)(no, nv, npo, nvp, nto, w(joooo), w(jovvo), w(kt2p), w(kt2px), w(jopa), w(jopb), &
                   w(jvpa), w(jvpb), w(jofree), w(jopair), w(kxo), w(kg), w(kkm), w(kb), w(koo))
+    if (q_left) call N(xzqpp)(no, nv, npo, nvp, w(jl2), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kl2pp))
     tq(1) = omp_get_wtime() - t0
   end if
   call xzrel(m1)
@@ -88,6 +107,9 @@ subroutine N(xzq)(w, eq5, eq6)
   if (ncls == 1) then
     kev4 = xzget(na4, '(Q): energies of the virtual quadruples')
     kz = xzget(NW * na4, '(Q): z')
+    kz3 = kz
+    kc3 = kz
+    if (q_left) kz3 = xzget(NW * na4, '(Q): z of Lambda3')
     krt3 = xzget(NW * na4, '(Q): r of [V,T3]')
     krtt = xzget(NW * na4, '(Q): r of T2 T2')
     kw22 = xzget(NW * nvp * qc22, '(Q): product [(ab)][(cd)]')
@@ -119,6 +141,12 @@ subroutine N(xzq)(w, eq5, eq6)
     krtt = xzget(NW * qn22max, '(Q): blocks of z')
     kw22 = xzget(NW * qn13max, '(Q): blocks of [V,T3] on an index and a triple')
     kw13 = xzget(NW * qn13max, '(Q): blocks of T2 T2 on an index and a triple')
+    kz3 = kz
+    kc3 = kw13
+    if (q_left) then
+      kz3 = xzget(NW * qn22max, '(Q): blocks of z of Lambda3 on two pairs')
+      kc3 = xzget(NW * qn13max, '(Q): blocks of z of Lambda3 on an index and a triple')
+    end if
     kla = xzget(NW * 4 * nvcmax * nqmax, '(Q): stacked operand')
     kra = xzget(NW * 4 * nvcmax * nqmax, '(Q): stacked operand')
     klb = xzget(NW * 4 * nocmax * nqmax, '(Q): stacked operand')
@@ -150,6 +178,8 @@ subroutine N(xzq)(w, eq5, eq6)
   if (nrank > 1) want = 8 * nrank
   call get_environment_variable('XZ_QTASKS', arg, ldbg)
   if (ldbg > 0) read(arg, *) want
+  qkind = '(Q)'
+  if (q_left) qkind = '(Q)_L'
   call xzq_build(no, want, cq, cx)
   qsample = 0d0
   call get_environment_variable('XZ_QSAMPLE', arg, ldbg)
@@ -169,7 +199,11 @@ subroutine N(xzq)(w, eq5, eq6)
     costmine = costmine + tcost(it)
     if (.not. tdone(it)) costleft = costleft + tcost(it)
   end do
-  write(6, '(/,a,i10,a,i14,a)') '   (Q) correction: ', nquad, ' occupied x ', na4, ' virtual quadruples'
+  if (q_left) then
+    write(6, '(/,a,i10,a,i14,a)') '   (Q)_Lambda correction: ', nquad, ' occupied x ', na4, ' virtual quadruples'
+  else
+    write(6, '(/,a,i10,a,i14,a)') '   (Q) correction: ', nquad, ' occupied x ', na4, ' virtual quadruples'
+  end if
   write(6, '(a,i6,a,i5,a,i6,a,i5)') '   tasks: ', ntask, '   ranks: ', nrank, '   tasks of this rank: ', nmine, &
     '   rank ', myrank
   if (nold > 0) write(6, '(a,i6,a)') '   restart: ', nold, ' tasks were finished by an earlier run (files XZQCHK.*)'
@@ -245,12 +279,14 @@ subroutine N(xzq)(w, eq5, eq6)
                 if (ncls == 1) then
                   call N(xzquad)(w, i, j, k, l, na4, w(jotri), w(josgn), w(kt2pp), w(kt2p), w(kt2px), w(kxo), &
                                  w(kev4), w(kz), w(krt3), w(krtt), w(kw22), w(kw13), w(kla), w(kra), w(klb), &
-                                 w(krb), w(klc), w(krc), w(kwh), w(kxv), slot, e1, tq)
+                                 w(krb), w(klc), w(krc), w(kwh), w(kxv), slot, q_left, w(kl2pp), w(kz3), &
+                                 e1, tq)
                 else
                   call N(xzqsquad)(w, i, j, k, l, w(jotri), w(josgn), w(jopidx), w(jopgrp), w(kt2pp), &
                                    w(kt2p), w(kt2px), w(kxo), w(kz), w(krt3), w(krtt), w(kw22), w(kw13), &
                                    w(kla), w(kra), w(klb), w(krb), w(kwh), w(kwh + NW * 6 * nqmax), w(klc), &
-                                   w(krc), w(krc + 6 * nocmax), w(kxv), slot, e1, tq)
+                                   w(krc), w(krc + 6 * nocmax), w(kxv), slot, q_left, w(kl2pp), w(kz3), &
+                                   w(kc3), e1, tq)
                 end if
                 e = e + e1
                 ndone = ndone + 1
@@ -312,6 +348,8 @@ subroutine N(xzq)(w, eq5, eq6)
   if (qdebug) write(6, '(a,4f18.12)') '   (Q) parts: z.[V,T3], z.T2T2, [V,T3].[V,T3], [V,T3].T2T2', qparts
   write(6, '(5x,a28,f12.2,a)') 'Xo', tq(1), ' s'
   write(6, '(5x,a28,f12.2,a)') 'Xv', tq(2), ' s'
+  if (q_left) write(6, '(5x,a28,f12.2,a)') 'left side with Lambda_3', tq(7), &
+    ' s (in the three lines below)'
   write(6, '(5x,a28,f12.2,a)') 'operands', tq(3), ' s'
   write(6, '(5x,a28,f12.2,a)') 'products (GEMM)', tq(4), ' s'
   write(6, '(5x,a28,f12.2,a)') 'reductions', tq(5), ' s'
@@ -468,7 +506,7 @@ end subroutine
 ! One occupied quadruple i<j<k<l: e(1), e(2) = its parts of E[Q] and of
 ! E(Q) - E[Q].
 subroutine N(xzquad)(w, i, j, k, l, na4, otri, osgn, t2pp, t2p, t2px, xo, ev4, z, rt3, rtt, w22, w13, &
-                     la, ra, lb, rb, lc, rc, wh, xv, slot, e, tq)
+                     la, ra, lb, rb, lc, rc, wh, xv, slot, left, l2pp, z3, e, tq)
   use xzdata
   use xzkern
   use omp_lib
@@ -488,10 +526,14 @@ subroutine N(xzquad)(w, i, j, k, l, na4, otri, osgn, t2pp, t2p, t2px, xo, ev4, z
   ZT :: wh(0:nvp-1, 0:5, 0:1)
   ZT, intent(in) :: xv(0:nv*nvt-1, 0:*)
   integer(8), intent(in) :: slot(0:*)
+  logical, intent(in) :: left                                  ! lambda on the left: (Q)_Lambda
+  ZT, intent(in) :: l2pp(0:nvp-1, 0:npo-1)                     ! (left)
+  ZT :: z3(*)                                                  ! (left)
   real(8), intent(out) :: e(2)
-  real(8), intent(inout) :: tq(6)
-  integer(8) :: q(0:3), s, x, jt, m, c0, nc, p1, p2, n
+  real(8), intent(inout) :: tq(7)
+  integer(8) :: q(0:3), s, x, jt, m, c0, nc, p1, p2, n, jts(0:3)
   integer(8) :: rows(0:6*no-1), xfirst(0:5), pfirst(0:5)
+  real(8) :: tl0
   integer(1) :: sgn(0:6*no-1)
   real(8) :: sg, s13(0:3), s22(0:5), t0, eo
   integer(8), external :: xztrank
@@ -514,8 +556,14 @@ subroutine N(xzquad)(w, i, j, k, l, na4, otri, osgn, t2pp, t2p, t2px, xo, ev4, z
     p2 = xzpidx(q(r1(s)), q(r2(s)), no)
     pfirst(s) = p1
     xfirst(s) = q(r1(s))
-    wh(:, s, 0) = s22(s) * t2pp(:, p1)
-    call N(xzqconj)(nvp, w(jgpp + NW * nvp * p2), wh(0, s, 1))
+    if (left) then
+      ! l(ij,ab) <kl||cd>
+      wh(:, s, 0) = s22(s) * l2pp(:, p1)
+      call N(xzqcopy)(nvp, 1d0, .false., w(jgpp + NW * nvp * p2), wh(0, s, 1))
+    else
+      wh(:, s, 0) = s22(s) * t2pp(:, p1)
+      call N(xzqconj)(nvp, w(jgpp + NW * nvp * p2), wh(0, s, 1))
+    end if
   end do
   call zc_tn_zero(z, 8 * NW * na4)
   call zc_tn_zero(rt3, 8 * NW * na4)
@@ -534,6 +582,7 @@ subroutine N(xzquad)(w, i, j, k, l, na4, otri, osgn, t2pp, t2p, t2px, xo, ev4, z
       jt = xztrank(q(0), q(1), q(2), no)
     end select
     sg = s13(s)
+    jts(s) = jt
     ! - <ab||ei> = <ie||ab>*:  la[e][(ab)] = sgn conj(<xe||ab>)
     call N(xzqla)(nv * nvp, sg, w(jovvq + NW * nv * nvp * x), la(0, 0, s))
     call zc_tn_zero(ra(0, 0, s), 8 * NW * nv * nvp)
@@ -598,11 +647,92 @@ subroutine N(xzquad)(w, i, j, k, l, na4, otri, osgn, t2pp, t2p, t2px, xo, ev4, z
     call N(zc_tn_reduce)(rtt, 1_8, na4, int(nv, 4), 1_4, 3_4, 0_8, nv, c0, c0 + nc, w13, nc, 1_8, 0_8, 1d0)
     tq(5) = tq(5) + omp_get_wtime() - t0
   end do
+  if (left) then
+    ! ---- z3 = <0| Lambda_3 V |Q>: the two products of [V,T3] with l3 and
+    !      the integrals the other way round, in the same work arrays
+    tl0 = omp_get_wtime()
+    t0 = omp_get_wtime()
+    call zc_tn_zero(z3, 8 * NW * na4)
+    do s = 0, 3
+      call N(xzqcopy)(nv * nvp, s13(s), .false., w(jovvq + NW * nv * nvp * q(s)), la(0, 0, s))
+      call zc_tn_zero(ra(0, 0, s), 8 * NW * nv * nvp)
+      call N(zc_tn_expand)(w(jl3 + NW * nvt * jts(s)), 1_8, nvt, int(nv, 4), 1_4, 2_4, 0_8, nv, 0_8, nvp, &
+                           ra(0, 0, s), nvp, 1_8, 0_8, 1d0)
+    end do
+    do s = 0, 5
+      do m = 0, no - 1
+        call N(xzqcopy)(nv, s22(s), .false., w(jooov + NW * nv * (m + no * (q(f2(s)) + no * q(f1(s))))), &
+                        lc(0, m, s))
+      end do
+    end do
+    call N(zc_tn_rows)(w(jl3), nvt, rows, sgn, 6 * no, 0_8, nvt, rc, nvt)
+    tq(3) = tq(3) + omp_get_wtime() - t0
+    do c0 = 0, nvp - 1, qc22
+      nc = min(qc22, nvp - c0)
+      t0 = omp_get_wtime()
+      call N(zc_gemm)(1_4, 0_4, nvp, nc, 4 * nv, one, la, nvp, ra(c0, 0, 0), nvp, zero, w22, nc)
+      tq(4) = tq(4) + omp_get_wtime() - t0
+      t0 = omp_get_wtime()
+      call N(zc_tn_reduce)(z3, 1_8, na4, int(nv, 4), 2_4, 2_4, 0_8, nvp, c0, c0 + nc, w22, nc, 1_8, 0_8, 1d0)
+      tq(5) = tq(5) + omp_get_wtime() - t0
+    end do
+    do c0 = 0, nvt - 1, qc13
+      nc = min(qc13, nvt - c0)
+      t0 = omp_get_wtime()
+      call N(zc_gemm)(1_4, 0_4, nv, nc, 6 * no, one, lc, nv, rc(c0, 0, 0), nvt, zero, w13, nc)
+      tq(4) = tq(4) + omp_get_wtime() - t0
+      t0 = omp_get_wtime()
+      call N(zc_tn_reduce)(z3, 1_8, na4, int(nv, 4), 1_4, 3_4, 0_8, nv, c0, c0 + nc, w13, nc, 1_8, 0_8, 1d0)
+      tq(5) = tq(5) + omp_get_wtime() - t0
+    end do
+    tq(7) = tq(7) + omp_get_wtime() - tl0
+  end if
   t0 = omp_get_wtime()
   e = 0d0
-  call N(zc_tn_energy2)(z, rt3, rtt, ev4, eo, na4, e)
-  if (qdebug) call N(xzqparts)(na4, z, rt3, rtt, ev4, eo, qparts)
+  if (left) then
+    call N(zc_ql_energy)(z, z3, rt3, rtt, ev4, eo, na4, e)
+  else
+    call N(zc_tn_energy2)(z, rt3, rtt, ev4, eo, na4, e)
+    if (qdebug) call N(xzqparts)(na4, z, rt3, rtt, ev4, eo, qparts)
+  end if
   tq(6) = tq(6) + omp_get_wtime() - t0
+end subroutine
+
+! l2pp[P][Q] of l2[i][j][a][b]
+subroutine N(xzqpp)(no, nv, npo, nvp, l2, opa, opb, vpa, vpb, l2pp)
+  implicit none
+  integer(8), intent(in) :: no, nv, npo, nvp
+  ZT, intent(in) :: l2(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)
+  integer(8), intent(in) :: opa(0:npo-1), opb(0:npo-1), vpa(0:nvp-1), vpb(0:nvp-1)
+  ZT, intent(out) :: l2pp(0:nvp-1, 0:npo-1)
+  integer(8) :: p, q
+  do p = 0, npo - 1
+    do q = 0, nvp - 1
+      l2pp(q, p) = l2(vpb(q), vpa(q), opb(p), opa(p))
+    end do
+  end do
+end subroutine
+
+! out = sg * a, or sg * conj(a)
+subroutine N(xzqcopy)(n, sg, cj, a, out)
+  implicit none
+  integer(8), intent(in) :: n
+  real(8), intent(in) :: sg
+  logical, intent(in) :: cj
+  ZT, intent(in) :: a(n)
+  ZT, intent(out) :: out(n)
+  integer(8) :: i
+  if (cj) then
+    !$omp parallel do if(n > 100000)
+    do i = 1, n
+      out(i) = sg * CONJ(a(i))
+    end do
+  else
+    !$omp parallel do if(n > 100000)
+    do i = 1, n
+      out(i) = sg * a(i)
+    end do
+  end if
 end subroutine
 
 ! out = conj(a)
