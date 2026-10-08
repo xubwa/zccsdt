@@ -6,11 +6,9 @@ usage: python bench/density_ccsdt.py validate MOLECULE BASIS KIND [NDROP]
            reference (zccsdt.cc.lambda_ref: small cases only), the relaxed
            density, and the dipole derivative of E(SCF) + E_corr(CCSDT)
            with the SCF repeated in the field (four-point differences).
-           NDROP: that many of the highest virtual spin orbitals left out of
-           the SCF basis of the correlated calculation is not done here - the
-           number is the count of frozen occupied ones (lowest), and of
-           dropped virtual ones after a comma: 2 or 2,4.
-       python bench/density_ccsdt.py time MOLECULE BASIS KIND [NITER]
+           NDROP: the number of frozen occupied spin orbitals (the lowest)
+           and, after a comma, of dropped virtual ones (the highest): 2 or 2,4.
+       python bench/density_ccsdt.py time MOLECULE BASIS KIND [NITER] [NDROP]
            the time of the densities, the orbital gradient and the Z-vector
            equations next to that of a CCSDT iteration.  Lambda is the
            conjugate of t here (the cost does not depend on the numbers; the
@@ -167,13 +165,14 @@ def tree(times, parent=(), indent=1):
         tree(times, tuple(parent) + (name,), indent + 1)
 
 
-def profile(mol, kind, niter):
+def profile(mol, kind, niter, nfrozen=0, ndrop=0):
     mem = {'max_memory': float(os.environ['ZC_MAXMEM'])} if os.environ.get('ZC_MAXMEM') else {}
     mf, C, z = make_scf(mol, kind)
     t0 = time.perf_counter()
-    eris = E.from_scf(mf, mo_coeff=C, packed_vvvv=kind != 'ghfc', **mem)
+    eris, (Cf, Co, Cv, Cd) = integrals(mf, C, nfrozen, ndrop, packed_vvvv=kind != 'ghfc', **mem)
     nocc, nvir = eris.nocc, eris.nmo - eris.nocc
-    print('%d occupied and %d virtual spin orbitals, %s; integrals %.1f s' % (nocc, nvir, eris.dtype, time.perf_counter() - t0))
+    print('%d occupied and %d virtual spin orbitals (%d frozen, %d dropped), %s; integrals %.1f s'
+          % (nocc, nvir, nfrozen, ndrop, eris.dtype, time.perf_counter() - t0))
     r0 = solver.kernel(eris, 'ccsdt', solver.Options(max_cycle=1, verbose=True, **mem))
     timing.reset()
     r = solver.kernel(eris, 'ccsdt', solver.Options(max_cycle=niter, verbose=True, plan=r0.plan, **mem),
@@ -192,15 +191,17 @@ def profile(mol, kind, niter):
         nb, slab = os.environ['ZC_DENS_PLAN'].split(',')
         isz, nvp = t3.dtype.itemsize, nvir * (nvir - 1) // 2
         slab = max(1, int(float(slab) * 1e6) // (isz * nvp)) * isz * nvp
-        dmem = {'plan': D.Plan(nb=int(nb), slab_bytes=slab, need=D.fixed_bytes(nocc, nvir, isz) + max(
-            int(nb) * D.pair_bytes(nocc, nvir, isz), slab))}
+        dmem = {'plan': D.Plan(nb=int(nb), slab_bytes=slab, need=D.fixed_bytes(nocc, nvir, isz, nfrozen + ndrop) + max(
+            int(nb) * D.pair_bytes(nocc, nvir, isz, nfrozen + ndrop), slab))}
     for attempt in range(2):
         timing.reset()
         base = memory.resident()
         watch = MemWatch()
         watch.start()
         t0, c0 = time.perf_counter(), time.process_time()
-        rel = D.relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, C, tol=1e-9, **dmem)
+        rel = D.relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, np.hstack((Co, Cv)),
+                             frozen_occ=Cf if nfrozen else None, dropped_vir=Cd if ndrop else None,
+                             tol=1e-9, **dmem)
         wall, cpu = time.perf_counter() - t0, time.process_time() - c0
         peak = watch.stop()
         print('run %d: densities + orbital gradient + Z-vector %.2f s, %.1f cores busy = %.2f CCSDT iterations; '
@@ -218,7 +219,8 @@ def main():
         fr = (sys.argv[5] if len(sys.argv) > 5 else '0').split(',')
         validate(mol, kind, int(fr[0]), int(fr[1]) if len(fr) > 1 else 0)
     else:
-        profile(mol, kind, int(sys.argv[5]) if len(sys.argv) > 5 else 2)
+        fr = (sys.argv[6] if len(sys.argv) > 6 else '0').split(',')
+        profile(mol, kind, int(sys.argv[5]) if len(sys.argv) > 5 else 2, int(fr[0]), int(fr[1]) if len(fr) > 1 else 0)
 
 
 if __name__ == '__main__':
