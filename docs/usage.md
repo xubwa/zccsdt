@@ -283,9 +283,14 @@ e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), 
   (`zccsdt.cc.quadruples_lambda`; in the sectors of the labels,
   `quadruples_lambda_sym`, where the integrals have them): 1.3 to 1.4 times
   the time of (Q).  `zccsdt.CCSDTQ` passes it on to its CCSDT step.
-- The densities and (Q)_Lambda work on T3 and Lambda_3 packed in
-  lexicographic order: after iterations in the blocks of the labels both
-  are expanded once.  The Lambda equations and (Q)_Lambda use the labels.
+- For a linear molecule with `symmetry` the Lambda equations and the
+  densities run in the blocks of the labels (`lambda_blk`, `density_blk`)
+  where C(o,3) C(v,3) is at least `mycc.blocks_min` (800,000: below that
+  the blocks are slower), else on the packed block; `mycc.l3` has the
+  layout of `mycc.t3` either way, and `lambda_blocks`, `rdm1_blocks` say
+  what ran.  HBr / cc-pVQZ-DK, 8 + 160 spinors, from the spinors to the
+  relaxed density: 194 s with the labels, 645 s without.  (Q)_Lambda takes
+  T3 and Lambda_3 packed and forms its products in the sectors.
 - An RHF reference makes `zccsdt.CCSDT` the closed-shell class, which has
   none of this: `zccsdt.CCSDT(mf.to_ghf())` for these methods.
 
