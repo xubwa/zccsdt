@@ -9,8 +9,7 @@ operators with (the full density, the SCF part included, D[p,q] = <q+ p>:
 bench/cfour/write_density.py has that pinned against CFOUR's own file for
 CCSD).
 
-Lambda is that of the dense reference (zccsdt.cc.lambda_ref) until the
-solver on packed amplitudes is there: small cases only.
+Lambda is that of the solver on packed amplitudes (zccsdt.cc.lambda_opt).
 
 usage: python bench/cfour/write_density_ccsdt.py RUNDIR [--ccsd] [--run]
   --ccsd: the CCSD limit of the same code path - the amplitudes and lambda
@@ -37,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import props                                                            # noqa: E402
 
 from zccsdt import cfour, eris as E                                     # noqa: E402
-from zccsdt.cc import ccsdtq_ref as R, ccsdtq_terms as Q, density_opt, lambda_ref, solver   # noqa: E402
+from zccsdt.cc import density_opt, lambda_opt, solver                 # noqa: E402
 
 
 def amplitudes_ccsdt(mf, C, nfrozen, ndropped, log):
@@ -46,25 +45,21 @@ def amplitudes_ccsdt(mf, C, nfrozen, ndropped, log):
     n = C.shape[1]
     nocc = int((mf.mo_occ > 0).sum())
     cols = np.arange(n - ndropped)
-    # (the full <ab||cd>: the dense reference of Lambda takes it)
-    eris = E.from_scf(mf, mo_coeff=C[:, cols], mo_occ=mf.mo_occ[cols], frozen=nfrozen)
+    eris = E.from_scf(mf, mo_coeff=C[:, cols], mo_occ=mf.mo_occ[cols], frozen=nfrozen, packed_vvvv=True)
     t0 = time.perf_counter()
     r = solver.kernel(eris, 'ccsdt', solver.Options(conv_tol=1e-12, conv_tol_normt=1e-9))
     if not r.converged:
         raise RuntimeError('CCSDT did not converge')
     log('E(CCSDT) = %.12f  correlation %.12f  (%d iterations, %.1f s)'
         % (mf.e_tot + float(np.real(r.e_corr)), float(np.real(r.e_corr)), r.ncycle, time.perf_counter() - t0))
-    # Lambda: the dense reference (full arrays)
+    # Lambda on the packed amplitudes
     t0 = time.perf_counter()
-    o, v = r.t1.shape
-    fock, g, mo_e, _ = R.integrals(eris)
-    t3 = Q.expand(np.asarray(r.t3).reshape(len(Q.tuples(o, 3)), -1), o, v, 3)
-    rl = lambda_ref.kernel(fock, g, mo_e, o, [r.t1, r.t2, t3], conv_tol_normt=1e-10)
+    rl = lambda_opt.kernel(eris, r.t1, r.t2, r.t3, solver.Options(conv_tol_normt=1e-10))
     if not rl.converged:
         raise RuntimeError('the Lambda equations of CCSDT did not converge')
-    log('Lambda (dense reference): %d iterations, %.1f s' % (rl.ncycle, time.perf_counter() - t0))
+    log('Lambda: %d iterations, %.1f s' % (rl.ncycle, time.perf_counter() - t0))
     parts = (C[:, :nfrozen], C[:, nfrozen:nocc], C[:, nocc:n - ndropped], C[:, n - ndropped:])
-    return eris, r.t1, r.t2, r.t3, rl.lams[0], rl.lams[1], Q.unique(rl.lams[2], 3), parts
+    return eris, r.t1, r.t2, r.t3, rl.l1, rl.l2, rl.l3, parts
 
 
 def amplitudes_ccsd(mf, nfrozen, ndropped, log):

@@ -576,3 +576,39 @@ def test_other_blocks_vanish_for_converged_amplitudes():
     assert scale > 1e-5
     for block in (gnh[:o, :o], gnh[o:, o:], gnh[:o, o:], gnh[o:, :o] - res.gnh):
         assert abs(block).max() < 1e-7 * scale
+
+
+def test_front_end_relaxed_density_of_a_linear_molecule():
+    '''zccsdt.CCSDT(mf).make_rdm1() - Lambda on the packed amplitudes
+    (lambda_opt), the density and the orbital gradient, the Z-vector
+    equations - for HF with X2C spinors on the z axis and a frozen core: T3
+    in the blocks of 2 m_j, the spinors in the order of their labels.  The
+    relaxed dipole against the finite field with the SCF repeated in it.'''
+    import zccsdt
+    from pyscf import gto, x2c
+
+    def run(field):
+        mol = gto.M(atom='F 0 0 0; H 0 0 0.9168', basis='6-31g', verbose=0)
+        mf = x2c.UHF(mol)
+        mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-9
+        if field:
+            h0, z = mf.get_hcore(), mol.intor('int1e_r_spinor')[2]
+            mf.get_hcore = lambda *args, **kwargs: h0 + field * z
+        mf.kernel()
+        cc = zccsdt.CCSDT(mf, frozen=2)
+        cc.verbose, cc.conv_tol, cc.conv_tol_normt = 0, 1e-12, 1e-10
+        cc.kernel()
+        return mol, cc
+
+    mol, cc = run(0.0)
+    assert np.size(cc.t3) < 56 * 560                    # (blocks of the labels)
+    z = mol.intor('int1e_r_spinor')[2]
+    D = cc.make_rdm1(ao_repr=True)
+    Du = cc.make_rdm1(relaxed=False, ao_repr=True)
+    assert cc.converged_lambda and abs(D - D.conj().T).max() < 1e-12
+    assert abs(np.einsum('pq,qp', mol.intor('int1e_ovlp_spinor'), D).real - 10) < 1e-9
+    h = 1e-3
+    e = {f: run(f)[1].e_tot for f in (-2 * h, -h, h, 2 * h)}
+    ff = (e[-2 * h] - 8 * e[-h] + 8 * e[h] - e[2 * h]) / (12 * h)
+    rel, unrel = (np.einsum('pq,qp', z, x).real for x in (D, Du))
+    assert abs(rel - ff) < 5e-9 and abs(unrel - rel) > 1e-5

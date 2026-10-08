@@ -975,7 +975,7 @@ class GCCSDT(UCCSDT):
     real_spinors = True
     symmetry = True         # use the symmetry labels of the spinors where the integrals have them
     _block_iterations = True    # ... in the iterations too: T3 in blocks, the spinors in the order of the labels
-    _keys = UCCSDT._keys | {'real_spinors', 'symmetry'}
+    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'rdm1_basis'}
 
     def _axial(self):
         '''The spinors of a linear molecule on the z axis adapted to m_j
@@ -1096,6 +1096,71 @@ class GCCSDT(UCCSDT):
         if num is not None:
             occ, vir = num[:eris.nocc], num[eris.nocc:]
         return ['%d' % (i + 1) for i in occ], ['%d' % (a + 1) for a in vir]
+
+    # ---- Lambda and one-electron properties (docs/lambda.md)
+
+    def _dense_view(self):
+        '''(eris, t3) for the codes that take T3 on the packed block in
+        lexicographic order: the integrals without their labels in use, the
+        blocks of T3 put in their places.'''
+        import copy
+        from zccsdt.cc import ccsdt_opt
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        t3 = self.t3
+        if getattr(eris, 'use_labels', False):
+            t3 = ccsdt_opt.packed_t3(eris, t3)
+            eris = copy.copy(eris)
+            eris.use_labels = False
+            eris.__dict__.pop('_buffers', None)
+        return eris, t3
+
+    def solve_lambda(self):
+        '''The Lambda equations of CCSDT for the converged amplitudes
+        (zccsdt.cc.lambda_opt): l1, l2 and l3 on the packed block, kept as
+        self.l1, self.l2, self.l3.'''
+        from zccsdt.cc import lambda_opt, solver
+        if self.t3 is None:
+            raise RuntimeError('%s.solve_lambda(): no amplitudes (kernel() first)' % self.__class__.__name__)
+        eris, t3 = self._dense_view()
+        res = lambda_opt.kernel(eris, self.t1, self.t2, t3, solver.Options(
+            conv_tol_normt=self._conv_tol_normt(), max_cycle=self.max_cycle, diis_space=self.diis_space,
+            incore_complete=self.incore_complete, max_memory=self.max_memory))
+        if not res.converged:
+            logger.warn(self, 'the Lambda equations of CCSDT did not converge in %d cycles', res.ncycle)
+        self.l1, self.l2, self.l3, self.converged_lambda = res.l1, res.l2, res.l3, bool(res.converged)
+        return self.l1, self.l2, self.l3
+
+    def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-9):
+        '''The one-particle density of CCSDT, D[p,q] = <q+ p>, in the basis
+        of all spinors of the SCF in the order [frozen occupied, active
+        occupied, active virtual, dropped virtual] (``ao_repr``: in the AO
+        basis): the relaxed one - with the response of the spinors, from the
+        orbital gradient and the Z-vector equations of the SCF
+        (zccsdt.cc.density_opt, zccsdt.zccsd.zvector) -, or with
+        ``relaxed=False`` the one of t and lambda at fixed spinors.  Lambda
+        is solved for if it is not there.  The trace with a one-electron
+        operator is the derivative of the CCSDT energy.'''
+        from zccsdt.cc import density_opt
+        if isinstance(self._scf, _Given):
+            raise RuntimeError('the integrals were given: no SCF to take the response of the spinors from')
+        if getattr(self, 'l3', None) is None:
+            self.solve_lambda()
+        eris, t3 = self._dense_view()
+        fo, o, v, fv = self._active()
+        if getattr(eris, 'labels', None) is not None and getattr(self, '_sorted', None) is not None:
+            o, v = self._sorted
+        axial = self._axial()
+        Cs = np.asarray(self.mo_coeff) if axial is None else axial
+        rel = density_opt.relaxed_rdm1(
+            self._scf, eris, self.t1, self.t2, t3, self.l1, self.l2, self.l3, Cs[:, np.concatenate((o, v))],
+            frozen_occ=Cs[:, fo] if len(fo) else None, dropped_vir=Cs[:, fv] if len(fv) else None,
+            tol=tol, max_memory=self.max_memory)
+        dm = rel.relaxed if relaxed else rel.unrelaxed
+        self.rdm1_basis = rel.mo_coeff
+        if ao_repr:
+            C = rel.mo_coeff
+            return C @ dm @ C.conj().T
+        return dm
 
     def ccsdt_q(self, t2=None, t3=None):
         '''(Q) correction of the converged CCSDT amplitudes on spin orbitals
