@@ -80,6 +80,8 @@ def main():
     ccsdt_opt.release_cached(eris)
 
     # ---- Lambda iterations
+    from zccsdt import memory
+    base = memory.resident()            # the integrals and T3
     watch = MemWatch()
     watch.start()
     timing.reset()
@@ -100,9 +102,12 @@ def main():
     plan = lr.plan
     print('plan: need %.2f GB (setup %.2f, iteration %.2f, buffers mem_mb %.0f)'
           % (plan.need / 1e9, plan.setup / 1e9, plan.iteration / 1e9, plan.mem_mb))
-    print('peak RSS %.2f GB (Lambda: anonymous %.2f GB, file-backed %.2f GB)'
-          % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6, watch.anon / 1e6,
-             watch.file / 1e6))
+    t3_bytes = t3.nbytes
+    print('Lambda: peak anonymous %.2f GB, %.2f GB above the %.2f GB before it (integrals, T3); '
+          'the plan without T3: %.2f GB;  file-backed %.2f GB;  peak RSS of the process %.2f GB'
+          % (watch.anon / 1e6, watch.anon / 1e6 - base / 1e9, base / 1e9,
+             (plan.need - t3_bytes) / 1e9, watch.file / 1e6,
+             resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6))
 
 
 if __name__ == '__main__':

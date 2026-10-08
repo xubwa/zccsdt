@@ -76,6 +76,7 @@ def test_residuals_against_the_tables(no, nv, cplx, mem_mb, use_c, monkeypatch):
         pytest.skip('C libraries not built')
     monkeypatch.setattr(t3kern, 'USE_C', use_c)
     monkeypatch.setattr(t3pack, 'USE_C', use_c)
+    monkeypatch.setattr(LO, 'USE_C', use_c and LO.USE_C)
     eris = _model_eris(no, nv, seed=no + nv, cplx=cplx)
     rng = np.random.default_rng(7)
     t, l = _amps(rng, no, nv, cplx), _amps(rng, no, nv, cplx)
@@ -110,6 +111,43 @@ def test_residuals_against_the_tables(no, nv, cplx, mem_mb, use_c, monkeypatch):
     assert new[2] is out or np.shares_memory(new[2], out)
     assert _rel(new[0], want[0]) < 1e-12 and _rel(new[1], want[1]) < 1e-12
     assert _rel(new[2].reshape(L3p.shape), Q.unique(want[2], 3)) < 1e-12
+
+
+@pytest.mark.parametrize('cplx', [False, True])
+def test_pair_kernels(cplx, monkeypatch):
+    '''csrc/lambda_t3.c against the numpy forms and against the definitions:
+    an array packed over a virtual pair on both orders of the pair, and its
+    contraction with the packed columns of an operator on pairs (more pairs
+    than one block of the kernel).'''
+    if not LO.USE_C:
+        pytest.skip('libzc_lambda not built')
+    n, nx, ny = 13, 3, 4
+    vm = t3pack.triple_map(n)
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    rng = np.random.default_rng(0)
+
+    def rand(*sh):
+        return rng.standard_normal(sh) + (1j * rng.standard_normal(sh) if cplx else 0)
+    Y = rand(ny, nx, vm.npair)
+    full = np.zeros((ny, nx, n, n), dtype=Y.dtype)
+    full[:, :, md, ne] = Y
+    full[:, :, ne, md] = -Y
+    got = LO.pair_expand(Y, vm)
+    assert got.dtype == Y.dtype and abs(got - full.transpose(0, 3, 1, 2)).max() == 0
+    Y = rand(n, nx, vm.npair)
+    W = rand(vm.npair, vm.npair)
+    w = np.zeros((vm.npair, n, n), dtype=W.dtype)
+    w[:, md, ne] = W
+    w[:, ne, md] = -W
+    ref = np.einsum('hxQ,Qah->xa', Y, w)
+    got = LO.pair_matvec(Y, W, vm)
+    assert abs(got - ref).max() < 1e-12 * abs(ref).max()
+    monkeypatch.setattr(LO, 'USE_C', False)
+    assert abs(LO.pair_matvec(Y, W, vm) - ref).max() < 1e-12 * abs(ref).max()
+    Y = rand(ny, nx, vm.npair)
+    full[:, :, md, ne] = Y
+    full[:, :, ne, md] = -Y
+    assert abs(LO.pair_expand(Y, vm) - full.transpose(0, 3, 1, 2)).max() == 0
 
 
 def test_integrals_and_amplitudes_are_not_modified():

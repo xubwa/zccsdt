@@ -46,6 +46,8 @@ of a label has to provide.  The memory is planned (plan_memory); T3, l3 and
 the residual are in ordinary memory.
 '''
 
+import ctypes
+import os
 import time
 from dataclasses import dataclass
 
@@ -63,6 +65,58 @@ einsum = lib.einsum
 
 # the groups of terms of the Lambda_3 residual (residuals(..., terms=))
 GROUPS = ('outer', 'drive2', 'drive3', 'ring', 'pp', 'hh')
+
+
+
+def _load_lib():
+    path = os.environ.get('ZCCSDT_LAMBDA_LIB') or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib', 'libzc_lambda.so')
+    try:
+        return ctypes.CDLL(path)
+    except OSError:
+        return None
+
+
+_lib = _load_lib()
+USE_C = _lib is not None        # csrc/lambda_t3.c; set False to force the numpy forms
+
+
+def pair_expand(Y, vm):
+    '''out[y, e, x, a] = Y[y, x, (a<e)] for a < e, -Y[y, x, (e<a)] for a > e:
+    an array packed over a virtual pair on both orders of the pair.'''
+    ny, nx, nq = Y.shape
+    n = vm.n
+    out = np.empty((ny, n, nx, n), dtype=Y.dtype)
+    if USE_C and vm.spins is None and Y.flags.c_contiguous \
+            and Y.dtype in (np.float64, np.complex128):
+        getattr(_lib, 'zc_lam_pair_expand_' + t3pack._sfx(Y.dtype))(
+            t3pack._p(Y), t3pack._p(out), t3pack._I64(ny), t3pack._I64(nx), t3pack._I64(n))
+        return out
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    out[...] = 0
+    out[:, ne, :, md] = Y.transpose(2, 0, 1)
+    out[:, md, :, ne] = -Y.transpose(2, 0, 1)
+    return out
+
+
+def pair_matvec(Y, W, vm):
+    '''K[x, a] = sum_{Q,h} Y[h, x, Q] w[Q, (a,h)] with the packed columns of
+    W (npair, npair) on both orders of the pair: w[Q, (a,h)] = W[Q, (a<h)]
+    for a < h and -W[Q, (h<a)] for a > h.'''
+    n, nx, nq = Y.shape
+    out = np.zeros((nx, n), dtype=Y.dtype)
+    if USE_C and vm.spins is None and Y.flags.c_contiguous and W.flags.c_contiguous \
+            and Y.dtype == W.dtype and Y.dtype in (np.float64, np.complex128):
+        getattr(_lib, 'zc_lam_pair_matvec_' + t3pack._sfx(Y.dtype))(
+            t3pack._p(Y), t3pack._p(W), t3pack._p(out), t3pack._I64(nx), t3pack._I64(n))
+        return out
+    r = np.arange(n)
+    for h in range(n):
+        a = np.delete(r, h)
+        cols = vm.pidx[np.minimum(a, h), np.maximum(a, h)]
+        out[:, a] += np.where(a < h, 1.0, -1.0) * gemm(np.ascontiguousarray(Y[h]),
+                                                        np.asarray(W[:, cols], dtype=Y.dtype))
+    return out
 
 
 # ------------------------------------------------------------------- engine
@@ -343,9 +397,9 @@ def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0):
         t3pack.axpby(GmQ[:, :, nocc:], Wv.transpose(2, 0, 1), 1.0, 0.0)
         im.GmQ = GmQ.reshape(nocc * nvp, nocc + nvir)
         del Wv, Bv
-        # <ej||bg> = -<je||bg> as [e, g, j, b]; the dressed ovvv block goes
+        # <ej||bg> = -<je||bg> as [g, e, j, b]; the dressed ovvv block goes
         im.Vx = np.empty((nvir, nvir, nocc, nvir), dtype=dtype)
-        t3pack.axpby(im.Vx, ge['ovvv'].transpose(1, 3, 0, 2), -1.0, 0.0)
+        t3pack.axpby(im.Vx, ge['ovvv'].transpose(3, 1, 0, 2), -1.0, 0.0)
         del ge['ovvv']
 
     # ---- W_vooo[j, P(mn), e] = <ej||mn>-bar
@@ -373,6 +427,9 @@ def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0):
         O6 = t3pack.occ_operator(om, lambda t: ccsdt_opt._occ_apply(t, Woooo, im.Foo))
         im.O6T = np.ascontiguousarray(O6.T, dtype=dtype)
         im.WL = np.ascontiguousarray(im.Wov.transpose(2, 0, 1, 3)).reshape(nvir * nocc, -1)
+        # [(m, e), (j, b)] and [i, (g, f, m)] of Wov[k, e, c, m]
+        im.Wov_mejb = np.ascontiguousarray(im.Wov.transpose(3, 1, 0, 2)).reshape(nvir * nocc, -1)
+        im.Wov_igfm = np.ascontiguousarray(im.Wov.transpose(0, 2, 1, 3)).reshape(nocc, -1)
         im.oovv, im.oovo = goovv, ge['oovo']
         im.goovv_pp, im.goovv_P, im.goovv_mn, im.goovo_mn = goovv_pp, goovv_P, goovv_mn, goovo_mn
         im.t2, im.t2P = t2, t2P
@@ -508,29 +565,23 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
         # [j, h]: l2 with T3, and l3 with t2 twice
         Dov = D1.reshape(nv, no).T - gemm(Y2.reshape(nv, no * nvp), t2P.reshape(no, no * nvp).T).T
         Y1u = _unpack_occ(Y1, om)                               # [i, m, a, n]
-        # Y2 on all virtual pairs, as [i, a, e, g] = Y2[g, i, (a e)]
-        Y2x = np.zeros((no, nv, nv, nv), dtype=dtype)
-        Y2x[:, md, ne, :] = Y2.transpose(1, 2, 0)
-        Y2x[:, ne, md, :] = -Y2.transpose(1, 2, 0)
+        # Y2 on both orders of its pair: [g, e, i, a] = Y2[g, i, (a e)]
+        Y2x = pair_expand(Y2, vm)
 
         r1 = np.array(fov, dtype=dtype)
         r1 += l1 @ Fvv - Foo @ l1 + einsum('me,ieam->ia', l1, Wov)
         r1 += gemm(l2P.reshape(no, no * nvp), im.GmQ[:, no:])
         r1 += einsum('Pae,iPe->ia', l2mn, im.GPd[nv:])
         # (the products with o v^3-sized arrays as they are stored: no transposed copies)
-        r1 += (Gvv.ravel() @ Vx.reshape(nv * nv, dm)).reshape(no, nv)
+        r1 += (Gvv.T.ravel() @ Vx.reshape(nv * nv, dm)).reshape(no, nv)
         r1 += einsum('jh,ijah->ia', Dov, oovv) + einsum('mj,ijam->ia', Goo, oovo)
         r1 -= (Goo3 @ fov + fov @ Gvv3.T) / 12.0
         # - sum_{Q,h} Y2[h,i,Q] (~<Q||ah> + t2 <mn||ah>): with the ladder
         # operator, whose folded Fvv is taken out again
-        r = np.arange(nv)
-        for h in range(nv):
-            a = np.delete(r, h)
-            cols = vm.pidx[np.minimum(a, h), np.maximum(a, h)]
-            r1[:, a] -= np.where(a < h, 1.0, -1.0) * gemm(Y2[h], im.Wpp[:, cols])
-        r1 += 0.5 * (np.einsum('iehh->ie', Y2x) @ Fvv
-                     + (Y2x.reshape(dm, nv * nv) @ Fvv.ravel()).reshape(no, nv))
-        r1 += gemm(np.ascontiguousarray(Dr4.transpose(1, 0, 2, 3)).reshape(no, nv * nv * no),
+        r1 -= pair_matvec(Y2, im.Wpp, vm)
+        r1 += 0.5 * (np.einsum('hhie->ie', Y2x) @ Fvv
+                     + (Fvv.T.ravel() @ Y2x.reshape(nv * nv, dm)).reshape(no, nv))
+        r1 += gemm(np.ascontiguousarray(Dr4.transpose(1, 2, 0, 3)).reshape(no, nv * nv * no),
                    Vx.reshape(nv * nv * no, nv))
         r1 += einsum('amgj,ijgm->ia', Dr4, oovo)
         r1 -= einsum('imeo,oeam->ia', Y1u, Wov)
@@ -540,9 +591,7 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
         np.subtract.at(r1, nn, X[P, :, mm])
         r1 += r1x.T
         r1 -= einsum('Paj,ijP->ia', Y1, im.Woooo_P)
-        for m in range(no):         # - Y2x[m,a,f,g] Wov[i,f,g,m]
-            r1 -= gemm(Y2x[m].reshape(nv, nv * nv),
-                       np.ascontiguousarray(Wov[:, :, :, m]).reshape(no, nv * nv).T).T
+        r1 -= gemm(im.Wov_igfm, Y2x.reshape(nv * nv * no, nv))       # Wov[i,f,g,m] Y2x[g,f,m,a]
 
         Xij += einsum('ie,ejQ->ijQ', l1, vovvQ) - einsum('imQ,jm->ijQ', l2P, Foo) \
             - einsum('io,joQ->ijQ', Goo, im.goovv_P)
@@ -559,9 +608,9 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
         r2 += r2q
         # P(ij) P(ab) M[(i,a), (j,b)]
         M = np.multiply.outer(l1.ravel(), fov.ravel()).astype(dtype)
-        gemm(np.ascontiguousarray(l2.transpose(0, 2, 1, 3)).reshape(dm, dm),
-             np.ascontiguousarray(Wov.transpose(3, 1, 0, 2)).reshape(dm, dm), M, beta=1.0)
-        gemm(Y2x.reshape(dm, nv * nv), Vx.reshape(nv * nv, dm), M, beta=1.0)
+        gemm(np.ascontiguousarray(l2.transpose(0, 2, 1, 3)).reshape(dm, dm), im.Wov_mejb, M,
+             beta=1.0)
+        gemm(Y2x.reshape(nv * nv, dm).T, Vx.reshape(nv * nv, dm), M, beta=1.0)
         M += einsum('aigo,jobg->iajb', Dr4, oovv).reshape(dm, dm)
         M += einsum('imao,jobm->iajb', Y1u, oovo).reshape(dm, dm)
         ia = mm[:, None] * nv + md[None, :]
@@ -610,7 +659,7 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0, diis_space=
                 (diis.INCORE_SIZE): then 2 ``diis_space`` more (``diis``)
       pp        v^4 / 4: the ladder operator, made in the dressed <ab||de>
       kept      the operands of the passes: r f / 2 for pass 1 (t2 and
-                W_vvvo), r f for the drive products, f for <ej||bg>, 7 s,
+                W_vvvo), r f for the drive products, f for <ej||bg>, 9 s,
                 and the contractions of T3 with <ei||gh> and <ij||fg>,
                 o C(o,3) v^2 / 2 + C(o,3) o^2 v / 2 elements
       setup     the largest of: the dressed <ie||bc> (f) next to the
@@ -618,7 +667,7 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0, diis_space=
                 iteration: at most 2 GB); f (2 + 1.5 r) when <ej||bg> is
                 made; the kept operands and the batch buffers (or the
                 occupied operator while it is made, 6 C(o,3) o^3 elements)
-      iteration the kept operands and 9 s next to the batch buffers (two
+      iteration the kept operands and 8 s next to the batch buffers (two
                 thirds of mem_mb, at least one occupied pair: f) or, after
                 the passes, next to 1.5 f for the residuals of rank 1 and 2
       overhead  of the threaded BLAS and the allocator (ccsdt_opt.overhead),
@@ -638,7 +687,7 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0, diis_space=
     pp = nvp * nvp * isz
     gmq = o * nvp * (o + v) * isz
     bdrv = 2 * (o + v) * o * nvp * isz
-    kept = gmq + bdrv + f + (nvp * nto * o + npo * nto * v) * isz + 7 * s
+    kept = gmq + bdrv + f + (nvp * nto * o + npo * nto * v) * isz + 9 * s
     fixed = 3 * nto * nto * isz + ccsdt_opt.overhead()
     dress = min(2_000_000_000, 2 * pp)
     occ = 6 * nto * o ** 3 * isz            # the occupied operator from the packed basis
@@ -650,8 +699,8 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0, diis_space=
 
     def fill(mem):
         plan.mem_mb = mem
-        plan.setup = max(f + dress, gmq + bdrv + 2 * f, kept - 7 * s + max(bufs(mem), occ)) + 7 * s
-        plan.iteration = kept + max(bufs(mem), 3 * f // 2) + 9 * s
+        plan.setup = max(f + dress, gmq + bdrv + 2 * f, kept - 9 * s + max(bufs(mem), occ)) + 9 * s
+        plan.iteration = kept + max(bufs(mem), 3 * f // 2) + 8 * s
         plan.need = fixed + 3 * t3 + plan.diis + pp + max(plan.setup, plan.iteration)
         return budget is None or plan.need <= budget
 

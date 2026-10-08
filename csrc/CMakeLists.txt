@@ -46,6 +46,16 @@ target_link_libraries(zc_t4sym PUBLIC OpenMP::OpenMP_C m)
 set_target_properties(zc_t4sym PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
 
+# the Lambda equations of CCSDT on packed Lambda_3 (zccsdt/cc/lambda_opt.py):
+# an intermediate packed over a virtual pair, expanded and contracted with the
+# columns of the packed pp operator (the passes themselves use zc_t3pack and
+# the GEMM of zc_ccsdt_t3)
+add_library(zc_lambda SHARED lambda_t3.c)
+target_compile_options(zc_lambda PRIVATE -O3 -march=native -fcx-limited-range)
+target_link_libraries(zc_lambda PUBLIC OpenMP::OpenMP_C m)
+set_target_properties(zc_lambda PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
+
 # kernels of the spinor CCSD amplitude equations (zccsdt/zccsd/amps.py) and of
 # its (T) correction (zccsdt/zccsd/triples.py)
 add_library(zc_zccsd SHARED zccsd_kernels.c zccsd_t.c)
