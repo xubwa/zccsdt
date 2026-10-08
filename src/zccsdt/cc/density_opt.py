@@ -620,6 +620,7 @@ def _frozen_stage(c):
     # if t and lambda are symmetric under time reversal - which the first barred one tells
     U = getattr(c.source, 'kramers', None)
     half = nfz // 2
+    c.plan.kramers = False
     if nfz < 4:
         U = None
     it = c.source.batches(c.plan.frozen, (0, nfz) if U is None else (0, half + 1))
