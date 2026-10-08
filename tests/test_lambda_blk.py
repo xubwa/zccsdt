@@ -274,3 +274,77 @@ def test_front_end(hbr, monkeypatch):
     d1, d2, d3 = cc.solve_lambda()
     assert not cc.lambda_blocks and d3.size == 31820 and abs(d3 - l3).max() < 1e-10
     assert abs(d1 - l1).max() < 1e-10 and abs(d2 - l2).max() < 1e-10
+
+
+MODELS = {'one': ([0] * 6, [0] * 30),
+          'six': ([-3, -1, -1, 1, 1, 3], [-5] * 2 + [-3] * 5 + [-1] * 8 + [1] * 8 + [3] * 5 + [5] * 2)}
+
+
+@pytest.mark.parametrize('labels,cplx', [('one', True), ('six', True), ('six', False)])
+def test_memory_plan(labels, cplx):
+    '''What the intermediates and an iteration in blocks allocate
+    (tracemalloc follows numpy's allocations) stays within the plan, stage
+    by stage, with whole batches and with the smallest buffers, and the plan
+    is not far above it; the work array is the planned one; the buffers
+    grow with the budget and take what fits; MemoryError below the floor.'''
+    from zccsdt.cc import t3engine
+    olab, vlab = MODELS[labels]
+    no, nv = len(olab), len(vlab)
+    eris, t, l = _labelled_model(no, nv, olab, vlab, seed=5, cplx=cplx)
+    isz = 16 if cplx else 8
+    T3b = ccsdt_opt.blocked_t3(eris, _packed(t[2], 3))
+    L3b = ccsdt_opt.blocked_t3(eris, _packed(l[2], 3))
+    del t[2], l[2]
+    om, vm = t3pack.maps_for(eris)
+    ccsdt_opt.vvvv_packed(eris, vm)             # (the packed bare <ab||de>: the integral object's)
+    ccsdt_opt._bare_Q(eris, om, vm)
+    del eris.vvvv
+    f = no * nv ** 3 * isz
+    pp = sum((hi - lo) ** 2 for lo, hi in vm.blocks) * isz
+    assert T3b.size == (81200 if labels == 'one' else 12416)
+    for mem_mb in (2000.0, 1e-3):
+        eng = LO.block_engine(eris, T3b.dtype, mem_mb)
+        plan = LO.plan_memory_blocks(eng, None, mem_mb)
+        assert plan.blocks and plan.buffers == eng.buffer_bytes(mem_mb)
+        t3engine.release_workspace()
+        del eng
+        gc.collect()
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        im = LO.make_intermediates(eris, t[0], t[1], T3b, mem_mb=plan.mem_mb, blocks=True)
+        setup = tracemalloc.get_traced_memory()[1] - base
+        kept = tracemalloc.get_traced_memory()[0] - base
+        tracemalloc.reset_peak()
+        out = np.empty(L3b.size, dtype=T3b.dtype)       # (the residual: one T3 of the plan)
+        LO.update_lams(im, l[0], l[1], L3b, T3b, out=out)
+        LO.update_lams(im, l[0], l[1], L3b, T3b, out=out)
+        peak = tracemalloc.get_traced_memory()[1] - base - out.nbytes
+        tracemalloc.stop()
+        fixed = pp + plan.buffers
+        where = (mem_mb, setup / f, kept / f, peak / f, (plan.setup + fixed) / f, (plan.kept + fixed) / f,
+                 (plan.iteration + fixed) / f)
+        assert t3engine.workspace_bytes() == plan.buffers, where
+        assert setup <= plan.setup + fixed, where
+        assert kept <= plan.kept + fixed, where
+        assert peak <= plan.iteration + fixed, where
+        assert peak > 0.85 * (plan.iteration + fixed), where
+        assert plan.need >= max(plan.setup, plan.iteration) + fixed + 3 * L3b.nbytes
+        del im, out
+    eng = LO.block_engine(eris, T3b.dtype)
+    floor = LO.plan_memory_blocks(eng, None, 1e-3)
+    full = LO.plan_memory_blocks(eng, None, 2000.0)
+    assert floor.need == plan.need < full.need and full.diis == 0
+    assert LO.plan_memory_blocks(eng, None, 2000.0, diis_space=6).diis == 12 * L3b.nbytes
+    # budgets from the floor to everything: within the budget, growing with it, and no
+    # buffers that fit are left out
+    grid = [LO.plan_memory_blocks(eng, None, m).need for m in np.geomspace(1e-3, 2000.0, 400)]
+    assert all(a <= b for a, b in zip(grid, grid[1:])) and len(set(grid)) >= 5
+    last = None
+    for budget in np.linspace(floor.need, full.need, 25).astype(np.int64):
+        p = LO.plan_memory_blocks(eng, int(budget), 2000.0)
+        assert p.need <= budget and p.need >= max(n for n in grid if n <= budget), budget
+        assert last is None or (p.need >= last.need and p.mem_mb >= last.mem_mb)
+        last = p
+    assert last.need == full.need
+    with pytest.raises(MemoryError, match=r'in the blocks of the symmetry labels.* need about .* GB'):
+        LO.plan_memory_blocks(eng, floor.need - 1, 2000.0)

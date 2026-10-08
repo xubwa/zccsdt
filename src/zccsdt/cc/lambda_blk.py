@@ -181,18 +181,14 @@ class BlockL3:
                             G = np.concatenate((GPd[e0:e1, p0:p1, d0:d1],
                                                 GPd[nv + j0:nv + j1, p0:p1, d0:d1]), axis=0)
                             Gy = gy(sm, gQ, sy)
-                            if nr == nd * nm:       # one block of classes: the batch at once
+                            if nr == nd * nm:       # one block of classes: L as it is
                                 Lf = L.reshape(nbp * nd, nm * nQ)
-                                X = gemm(np.ascontiguousarray(G, dtype=dtype).reshape(ne + nj, -1), Lf)
-                                Y = gemm(Lf, Gy).reshape(nbp, nd, nj + ne)
-                            else:
-                                G = np.ascontiguousarray(G.transpose(1, 0, 2), dtype=dtype)
-                                X = np.zeros((ne + nj, nm * nQ), dtype=dtype)
-                                Y = np.empty((nbp, nd, nj + ne), dtype=dtype)
-                                for k in range(nbp):
-                                    Lk = L[k, rows].reshape(nd, nm * nQ)
-                                    gemm(G[k], Lk, X, beta=1.0)
-                                    gemm(Lk, Gy, Y[k])
+                            else:                   # [(P, d), (m, Q)] in the storage of T
+                                Lf = ws[n:n + nbp * nd * nm * nQ].reshape(nbp, nd * nm, nQ)
+                                t3pack.axpby(Lf, L[:, rows], 1.0, 0.0)
+                                Lf = Lf.reshape(nbp * nd, nm * nQ)
+                            X = gemm(np.ascontiguousarray(G, dtype=dtype).reshape(ne + nj, -1), Lf)
+                            Y = gemm(Lf, Gy).reshape(nbp, nd, nj + ne)
                             X = X.reshape(ne + nj, nm, nQ)
                             X3[e0:e1, m0:m1, Qlo:Qhi] += X[:ne]
                             X3[nv + j0:nv + j1, m0:m1, Qlo:Qhi] += X[ne:]
@@ -313,17 +309,14 @@ class BlockL3:
                             if not (ncc and ni and 0 <= se < nc and len(kcols[se])):
                                 continue
                             B = bd(gQ, si)
-                            if nr == ncc * ni:      # one block of classes: the batch at once
-                                A = np.ascontiguousarray(Adrv[p0:p1, c0:c1][:, :, kcols[se]],
-                                                         dtype=dtype)
-                                gemm(A.reshape(nbp * ncc, -1), B, Zg.reshape(nbp * ncc, ni * nQ),
-                                     alpha=-1.0, beta=1.0)
-                            else:
-                                for k in range(nbp):
-                                    A = np.ascontiguousarray(Adrv[p0 + k, c0:c1][:, kcols[se]],
-                                                             dtype=dtype)
-                                    gemm(A, B, Zg[k, rows].reshape(ncc, ni * nQ),
-                                         alpha=-1.0, beta=1.0)
+                            A = np.ascontiguousarray(Adrv[p0:p1, c0:c1][:, :, kcols[se]],
+                                                     dtype=dtype).reshape(nbp * ncc, -1)
+                            if nr == ncc * ni:      # one block of classes: into Z as it is
+                                gemm(A, B, Zg.reshape(nbp * ncc, ni * nQ), alpha=-1.0, beta=1.0)
+                            else:                   # the batch at once, in the storage of the gathered block
+                                X = ws[off:off + nbp * ncc * ni * nQ].reshape(nbp * ncc, ni * nQ)
+                                gemm(A, B, X)
+                                t3pack.axpby(Zg[:, rows], X.reshape(nbp, ncc * ni, nQ), -1.0, 1.0)
                 with timer('reduce'):
                     for tb, tx, tP, tsg, A0, A1 in e._red_targets(p0, p1):
                         fred2(p_(R), p_(e.Rcol), I_(len(tb)), p_(tb), p_(tx), p_(tP), p_(tsg),
