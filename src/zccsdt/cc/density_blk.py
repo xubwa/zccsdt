@@ -42,7 +42,7 @@ works on the packed block.
 import numpy as np
 
 from zccsdt.blas import gemm
-from zccsdt.cc import ccsdt_opt, lambda_blk, t3engine, t3pack
+from zccsdt.cc import ccsdt_opt, t3engine, t3pack
 from zccsdt.cc.t3engine import _CArgs, _batches
 from zccsdt.timing import timer
 
@@ -130,7 +130,8 @@ class BlockDensity:
         labels add up), the blocks of the ring density, the operand and the
         result of one stacked GEMM, and - outside of the passes - the
         columns of one pair block of two o v^3 / 2 arrays (Slabs, the
-        contraction of the block aibc).'''
+        contraction of the block aibc), or the copies of rows of Gamma in
+        gamma_pairs.'''
         nc, noc, nvc, nQg = self.nc, self.noc, self.nvc, self.nQg
         ny = [noc[s] + nvc[s] for s in range(nc)]
         gy = sum(noc[sm] * nQg[gQ] * ny[gQ - sm] for gQ in range(self.npg) for sm in range(nc)
@@ -139,7 +140,10 @@ class BlockDensity:
         one = max([ny[gQ - sm] * noc[sm] * nQg[gQ] for gQ in range(self.npg) for sm in range(nc)
                    if 0 <= gQ - sm < nc] + [0])
         cols = 2 * self.om.n * self.vm.n * max(nQg + [0])
-        return (max(gy + ring + 3 * one, cols) + ring) * self.dtype.itemsize
+        # gamma_pairs: two copies of rows of Gamma, each of GAMMA_CHUNK or one row of a block
+        isz = self.dtype.itemsize
+        rows = 0 if self.nc == 1 else 2 * max(min(GAMMA_CHUNK // isz, n * n) for n in nQg + [0])
+        return (max(gy + ring + 3 * one, cols, rows) + ring) * isz
 
     # ---- the stacked GEMMs of a gathered block
 
@@ -382,47 +386,88 @@ class BlockDensity:
         return self.l.gram(L3, T3)
 
 
+def _class_pairs(vm):
+    '''Per pair block h of a grouped map, the pairs (p<q) by the classes
+    (sa <= sb, sa + sb = h) of p and q: [(a0, a1, b0, b1, r0, nr)] - p in
+    a0:a1, q in b0:b1, and the nr rows of the block from r0 that hold these
+    pairs, p-major (all of them for sa < sb; those with p < q for sa = sb).
+    Kept on the map.'''
+    tab = getattr(vm, '_class_pairs', None)
+    if tab is None:
+        rng = [(int(r[0]), int(r[-1]) + 1) if len(r) else (0, 0)
+               for r in (np.where(vm.spins == s)[0] for s in range(vm.ncls))]
+        tab = []
+        for h, (lo, hi) in enumerate(vm.blocks):
+            rows = []
+            for sa in range(vm.ncls):
+                sb = h - sa
+                if sb < sa or sb >= vm.ncls:
+                    continue
+                (a0, a1), (b0, b1) = rng[sa], rng[sb]
+                if sa == sb:
+                    pp, qq = np.triu_indices(a1 - a0, 1)
+                else:
+                    pp, qq = (x.ravel() for x in np.meshgrid(np.arange(a1 - a0), np.arange(b1 - b0),
+                                                             indexing='ij'))
+                if len(pp) == 0:
+                    continue
+                r0 = int(vm.pidx[a0 + pp[0], b0 + qq[0]]) - lo
+                assert np.array_equal(vm.pairs[lo + r0:lo + r0 + len(pp)],
+                                      np.stack((a0 + pp, b0 + qq), axis=1))
+                rows.append((a0, a1, b0, b1, r0, len(pp)))
+            assert sum(r[5] for r in rows) == hi - lo
+            tab.append(rows)
+        vm._class_pairs = tab
+    return tab
+
+
+GAMMA_CHUNK = 64 << 20      # bytes of a copy of rows of Gamma in gamma_pairs
+
+
 def gamma_pairs(out, Gam, V, vm, cols, alpha=1.0):
     '''density_opt._gamma_pairs for Gamma as the list of its diagonal pair
     blocks (BlockDensity.gamma) and the pairs of ``vm`` in the order of
     their groups: out[q, y] += alpha sum_Q G[Q, (p<q)] V[Q, p, y] and
     out[p, y] -= alpha sum_Q G[Q, (p<q)] V[Q, q, y] (``cols``; else with
-    G[(p<q), Q]), Q of the group of (p<q).  V (npair, n, ncol).  In a group
-    the pairs with one first index are a range of rows and of second
-    indices; those with one second index are gathered.'''
-    n, pidx = vm.n, vm.pidx
+    G[(p<q), Q]), Q of the group of (p<q).  V (npair, n, ncol), out
+    (n, ncol).  In a block the pairs with p and q of two given classes are
+    a range of rows, p-major: Gamma[Q, p, q] for them (a copy, GAMMA_CHUNK
+    of Q at a time) and one GEMM for each of the two terms - or, for p and
+    q of one class, one with the antisymmetric square.'''
     if vm.npair == 0 or V.shape[2] == 0:
         return
-    r = np.arange(n)
-    for (lo, hi), G in zip(vm.blocks, Gam):
-        if hi == lo:
-            continue
-        Vh = V[lo:hi]
-        for p in range(n - 1):
-            idx = pidx[p, p + 1:]
-            sel = (idx >= lo) & (idx < hi)
-            if not sel.any():
-                continue
-            rows, qs = idx[sel] - lo, r[p + 1:][sel]
-            if rows[-1] - rows[0] == len(rows) - 1 and qs[-1] - qs[0] == len(qs) - 1:
-                r0, r1 = rows[0], rows[-1] + 1
-                gemm(G[:, r0:r1].T if cols else G[r0:r1], Vh[:, p, :], out[qs[0]:qs[-1] + 1],
-                     alpha=alpha, beta=1.0)
-            else:
-                M = np.take(G, rows, axis=1 if cols else 0)
-                out[qs] += alpha * gemm(M.T if cols else M, Vh[:, p, :])
-        for q in range(1, n):
-            idx = pidx[:q, q]
-            sel = (idx >= lo) & (idx < hi)
-            if not sel.any():
-                continue
-            rows, ps = idx[sel] - lo, r[:q][sel]
-            M = np.take(G, rows, axis=1 if cols else 0)
-            if ps[-1] - ps[0] == len(ps) - 1:
-                gemm(M.T if cols else M, Vh[:, q, :], out[ps[0]:ps[-1] + 1], alpha=-alpha, beta=1.0)
-            else:
-                out[ps] -= alpha * gemm(M.T if cols else M, Vh[:, q, :])
-            del M
+    dtype, k = out.dtype, V.shape[2]
+    isz = out.itemsize
+    for (lo, hi), G, rows in zip(vm.blocks, Gam, _class_pairs(vm)):
+        nh = hi - lo
+        for a0, a1, b0, b1, r0, nr in rows:
+            na, nb = a1 - a0, b1 - b0
+            same = a0 == b0
+            nq = int(max(1, min(nh, GAMMA_CHUNK // (max(nr, na * na if same else 0) * isz))))
+            if same:
+                iu = np.triu_indices(na, 1)
+            for q0 in range(0, nh, nq):
+                q1 = min(q0 + nq, nh)
+                m = q1 - q0
+                Gs = np.empty((m, nr), dtype=dtype)             # [Q, (p, q)]
+                t3pack.axpby(Gs, G[q0:q1, r0:r0 + nr] if cols else G[r0:r0 + nr, q0:q1].T, 1.0, 0.0)
+                Va = np.ascontiguousarray(V[lo + q0:lo + q1, a0:a1]).reshape(m * na, k)
+                if same:
+                    Gq = np.zeros((m, na, na), dtype=dtype)
+                    Gq[:, iu[0], iu[1]] = Gs
+                    Gq[:, iu[1], iu[0]] = -Gs
+                    del Gs
+                    gemm(Gq.reshape(m * na, na).T, Va, out[a0:a1], alpha=alpha, beta=1.0)
+                    del Gq
+                    continue
+                gemm(Gs.reshape(m * na, nb).T, Va, out[b0:b1], alpha=alpha, beta=1.0)
+                del Va
+                Gt = np.empty((m, nb, na), dtype=dtype)         # [Q, q, p]
+                t3pack.axpby(Gt, Gs.reshape(m, na, nb).transpose(0, 2, 1), 1.0, 0.0)
+                del Gs
+                Vb = np.ascontiguousarray(V[lo + q0:lo + q1, b0:b1]).reshape(m * nb, k)
+                gemm(Gt.reshape(m * nb, na).T, Vb, out[a0:a1], alpha=-alpha, beta=1.0)
+                del Gt, Vb
 
 
 class Slabs:

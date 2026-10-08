@@ -97,6 +97,20 @@ first index do not fit.  With frozen spinors: Gamma and the buffers of its
 pass, and the integrals of a batch of frozen spinors with the arrays they
 are cut into - as many as fit, at least those of one.
 
+In the blocks of a symmetry label (kernel(..., blocks=True),
+relaxed_rdm1(..., blocks=True); zccsdt.cc.density_blk): t3 and lambda3 as
+the amplitude and the Lambda equations in blocks leave them, and the passes
+over them split into the blocks that the labels leave - the gathers per
+group of occupied and of virtual pairs, the stacked GEMMs per class of the
+two free indices, the ring density per difference of classes, Gamma as its
+diagonal pair blocks (always, in the place of Y: route 'gamma'; sum n_h^2
+elements for pair blocks of n_h pairs) and its products with the integrals
+per pair of classes, the dressed <ab||de> as its diagonal pair blocks in
+slabs of the rows of a block.  Everything else is the code above on the
+same dense arrays, with pairs in the order of their groups: the blocks of
+g2, their contractions with the integrals, the integrals with one frozen
+index.  One class is no symmetry.  Memory: plan_memory_blocks.
+
 Timers (zccsdt.timing): 'dens.dress', 'dens.vvvv', 'dens.pass_l',
 'dens.pass_tl' (with .gather, .t, .ring, .y, .h), 'dens.gamma', 'dens.gram',
 'dens.blocks', 'dens.gradient', 'dens.frozen' (with .setup, .ao2mo, .dress,
@@ -535,8 +549,10 @@ def _gamma_pairs(out, Gam, V, vm, cols, alpha=1.0):
     (``cols``); else the same with G[(p<q), Q], the first one.  The pairs
     with one first index are a range of columns (rows); those with one
     second index are gathered.'''
-    if isinstance(Gam, list):       # its diagonal pair blocks, the pairs in the order of their groups
+    if isinstance(Gam, list) and len(Gam) > 1:      # its diagonal pair blocks, the pairs by groups
         return density_blk.gamma_pairs(out, Gam, V, vm, cols, alpha)
+    if isinstance(Gam, list):       # one class: the block is the matrix, the pairs in lexicographic order
+        Gam = Gam[0]
     v, pidx = vm.n, vm.pidx
     if vm.npair == 0 or V.shape[2] == 0:
         return
@@ -621,6 +637,37 @@ def _conj(G, X):
         except (ImportError, OSError):
             pass
     np.conjugate(G, out=X)
+
+
+def _real_part(G, X, check=False):
+    '''X = Re G for the integrals G[f, a, b, c] of real spinors, which come
+    from the complex transformation (on threads); ``check``: ValueError if
+    they are not real to 1e-8 of their size.'''
+    if not np.iscomplexobj(G):
+        X[...] = G
+        return
+    fast = (G.dtype == np.complex128 and X.dtype == np.float64 and G.ndim == 4 and G.flags.c_contiguous
+            and X.flags.c_contiguous)
+    parts = G.view(np.float64).reshape(G.shape + (2,)) if fast else None
+
+    def largest(x):
+        try:                            # (no temporary: one frozen spinor at a time)
+            from scipy.linalg.blas import idamax
+            return max(abs(float(y.ravel()[idamax(y.ravel())])) for y in x) if x.size else 0.0
+        except ImportError:
+            return abs(x).max() if x.size else 0.0
+    imag = 0.0
+    if check and fast:
+        t3pack.axpby(X, parts[..., 1], 1.0, 0.0)
+        imag = largest(X)
+    elif check:
+        imag = abs(G.imag).max() if G.size else 0.0
+    if fast:
+        t3pack.axpby(X, parts[..., 0], 1.0, 0.0)
+    else:
+        X[...] = G.real
+    if check and imag > 1e-8 * max(1.0, largest(X)):
+        raise ValueError('The integrals with a frozen index are not real')
 
 
 def _cut(X, sa, sb, sc, perm=(0, 1, 2, 3)):
@@ -770,11 +817,6 @@ def _frozen_stage(c):
             break
         f0, f1, G = item
         k = f1 - f0
-        if real and np.iscomplexobj(G):
-            if not checked:
-                if abs(G.imag).max() > 1e-8 * max(1.0, abs(G.real).max()):
-                    raise ValueError('The integrals with a frozen index are not real')
-                checked = True
         if X is None or X.shape[0] != k:
             X = None
             X = np.empty((k, n, n, n), dtype=dtype)
@@ -782,7 +824,8 @@ def _frozen_stage(c):
         # ---- B[f, i] and B[f, a]: 1/2 sum S[f,q,r,s] g2[x,q,r,s]
         with timer('dens.frozen.dress'):
             if real:
-                X[...] = G.real
+                _real_part(G, X, not checked)
+                checked = True
             else:
                 t3pack.axpby(X, G, 1.0, 0.0)
             _dress(X, t1, 'yxy')
@@ -819,7 +862,7 @@ def _frozen_stage(c):
         # ---- K[f, a] and K[f, i]: 1/2 sum W[p,q,f,s] g2[p,q,r,s], W[p,q,f,s] = W[f,s,p,q]
         with timer('dens.frozen.dress'):
             if real:
-                X[...] = G.real
+                _real_part(G, X)
             else:
                 _conj(G, X)
             del G, item
@@ -1070,6 +1113,7 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     if triples and eng is not None and gradient:
         with timer('dens.gamma'):       # its diagonal pair blocks
             Gam = eng.gamma(T3p, L3p, max(1, plan.ng or eng.most_triples()))
+            t3engine.release_workspace()        # (the batches: not alive with what follows)
             _gamma_pairs(S13, Gam, Vvo, vm, True)
     elif triples and eng is None and route == 'gamma':
         # Gamma[(e<f), (g<h)] = 3 sum_(m<n<o, d) l3[mno, d, (ef)] t3[mno, d, (gh)] (= sum_(P, d, m)
@@ -1156,10 +1200,11 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         psign = np.sign(np.arange(v)[None, :] - np.arange(v)[:, None]).astype(np.float64)
         pfull = np.where(pfull >= 0, pfull, 0)
         t2r = np.ascontiguousarray(t2.transpose(0, 2, 1, 3)).reshape(o * v, o * v)  # [(i b), (m e)]
-        for a in range(v if nQ else 0):
-            Ca = C3[:, pfull[a], :] * psign[a][None, :, None]                       # [m, e, c]
-            Sa = gemm(t2r, Ca.reshape(o * v, v)).reshape(o, v, v)
-            Dai[a] += 0.5 * (Sa[:, md, ne] - Sa[:, ne, md])
+        with timer('aibc'):
+            for a in range(v if nQ else 0):
+                Ca = C3[:, pfull[a], :] * psign[a][None, :, None]                   # [m, e, c]
+                Sa = gemm(t2r, Ca.reshape(o * v, v)).reshape(o, v, v)
+                Dai[a] += 0.5 * (Sa[:, md, ne] - Sa[:, ne, md])
         del t2r
 
     # ---- frozen spinors: the blocks of g2 with the integrals of one frozen index
@@ -1187,7 +1232,8 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         Wb = Vvo.reshape(nQ, v * o)
         Dv = np.ascontiguousarray(np.broadcast_to(np.eye(o, dtype=dtype)[None, :, None, :],
                                                   (v, o, v, o)) * g_ab[:, None, :, None])
-        _bra_pairs(G, Wb, Dv, vm.pairs, -1.0)
+        with timer('ab.vvvo'):
+            _bra_pairs(G, Wb, Dv, vm.pairs, -1.0)
         del Dv
         # ijkl with <am||jk>
         G -= 0.5 * einsum('majk,imjk->ai', ovoo, _unpack_occ(_unpack_occ(Y4.T, om).transpose(
@@ -1202,18 +1248,20 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             G += 0.5 * gemm(VooQ[:, m], C3[m]).T
         del VooQ, Voo
         # iabj with <ae||fm> and <em||ij>
-        _bra_pairs(G, Wb, np.ascontiguousarray(Rg.transpose(0, 3, 2, 1)), vm.pairs, 1.0)
+        with timer('iabj.vvvo'):
+            _bra_pairs(G, Wb, np.ascontiguousarray(Rg.transpose(0, 3, 2, 1)), vm.pairs, 1.0)
         G -= einsum('meij,ejam->ai', ovoo, Rg)
         # ijab with <mn||ie> and <am||ef>
         G += einsum('Pei,Pae->ai', oovo[mm, nn], _unpack_vir(Dab, vm))
         Dij = _unpack_occ(Dab, om)                              # [i, m, Q]
         G1Q, oovvQ = ccsdt_opt._bare_Q(eris, om, vm)            # <my||Q>, <mn||Q>
         oovvQ = _unpack_occ(np.asarray(oovvQ), om)              # [m, n, Q]
-        for m in range(o):
-            # the dressed <ma||Q> = <ma||Q> - sum_n t1[n,a] <mn||Q>
-            Wm = np.array(G1Q[m], dtype=dtype)
-            gemm(t1.T, oovvQ[m], Wm, alpha=-1.0, beta=1.0)
-            G -= gemm(Wm, Dij[:, m].T)
+        with timer('ijab.ovvv'):
+            for m in range(o):
+                # the dressed <ma||Q> = <ma||Q> - sum_n t1[n,a] <mn||Q>
+                Wm = np.array(G1Q[m], dtype=dtype)
+                gemm(t1.T, oovvQ[m], Wm, alpha=-1.0, beta=1.0)
+                G -= gemm(Wm, Dij[:, m].T)
         del oovvQ
         # abcd with <ef||gi>: its l2 t2 part, and its l3 t3 part from pass 2
         U = gemm(l2pp, Wb).reshape(nP, v, o)
@@ -1221,8 +1269,9 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         G -= S13 / 3.0
         del U, Wb
         # aibc with <em||if> and with <ae||fg>
-        for e in range(v):
-            G -= einsum('mfi,maf->ai', ovvo[:, e], _unpack_vir(Dai[e], vm))
+        with timer('aibc.ovvo'):
+            for e in range(v):
+                G -= einsum('mfi,maf->ai', ovvo[:, e], _unpack_vir(Dai[e], vm))
         Dh = None
         for h, lo, hi, q0, q1, W in slabs:
             if hi - lo == nQ:
@@ -1230,7 +1279,8 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             elif q0 == 0:           # the columns of the pair block
                 Dh = None
                 Dh = np.ascontiguousarray(Dai[:, :, lo:hi])
-            _bra_pairs(G, W, Dh, vm.pairs[lo + q0:lo + q1], -1.0)
+            with timer('aibc.vvvv'):
+                _bra_pairs(G, W, Dh, vm.pairs[lo + q0:lo + q1], -1.0)
         del Dh
         slabs.close()
     return Result(d1, G, g1, plan, bf, kf)

@@ -36,7 +36,7 @@ from pyscf import gto, x2c
 
 import zccsdt
 from zccsdt import memory, timing
-from zccsdt.cc import ccsdt_opt, density_blk, density_opt, lambda_opt, solver
+from zccsdt.cc import ccsdt_opt, density_opt, lambda_opt, solver
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from profile_lambda_blocks import Phase, iterations     # noqa: E402
@@ -193,7 +193,6 @@ def stages(mol_name, basis, niter, nfrozen, ndrop):
         del rels, a, b
         full = density_opt.relaxed_rdm1(mf, eris, t1, t2, t3b, l1, l2, l3b, Ca, blocks=True, plan_only=True,
                                         **fz)
-        eng = density_blk.engine(eris, t3b.dtype)
         lo, hi = 0, full.need
         while hi - lo > 1_000_000:          # the floor of the plan, to 1 MB
             mid = (lo + hi) // 2
@@ -204,7 +203,6 @@ def stages(mol_name, basis, niter, nfrozen, ndrop):
             except MemoryError:
                 lo = mid
         budget = hi + (full.need - hi) // 4
-        del eng
         with Phase() as ph:
             rel = density_opt.relaxed_rdm1(mf, eris, t1, t2, t3b, l1, l2, l3b, Ca, tol=1e-9, blocks=True,
                                            max_memory=(memory.resident() + budget) / 1e6, **fz)
