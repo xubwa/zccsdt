@@ -125,11 +125,22 @@ A file that reads `XZAMPS` must run in the mode of the run that wrote it
 files, so this only matters with `XZ_LABELS` / `XZ_REAL`); the header is
 checked.
 
-**Limit of the reader:** `moinpppp` is read as one Fortran record into the
-place where the packed block stays (section 4).  ifort writes a record of
-more than 2 GB as sub-records, which the Fortran reader takes; the Python
-reader and writer (`zccsdt.cfour`) assume one record with 4-byte markers and
-do not go beyond 2 GB (v > about 150 spinors).  No case of that size was run.
+**Files beyond 2 GB.**  ifort writes a record of more than 2^31 - 9 bytes
+as a chain of sub-records, each between two markers of 4 bytes (the leading
+marker negative if another sub-record follows, the trailing one if one came
+before); `moinpppp` of 160 virtual spinors is 2 654 310 416 bytes in two
+sub-records of 2 147 483 639 and 506 826 761 bytes.  The native reader takes
+a file with one Fortran READ, which follows the chain; only its checks of the
+lengths count the markers (`xzrecbytes`).  The Python reader and writer
+(`zccsdt.cfour._record`, `_write_record`, `record_bytes`) read and write the
+same chain.  Validated on files of CFOUR's own `xx2cvtran` (section 7).
+`xzccsdt mp2` reads the integrals and prints their second-order energy - the
+number that `xx2cvtran` prints as "mp2 energy" - without the memory of a CC
+calculation: a check of the files for cases too large to iterate.
+
+What stays CFOUR's business: `xx2cvtran` with `ABCDTYPE=STANDARD` transforms
+the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
+25.8 GB resident, measured); 300 virtual spinors would be about 150 GB.
 
 ## 3. Sources
 
@@ -463,6 +474,19 @@ node with 4 threads unless a job is named.
 | HBr / cc-pVTZ-DK, X2C-1e, 28 frozen (8 + 78), job 31778128 | CCSDT | -2605.165534626440 | -2605.165534626440 | 19 / 19 |
 | | CCSDT[Q] | -2605.165561661789 | -2605.165561661789 | |
 | | CCSDT(Q) | -2605.165759197891 | -2605.165759197891 | |
+| HBr / cc-pVQZ-DK, X2C-1e, 28 frozen (8 + 160), `moinpppp` 2.65 GB, job 31779060 | CCSDT | -2605.192252825424 | -2605.192252825424 | 19 / 19 |
+| | CCSDT[Q] | -2605.192239841907 | -2605.192239841907 | |
+| | CCSDT(Q) | -2605.192558400552 | -2605.192558400552 | |
+
+**Files beyond 2 GB** (HBr / cc-pVQZ-DK, files of CFOUR's `xx2cvtran`, job
+31779060, node c388): the row above, and with 10 frozen spinors (26 + 160:
+too large to iterate here, T3 would be 27.9 GB) the second-order energy of
+the files: `xx2cvtran` prints -0.394844126182089; the Python reader gives
+-0.394844126182; `xzccsdt mp2` gives -0.394844126182 (3.2 s to read and
+sort, 4.6 GB of the work array); the same files written again by the Python
+writer (sub-records of 2147483639 and 506826761 bytes, as CFOUR's) and read
+by the native program: -0.394844126182.  For 8 + 160 `xx2cvtran` prints
+-0.191879981425920 and the native program -0.191879981426.
 
 The first H2O case is that of `/home/xwang405/.claude/jobs/7ba4fcf7/tmp/cf_n4`
 (the three reference energies given with the task).
@@ -570,6 +594,13 @@ environment: CCSDT 34.56 against 34.59 s, (Q) 15.33 against 15.35 s, job
 / cc-pVDZ: 0.40 against 0.41 s per iteration, (Q) 2.96 against 2.94 s),
 `KMP_BLOCKTIME=0` (no gain).
 
+**HBr / cc-pVQZ-DK, 28 frozen (8 + 160)**, complex, dense, 16 cores of one
+node (`-c 16 --mem=60G`, job 31779060, node c388, the native program first;
+`MEMORY_SIZE=45 GB`): CCSDT 18.97 s per iteration native, 22.10 s Python;
+(Q) 165.5 s native, 171.1 s Python; peak resident set 21.2 GB native (the
+work array used: 21.2 GB, of which the 8 DIIS vectors 9.6 GB; the least that
+CCSDT takes is 5.7 GB, (Q) 12.1 GB), 21.9 GB Python.
+
 **Labels and real arithmetic**: HBr / cc-pVTZ-DK, 28 frozen (8 + 78), the
 m_j-adapted real spinors written by `bench/cfour/labelled_run.py` (8
 classes; T3 14.6 %, `<ab||cd>` 14.3 % of the dense arrays), CCSDT only, 19
@@ -668,8 +699,24 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   array, bare, once; the dressed operator is never stored whole).
 - CCSDTQ, (P), properties, the AO-driven CCSD(T); CFOUR's nonrelativistic
   programs.
-- `moinpppp` beyond 2 GB was not run (section 2); HBr / cc-pVQZ-DK (8 + 160)
-  was therefore not timed.
+- The relaxed density for `xsox2cprop` (`denfinal`): not started.  What
+  CFOUR's `xx2czvec` reads was looked up for it (read-only; `x2czvec/`):
+  `xfull`, the orbital gradient X[a][i] on (active + dropped virtual) x
+  (frozen + active occupied) spinors; `dpoo`, `dpvv`, `dii0`, `daa0`
+  (occupied-occupied and virtual-virtual blocks of the one-particle density;
+  the final density has dpoo + dpoo^+ and the diagonals of dii0, daa0);
+  `dpopo`, `dpvpv` (frozen-active and dropped-active blocks); all one record
+  each, complex, written by `xx2cccdenocbp` (`xmatfull.f90`, `wrtdp.f90`).
+  It solves the Z-vector equations with integrals that it transforms itself
+  from the AO integrals (`genintzvec.f90`: `intpphh2`, `intphhp2` over all
+  occupied and all virtual spinors) and writes `denfinal` (`denmatg2.f90`:
+  D[i][a] from the solution, the blocks above, 1 on the occupied diagonal).
+  No two-particle density crosses this interface: a native CCSDT density
+  code can feed it.  Not yet pinned: the factors and conjugations of each
+  block (to be fixed on CFOUR's own CCSD numbers), and how `xx2cccdenocbp`
+  makes the parts of `xfull`, `dpopo`, `dpvpv` with a frozen index.
+- The one-rank-per-node timing of (Q), a smaller duplication of Xv between
+  ranks, labels with a modulus: as before.
 - No input section of the ZMAT is read (`%zccsdt` of the Python front end):
   method by argument or CALC, thresholds by CC_CONV / CC_MAXCYC, everything
   else by the environment variables named above (test hooks and overrides).

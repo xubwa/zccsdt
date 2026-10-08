@@ -171,3 +171,22 @@ subroutine N(xzamps)(w, rw, ecorr)
     call errex
   end if
 end subroutine
+
+! ---------------------------------------------------------------------------
+! The second-order energy from the integrals in the work array.
+subroutine N(xzmp2)(w, e2)
+  use xzdata
+  use xzmem
+  implicit none
+  real(8) :: w(*)
+  real(8), intent(out) :: e2
+  integer(8) :: m0, k1, k2
+  ZT :: e
+  m0 = xzmark()
+  k1 = xzget(NW * no * nv, 'T1')
+  k2 = xzget(NW * no * no * nv * nv, 'T2')
+  call N(xzguess)(no, nv, w(jeps), w(joovv), w(k1), w(k2))
+  call N(xzecorr)(no, nv, w(k1), w(k2), w(joovv), e)
+  e2 = dble(e)
+  call xzrel(m0)
+end subroutine

@@ -28,6 +28,18 @@
 !
 
 ! ---------------------------------------------------------------------------
+! The bytes of data of a file of nbytes bytes that is one record of a
+! sequential unformatted file of ifort: a record of more than 2**31 - 9 bytes
+! is a chain of sub-records, each with two markers of 4 bytes (a Fortran READ
+! takes them as one record; only the lengths have to be counted here).
+integer(8) function xzrecbytes(nbytes)
+  implicit none
+  integer(8), intent(in) :: nbytes
+  integer(8), parameter :: sub = 2147483639_8
+  xzrecbytes = nbytes - 8 * ((nbytes + sub + 7) / (sub + 8))
+end function xzrecbytes
+
+! ---------------------------------------------------------------------------
 ! One record of an unformatted sequential file, n double words.
 subroutine xzrfile(fname, buf, n)
   implicit none
@@ -35,6 +47,7 @@ subroutine xzrfile(fname, buf, n)
   integer(8), intent(in) :: n
   real(8), intent(out) :: buf(n)
   integer(8) :: nbytes
+  integer(8), external :: xzrecbytes
   integer :: ios
   logical :: there
   inquire(file=fname, exist=there, size=nbytes)
@@ -44,9 +57,9 @@ subroutine xzrfile(fname, buf, n)
       '   xx2cvtran writes <ab||cd> only with ABCDTYPE=STANDARD.'
     call errex
   end if
-  if (nbytes < 8 * n + 8) then
-    write(6, '(/,a,a,a,i16,a,i16,a)') ' @XZCCSDT-F, the file ', trim(fname), ' has ', nbytes, &
-      ' bytes; ', 8 * n + 8, ' are expected for the sizes of this run.'
+  if (xzrecbytes(nbytes) /= 8 * n) then
+    write(6, '(/,a,a,a,i16,a,i16,a)') ' @XZCCSDT-F, the file ', trim(fname), ' has ', xzrecbytes(nbytes), &
+      ' bytes of data; ', 8 * n, ' are expected for the sizes of this run.'
     call errex
   end if
   open(unit=71, file=fname, form='unformatted', access='sequential', status='old', &
@@ -67,6 +80,7 @@ subroutine xzsizes()
   use xzpar
   implicit none
   integer(8) :: nb, po, nel, idrop, k, ib(1)
+  integer(8), external :: xzrecbytes
   real(8) :: rb(1)
   logical :: there
   character(len=8), parameter :: need(6) = &
@@ -80,7 +94,7 @@ subroutine xzsizes()
     end if
   end do
   inquire(file='moinhhhh', size=nb)
-  nel = (nb - 8) / 16
+  nel = xzrecbytes(nb) / 16
   po = nint(sqrt(dble(nel)), 8)
   no = nint((sqrt(8d0 * dble(po) + 1d0) - 1d0) / 2d0, 8)
   if (no < 1 .or. (no * (no + 1) / 2) ** 2 /= nel) then
@@ -88,7 +102,7 @@ subroutine xzsizes()
     call errex
   end if
   inquire(file='moinhhpp', size=nb)
-  nel = (nb - 8) / 16
+  nel = xzrecbytes(nb) / 16
   nv = nint(sqrt(dble(nel)) / dble(no), 8)
   if (nv < 1 .or. (no * nv) ** 2 /= nel) then
     write(6, '(/,a)') ' @XZCCSDT-F, moinhhhh and moinhhpp do not belong together.'

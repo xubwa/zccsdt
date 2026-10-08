@@ -100,6 +100,7 @@ subroutine xzdrv(w, maxcor)
   !      amplitudes (file XZAMPS) themselves
   docc = method(1:5) == 'CCSDT'
   planq = .not. docc .or. myrank > 0
+  if (method == 'MP2' .and. myrank > 0) return
   sync = 0d0
   if (docc .and. myrank > 0) then
     call xzmpi_bcast(sync, 16_8)
@@ -132,6 +133,21 @@ subroutine xzdrv(w, maxcor)
     ' %, <ab||cd> ', 100d0 * nvv / (nvp * nvp), ' %'
   write(6, '(a,f10.2,a)') '   integrals read and sorted: ', tread, ' s'
   flush(6)
+
+  ! ---- MP2: the second-order energy of the integrals as they were read (a
+  !      check of the files, e.g. against the number that xx2cvtran prints)
+  if (method == 'MP2') then
+    if (nwe == 2) then
+      call xzmp2_z(w, ecorr)
+    else
+      call xzmp2_d(w, ecorr)
+    end if
+    write(6, '(/,a,f25.12)') '   second-order correlation energy  ', ecorr
+    write(6, '(a,f25.12)') '   E(MP2)                           ', escf + ecorr
+    write(6, '(a,i14,a,f10.1,a)') '   work array used: ', xzpeak, ' words = ', 8d-6 * xzpeak, ' MB'
+    write(6, '(a)') '   XZCCSDT finished: MP2 energy done (TOTENERG not written).'
+    return
+  end if
 
   ! ---- the memory plan
   call xzplan(w, nslot, usefile, nch, .false.)
@@ -261,11 +277,12 @@ subroutine xzjob()
     end if
   end if
   if (method /= 'CCSDT' .and. method /= 'CCSDT[Q]' .and. method /= 'CCSDT(Q)' .and. method /= '(Q)' &
-      .and. method /= '[Q]') then
-    write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q].'
+      .and. method /= '[Q]' .and. method /= 'MP2') then
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), &
+      ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], MP2.'
     call errex
   end if
-  with_q = method /= 'CCSDT'
+  with_q = method /= 'CCSDT' .and. method /= 'MP2'
   conv_t = 10d0 ** (-abs(iflags(4)))
   conv_e = 10d0 ** (-abs(iflags(4)) - 2)
   maxcyc = iflags(7)

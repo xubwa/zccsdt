@@ -22,7 +22,8 @@ moinphhp         <ia||bj>   all elements, stored [b, i, a, j]
 PPPH0001, ..     <ab||ci>   on pairs a<=b, full c: one file per occupied i
 moinpppp         <ab||cd>   on pairs a<=b, c<=d
 
-Every file is one record of an unformatted sequential file, complex numbers
+Every file is one record of an unformatted sequential file (beyond 2 GB in
+the sub-records of ifort: SUBRECORD), complex numbers
 as (re, im), the first index running fastest (pairs: the smaller index
 fastest); the pairs include the diagonal, which is zero.  The integrals are
 antisymmetrized already, in the convention of this program:
@@ -71,14 +72,68 @@ _NKEYS, _WORD = 1000, 8          # entries of JAINDX; bytes of an integer word (
 _RECORD = 128                    # words of a record of JOBARC
 
 
-def _record(path, dtype=_F8):
-    '''The one record of a file written by CFOUR's wfile.'''
+# The data of a record of a sequential unformatted file of ifort between two
+# markers of 4 bytes: at most this many bytes.  A longer record is a chain of
+# sub-records, each with its two markers; the sign of the leading marker of
+# a sub-record is negative if another one follows, that of the trailing
+# marker if one came before (the convention of ifort and gfortran).
+SUBRECORD = 2 ** 31 - 9
+
+
+def _subrecords(f, path):
+    '''[(offset of the data, bytes)] of the sub-records of the first record
+    of the open file ``f``, and the end of the record.'''
+    size = os.fstat(f.fileno()).st_size
+    out, pos = [], 0
+    while True:
+        f.seek(pos)
+        head = f.read(4)
+        if len(head) != 4:
+            raise ValueError('%s: not a record of a sequential unformatted file' % path)
+        n = int(np.frombuffer(head, '<i4')[0])
+        m = abs(n)
+        f.seek(pos + 4 + m)
+        tail = f.read(4)
+        if pos + 8 + m > size or len(tail) != 4 or abs(int(np.frombuffer(tail, '<i4')[0])) != m:
+            raise ValueError('%s: not a record of a sequential unformatted file' % path)
+        out.append((pos + 4, m))
+        pos += m + 8
+        if n >= 0:
+            return out, pos
+
+
+def record_bytes(path):
+    '''The bytes of data of the one record of a file (its sub-records
+    together).'''
     with open(path, 'rb') as f:
-        buf = f.read()
-    n = int(np.frombuffer(buf, '<i4', 1, 0)[0])
-    if n < 0 or n + 8 != len(buf) or int(np.frombuffer(buf, '<i4', 1, 4 + n)[0]) != n:
-        raise ValueError('%s: not one record of a sequential unformatted file' % path)
-    return np.frombuffer(buf, dtype, n // np.dtype(dtype).itemsize, 4)
+        parts, end = _subrecords(f, path)
+    return sum(m for _, m in parts)
+
+
+def _record(path, dtype=_F8):
+    '''The one record of a file written by CFOUR's wfile - of any length:
+    a record of more than SUBRECORD bytes is read from its sub-records.'''
+    dtype = np.dtype(dtype)
+    with open(path, 'rb') as f:
+        parts, end = _subrecords(f, path)
+        if end != os.fstat(f.fileno()).st_size:
+            raise ValueError('%s: not one record of a sequential unformatted file' % path)
+        total = sum(m for _, m in parts)
+        out = np.empty(total // dtype.itemsize, dtype=dtype)
+        if total != out.nbytes:
+            raise ValueError('%s: %d bytes are not numbers of %d bytes' % (path, total, dtype.itemsize))
+        buf = memoryview(out).cast('B')
+        at = 0
+        for pos, m in parts:
+            f.seek(pos)
+            got = 0
+            while got < m:                      # (a read may return less than asked for)
+                k = f.readinto(buf[at + got:at + m])
+                if not k:
+                    raise ValueError('%s: the file ends inside a record' % path)
+                got += k
+            at += m
+    return out
 
 
 def _complex(path, shape):
@@ -225,7 +280,7 @@ def _pairs(n):
 def _sizes(directory):
     '''(nocc, nvir) from the sizes of moinhhhh and moinhhpp.'''
     def numbers(name):
-        return (os.path.getsize(os.path.join(directory, name)) - 8) // 16
+        return record_bytes(os.path.join(directory, name)) // 16
     no = int(round((np.sqrt(8 * np.sqrt(numbers('moinhhhh')) + 1) - 1) / 2))
     if no < 1 or (no * (no + 1) // 2) ** 2 != numbers('moinhhhh'):
         raise ValueError('%s: moinhhhh is not a block on pairs of occupied spinors' % directory)
@@ -375,11 +430,25 @@ def mp2(eris):
 # ---------------------------------------------------------------------------
 # the other direction: a container in CFOUR's files (tests, other programs)
 
-def _write_record(path, a):
+def _write_record(path, a, subrecord=None):
+    """One record of a sequential unformatted file as ifort writes it: in
+    sub-records where it is longer than SUBRECORD bytes (``subrecord``:
+    another limit, for tests)."""
     a = np.ascontiguousarray(a)
-    mark = np.array([a.nbytes], dtype='<i4').tobytes()
+    buf = memoryview(a).cast('B')
+    limit = subrecord or SUBRECORD
+    n = len(buf)
     with open(path, 'wb') as f:
-        f.write(mark + a.tobytes() + mark)
+        at = 0
+        while True:
+            m = min(limit, n - at)
+            more, before = at + m < n, at > 0
+            f.write(np.array([-m if more else m], dtype='<i4').tobytes())
+            f.write(buf[at:at + m])
+            f.write(np.array([-m if before else m], dtype='<i4').tobytes())
+            at += m
+            if not more:
+                break
 
 
 def _write_complex(path, a):

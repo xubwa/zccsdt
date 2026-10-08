@@ -92,7 +92,7 @@ integer(8) function xzpeak_q(w)
   call xzlayout(w, status)
   k = xzget(nwe * no * nv, 'T1')
   k = xzget(nwe * no * no * nv * nv, 'T2')
-  k = xzget(nwe * n3, 'T3')
+  if (method /= 'MP2') k = xzget(nwe * n3, 'T3')
   if (with_q) then
     if (nwe == 2) then
       call xzq_z(w, e5, e6)
@@ -151,6 +151,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   pchunk = min(max(n3, 1_8), 1048576_8)
   floor_cc = 0
   if (.not. planq) floor_cc = xzpeak_cc(w)
+  ! (MP2: the integrals and one array of the size of T2 twice)
+  if (method == 'MP2') with_q = .false.
   floor_q = xzpeak_q(w)
   if (flooronly .and. max(floor_cc, floor_q) <= xzsize) return
   write(6, '(/,a,a,a)') '   Memory plan (words of 8 bytes; ', merge('real numbers   ', 'complex numbers', nwe == 1), ')'
