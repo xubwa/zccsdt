@@ -469,7 +469,7 @@ with it:
 python -m zccsdt.cfour --chain --programs "xjoda xsox2catm xsox2chf" --properties RUNDIR
 ```
 
-for `CALC=CCSD`, `CCSD(T)` and `CCSDT` (the last one through
+for `CALC=CCSD`, `CCSD(T)`, `CCSDT` and `CCSDT(Q)` (the last two through
 `zccsdt.CCSDT` on integrals transformed here).  H2O / 6-31G, X2C-1e, against
 CFOUR's own chain (`xx2cccsd`, `xx2cccdenocbp`, `xx2czvec`, `xsox2cprop`):
 the density differs from CFOUR's `denfinal` by at most 1.7e-10 for CCSD and

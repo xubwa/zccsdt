@@ -704,8 +704,9 @@ def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True, dens
     mf, nfrozen, ndropped = reference(directory)
     n = len(mf.mo_energy)
     frozen = list(range(nfrozen)) + list(range(n - ndropped, n)) if ndropped else nfrozen
-    if j.method == 'ccsdt':
+    if j.method in ('ccsdt', 'ccsdt(q)'):
         import zccsdt
+        with_q = j.method == 'ccsdt(q)'
         cc = zccsdt.CCSDT(mf, frozen=frozen)
         cc.verbose, cc.stdout = verbose, stdout
         cc.conv_tol, cc.conv_tol_normt, cc.max_cycle = j.conv_tol, j.conv_tol_normt, j.max_cycle
@@ -714,9 +715,16 @@ def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True, dens
         cc.kernel()
         if not cc.converged:
             raise RuntimeError('CCSDT did not converge in %d cycles' % j.max_cycle)
+        e = {'scf': float(mf.e_tot), 'ccsdt': float(cc.e_tot)}
+        if with_q:
+            e_q = cc.ccsdt_q()
+            e['ccsdt[q]'], e['ccsdt(q)'] = float(cc.e_tot + cc.e_q5), float(cc.e_tot + e_q)
         if density:
-            write_density(directory, mf, cc.make_rdm1(ao_repr=True))
-        return {'scf': float(mf.e_tot), 'ccsdt': float(cc.e_tot)}
+            cc.solve_lambda(with_q=with_q)
+            if not cc.converged_lambda:
+                raise RuntimeError('the Lambda equations did not converge in %d cycles' % j.max_cycle)
+            write_density(directory, mf, cc.make_rdm1(with_q=with_q, ao_repr=True))
+        return e
     cc = DirectZCCSD(mf, frozen=frozen)
     cc.verbose, cc.stdout, cc.kramers = verbose, stdout, kramers
     cc.conv_tol, cc.conv_tol_normt, cc.max_cycle = j.conv_tol, j.conv_tol_normt, j.max_cycle
@@ -755,12 +763,12 @@ def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, job
         raise FileNotFoundError('%s: CCSD(T) is done on CFOUR\'s spinors with AO integrals made here and needs '
                                 'the files scf2ccmo, MOL, GENBAS and ZMAT of the run' % directory)
     density = wants_density(directory) if density is None else density
-    if density and (j.method not in ('ccsd', 'ccsd(t)', 'ccsdt') or not scf_files or mo_integrals):
-        raise ValueError('the relaxed density (PROPS of the ZMAT) is there for CCSD, CCSD(T) and CCSDT on '
+    if density and (j.method not in ('ccsd', 'ccsd(t)', 'ccsdt', 'ccsdt(q)') or not scf_files or mo_integrals):
+        raise ValueError('the relaxed density (PROPS of the ZMAT) is there for CCSD, CCSD(T), CCSDT and CCSDT(Q) on '
                          'CFOUR\'s spinors (the files scf2ccmo, MOL, GENBAS), not for %s%s'
                          % (j.method.upper(), ' on the integral files' if mo_integrals else ''))
     if (j.method in ('ccsd', 'ccsd(t)') and scf_files and not (mo_integrals and j.method == 'ccsd')) or \
-            (j.method == 'ccsdt' and density):
+            (j.method in ('ccsdt', 'ccsdt(q)') and density):
         # the AO-driven code on CFOUR's spinors: no integral files are read
         say('CFOUR run directory %s: %s (%s), AO-driven on CFOUR\'s spinors%s'
             % (os.path.abspath(directory), j.method.upper(), j.source['method'],
