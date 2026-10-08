@@ -7,6 +7,13 @@ Memory: the DIIS vectors are in a scratch file unless ``incore_complete``
 (zccsdt.cc.diis).  ``max_memory`` decides where the other large arrays of
 CCSDT live (ccsdt_opt.plan_memory): when they do not fit, T3 and its residual
 are mapped arrays of a scratch file and the packed <ab||de> is used in slabs.
+
+Disk: ``max_disk`` (MB; default: the free space of the scratch directory
+less a reserve) is what the scratch files of the run may take.  The mapped
+arrays of the memory plan come first; the DIIS vectors get the rest
+(zccsdt.disk, diis_plan_for): all ``diis_space`` of them in the file, else
+some of them in memory, else fewer of them, else DIIS without T3 - or an
+error before the first iteration, with the numbers.
 '''
 
 import time
@@ -27,15 +34,22 @@ class Options:
     conv_tol: float = 1e-10
     conv_tol_normt: float = 1e-8
     max_cycle: int = 200
-    diis_space: int = 8
+    diis_space: int = 8         # stored vectors asked for: a maximum (zccsdt.disk)
     diis_file: str = None       # HDF5 file of the DIIS vectors (default: temporary)
+    diis_t3: bool = None        # T3 in the DIIS vectors (CCSDT, Lambda): None - yes,
+                                # unless neither disk nor memory holds three of them;
+                                # True - yes, or an error; False - T1 and T2 only
     incore_complete: bool = False   # keep all DIIS vectors in memory (as in PySCF)
     mem_mb: float = 2000.0      # batch buffer budget of the packed-T3 code
     spin_flip: bool = False     # closed-shell alpha/beta symmetry (RCCSDT)
     verbose: bool = False
     max_memory: float = None    # MB for the whole process, as in PySCF (default:
                                 # 80% of what the node and the job limit leave)
+    max_disk: float = None      # MB for the scratch files of the process (default:
+                                # ZCCSDT_MAX_DISK, else the free space of the scratch
+                                # directory less a reserve)
     plan: object = None         # ccsdt_opt.MemoryPlan given explicitly
+    diis_plan: object = None    # zccsdt.disk.DiisPlan given explicitly
     callback: object = None     # callback(info) after every iteration (kernel)
 
 
@@ -50,6 +64,7 @@ class Result:
     t3: np.ndarray = None       # packed (i<j<k, a<b<c) for CCSDT
     timings: list = None        # wall time per iteration
     plan: object = None         # the MemoryPlan of a CCSDT run
+    diis_plan: object = None    # where its DIIS vectors were (zccsdt.disk.DiisPlan)
 
 
 def init_amps(eris):
@@ -99,6 +114,33 @@ def _diff_norm(a, b, chunk=1 << 22):
     return np.sqrt(s)
 
 
+def diis_plan_for(eris, dtype, opts, plan):
+    '''Where the DIIS vectors of a CCSDT run with the MemoryPlan ``plan`` go
+    (zccsdt.disk.DiisPlan; the rule: zccsdt.disk): from ``opts.max_disk``
+    less what the plan maps to scratch files, and the memory that the plan
+    leaves of its budget.  Raises DiskFullError if the mapped arrays of the
+    plan do not fit on the disk, or the vectors with an explicit
+    ``diis_t3 = True``; MemoryError if ``incore_complete`` cannot be met.'''
+    from zccsdt import disk, memory
+    size = ccsdt_opt.engine_for(eris, dtype, flip=getattr(opts, 'spin_flip', False)).size
+    t3 = size * np.dtype(dtype).itemsize
+    o = eris.nocc
+    v = eris.fock.shape[0] - o
+    big = disk.file_bytes([o * v, o * (o - 1) // 2 * (v * (v - 1) // 2), size], np.dtype(dtype).itemsize)
+    r3_file = bool(plan.t3_file if plan.r3_file is None else plan.r3_file)
+    spare = plan.spare
+    if opts.incore_complete:    # (whatever max_memory: what the node and the job leave)
+        avail = memory.available()
+        spare = None if avail is None else max(0, avail + ccsdt_opt.cached_bytes(eris) - plan.need)
+    dp = disk.diis_plan(big, opts.diis_space, opts.max_disk, opts.diis_file, plan.disk, spare,
+                        opts.diis_t3, opts.incore_complete, 'T3',
+                        memory_tight=bool(plan.t3_file or r3_file))
+    if r3_file and not dp.with_big and size:
+        # the residual is not built in the DIIS storage then: one more array of the scratch file
+        disk.require(plan.disk + t3, 'T3 and its residual', opts.max_disk)
+    return dp
+
+
 def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     '''Solve CCSD or CCSDT.  Returns a Result; t3 is kept packed.
     method: 'ccsd', 'ccsdt' (packed-T3 implementation) or 'ccsdt_ref'
@@ -108,7 +150,11 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     the memory cgroups of the process leave) decides where the large arrays
     live (ccsdt_opt.plan_memory); ``opts.incore_complete`` keeps everything
     in memory whatever the budget and ``opts.plan`` gives a MemoryPlan
-    explicitly.  The plan used is returned as Result.plan.
+    explicitly.  The plan used is returned as Result.plan.  ``opts.max_disk``
+    (MB) bounds the scratch files of the run; where the DIIS vectors go
+    follows from both (diis_plan_for; returned as Result.diis_plan), and a
+    disk that does not hold what the run needs is an error before the first
+    iteration.
 
     ``opts.callback(info)``, if given, is called after every iteration with
     a dict: cycle, e_corr, de, norms (|dt1|, |dt2|, |dt3| of the full
@@ -124,10 +170,14 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     dtype = np.result_type(t1, t2, eris.oovv, eris.fock)
     t1 = t1.astype(dtype)
     t2 = t2.astype(dtype)
-    plan = scr = None
+    plan = scr = dplan = None
     tight = r3_file = False
+    from zccsdt import disk
     if method == 'ccsdt':
         plan = opts.plan or ccsdt_opt.plan_for(eris, dtype, opts)
+        # (before anything is allocated: the disk holds the plan or the run stops here)
+        with disk.limit(opts.max_disk):
+            dplan = opts.diis_plan or diis_plan_for(eris, dtype, opts, plan)
         # memory is short if the plan has put anything into a scratch file:
         # the kernels then tell the operating system what they do with mapped arrays
         tight = plan.t3_file or plan.pp_file or plan.pp_bytes is not None
@@ -135,6 +185,12 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
         # keeps it in memory): it is then built in the storage of the DIIS vectors
         r3_file = plan.t3_file if plan.r3_file is None else plan.r3_file
     hints = scratch.hints(tight)
+    # DIIS without T3 (opts.diis_t3 = False, or nothing holds the vectors):
+    # T3 takes its Jacobi step, into a second array that alternates with it
+    diis_t3 = dplan is None or dplan.with_big
+    other = None
+    limit = disk.limit(opts.max_disk)
+    limit.__enter__()
     adiis = None
     timings = []
     conv = False
@@ -152,6 +208,8 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                 scr = Scratch(prefix='zccsdt_t3_', what='T3',
                               hint=' or give the calculation more memory (max_memory)')
                 mapped = scr.create('t3', size, dtype)
+                if r3_file and not diis_t3:
+                    other = scr.create('r3', size, dtype)
                 if t3 is not None:
                     mapped[:] = np.asarray(t3).ravel()
                 t3 = mapped
@@ -161,13 +219,21 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                 t3 = np.array(t3, dtype=dtype).ravel()  # (overwritten below: not the caller's)
 
         e_old = ccsd.energy(t1, t2, eris)
-        adiis = DIIS(space=opts.diis_space, filename=opts.diis_file,
-                     incore=opts.incore_complete)
+        if dplan is None:
+            adiis = DIIS(space=opts.diis_space, filename=opts.diis_file,
+                         incore=opts.incore_complete)
+        else:
+            adiis = DIIS(space=dplan.space, filename=opts.diis_file,
+                         incore=opts.incore_complete or dplan.n_file == 0,
+                         in_memory=dplan.n_memory)
         for icycle in range(opts.max_cycle):
             t0, c0 = time.perf_counter(), time.process_time()
             if with_t3:
                 if method == 'ccsdt':
-                    rbuf = adiis.buffers(_parts(t1, t2, t3))[0][2] if r3_file else None
+                    if not diis_t3:
+                        rbuf = other
+                    else:
+                        rbuf = adiis.buffers(_parts(t1, t2, t3))[0][2] if r3_file else None
                     t1n, t2n, t3n = ccsdt_opt.update_amps(opts, t1, t2, t3, eris,
                                                           mem_mb=opts.mem_mb, out=rbuf,
                                                           plan=plan)
@@ -180,19 +246,30 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                 first = adiis.xprev is None
                 if first:
                     norms = [np.linalg.norm(t1n - t1), np.linalg.norm(t2n - t2), 0.0]
-                    if with_t3:
-                        with timer('diis.norm0'):
-                            norms[2] = 6.0 * _diff_norm(t3n, t3)
-                parts = adiis.update(_parts(t1n, t2n, t3n),
-                                     out=[None, None, t3] if in_place else None)
+                if with_t3 and (first or not diis_t3):
+                    with timer('diis.norm0'):
+                        n3 = 6.0 * _diff_norm(t3n, t3)
+                if diis_t3:
+                    parts = adiis.update(_parts(t1n, t2n, t3n),
+                                         out=[None, None, t3] if in_place else None)
+                else:
+                    parts = adiis.update(_parts(t1n, t2n, None))
                 if not first:
                     # ||dt2_full|| = 2 ||dt2_packed||, ||dt3_full|| = 6 ||dt3_packed||
                     en = adiis.err_norms
-                    norms = [en[0], 2.0 * en[1], 6.0 * en[2] if with_t3 else 0.0]
+                    norms = [en[0], 2.0 * en[1], 6.0 * en[2] if with_t3 and diis_t3 else 0.0]
+                if with_t3 and (first or not diis_t3):
+                    norms[2] = n3
                 norms = [float(x) for x in norms]
                 normt = sum(norms)
                 with timer('diis.unpack'):
-                    t1, t2, t3 = _from_parts(parts, nocc, nvir, with_t3)
+                    if diis_t3:
+                        t1, t2, t3 = _from_parts(parts, nocc, nvir, with_t3)
+                    else:
+                        t1, t2, _ = _from_parts(parts, nocc, nvir, False)
+                        # the new T3 as it is; its array of the last iteration is the next target
+                        scratch.written(t3n)
+                        other, t3 = t3, t3n
             e_new = ccsd.energy(t1, t2, eris)
             timings.append(time.perf_counter() - t0)
             de = e_new - e_old
@@ -210,10 +287,12 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                 break
     finally:
         scratch.hints(hints)
+        limit.__exit__(None, None, None)
         if adiis is not None:
             adiis.close()
         if scr is not None:
             scr.close()                 # the mapped t3 stays valid (the file is unlinked)
     e_corr = e_old
     return Result(e_corr=e_corr, e_tot=eris.e_hf + e_corr.real, converged=conv,
-                  ncycle=icycle + 1, t1=t1, t2=t2, t3=t3, timings=timings, plan=plan)
+                  ncycle=icycle + 1, t1=t1, t2=t2, t3=t3, timings=timings, plan=plan,
+                  diis_plan=dplan)

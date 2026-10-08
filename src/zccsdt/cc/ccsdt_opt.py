@@ -49,6 +49,11 @@ class MemoryPlan:
                                 # of triples all slabs ('batch': T3 is read once)
     mem_mb: float = None        # batch buffers of the T3 passes (None: Options.mem_mb)
     need: int = 0               # bytes of ordinary memory the plan takes
+    disk: int = 0               # bytes that the plan puts into scratch files (T3, the
+                                # bare <ab||de> if it is in memory now, the kept rows
+                                # of the ladder operator); the DIIS vectors come on top
+    spare: int = None           # bytes of the memory budget beyond ``need`` (None:
+                                # no budget known)
 
 
 _STEPS = [0]                # CCSDT steps taken by this process
@@ -154,6 +159,29 @@ def plan_for(eris, dtype, opts):
 def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memory',
                 mem_mb=2000.0, t3_bytes=None, pp_bytes=None, sliceable=True, row_bytes=None,
                 engine=None, ovvv=OVVV_DENSE, dress_bytes=None):
+    '''MemoryPlan for ``budget`` bytes of ordinary memory (_plan_memory, which
+    has the rules), with what it puts on the scratch disk (``disk``: T3 if
+    it is mapped, the bare packed <ab||de> if it has to leave memory, the
+    rows of the dressed operator that the batch-wise ladder keeps in a
+    file) and what it leaves of the budget (``spare``).  The residual of a
+    mapped T3 is built in the storage of the DIIS vectors and is counted
+    with them (zccsdt.disk).'''
+    plan = _plan_memory(nocc, nvir, itemsize, budget, limit, pp_where, mem_mb, t3_bytes, pp_bytes,
+                        sliceable, row_bytes, engine, ovvv, dress_bytes)
+    o, v = nocc, nvir
+    nvp = v * (v - 1) // 2
+    pp = nvp * nvp * itemsize if pp_bytes is None else pp_bytes
+    t3 = o * (o - 1) * (o - 2) // 6 * (v * (v - 1) * (v - 2) // 6) * itemsize if t3_bytes is None \
+        else t3_bytes
+    plan.disk = (t3 if plan.t3_file else 0) + (pp if plan.pp_file and pp_where == 'memory' else 0) \
+        + (pp if plan.pp_order == 'batch' and plan.pp_bytes is not None and plan.pp_bytes < pp else 0)
+    plan.spare = None if budget is None else max(0, int(budget) - plan.need)
+    return plan
+
+
+def _plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memory',
+                 mem_mb=2000.0, t3_bytes=None, pp_bytes=None, sliceable=True, row_bytes=None,
+                 engine=None, ovvv=OVVV_DENSE, dress_bytes=None):
     '''MemoryPlan for ``budget`` bytes of ordinary memory beyond what the
     integral object holds already (None: no limit, everything in memory).
 
