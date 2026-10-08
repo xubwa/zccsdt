@@ -59,7 +59,8 @@ contains
   end subroutine
 end module xzpland
 
-! words of the work array that the layout and the iterations take
+! words of the work array that the layout and the iterations (CCSDT, the
+! Lambda equations, or both one after the other) take
 integer(8) function xzpeak_cc(w)
   use xzdata
   use xzmem
@@ -68,19 +69,32 @@ integer(8) function xzpeak_cc(w)
   real(8) :: w(*)
   real(8) :: e
   logical :: c
-  integer(8) :: n, peak, status
+  integer(8) :: n, peak, status, k
   call xzdry_begin(0_8)
   call xzlayout(w, status)
-  if (nwe == 2) then
-    call xzcc_z(w, pslot, pfile, pchunk, e, c, n)
+  if (with_cc) then
+    if (nwe == 2) then
+      call xzcc_z(w, pslot, pfile, pchunk, e, c, n)
+    else
+      call xzcc_d(w, pslot, pfile, pchunk, e, c, n)
+    end if
   else
-    call xzcc_d(w, pslot, pfile, pchunk, e, c, n)
+    k = xzget(nwe * no * nv, 'T1')
+    k = xzget(nwe * no * no * nv * nv, 'T2')
+    k = xzget(nwe * n3, 'T3')
+  end if
+  if (with_lam) then
+    if (nwe == 2) then
+      call xzlam_z(w, pslot, pfile, pchunk, c, n)
+    else
+      call xzlam_d(w, pslot, pfile, pchunk, c, n)
+    end if
   end if
   call xzdry_end(peak)
   xzpeak_cc = peak
 end function xzpeak_cc
 
-! words that the layout, the amplitudes and (Q) take
+! words that the layout, the amplitudes (and lambda) and (Q) take
 integer(8) function xzpeak_q(w)
   use xzdata
   use xzmem
@@ -93,6 +107,10 @@ integer(8) function xzpeak_q(w)
   k = xzget(nwe * no * nv, 'T1')
   k = xzget(nwe * no * no * nv * nv, 'T2')
   if (method /= 'MP2') k = xzget(nwe * n3, 'T3')
+  if (with_q .and. q_left) then
+    k = xzget(nwe * no * no * nv * nv, 'Lambda2')
+    k = xzget(nwe * n3, 'Lambda3')
+  end if
   if (with_q) then
     if (nwe == 2) then
       call xzq_z(w, e5, e6)
@@ -120,8 +138,12 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   integer(8) :: f, floor_cc, floor_q, need_cc, need_q, free_bytes, per_vec, nfit, k8
   integer :: k
   character(len=8) :: arg
+  character(len=14) :: what
   integer :: larg
 
+  what = 'CCSDT'
+  if (with_lam) what = 'CCSDT, Lambda'
+  if (with_lam .and. .not. with_cc) what = 'Lambda'
   f = no * nv * nvp                       ! elements of a half-expanded batch of one pair
   ! ---- the smallest and the target batch sizes
   plo(1) = min(nv, nqmax)
@@ -156,7 +178,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   floor_q = xzpeak_q(w)
   if (flooronly .and. max(floor_cc, floor_q) <= xzsize) return
   write(6, '(/,a,a,a)') '   Memory plan (words of 8 bytes; ', merge('real numbers   ', 'complex numbers', nwe == 1), ')'
-  write(6, '(a,i16,a,f10.1,a)') '     the least that CCSDT takes:     ', floor_cc, '  = ', 8d-6 * floor_cc, ' MB'
+  if (.not. planq) write(6, '(a,a30,i16,a,f10.1,a)') '     the least that ', what // ' takes:', floor_cc, '  = ', &
+    8d-6 * floor_cc, ' MB'
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     the least that (Q) takes:       ', floor_q, '  = ', &
     8d-6 * floor_q, ' MB'
   write(6, '(a,i16,a,f10.1,a)') '     the work array has:             ', xzsize, '  = ', 8d-6 * xzsize, ' MB'
@@ -231,7 +254,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   usefile = pfile
   nch = pchunk
   if (.not. planq) then
-  write(6, '(a,i16,a,f10.1,a)') '     CCSDT with this plan:           ', need_cc, '  = ', 8d-6 * need_cc, ' MB'
+  write(6, '(a,a30,i16,a,f10.1,a)') '     ', what // ' with this plan:   ', need_cc, '  = ', 8d-6 * need_cc, ' MB'
   end if
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with this plan:             ', need_q, '  = ', &
     8d-6 * need_q, ' MB'

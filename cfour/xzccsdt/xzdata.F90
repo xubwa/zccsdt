@@ -64,6 +64,9 @@ module xzdata
   ! ---- the job
   character(len=16) :: method = ' '
   logical :: with_q = .false.
+  logical :: with_cc = .false.      ! the CCSDT iterations are part of the job
+  logical :: with_lam = .false.     ! the Lambda equations are
+  logical :: q_left = .false.       ! (Q) with lambda on the left: (Q)_Lambda
   real(8) :: conv_e = 1d-9, conv_t = 1d-7
   integer(8) :: maxcyc = 50
   integer(8) :: ndiis = 8           ! DIIS vectors asked for
@@ -95,6 +98,27 @@ module xzdata
   integer(8) :: jt1                 ! [i][a]
   integer(8) :: jt2                 ! [i][j][a][b]
   integer(8) :: jt3                 ! [I][A] on i<j<k, a<b<c
+
+  ! ---- lambda, in the layouts of the amplitudes
+  integer(8) :: jl1 = 0, jl2 = 0, jl3 = 0
+
+  ! ---- what a Lambda iteration needs of the integrals and of t (xzlam.inc;
+  !      made once, kept for the iterations)
+  integer(8) :: lfov = 0            ! f[m][e], T1-dressed
+  integer(8) :: lfvv = 0, lfoo = 0  ! F_vv[a][d], F_oo[m][i] of the T3 equation
+  integer(8) :: lwov = 0            ! W_ovvo[k][e][c][m]
+  integer(8) :: lwl = 0             ! [(c, k)][(e, m)]: the ring operator of pass 2
+  integer(8) :: lwkl = 0            ! W_oooo[K][P] on pairs
+  integer(8) :: lo6t = 0            ! the transposed operator on occupied triples
+  integer(8) :: lgmq = 0            ! [m][Q][y]: t2[m][n][Q], W_vvvo[Q][b][m]
+  integer(8) :: lgpd = 0            ! [x][P][e]: t2[P][e][f], W_vooo[j][P][e]
+  integer(8) :: lbdrv = 0           ! [k][i][Q], k < 2 (nv + no): right-hand sides of the drive terms
+  integer(8) :: ladrv = 0           ! [P][c][k]: their left-hand sides
+  integer(8) :: lvx = 0             ! [g][e][j][b] = ~<ej||bg>
+  integer(8) :: lxq = 0             ! [P][I][e] = sum_{f<g} <P||fg> t3[I][e, fg]
+  integer(8) :: lx2 = 0             ! [Q][I][i] = A(ef) sum_{g<h} ~<ei||gh> t3[I][f, gh]
+  integer(8) :: looovd = 0          ! dressed <mn||ie> [m][n][i][e]
+  integer(8) :: lt2p = 0            ! t2[i][j][Q]
 
   ! ---- batch sizes: the memory plan (xzplan.F90)
   integer(8) :: nbp = 1             ! occupied pairs of a batch of pass 1 and pass 2
@@ -130,4 +154,12 @@ module xzdata
     'T1 dressing', 'pass-1 operands', 'pass 1', 'W_vvvo', 'intermediates', &
     'dressed <ab||cd> rows', 'pp ladder: gather', 'pp ladder: GEMM', 'pp ladder: reduction', &
     'CCSD part', 'occupied operator', 'pass 2', 'hh ladder, F_oo', 'T3 update', 'DIIS', 'energy']
+
+  ! ---- wall times of the stages of the Lambda equations
+  integer, parameter :: nltime = 12
+  real(8) :: tlam(nltime) = 0d0
+  character(len=28), parameter :: lname(nltime) = [character(len=28) :: &
+    'intermediates (once)', 'pass 1: gather', 'pass 1: stacked GEMMs', 'pass 1: density', &
+    'Gram matrix', 'pass 2', 'ladder: gather', 'ladder: GEMM', 'ladder: reduction, small', &
+    'hh ladder, F_oo', 'residuals of rank 1, 2', 'update, DIIS']
 end module xzdata

@@ -10,8 +10,11 @@ C ALLOCATES: ICORE(I0), MAXCOR DOUBLE WORDS (MEMORY_SIZE OF THE ZMAT).
 C
 C   xzccsdt [method]      method: ccsdt, ccsdt[q], ccsdt(q), or (q) / [q]
 C                         for the correction alone from the amplitudes
-C                         of an earlier run (file XZAMPS); default: what
-C                         CALC of the ZMAT asks for (JOBARC)
+C                         of an earlier run (file XZAMPS); lambda: the
+C                         Lambda equations of CCSDT for these amplitudes
+C                         (file XZLAMB); ccsdt(q)_l, ccsdt[q]_l, or
+C                         (q)_l / [q]_l from XZAMPS and XZLAMB; default:
+C                         what CALC of the ZMAT asks for (JOBARC)
 C
 C BUILT WITH MPI, (Q) IS PARALLEL OVER RANKS.  RANK 0 IS THE CFOUR
 C PROGRAM (CRAPSI, JOBARC, THE OUTPUT); THE OTHER RANKS GET JODA'S FLAGS

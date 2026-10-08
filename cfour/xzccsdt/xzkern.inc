@@ -45,6 +45,50 @@
       type(c_ptr), value :: io
     end subroutine
 
+    ! ---- the passes of a Lambda iteration (csrc/ccsdt_t3.c) and the kernels of
+    !      csrc/lambda_t3.c
+    subroutine N(zc_l3_pass1w)(l3, t3, nto, nvt, no, nv, npo, nvp, otri, osgn, vtri, vsgn, batch, &
+                               gpd, gmq, ny, l2pp, xacc, yall, dr, d1, stats, bufl, buft) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, ny
+      type(*), dimension(*) :: l3, t3, otri, osgn, vtri, vsgn, gpd, gmq, l2pp, xacc, yall, dr, d1, bufl, buft
+      real(c_double) :: stats(4)
+    end subroutine
+
+    subroutine N(zc_l3_pass2w)(l3, nto, nvt, no, nv, npo, nvp, otri, osgn, ofree, opair, &
+                               vtri, vsgn, vfree, vpair, batch, wl, u, nu, vp, adrv, k, bdrv, r, stats, &
+                               tb, z) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, nu, k
+      type(*), dimension(*) :: l3, otri, osgn, ofree, opair, vtri, vsgn, vfree, vpair
+      type(*), dimension(*) :: wl, u, vp, adrv, bdrv, r, tb, z
+      real(c_double) :: stats(4)
+    end subroutine
+
+    subroutine N(zc_lam_pair_expand)(y, out, ny, nx, n) bind(C)
+      import
+      integer(c_int64_t), value :: ny, nx, n
+      type(*), dimension(*) :: y, out
+    end subroutine
+
+    subroutine N(zc_lam_pair_expand_tab)(y, out, ny, nx, n, nq, pidx) bind(C)
+      import
+      integer(c_int64_t), value :: ny, nx, n, nq
+      type(*), dimension(*) :: y, out, pidx
+    end subroutine
+
+    subroutine N(zc_lam_pair_matvec)(y, w, acc, nx, n) bind(C)
+      import
+      integer(c_int64_t), value :: nx, n
+      type(*), dimension(*) :: y, w, acc
+    end subroutine
+
+    subroutine N(zc_lam_pair_matvec_tab)(y, w, acc, nx, n, nqt, q0, nq, pa, pb) bind(C)
+      import
+      integer(c_int64_t), value :: nx, n, nqt, q0, nq
+      type(*), dimension(*) :: y, w, acc, pa, pb
+    end subroutine
+
     subroutine N(zc_gather_vir_half)(t3, nvt, rows, nb, vtri, vsgn, nv, nvp, out) bind(C)
       import
       integer(c_int64_t), value :: nvt, nb, nv, nvp

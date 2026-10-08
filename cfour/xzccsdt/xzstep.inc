@@ -284,7 +284,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
                            w(kr3), c_null_ptr, stats, w(ktb), w(kz))
     end if
   else
-    call N(xzbpass2)(w, kt3, kr3, w(kwring), w(kadrv), w(kbd))
+    call N(xzbpass2)(w, kt3, kr3, w(kwring), w(kadrv), w(kbd), 1_8, 0_8, w(kbd), w(kbd))
   end if
   if (.not. xzdry) then
     tstage(12) = tstage(12) + omp_get_wtime() - t0
