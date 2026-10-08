@@ -25,13 +25,16 @@ With four active electrons CCSDTQ is the full CI of the active spinors:
 the unrelaxed densities are then compared with those of
 pyscf.fci.fci_dhf_slow on the same integrals (fci()).
 '''
+import os
 import sys
 import time
 
 import numpy as np
 
-from qgrad_ccsdt_q import GEOM
-from qlgrad_ccsdt_ql import setup
+from pyscf import gto, scf, x2c
+
+from qgrad_ccsdt_q import GEOM, ROOT, spin_mixed
+from zccsdt.genbas import read_genbas
 from zccsdt import eris as E
 from zccsdt.cc import ccsdtq, ccsdtq_ref as R, ccsdtq_terms as Q, lambda4_ref as L4
 
@@ -49,6 +52,44 @@ FROZEN_CORE=%s,SCF_CONV=11,CC_CONV=11,CC_MAXCYC=200,LINEQ_CONV=11
 SCF_MAXCYC=200,MEMORY_SIZE=2,MEM_UNIT=GB
 CALC=CCSDTQ,PROPS=FIRST_ORDER)
 '''
+
+
+def setup(name, basis, kind):
+    '''(make_scf(eps) -> (SCF with eps * z in the core Hamiltonian, its
+    spinors), z in the AO basis of that SCF): bench/qlgrad_ccsdt_ql.setup
+    for the dipole operator, with an SCF that starts again from its last
+    density when it has not reached conv_tol = 1e-13 (the X2C SCF of BH
+    stops short of it in some runs and not in others, at the same
+    strength).'''
+    if kind == 'x2c':
+        mol = gto.M(atom=GEOM[name], basis=basis, verbose=0)
+    else:
+        atoms = sorted({a.split()[0] for a in GEOM[name].split(';')})
+        mol = gto.M(atom=GEOM[name], verbose=0, basis={
+            el: read_genbas(os.path.join(ROOT, 'GENBAS'), '%s:%s' % (el.upper(), basis)) for el in atoms})
+    with mol.with_common_orig((0, 0, 0)):
+        v1 = mol.intor('int1e_r' + ('_spinor' if kind == 'x2c' else ''))[2]
+    v = v1 if kind == 'x2c' else np.kron(np.eye(2), v1)
+
+    def make_scf(eps):
+        mf = x2c.UHF(mol) if kind == 'x2c' else scf.RHF(mol)
+        h0 = mf.get_hcore()
+        mf.get_hcore = lambda *args: h0 + eps * v1
+        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
+        mf.kernel()
+        for attempt in range(5):
+            if mf.converged:
+                break
+            print('(SCF at strength %g not converged in %d cycles: again from its density)' % (eps, mf.max_cycle))
+            mf.kernel(dm0=mf.make_rdm1())
+        assert mf.converged
+        if kind == 'x2c':
+            return mf, mf.mo_coeff
+        ghf = scf.addons.convert_to_ghf(mf)
+        h2 = np.kron(np.eye(2), h0 + eps * v1)
+        ghf.get_hcore = lambda *args: h2
+        return ghf, spin_mixed(ghf) if kind == 'complex' else ghf.mo_coeff
+    return make_scf, v
 
 
 def fci(h, g, nelec):
@@ -89,7 +130,7 @@ def main():
     opts = dict(a.split('=') for a in sys.argv[2:] if '=' in a)
     nfrozen, ndrop = (int(rest[0]), int(rest[1])) if rest else (0, 0)
     steps = [float(x) for x in opts.get('steps', '4e-3,2e-3,1e-3').split(',')]
-    make_scf, v, nuc = setup(name, basis, kind)
+    make_scf, v = setup(name, basis, kind)
     if opts.get('zmat'):
         mol = make_scf(0.0)[0].mol
         print(ZMAT % ('%s ccsdtq_%s_props' % (name, basis.lower().replace('-', '')),
