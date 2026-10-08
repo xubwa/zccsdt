@@ -981,9 +981,10 @@ class GCCSDT(UCCSDT):
     # the blocks are slower than the few large ones of the packed block (docs/lambda.md 10.5)
     blocks_min = 800_000
     # CCSDT(Q)_Lambda properties (zccsdt.cc.zeta_opt): the stencil of the iterations of zeta
-    # ('central': two amplitude steps each and the exact formula at the end; 'exact': four) and
-    # of the derivatives along zeta that are taken once (the Lambda residuals, the densities)
-    zeta_stencil = 'central'
+    # ('forward': one amplitude step each, then two, and the exact formula at the end;
+    # 'central': two and the exact formula; 'exact': four) and of the derivatives along zeta
+    # that are taken once (the Lambda residuals, the densities)
+    zeta_stencil = 'forward'
     response_stencil = 'exact'
     _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'rdm1_blocks', 'blocks_min',
                               'e_ql', 'e_ql5', 'e_tot_ql', 'zeta1', 'zeta2', 'zeta3', 'l1_ql', 'l2_ql', 'l3_ql',
@@ -1303,7 +1304,8 @@ class GCCSDT(UCCSDT):
         if not rz.converged:
             logger.warn(self, 'the equation of zeta of CCSDT(Q)_Lambda did not converge in %d cycles', rz.ncycle)
         self.ql_info['zeta'] = dict(wall=time.perf_counter() - t0, cycles=rz.ncycle, steps=rz.steps,
-                                    stencil_error=rz.stencil_error, mapped=rz.plan.mapped, need=rz.plan.need,
+                                    stencil_error=rz.stencil_error, forward=rz.forward, mapped=rz.plan.mapped,
+                                    need=rz.plan.need,
                                     timings=rz.timings)
         ccsdt_opt.release_cached(eris)          # (what the amplitude steps kept)
         # ---- lambda': the Lambda equations with sources, in the blocks of the labels or on

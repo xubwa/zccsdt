@@ -20,6 +20,10 @@ amplitudes (points()):
                two evaluations; what is left out is h^2 times the cubic term
                of f along zeta, DELTA^2 = 1e-10 of J zeta times a number of
                order one, and the rounding of f is divided by h
+    'forward'  [f(t + h zeta) - f(t)] / h,   h = DELTA_FORWARD / max |zeta|
+               one evaluation (f(t) is made once); what is left out is h
+               times the quadratic term, 1e-8 of J zeta - for iterations
+               that are still far from converged, kernel() only
 
 The Jacobian.  ccsdt_opt.update_amps gives the Jacobi step N(t) = t + R(t) / D
 of the amplitude equations, as it is - T3 on the packed block or in the
@@ -29,21 +33,31 @@ that sum to zero and reproduce the first derivative,
     zeta + (J zeta + q) / D = sum_k w_k N(t + x_k zeta) + q / D:
 
 a Jacobi step of (1) costs as many amplitude iterations as the stencil has
-points, and DIIS runs on it as on the amplitudes.  kernel() iterates with
-the central differences (two amplitude iterations per iteration).  When
-their change is below the threshold, the same iterate is done once more
-with the points +-2h, which with the two at +-h are the exact formula at
-step h: if the exact change is below the threshold too - the difference
-between the two is Result.stencil_error - the iterations end, else they go
-on with the exact stencil (four amplitude iterations each).
+points, and DIIS runs on it as on the amplitudes.  kernel() goes up a
+ladder:
+
+  1. forward differences, one amplitude iteration per iteration (and one
+     for N(t)), until the change is FORWARD_TOL of zeta, or below the
+     threshold;
+  2. central differences, two per iteration, until the change is below
+     the threshold;
+  3. the last iterate once more with the points +-2h, which with the two at
+     +-h are the exact formula at step h.  If the exact change is below the
+     threshold too - the difference between the two is
+     Result.stencil_error - the iterations end, else they go on with the
+     exact stencil, four amplitude iterations each.
+
+So the solution is that of the exact equations to the threshold, by a
+criterion that does not depend on the estimates above; ``stencil`` starts
+the ladder higher up.
 
 Memory (plan_for): the amplitude steps have the MemoryPlan of the amplitude
 equations - their "T3" is the shifted amplitudes, their residual the new
-vector.  The equation has four more arrays of the size of T3 (zeta_3,
-q_3 / D, the accumulator of a stencil and a copy for the last check) and its
-DIIS vectors.  If the amplitude steps do not fit in memory next to them,
-they are mapped arrays of a scratch file, which every use passes over once,
-front to back.
+vector.  The equation has five more arrays of the size of T3 (zeta_3,
+q_3 / D, N(t), the accumulator of a stencil and a copy for the last check)
+and its DIIS vectors.  If the amplitude steps do not fit in memory next to
+them, they are mapped arrays of a scratch file, which every use passes over
+once, front to back.
 
 Timers (zccsdt.timing): 'zeta.step' (an amplitude step, with the timers of
 ccsdt_opt below it), 'zeta.vectors', 'zeta.diis', 'zeta.response'.
@@ -60,7 +74,9 @@ from zccsdt.timing import timer
 
 DELTA = 1e-5        # central differences: the largest change of an amplitude
 EXACT = ((1.0, 8.0 / 12.0), (-1.0, -8.0 / 12.0), (2.0, -1.0 / 12.0), (-2.0, 1.0 / 12.0))
-NVEC = 4            # arrays of the size of T3 besides those of an amplitude step
+DELTA_FORWARD = 3e-8        # forward differences: the same
+FORWARD_TOL = 1e-6          # ... are left when the change is this fraction of zeta
+NVEC = 5            # arrays of the size of T3 besides those of an amplitude step
 CHUNK = 1 << 22
 
 
@@ -182,11 +198,12 @@ class Result:
     normt: float = 0.0          # the last change of the full tensors
     steps: int = 0              # amplitude steps taken
     stencil_error: float = None  # the central step against the exact one at the last iterate (full tensors)
+    forward: int = 0            # iterations with forward differences
     timings: list = None        # wall time per iteration
     plan: object = None
 
 
-def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
+def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='forward', delta=DELTA):
     '''Solve J zeta + q = 0 for converged CCSDT amplitudes: t1, t2 dense, t3
     as solver.kernel returns it (the packed block, or the blocks of the
     symmetry labels where the integrals have them in use); q2[i,j,a,b] and
@@ -198,16 +215,16 @@ def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
     max_cycle, diis_space, diis_file, incore_complete, mem_mb, max_memory,
     verbose, callback; ``plan`` takes a Plan of this module).
 
-    ``stencil``: 'central' - two amplitude steps per iteration, and at the
-    end the check with the exact formula described in the module (two more
-    steps; four per iteration from then on if it fails) -, or 'exact': four
-    amplitude steps in every iteration.  ``delta``: the largest change of an
-    amplitude in a central step.  Returns a Result; zeta_3 has the layout of
-    t3.'''
+    ``stencil``: where the ladder of the module starts - 'forward' (one
+    amplitude step per iteration, then two, and the check with the exact
+    formula at the end), 'central' (two, and the check) or 'exact' (four in
+    every iteration).  ``delta``: the largest change of an amplitude in a
+    central step.  Returns a Result; zeta_3 has the layout of t3.'''
     from zccsdt import scratch
     from zccsdt.scratch import Scratch
     opts = opts or solver.Options()
-    points(stencil)
+    if stencil != 'forward':
+        points(stencil)
     nocc, nvir = np.shape(t1)
     dtype = np.dtype(np.result_type(t1, t2, t3, q2, q3, eris.oovv, eris.fock))
     plan = opts.plan if isinstance(opts.plan, Plan) else plan_for(eris, dtype, opts)
@@ -251,7 +268,7 @@ def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
             A = new('in', plan.mapped and aplan.t3_file)
         c2 = np.asarray(q2, dtype=dtype) / eijab
         z1, z2 = np.zeros((nocc, nvir), dtype=dtype), c2.copy()
-        B = keep = None
+        B = keep = base = None
 
         def evaluate(x, out):
             '''The Jacobi step of the amplitude equations at t + x zeta: (t1, t2, T3 in ``out``).'''
@@ -283,7 +300,7 @@ def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
 
         adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=opts.incore_complete,
                      incore_size=max(size, 1) if plan.mapped else None)
-        mode = stencil
+        mode, nforward = stencil, 0
         for icycle in range(opts.max_cycle):
             t0, c0 = time.perf_counter(), time.process_time()
             scale = max(largest((z1, z2)), largest((z3,)))
@@ -292,11 +309,27 @@ def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
                 break
             if B is None:
                 B = new('out', plan.mapped and r3_file)
-            pts = points(mode, scale, delta)
-            z1n, z2n = combine(pts, (0.0, c2, [(1.0, c3)]), B)
+            used = mode
+            if mode == 'forward':
+                nforward += 1
+                if base is None:        # the step at t itself, once
+                    N0 = new('base', plan.mapped)
+                    base = evaluate(0.0, N0) + (N0,)
+                h = float(DELTA_FORWARD / scale)
+                pts = ((h, 1.0 / h),)
+                z1n, z2n = combine(pts, (-base[0] / h, c2 - base[1] / h, [(1.0, c3), (-1.0 / h, base[2])]), B)
+            else:
+                pts = points(mode, scale, delta)
+                z1n, z2n = combine(pts, (0.0, c2, [(1.0, c3)]), B)
             norms = change(z1n, z2n, B)
             normt = sum(norms)
-            if normt < opts.conv_tol_normt and mode == 'central':
+            if used == 'forward':
+                size_z = float(np.linalg.norm(z1n) + np.linalg.norm(z2n))
+                if size:
+                    size_z += 6.0 * float(np.sqrt(abs(diis._dot(B, B))))
+                if normt < max(opts.conv_tol_normt, FORWARD_TOL * size_z):
+                    mode = 'central'
+            if normt < opts.conv_tol_normt and used == 'central':
                 # the same iterate with the exact formula at step h: the points +-2h more
                 h = pts[0][0]
                 with timer('zeta.vectors'):
@@ -311,7 +344,7 @@ def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
                 normt = sum(norms)
                 if normt >= opts.conv_tol_normt:
                     mode = 'exact'
-            if normt < opts.conv_tol_normt:
+            if normt < opts.conv_tol_normt and used != 'forward':
                 conv = True
                 z1, z2 = z1n, z2n
                 with timer('zeta.vectors'):
@@ -325,10 +358,10 @@ def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
                         B = None
             timings.append(time.perf_counter() - t0)
             if opts.verbose:
-                print('zeta cycle %3d  |dz| = %.3e  %s  %.2fs' % (icycle + 1, normt, mode, timings[-1]))
+                print('zeta cycle %3d  |dz| = %.3e  %s  %.2fs' % (icycle + 1, normt, used, timings[-1]))
             if opts.callback is not None:
                 opts.callback(dict(cycle=icycle + 1, norms=tuple(norms), normt=normt, diis=len(adiis.xs),
-                                   wall=timings[-1], cpu=time.process_time() - c0, steps=nsteps[0], stencil=mode))
+                                   wall=timings[-1], cpu=time.process_time() - c0, steps=nsteps[0], stencil=used))
             if conv:
                 break
     finally:
@@ -338,7 +371,7 @@ def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
         if scr[0] is not None:
             scr[0].close()              # (the mapped zeta_3 stays valid: the file is unlinked)
     return Result(converged=conv, ncycle=icycle + 1, z1=z1, z2=z2, z3=z3, normt=normt, steps=nsteps[0],
-                  stencil_error=err, timings=timings, plan=plan)
+                  stencil_error=err, forward=nforward, timings=timings, plan=plan)
 
 
 # ------------------------------------------------------- the second equation

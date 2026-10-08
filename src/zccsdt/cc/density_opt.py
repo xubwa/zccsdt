@@ -736,6 +736,47 @@ class _Given:
             yield f0, f1, G
 
 
+class _Replay:
+    '''A source of the integrals of frozen spinors (FrozenIntegrals, _Given)
+    for several calls of kernel() with the same integrals - the densities
+    of CCSDT(Q)_Lambda at shifted amplitudes: the batches of the first call
+    are written to a scratch file as they are made, and the later calls
+    read them back (mapped arrays; kernel() only reads a batch).  Without
+    room for the file the batches are made again.'''
+
+    def __init__(self, source):
+        self.source, self.kept, self.scratch = source, {}, None
+
+    def __getattr__(self, name):        # (n, nmo, kramers, plan(), slab_plan(), ...)
+        return getattr(self.source, name)
+
+    def batches(self, plan=None, first=None):
+        from zccsdt.scratch import Scratch
+        key = (getattr(plan, 'nket', None), first)
+        if self.kept.get(key):
+            yield from self.kept[key]
+            return
+        out = None if key in self.kept else []
+        for f0, f1, G in self.source.batches(plan, first):
+            if out is not None:
+                try:
+                    if self.scratch is None:
+                        self.scratch = Scratch(prefix='zccsdt_frozen_', what='the integrals with one frozen index')
+                    M = self.scratch.create('g%d_%d' % (len(self.kept), f0), G.shape, G.dtype)
+                    M[...] = G
+                    out.append((f0, f1, M))
+                except OSError:
+                    out = None
+            yield f0, f1, G
+        self.kept[key] = out
+
+    def close(self):
+        self.kept = {}
+        if self.scratch is not None:
+            self.scratch.close()
+            self.scratch = None
+
+
 def _frozen_stage(c):
     '''(bf, kf) of kernel(): for every batch of frozen spinors, the
     integrals (f q|r s) once, T1-dressed for B (S[f,q,r,s] = <fq||rs>, q as
@@ -1437,6 +1478,8 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     if zeta is not None:
         # the shifted amplitudes: there (and resident) while the plan is made
         Tk = np.array(np.asarray(t3).reshape(-1), dtype=np.result_type(t3, zeta[2]))
+        if held_out is not None and not plan_only:
+            source = _Replay(source)    # (the integrals with one frozen index: made once for all passes)
     frozen = None if held_out is None else (nf + nd, source)
     res = kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=max_memory, plan=plan,
                  frozen=frozen, blocks=blocks, plan_only=plan_only, frozen_extra=extra, reserve=reserve)
@@ -1463,6 +1506,8 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
                 d1, gnh = d1 + wgt * rk.d1, gnh + wgt * rk.gnh
                 shifted.append((x, wgt, rk))
         del T3f, Z3f
+        if isinstance(source, _Replay):
+            source.close()
     del Tk
     dm1 = d1.T
     dm1 = 0.5 * (dm1 + dm1.conj().T)
