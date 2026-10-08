@@ -220,10 +220,16 @@ def profile(mol, kind, niter, nfrozen=0, ndrop=0):
                  rel.result.plan.slab_bytes, rel.result.plan.need / 1e9,
                  '; frozen spinors: route %s, %s at a time%s' % (
                      rel.result.plan.route, rel.result.plan.nk,
-                     ', Kramers pairs (half of them)' if rel.result.plan.kramers else '')
+                     ', Kramers pairs (half of them)' if getattr(rel.result.plan, 'kramers', False) else '')
                  if getattr(rel.result.plan, 'route', None) else ''))
         tree(timing.snapshot())
     print('Z-vector converged: %s; trace of the density %.10f' % (rel.converged, np.trace(rel.relaxed).real))
+    # numbers that do not depend on how the SCF mixed the spinors of a degenerate level
+    w = np.linalg.eigvalsh(rel.relaxed)
+    print('checksum: |D|^2 %.12f  |D - D(unrelaxed)|^2 %.6e  occupation numbers %.12f .. %.12f, sum of squares %.12f'
+          % (np.linalg.norm(rel.relaxed) ** 2, np.linalg.norm(rel.relaxed - rel.unrelaxed) ** 2, w[0], w[-1], (w ** 2).sum()))
+    if rel.gradient is not None:
+        print('checksum: |G|^2 %.12e over all spinors' % np.linalg.norm(rel.gradient) ** 2)
 
 
 def main():
