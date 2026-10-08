@@ -3423,8 +3423,35 @@ same amplitudes; seconds per iteration:
 
 Lambda of the two solvers agrees to 5e-11 (l1), 3e-11 (l2), 5e-12 (l3).
 With 8 + 28 spinors the blocks are slower than the packed block (small
-products; seen on the login node only).  The densities and the orbital
-gradient do not use the labels yet: l3 and T3 are expanded for them.
+products).
+
+The densities and the orbital gradient in blocks (`zccsdt.cc.density_blk`;
+docs/lambda.md section 10.5), and the whole calculation through the front
+end, spinors of one SCF, with `symmetry` and without; job 31744031 on c028
+(nothing else on it), 8 cores, wall seconds:
+
+| | TZ, no symmetry | TZ, symmetry | QZ, no symmetry | QZ, symmetry |
+|---|---|---|---|---|
+| integrals and CCSDT (19 iterations) | 24.82 | 15.78 | 368.5 | 153.0 |
+| Lambda (17 iterations) | 15.25 | 4.98 | 252.9 | 29.90 |
+| relaxed density | 2.53 | 1.78 | 23.59 | 11.04 |
+| total | 42.60 | 22.53 | 645.0 | 193.9 |
+
+Factors of 1.9 and 3.3 in all; the relaxed densities of the two runs agree
+to 1e-11 and 6e-12 in the AO basis.  The density gains least (1.30 and
+2.10 as a call on the same amplitudes): its passes over T3 and l3 became
+3.7 and 13 times faster and are a tenth of it now - what is left is the
+stage of the frozen spinors (4.3 of 10.9 s at QZ), the Z-vector equations
+(2.1 s) and the two-body blocks, none of which use the labels.  With
+symmetry the integral transformation (8.4 and 102 s) is more than half of
+the QZ run.
+
+Small cases are slower in blocks: the ratio packed / blocks of a Lambda
+iteration is 0.3 for 8 + 28 spinors, 1 at 8 + 46 and 3 at 8 + 78 (two
+samples on shared nodes).  The front end therefore solves Lambda and makes
+the density in blocks only where C(o,3) C(v,3) >= `blocks_min` (800,000);
+the amplitude iterations are not under that rule and have the same
+crossover.
 
 ### Complex spinors, larger cases, less memory
 
