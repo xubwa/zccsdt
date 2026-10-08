@@ -736,6 +736,47 @@ class _Given:
             yield f0, f1, G
 
 
+class _Replay:
+    '''A source of the integrals of frozen spinors (FrozenIntegrals, _Given)
+    for several calls of kernel() with the same integrals - the densities
+    of CCSDT(Q)_Lambda at shifted amplitudes: the batches of the first call
+    are written to a scratch file as they are made, and the later calls
+    read them back (mapped arrays; kernel() only reads a batch).  Without
+    room for the file the batches are made again.'''
+
+    def __init__(self, source):
+        self.source, self.kept, self.scratch = source, {}, None
+
+    def __getattr__(self, name):        # (n, nmo, kramers, plan(), slab_plan(), ...)
+        return getattr(self.source, name)
+
+    def batches(self, plan=None, first=None):
+        from zccsdt.scratch import Scratch
+        key = (getattr(plan, 'nket', None), first)
+        if self.kept.get(key):
+            yield from self.kept[key]
+            return
+        out = None if key in self.kept else []
+        for f0, f1, G in self.source.batches(plan, first):
+            if out is not None:
+                try:
+                    if self.scratch is None:
+                        self.scratch = Scratch(prefix='zccsdt_frozen_', what='the integrals with one frozen index')
+                    M = self.scratch.create('g%d_%d' % (len(self.kept), f0), G.shape, G.dtype)
+                    M[...] = G
+                    out.append((f0, f1, M))
+                except OSError:
+                    out = None
+            yield f0, f1, G
+        self.kept[key] = out
+
+    def close(self):
+        self.kept = {}
+        if self.scratch is not None:
+            self.scratch.close()
+            self.scratch = None
+
+
 def _frozen_stage(c):
     '''(bf, kf) of kernel(): for every batch of frozen spinors, the
     integrals (f q|r s) once, T1-dressed for B (S[f,q,r,s] = <fq||rs>, q as
@@ -1334,7 +1375,7 @@ class Relaxed:
 
 def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dropped_vir=None,
                  tol=1e-9, max_memory=None, verbose=None, plan=None, kramers=None, blocks=False,
-                 plan_only=False, q=None):
+                 plan_only=False, q=None, zeta=None, lams=None, stencil='exact'):
     '''The relaxed one-particle density of CCSDT: kernel() for the density
     of t and lambda and the orbital gradient, the Z-vector equations of the
     SCF ``mf`` (zccsd.zvector.solve) and zvector.relaxed_rdm1.
@@ -1370,7 +1411,22 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     for the integrals with a frozen index), and the rotations among the
     occupied and among the virtual spinors, on which E(Q) depends through
     its denominators, follow from the Fock matrix staying diagonal like
-    those between frozen and active ones (zvector._relax).'''
+    those between frozen and active ones (zvector._relax).
+
+    ``zeta``, ``lams``: for CCSDT(Q)_Lambda (docs/lambda.md 12) - ``q`` is
+    then the Gradient of (Q)_Lambda (zccsdt.cc.quadruples_lambda_grad),
+    ``zeta`` = (z1, z2, z3) the solution of zccsdt.cc.zeta_opt.kernel,
+    ``lams`` = (l1, l2, l3) lambda of CCSDT, and the arguments l1, l2, l3
+    are lambda', the solution of the Lambda equations with the sources of
+    zeta_opt.lambda_sources; z3 and both l3 in the layout of t3.  The
+    Lagrangian is L(t, lambda') + e(t, lambda) + zeta . W(t, lambda): to
+    the densities of (t, lambda') comes the derivative of those of (t,
+    lambda) along zeta in t - kernel() at the shifted amplitudes of
+    zeta_opt.points(``stencil``): four more passes with 'exact' (the
+    densities are polynomials of degree <= 4 in t), two with 'central' -,
+    the integrals with one frozen index included, and the terms of e as
+    for (Q) (quadruples_lambda_grad.orbital_gradient).  One more array of
+    the size of t3, the shifted amplitudes, is there during the passes.'''
     from pyscf.lib import logger
     from zccsdt.zccsd import zvector
     log = logger.new_logger(mf, verbose)
@@ -1418,20 +1474,54 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
         reserve = quadruples_grad.active_bytes(o, mo_coeff.shape[1] - o, isz)
         if held_out is not None:        # (alive while the plan is made: what it keeps is resident)
             extra = quadruples_grad.FrozenTerms(q, o, real)
+    Tk = None
+    if zeta is not None:
+        # the shifted amplitudes: there (and resident) while the plan is made
+        Tk = np.array(np.asarray(t3).reshape(-1), dtype=np.result_type(t3, zeta[2]))
+        if held_out is not None and not plan_only:
+            source = _Replay(source)    # (the integrals with one frozen index: made once for all passes)
+    frozen = None if held_out is None else (nf + nd, source)
     res = kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=max_memory, plan=plan,
-                 frozen=None if held_out is None else (nf + nd, source), blocks=blocks,
-                 plan_only=plan_only, frozen_extra=extra, reserve=reserve)
+                 frozen=frozen, blocks=blocks, plan_only=plan_only, frozen_extra=extra, reserve=reserve)
     if plan_only:
         if held_out is not None:
             res.held = (fock, source, rot, vref)
         return res
     if rot is not None:         # from the pairs back to the frozen spinors given
         res.bf, res.kf = rot.conj().T @ res.bf, rot.T @ res.kf
-    dm1 = res.d1.T
+    d1, gnh, shifted = res.d1, res.gnh, []
+    if zeta is not None:
+        # CCSDT(Q)_Lambda: the derivative of the densities of (t, lambda) along zeta in t
+        from zccsdt.cc import zeta_opt
+        z1, z2 = np.asarray(zeta[0]), np.asarray(zeta[1])
+        T3f, Z3f = (np.ascontiguousarray(np.asarray(x).reshape(-1), dtype=Tk.dtype) if not isinstance(x, np.memmap)
+                    or x.dtype != Tk.dtype else x.reshape(-1) for x in (t3, zeta[2]))
+        with timer('dens.zeta'):
+            for x, wgt in zeta_opt.points(stencil, max(zeta_opt.largest((z1, z2)), zeta_opt.largest((Z3f,)))):
+                zeta_opt.lin(Tk, [(1.0, T3f), (x, Z3f)])
+                rk = kernel(eris, t1 + x * z1, t2 + x * z2, Tk, lams[0], lams[1], lams[2], gradient=True,
+                            max_memory=max_memory, plan=res.plan, frozen=frozen, blocks=blocks)
+                if rot is not None:
+                    rk.bf, rk.kf = rot.conj().T @ rk.bf, rot.T @ rk.kf
+                d1, gnh = d1 + wgt * rk.d1, gnh + wgt * rk.gnh
+                shifted.append((x, wgt, rk))
+        del T3f, Z3f
+        if isinstance(source, _Replay):
+            source.close()
+    del Tk
+    dm1 = d1.T
     dm1 = 0.5 * (dm1 + dm1.conj().T)
     mo_e = np.asarray(eris.mo_energy, dtype=np.float64)
     Ga = None
-    if q is not None:
+    if q is not None and zeta is not None:
+        # E(Q)_L: the orbital energies in the density, the gradient among the active spinors
+        from zccsdt.cc import quadruples_lambda_grad
+        with timer('dens.q'):
+            dm1 = dm1 + np.diag(q.de)
+            Ga = quadruples_lambda_grad.orbital_gradient(eris, q, np.asarray(t1), np.asarray(t2),
+                                                         np.asarray(lams[1]), gnh)
+            del extra
+    elif q is not None:
         # E(Q): the orbital energies in the density, the gradient among the active spinors
         with timer('dens.q'):
             dm1 = dm1 + np.diag(q.de)
@@ -1491,6 +1581,9 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
             return F[np.ix_(held, both)], F[np.ix_(both, held)]
 
         B, K = frozen_terms(res, np.asarray(t1), fock_of)
+        for x, wgt, rk in shifted:      # (polynomials in t like the densities: the same stencil)
+            Bk, Kk = frozen_terms(rk, np.asarray(t1) + x * z1, fock_of)
+            B, K = B + wgt * Bk, K + wgt * Kk
         V = fock_mo(C @ (full - np.diag(occ)) @ C.conj().T)
         G = np.zeros((na, na), dtype=np.complex128)
         if Ga is None:

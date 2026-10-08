@@ -124,10 +124,12 @@ def sliceable(eris, eng):
     return eng.vm.spins is None
 
 
-def plan_for(eris, dtype, opts):
+def plan_for(eris, dtype, opts, reserve=0):
     '''MemoryPlan of a run with the solver options ``opts``: everything in
     memory with ``incore_complete``, else what fits in ``max_memory`` (MB for
-    the whole process; default: 80% of what is available).'''
+    the whole process; default: 80% of what is available).  ``reserve``:
+    bytes of that which the caller takes for arrays of its own (the vectors
+    of zccsdt.cc.zeta_opt, which runs amplitude steps).'''
     from zccsdt import memory
     from zccsdt.scratch import is_mapped
     om, vm = t3pack.maps_for(eris)
@@ -153,8 +155,8 @@ def plan_for(eris, dtype, opts):
     cached = cached_bytes(eris)
     budget = memory.budget(opts.max_memory)
     limit = budget if opts.max_memory is not None else memory.available()
-    return plan_memory(om.n, vm.n, isz, None if budget is None else budget + cached,
-                       None if limit is None else limit + cached, where, **kw)
+    return plan_memory(om.n, vm.n, isz, None if budget is None else budget + cached - reserve,
+                       None if limit is None else limit + cached - reserve, where, **kw)
 
 
 def plan_memory(nocc, nvir, itemsize=16, budget=None, limit=None, pp_where='memory',

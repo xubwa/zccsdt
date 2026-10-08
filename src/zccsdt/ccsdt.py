@@ -144,7 +144,7 @@ def _name(stages, key, short=False):
         return _PARTS[part]
     return key
 ROOT_INTS, ROOT_ITER, ROOT_Q, ROOT_P = 'zccsdt.integrals', 'zccsdt.iterations', 'zccsdt.q', 'zccsdt.p'
-ROOT_QG = 'zccsdt.qg'
+ROOT_QG, ROOT_QLG = 'zccsdt.qg', 'zccsdt.qlg'
 
 
 # ------------------------------------------------------------------ helpers
@@ -1036,8 +1036,16 @@ class GCCSDT(UCCSDT):
     # [C(o,3), C(v,3)] has at least this many elements; below it the many small products of
     # the blocks are slower than the few large ones of the packed block (docs/lambda.md 10.5)
     blocks_min = 800_000
+    # CCSDT(Q)_Lambda properties (zccsdt.cc.zeta_opt): the stencil of the iterations of zeta
+    # ('forward': one amplitude step each, then two, and the exact formula at the end;
+    # 'central': two and the exact formula; 'exact': four) and of the derivatives along zeta
+    # that are taken once (the Lambda residuals, the densities)
+    zeta_stencil = 'forward'
+    response_stencil = 'exact'
     _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'rdm1_blocks', 'blocks_min',
-                              'e_ql', 'e_ql5', 'e_tot_ql'}
+                              'e_ql', 'e_ql5', 'e_tot_ql', 'zeta1', 'zeta2', 'zeta3', 'l1_ql', 'l2_ql', 'l3_ql',
+                              'converged_zeta', 'converged_lambda_ql', 'ql_gradient_sectors', 'q_gradient_sectors',
+                              'zeta_stencil', 'response_stencil', 'ql_info'}
 
     def _axial(self):
         '''The spinors of a linear molecule on the z axis adapted to m_j
@@ -1253,6 +1261,148 @@ class GCCSDT(UCCSDT):
         self._q_gradient = (self.t3, q)
         return q
 
+    @staticmethod
+    def _q_mode(with_q):
+        '''``with_q`` of solve_lambda and make_rdm1: False (CCSDT), True
+        (CCSDT(Q)) or 'lambda' (CCSDT(Q)_Lambda).'''
+        if isinstance(with_q, str):
+            if with_q.lower() != 'lambda':
+                raise ValueError("with_q: False, True (CCSDT(Q)) or 'lambda' (CCSDT(Q)_Lambda), not %r" % with_q)
+            return 'lambda'
+        return bool(with_q)
+
+    def _on_packed_block(self, x):
+        '''An array in the layout of self.t3 on the packed block in
+        lexicographic order (the blocks of the symmetry labels put in their
+        places; as it is where self.t3 is on the packed block).'''
+        from math import comb
+        from zccsdt.cc import ccsdt_opt
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        no, nv = eris.nocc, eris.nmo - eris.nocc
+        if not getattr(eris, 'use_labels', False) or np.size(x) == comb(no, 3) * comb(nv, 3) != np.size(self.t3):
+            return x
+        return ccsdt_opt.packed_t3(eris, x).ravel()
+
+    def _ql_terms(self):
+        '''The first derivatives of (Q)_Lambda for the amplitudes and the
+        lambda of CCSDT of this object
+        (zccsdt.cc.quadruples_lambda_grad.Gradient: the sources of the two
+        linear equations of CCSDT(Q)_Lambda and the densities of the
+        correction), kept until self.t3 or self.l3 is another array; None
+        with fewer than four occupied or virtual spinors.  Lambda of CCSDT
+        is solved for if it is not there.  One pass over the occupied
+        quadruples, in the sectors of the symmetry labels where the
+        integrals have them and the blocks fit
+        (zccsdt.cc.quadruples_lambda_grad_sym; ``ql_gradient_sectors`` says
+        so), else on the packed block, where the derivatives of the sizes
+        of T3 and <vv||vv> go to a scratch file if memory is short.  It sets
+        e_ql and e_tot_ql as well.'''
+        from zccsdt.cc import ccsdt_opt, quadruples_lambda_grad, quadruples_lambda_grad_sym
+        if getattr(self, 'l3', None) is None or getattr(self, '_l_with_q', False):
+            self.solve_lambda()
+        kept = getattr(self, '_ql_gradient', None)
+        if kept is not None and kept[0] is self.t3 and kept[1] is self.l3:
+            return kept[2]
+        self._ql_gradient = self._ql_solution = None    # (the old ones go before the new one comes)
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        no, nv = eris.nocc, eris.nmo - eris.nocc
+        q = None
+        self.ql_info = {}
+        if no >= 4 and nv >= 4:
+            from math import comb
+            t3, l3 = self.t3, self.l3
+            if np.size(t3) != comb(no, 3) * comb(nv, 3):
+                t3 = ccsdt_opt.packed_t3(eris, t3)  # (the blocks of the labels, as the pass reads them)
+                l3 = self._packed_l3()
+            ccsdt_opt.release_cached(eris)
+            isz = np.dtype(np.result_type(self.t2, t3, self.l2, l3, eris.oovv)).itemsize
+            budget = memory.budget(self.max_memory)
+            spl = None
+            if self.symmetry and quadruples_lambda_grad_sym.available(eris):
+                try:
+                    spl = quadruples_lambda_grad_sym.plan(eris, isz, budget)
+                except MemoryError:     # (the dense code can do with less: batches, scratch)
+                    pass
+            self.ql_gradient_sectors = spl is not None
+            t0 = time.perf_counter()
+            if spl is not None:
+                with timing.timer(ROOT_QLG):
+                    q = quadruples_lambda_grad_sym.kernel(eris, self.t2, t3, self.l2, l3, plan_=spl)
+            else:
+                pl = quadruples_lambda_grad.plan(no, nv, isz, budget)
+                with timing.timer(ROOT_QLG):
+                    q = quadruples_lambda_grad.kernel(eris, self.t2, t3, self.l2, l3, plan_=pl)
+            self.ql_info['pass'] = dict(wall=time.perf_counter() - t0, sectors=spl is not None, need=q.plan.need)
+            self.e_ql = q.e_q
+            self.e_tot_ql = self.e_tot + self.e_ql
+        self._ql_gradient = (self.t3, self.l3, q)
+        return q
+
+    def _solve_ql(self):
+        '''zeta and lambda' of CCSDT(Q)_Lambda (solve_lambda(with_q='lambda')),
+        kept until self.t3 or self.l3 is another array: (l1', l2', l3').'''
+        from zccsdt.cc import ccsdt_opt, lambda_opt, solver, zeta_opt
+        q = self._ql_terms()
+        kept = getattr(self, '_ql_solution', None)
+        if kept is not None and kept[0] is self.t3 and kept[1] is self.l3:
+            return self.l1_ql, self.l2_ql, self.l3_ql
+        self._ql_solution = None
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        if q is None:                   # (no quadruples: CCSDT)
+            self.zeta1, self.zeta2, self.zeta3 = (np.zeros_like(x) for x in (self.t1, self.t2, self.t3))
+            self.l1_ql, self.l2_ql, self.l3_ql = self.l1, self.l2, self.l3
+            self.converged_zeta, self.converged_lambda_ql = True, bool(self.converged_lambda)
+            self._ql_solution = (self.t3, self.l3)
+            return self.l1_ql, self.l2_ql, self.l3_ql
+        opts = solver.Options(
+            conv_tol_normt=self._conv_tol_normt(), max_cycle=self.max_cycle, diis_space=self.diis_space,
+            incore_complete=self.incore_complete, max_memory=self.max_memory)
+        # ---- zeta: the Jacobian of the amplitude equations, T3 as the iterations had it
+        t0 = time.perf_counter()
+        rz = zeta_opt.kernel(eris, self.t1, self.t2, self.t3, q.q2, q.q3, opts, stencil=self.zeta_stencil)
+        if not rz.converged:
+            logger.warn(self, 'the equation of zeta of CCSDT(Q)_Lambda did not converge in %d cycles', rz.ncycle)
+        self.ql_info['zeta'] = dict(wall=time.perf_counter() - t0, cycles=rz.ncycle, steps=rz.steps,
+                                    stencil_error=rz.stencil_error, forward=rz.forward, mapped=rz.plan.mapped,
+                                    need=rz.plan.need,
+                                    timings=rz.timings)
+        ccsdt_opt.release_cached(eris)          # (what the amplitude steps kept)
+        # ---- lambda': the Lambda equations with sources, in the blocks of the labels or on
+        # the packed block as solve_lambda()
+        labels = bool(getattr(eris, 'use_labels', False))
+        dtype = np.result_type(self.t1, self.t2, self.t3, eris.oovv, eris.fock)
+        blocks = False
+        if (self.symmetry and labels and self._blocks_pay(eris) and np.size(self.l3) == np.size(self.t3)
+                and lambda_opt.block_engine(eris, dtype) is not None):
+            try:
+                zeta_opt.lambda_plan(eris, self.t1, dtype, opts, blocks=True)
+                blocks = True
+            except MemoryError:         # (the packed block then, which says what it needs)
+                pass
+        if blocks:
+            args, l3, z3 = (eris, self.t1, self.t2, self.t3), self.l3, rz.z3
+        else:
+            dense, t3 = self._dense_view()
+            args, l3, z3 = (dense, self.t1, self.t2, t3), self._packed_l3(), self._on_packed_block(rz.z3)
+        t0 = time.perf_counter()
+        src = zeta_opt.lambda_sources(*args, self.l1, self.l2, l3, (rz.z1, rz.z2, z3), q.s2, q.s3, opts,
+                                      blocks=blocks, stencil=self.response_stencil)
+        t1 = time.perf_counter()
+        res = lambda_opt.kernel(*args, opts, l1=self.l1, l2=self.l2, l3=l3, blocks=blocks, sources=src)
+        if not res.converged:
+            logger.warn(self, "the Lambda equations of CCSDT(Q)_Lambda (lambda') did not converge in %d cycles",
+                        res.ncycle)
+        self.ql_info['sources'] = dict(wall=t1 - t0, blocks=blocks)
+        self.ql_info['lambda'] = dict(wall=time.perf_counter() - t1, cycles=res.ncycle, setup=res.setup,
+                                      timings=res.timings, blocks=blocks, need=res.plan.need)
+        del src
+        self.zeta1, self.zeta2, self.zeta3 = rz.z1, rz.z2, rz.z3
+        self.l1_ql, self.l2_ql = res.l1, res.l2
+        self.l3_ql = lambda_opt.blocked_l3(eris, res.l3) if labels and not blocks else res.l3
+        self.converged_zeta, self.converged_lambda_ql = bool(rz.converged), bool(res.converged)
+        self._ql_solution = (self.t3, self.l3)
+        return self.l1_ql, self.l2_ql, self.l3_ql
+
     def solve_lambda(self, with_q=False):
         '''The Lambda equations of CCSDT for the converged amplitudes
         (zccsdt.cc.lambda_opt), kept as self.l1, self.l2, self.l3: l1 and l2
@@ -1268,10 +1418,29 @@ class GCCSDT(UCCSDT):
         of E(Q) with respect to t2 and t3 as constant terms (_q_terms;
         docs/lambda.md 11), for the first derivatives of the CCSDT(Q)
         energy: make_rdm1(with_q=True).  It is not the lambda of
-        ccsdt_q_lambda(), which wants that of CCSDT.'''
+        ccsdt_q_lambda(), which wants that of CCSDT.
+
+        ``with_q='lambda'``: the two linear equations that the first
+        derivatives of the CCSDT(Q)_Lambda energy need besides the Lambda
+        equations of CCSDT (docs/lambda.md 12; zccsdt.cc.zeta_opt), for
+        make_rdm1(with_q='lambda').  self.l1, self.l2, self.l3 are and
+        stay lambda of CCSDT - what ccsdt_q_lambda() takes -, solved for if
+        they are not there.  Then: the pass over the quadruples (_ql_terms);
+        zeta, the response of the CCSDT amplitudes to the quadruples - the
+        Jacobian of the amplitude equations on it, self.zeta1, self.zeta2,
+        self.zeta3 in the layouts of t1, t2, t3 -; and lambda', the Lambda
+        equations with the derivatives of e and the term of zeta as
+        constant terms: self.l1_ql, self.l2_ql, self.l3_ql in the layouts
+        of l1, l2, l3, which are returned.  ``zeta_stencil`` and
+        ``response_stencil`` choose how the derivatives along zeta are
+        taken (zccsdt.cc.zeta_opt.points); ``ql_info`` has cycles, amplitude
+        steps and times.'''
         from zccsdt.cc import lambda_opt, solver
         if self.t3 is None:
             raise RuntimeError('%s.solve_lambda(): no amplitudes (kernel() first)' % self.__class__.__name__)
+        with_q = self._q_mode(with_q)
+        if with_q == 'lambda':
+            return self._solve_ql()
         eris = self._eris if self._eris is not None else self.ao2mo()
         opts = solver.Options(
             conv_tol_normt=self._conv_tol_normt(), max_cycle=self.max_cycle, diis_space=self.diis_space,
@@ -1331,17 +1500,34 @@ class GCCSDT(UCCSDT):
         relaxed one the rotations among the occupied and among the virtual
         spinors besides (zccsdt.cc.quadruples_grad; docs/lambda.md 11).
         The unrelaxed density of CCSDT(Q) is not the derivative of anything
-        at fixed spinors: E(Q) needs canonical ones.'''
+        at fixed spinors: E(Q) needs canonical ones.
+
+        ``with_q='lambda'``: the density of CCSDT(Q)_Lambda - the trace of
+        the relaxed one with a one-electron operator is the derivative of
+        E(CCSDT) + E(Q)_L.  zeta and lambda' are those of
+        solve_lambda(with_q='lambda'), solved for if they are not there;
+        the densities of (t, lambda') and the derivative of those of (t,
+        lambda) along zeta (``response_stencil``: four or two more passes
+        of the density code), and the terms of the correction as for
+        CCSDT(Q) (zccsdt.cc.quadruples_lambda_grad; docs/lambda.md 12).'''
         from zccsdt.cc import density_blk, density_opt
         if isinstance(self._scf, _Given):
             raise RuntimeError('the integrals were given: no SCF to take the response of the spinors from')
-        if getattr(self, 'l3', None) is None or bool(getattr(self, '_l_with_q', False)) != bool(with_q):
-            self.solve_lambda(with_q=with_q)
-        q = self._q_terms() if with_q else None
-        if q is not None:
-            kw_q = dict(q=q)
+        with_q = self._q_mode(with_q)
+        kw_q, zeta = {}, None
+        if with_q == 'lambda':
+            q = self._ql_terms()
+            l1, l2, l3 = self._solve_ql()
+            if q is not None:
+                zeta = (self.zeta1, self.zeta2, self.zeta3)
+                kw_q = dict(q=q, zeta=zeta, lams=(self.l1, self.l2, self.l3), stencil=self.response_stencil)
         else:
-            kw_q = {}
+            if getattr(self, 'l3', None) is None or bool(getattr(self, '_l_with_q', False)) != with_q:
+                self.solve_lambda(with_q=with_q)
+            q = self._q_terms() if with_q else None
+            if q is not None:
+                kw_q = dict(q=q)
+            l1, l2, l3 = self.l1, self.l2, self.l3
         eris = self._eris if self._eris is not None else self.ao2mo()
         fo, o, v, fv = self._active()
         if getattr(eris, 'labels', None) is not None and getattr(self, '_sorted', None) is not None:
@@ -1353,22 +1539,27 @@ class GCCSDT(UCCSDT):
                   tol=tol, max_memory=self.max_memory, **kw_q)
         # in the blocks of the symmetry labels where T3 and l3 are in them and the plan fits
         plan = None
-        if (self.symmetry and getattr(eris, 'use_labels', False) and np.size(self.l3) == np.size(self.t3)
-                and self._blocks_pay(eris)
-                and density_blk.engine(eris, np.result_type(self.t1, self.t3, self.l3, eris.oovv,
+        if (self.symmetry and getattr(eris, 'use_labels', False) and np.size(l3) == np.size(self.t3)
+                and np.size(self.l3) == np.size(self.t3) and self._blocks_pay(eris)
+                and density_blk.engine(eris, np.result_type(self.t1, self.t3, l3, eris.oovv,
                                                             eris.fock)) is not None):
             try:
-                plan = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, self.t3, self.l1, self.l2,
-                                                self.l3, Ca, blocks=True, plan_only=True, **kw)
+                plan = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, self.t3, l1, l2,
+                                                l3, Ca, blocks=True, plan_only=True, **kw)
             except MemoryError:         # (the packed block then, which says what it needs)
                 pass
         if plan is not None:
-            rel = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, self.t3, self.l1, self.l2,
-                                           self.l3, Ca, blocks=True, plan=plan, **kw)
+            rel = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, self.t3, l1, l2,
+                                           l3, Ca, blocks=True, plan=plan, **kw)
         else:
+            if zeta is not None:        # (all in the layout of self.t3: on the packed block)
+                kw.update(zeta=zeta[:2] + (self._on_packed_block(zeta[2]),),
+                          lams=(self.l1, self.l2, self._packed_l3()))
+                l3 = self._on_packed_block(l3)
+            else:
+                l3 = self._packed_l3()
             eris, t3 = self._dense_view()
-            rel = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, t3, self.l1, self.l2,
-                                           self._packed_l3(), Ca, **kw)
+            rel = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, t3, l1, l2, l3, Ca, **kw)
         self.rdm1_blocks = plan is not None
         dm = rel.relaxed if relaxed else rel.unrelaxed
         self.rdm1_basis = rel.mo_coeff
@@ -1529,14 +1720,16 @@ class GCCSDTQ(GCCSDT):
 
     def solve_lambda(self, with_q=False):
         '''Lambda of the CCSDT step (GCCSDT.solve_lambda), with ``with_q``
-        that of CCSDT(Q): CCSDTQ has no Lambda equations here.'''
+        that of CCSDT(Q), or with 'lambda' the equations of
+        CCSDT(Q)_Lambda: CCSDTQ has no Lambda equations here.'''
         if self.ccsdt_run is None:
             raise RuntimeError('GCCSDTQ.solve_lambda(): no CCSDT step has been run (kernel() without amplitudes)')
         return self.ccsdt_run.solve_lambda(with_q=with_q)
 
     def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-11, with_q=False):
         '''The one-particle density of the CCSDT step (GCCSDT.make_rdm1),
-        with ``with_q`` that of CCSDT(Q); not of CCSDTQ.'''
+        with ``with_q`` that of CCSDT(Q) or, with 'lambda', of
+        CCSDT(Q)_Lambda; not of CCSDTQ.'''
         if self.ccsdt_run is None:
             raise RuntimeError('GCCSDTQ.make_rdm1(): no CCSDT step has been run (kernel() without amplitudes)')
         dm = self.ccsdt_run.make_rdm1(relaxed, ao_repr, tol, with_q)

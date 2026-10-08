@@ -1939,14 +1939,17 @@ The density step with the (Q) terms peaks at 6.69 GB (H2O), 1.63 GB (HBr
 
 ## 12. First derivatives of CCSDT(Q)_Lambda
 
-Theory and dense reference only; nothing here runs on packed amplitudes
-yet (12.6 lists what that needs).
+The theory (12.1 to 12.3), the dense reference (12.4), and the production
+code on packed amplitudes behind `GCCSDT.make_rdm1(with_q='lambda')` (12.5
+to 12.7).
 
 | File | What |
 |---|---|
 | `src/zccsdt/cc/qlgrad_ref.py` | the dense reference: the derivatives of E(Q)_L, the two linear equations, the densities, the relaxed density from full arrays |
-| `tests/test_qlgrad_ref.py` | the checks of 12.7 |
+| `tests/test_qlgrad_ref.py` | the checks of the reference in 12.8 |
 | `bench/qlgrad_ccsdt_ql.py` | finite fields at several steps (a dipole field, or a point charge as MRCC can have it) |
+
+(The files of the production code: 12.6.)
 
 ### 12.1 The functional
 
@@ -1965,7 +1968,7 @@ and the production code write z as `conj(Z(g, conj(lambda)))`, conjugating
 twice: the same number for Hermitian integrals. `qlgrad_ref.energy` is e
 for any g, which the derivative with respect to g needs. For a Hamiltonian
 with a symmetry that makes the energy real - every molecule here - Im e
-vanishes, 1e-16 and less in the X2C runs of 12.7; the model of the tests
+vanishes, 1e-16 and less in the X2C runs of 12.8; the model of the tests
 has 1.2e-4 of it next to Re e = -2.6e-4.)
 
 This is what makes (Q)_L simpler than (Q) of section 11 in one respect and
@@ -2042,7 +2045,7 @@ Order of the calculation:
 
 CFOUR's ncc has the same structure for CCSD(T)_Lambda (two more iterative
 solvers after Lambda, `upsilon_it` and `pi_it` in its task list), and
-refuses CCSDT(Q)_Lambda (12.7).
+refuses CCSDT(Q)_Lambda (12.8).
 
 ### 12.3 Densities and the response of the spin orbitals
 
@@ -2156,30 +2159,299 @@ LiH and BH with complex spin orbitals).
    (`qlgrad_ref.fock_density`; Re of its diagonal is `de`): Gamma of 11.2
    without the conjugation of w. (LiH, BH: 1e-14 and 8e-14 off.)
 
-### 12.6 What an implementation on packed amplitudes needs
+### 12.6 On packed amplitudes: what was built
 
-Measured: only the check named in the first row. The costs are
-**estimates** from the operation counts of the existing codes (sections
-5.1, 9, 10, 11.4, 11.6), not timings.
+| File | What |
+|---|---|
+| `src/zccsdt/cc/quadruples_lambda_grad.py` | the pass over the occupied quadruples on the packed block: q, s, the densities of e, `de`, Gamma; `source_terms`, `orbital_gradient` |
+| `src/zccsdt/cc/quadruples_lambda_grad_sym.py`, `csrc/qlambda.c` (`zc_qlg_sector_vectors`) | the same pass in the sectors of the symmetry labels |
+| `src/zccsdt/cc/zeta_opt.py` | equation (1) for zeta (`kernel`), the sources of equation (2) (`lambda_sources`), their memory plans |
+| `src/zccsdt/cc/lambda_opt.py` | `ResidualSources`: sources in the layouts of the residuals, for `kernel(sources=)` |
+| `src/zccsdt/cc/density_opt.py` | `relaxed_rdm1(zeta=, lams=, stencil=)`: the densities of zeta, the terms of e; `_Replay` |
+| `src/zccsdt/ccsdt.py` | `GCCSDT.solve_lambda(with_q='lambda')`, `make_rdm1(with_q='lambda')`, `_ql_terms` |
+| `tests/test_quadruples_lambda_grad.py`, `tests/test_quadruples_lambda_grad_sym.py` | the checks of 12.8 |
+| `bench/profile_ql_gradient.py`, `bench/slurm_ql_gradient.sh` | the timing of 12.7 |
 
-| Step | Contractions | Existing code | Cost (estimate) |
+**The pass over the quadruples** (`quadruples_lambda_grad.kernel`). After r
+(four products, `quadruples.right`) and z (three, `quadruples_lambda.left_lambda`)
+of an occupied quadruple: y = r / D and w = z / D, and every product
+backwards with its two adjoints as in 11.4 - with w for the four of r, with y
+for the three of z, nothing conjugated:
+
+| product | left-hand vector | its two adjoints go to |
+|---|---|---|
+| `- sum_e <ab||ei> t(jkl,cde)` | w | the density of `<ab||ei>`; s3 |
+| `sum_m <ma||ij> t(mkl,bcd)` | w | the density of `<ma||ij>`; s3 |
+| `sum_m t(im,ab) Xo(m;jkl;cd)` | w | s2; the adjoint of Xo (at the end: s2, the densities of `<mn||jk>`, `<md||el>`) |
+| `2 sum_e t(ij,ae) Xv(e;kl;bcd)` | w | s2; the adjoint of Xv (when Xv leaves: s2, the density of `<bc||ef>`) |
+| `l(ij,ab) <kl||cd>` | y | q2; the density of `<kl||cd>` |
+| `sum_e <ie||ab> l(jkl,cde)` | y | the density of `<ie||ab>`; q3 |
+| `sum_m <ij||ma> l(mkl,bcd)` | y | the density of `<ij||ma>`; q3 |
+
+Four expansions of a quadruple (w and y in the two layouts) where (Q) has
+five, seven products with two adjoints each where (Q) has five, and
+Gamma[a,e] = sum w[a,(bcd)] y[e,(bcd)] on the expanded vectors. E(Q)_L is
+the real part of e and the integrals of a rotated basis are Hermitian, so
+the coefficients of `<kl||cd>`, `<ie||ab>` and `<ij||ma>` are added,
+conjugated, to those of `<cd||kl>`, `-<ab||ei>` and `<ma||ij>`: the result
+is a `quadruples_grad.Gradient` (dE = Re sum density x d integral on the
+six blocks of 11.4) with q2, q3 and Im e besides, and
+`quadruples_grad.active_terms` and `FrozenTerms` - the orbital gradient of
+the correction among the active spinors and with a frozen index - are used
+as they are. What is new in the gradient is identity 1 with its q terms
+(`source_terms`; the parts with the packed arrays, s3 with t3 and q3 with
+l3, are made at the end of the pass) and Gamma without the conjugation.
+In sectors (`quadruples_lambda_grad_sym`) the kernel
+`zc_qlg_sector_vectors` writes y and w to the blocks of the seven products
+(two blocks on two pairs, two on an index and a triple), and the adjoints
+are taken block by block as in 11.4.
+
+Memory (`plan`): that of `quadruples_grad` with q3 (one more array of the
+size of T3), q2, the arrays of the left-hand side of 5.1 and the adjoints
+of the operands of z; where the largest batches do not fit, s3, q3 and the
+density of `<bc||ef>` are mapped arrays of a scratch file
+(`MAPPED`), MemoryError with the numbers below the floor. In sectors the
+blocks must fit (`quadruples_lambda_grad_sym.plan`; the front end plans
+inside `try` and runs the packed block otherwise).
+
+**Equation (1)** (`zeta_opt.kernel`). No linearized amplitude equations are
+coded. `ccsdt_opt.update_amps` is the Jacobi step N(t) = t + R(t) / D of the
+amplitude equations, for T3 on the packed block or in the blocks of the
+labels, in memory or mapped; with a stencil whose weights sum to zero and
+reproduce the first derivative,
+
+    zeta + (J zeta + q) / D = sum_k w_k N(t + x_k zeta) + q / D,
+
+so a Jacobi step for zeta costs as many amplitude iterations as the stencil
+has points, and DIIS runs on it as on the amplitudes (`diis.DIIS`, the
+vectors in the scratch file). Three stencils:
+
+| stencil | points | error of J zeta |
+|---|---|---|
+| exact | t +- zeta, t +- 2 zeta | none: R is a polynomial of degree <= 4 |
+| central | t +- h zeta, h max\|zeta\| = 1e-5 | h^2 times the cubic term: 1e-10 relative, times a number of order one |
+| forward | t + h zeta (and N(t), once), h max\|zeta\| = 3e-8 | h times the quadratic term: 1e-8 relative |
+
+The solver goes up this ladder: forward differences until the change is
+1e-6 of zeta (or below the threshold), central differences until it is
+below the threshold, and then the last iterate once more with the points
++-2h - with those at +-h the exact formula at step h. If the exact change
+is below the threshold as well, the iterations end; if not, they go on
+with the exact stencil. So the result does not rest on the error estimates
+of the table: the last Jacobi step is an exact one, and its size is the
+convergence criterion. `Result.stencil_error` is the difference between
+the central and the exact step at the last iterate (1e-16 to 1e-14 of the
+full tensors in every run so far).
+
+Memory (`zeta_opt.plan_for`): the amplitude steps have the `MemoryPlan` of
+the amplitude equations, whose two arrays of the size of T3 are the shifted
+amplitudes and the new vector. The equation has five more (zeta_3, q3 / D,
+N(t), the accumulator of a stencil, a copy for the last check) and its DIIS
+vectors. If an amplitude step does not fit in memory next to them, they are
+mapped arrays of a scratch file, which every use passes over once from
+front to back, and the amplitude step has the whole budget.
+
+**Equation (2)** (`zeta_opt.lambda_sources`, `lambda_opt.kernel(sources=)`).
+The directional derivative of the Lambda residuals: `lambda_opt.make_intermediates`
+and `residuals` at the four amplitude sets of the exact stencil (two with
+`stencil='central'`), in the layout of the Lambda equations (the packed
+block, or the blocks of the labels), plus s2 and s3 of the pass - a
+`lambda_opt.ResidualSources`, which the Lambda solver takes as it is. The
+solver starts from lambda.
+
+**Densities** (`density_opt.relaxed_rdm1(zeta=, lams=)`). `density_opt.kernel`
+for (t, lambda') and at the amplitudes of the stencil for (t, lambda) -
+four more passes with the exact stencil (the default), two with the central
+one -; d1, the table GRADIENT and, with frozen or dropped spinors, B and K
+of `frozen_terms` are combined with the weights (each is a polynomial in t;
+B and K after their terms with t1). The integrals with one frozen index are
+transformed once: `_Replay` writes the batches of the first pass to a
+scratch file and the other passes read them. Then as for CCSDT(Q):
+`quadruples_lambda_grad.orbital_gradient` (identities 1 to 3),
+`FrozenTerms` in the first pass, `zvector._relax`.
+
+**Front end.** `GCCSDT.solve_lambda(with_q='lambda')` and
+`make_rdm1(with_q='lambda')`, next to `with_q=False` (CCSDT) and `True`
+(CCSDT(Q)); `GCCSDTQ` hands both to its CCSDT step. `self.l1, l2, l3` are
+and stay lambda of CCSDT (what `ccsdt_q_lambda()` takes; it is solved again
+if the object holds that of CCSDT(Q)); zeta is `zeta1, zeta2, zeta3`,
+lambda' is `l1_ql, l2_ql, l3_ql`, in the layouts of t and lambda;
+`converged_zeta`, `converged_lambda_ql`, `ql_gradient_sectors`, `ql_info`
+(cycles, amplitude steps, seconds, plans). The pass, zeta and lambda' are
+kept until `t3` or `l3` is another array. `zeta_stencil` ('forward',
+'central', 'exact': where the ladder starts) and `response_stencil`
+('exact', 'central': the derivatives that are taken once). Labels: the
+pass in sectors, the amplitude steps of zeta in the layout of the
+iterations, lambda' and the densities in the blocks of the labels under
+the conditions of `solve_lambda()` and `make_rdm1()` (`blocks_min`, the
+plan inside `try`), on the packed block otherwise.
+
+### 12.7 Timing
+
+One job, 31773728 on c388 (8 cores of a Xeon Gold 6248R, `--mem=30G`,
+`bench/slurm_ql_gradient.sh`, `bench/profile_ql_gradient.py`), the tree of
+commit c268dd2: H2O / cc-pVTZ as spin orbitals (10 + 106, real, no labels:
+everything on the packed block) and HBr / cc-pVTZ-DK with X2C spinors, 28
+frozen (8 + 78, real, labels 2 m_j: sectors and blocks), `max_memory` 26
+GB; then H2O again with `max_memory` 4 GB. Thresholds 1e-11 (energy) and
+1e-9 (amplitudes, Lambda, zeta, lambda'). The node is shared: load 0.15 at
+the start, 10 to 14 from the middle of the first run on (other jobs came),
+and the times of one and the same step scatter by 20% for it - a CCSDT
+iteration of H2O took 4.27 s in the first run and 4.62 s in the third, an
+amplitude step inside zeta 5.04 s (the default ladder), 4.31 s (the exact
+stencil, twenty minutes later, vector operations included) and 4.56 s (the
+third run).
+
+| | H2O / cc-pVTZ, 10 + 106 | HBr / cc-pVTZ-DK, 8 + 78, 28 frozen | H2O, `max_memory` 4 GB |
 |---|---|---|---|
-| (1), J zeta | the linearized amplitude equations: every term of R1 to R3 with one t replaced by zeta, o^3 v^5 as an amplitude iteration | `ccsdt_opt.update_amps` as it is: the five-point formula on the Jacobi step, R = (t_new - t) D, is J zeta to 4e-14 of the dense one (BH, H2O / STO-3G, real and complex; checked by hand, not in a test) - four steps per iteration. Three with an entry for given dressed integrals (`jacobian_dressed`); a linearized residual of its own would be one pass with the T2 T3 and T2 T2 intermediates built twice | 3 to 4 amplitude iterations per iteration as a black box, 1.5 to 2 with a linearized code; 10 to 16 iterations to 1e-11 in the dense runs (lambda': 13 to 19) |
-| q2, q3, s2, s3 of e, d2 of e, de, Gamma | per occupied quadruple, after r and z: every product with its two adjoints. Products of r with w: the five of (Q) (11.4) - s3, s2, the densities of `<ab||ei>`, `<ma||ij>`, `<bc||ef>`, `<mn||jk>`, `<mb||ek>` and the adjoints of Xo, Xv. Products of z with y: `l2 <kl||cd>` (q2 and the density of `<kl||cd>`), the two of Lambda_3 (5.1: q3 and the densities of `<ie||ab>`, `<ij||ma>`) | the kernels of `quadruples_grad` (expansion, adjoint products, reduction onto triples) with the operands of `quadruples_lambda`; no conjugation of the left-hand vectors. In (Q) the `[V,T3]` products serve r and z at once (left-hand vector conj(y) + conj(w)); here r and z have their own products, each with its own adjoints | 3 times the products of (Q)_L, (Q)_L being 1.3 to 1.4 (Q): 4.5 to 5 (Q), against 3.4 to 3.6 (Q) measured for the pass of CCSDT(Q) |
-| s of (2): d_zeta W(t, lambda) | the Lambda residuals with one t replaced by zeta (ranks 2, 3: linear in t2, t3 for given dressed integrals; rank 1 quadratic), and with the dressed integrals one-index transformed by zeta_1 | `lambda_opt.make_intermediates` + `residuals` at shifted amplitudes (not tried) | once: 2 to 4 builds of the intermediates and Lambda residuals |
-| (2), lambda' | the Lambda equations with sources s1, s2, s3 | `lambda_opt.kernel(sources=)`, unchanged (s1 is already an argument) | a second Lambda solve: as many Lambda iterations again, or fewer from lambda as the guess (lambda-bar is 1e-4 to 1e-3 of it) |
-| densities of zeta | the densities and the orbital gradient with one t replaced by zeta | `density_opt.kernel` at shifted amplitudes (not tried): the gradient is linear in the densities, so the directional derivative can be taken of the gradient (identity 2), and with frozen spinors of `bf`, `kf` | once: 2 to 4 density evaluations, each cheaper than an amplitude iteration (section 4) |
-| gradient of e | d2 of e with the integrals of one changed index, as 11.4; with frozen spinors the analogue of `quadruples_grad.FrozenTerms` with the blocks of z (`<kl||cd>` is there; `<ie||ab>`, `<ij||ma>` are the transposed places of `<ab||ei>`, `<ma||ij>`) | `quadruples_grad.orbital_gradient`, `active_terms` with the new blocks | as for (Q): small |
+| CCSDT iteration | 4.27 s (19) | 0.33 s (19) | 4.62 s (19) |
+| Lambda iteration, CCSDT | 5.16 s (17) | 0.26 s (17, blocks) | 5.45 s (17) |
+| ... with the sources of (Q) / lambda' | 5.20 s (17) / 5.65 s (16) | 0.28 s (16) / 0.26 s (16) | 5.44 s (17) / 5.47 s (16) |
+| (Q) energy | 43.9 s | 1.66 s (sectors) | 48.8 s |
+| (Q)_L energy | 61.6 s | 1.98 s (sectors) | 69.4 s |
+| (Q) gradient pass | 128.4 s | 3.42 s (sectors) | 260.7 s (s3, `<bc\|\|ef>` mapped) |
+| (Q)_L gradient pass | 217.0 s | 4.00 s (sectors) | 436.0 s (s3, q3, `<bc\|\|ef>` mapped) |
+| ... over the (Q)_L energy / over (Q) | 3.52 / 4.94 | 2.02 / 2.41 | 6.28 / 8.94 |
+| zeta: iterations (forward + central), amplitude steps | 15 (13 + 2), 20 | 15 (13 + 2), 20 | 15 (13 + 2), 20 |
+| zeta: seconds, per iteration | 109.2 s, 7.28 s | 6.51 s, 0.43 s | 91.1 s, 6.08 s (vectors mapped) |
+| ... per iteration in CCSDT iterations | 1.71 | 1.32 | 1.31 |
+| ... a forward iteration / the last one (central + check) | 6.0 to 7.2 s / 18.1 s | 0.32 s / 1.25 s | 4.5 to 5.1 s / 17.2 s |
+| zeta with central differences from the start | 15, 32 steps, 165.5 s | 15, 32 steps, 10.3 s | |
+| zeta with the exact formula throughout | 15, 60 steps, 258.7 s | 15, 60 steps, 19.1 s | |
+| central against exact step, last iterate | 2.6e-13 | 2.5e-14 | 2.6e-13 |
+| sources of lambda' (exact stencil) | 29.2 s | 2.05 s | 28.0 s |
+| lambda' | 92.6 s | 4.43 s | 89.3 s |
+| relaxed density after the equations, CCSDT | 4.75 s | 1.78 s | 5.11 s |
+| ... CCSDT(Q) | 5.32 s | 2.29 s | 5.74 s |
+| ... CCSDT(Q)_L (five passes) | 30.95 s | 5.59 s | 25.5 s |
+| all after the CCSDT energy, CCSDT | 94.3 s | 6.49 s | 99.9 s |
+| all after the CCSDT energy, CCSDT(Q) | 223.9 s | 10.4 s | 361.1 s |
+| all after the CCSDT energy, CCSDT(Q)_L | 568.4 s | 27.3 s | 764.7 s |
+| ... in CCSDT iterations | 133 | 83 | 165 |
+| ... over CCSDT / over CCSDT(Q) | 6.0 / 2.5 | 4.2 / 2.6 | 7.7 / 2.1 |
+| ... without Lambda of CCSDT (which E(Q)_L needs) | 478.9 s | 22.6 s | 669.9 s |
+| dipole moment, CCSDT | 0.7498653312 | 0.3366355793 | 0.7498653312 |
+| dipole moment, CCSDT(Q) | 0.7492563653 | 0.3363222230 | 0.7492563653 |
+| dipole moment, CCSDT(Q)_L | 0.7492938320 | 0.3363471027 | 0.7492938320 |
 
-In all (estimate): after CCSDT, Lambda and E(Q)_L - which the energy
-needs anyway - the property costs one zeta solve (N iterations of 2 to 4
-amplitude iterations each), one more Lambda solve, a pass of about 5 (Q),
-and a handful of one-off evaluations; CCSDT(Q) of section 11 costs one
-Lambda solve and a pass of 3.5 (Q). Memory: zeta_3 and its DIIS vectors
-like T3; s3 and q3 the size of T3 each; nothing larger than what the
-existing solvers hold.
+("All after the CCSDT energy" of CCSDT(Q)_L: Lambda of CCSDT, the gradient
+pass - which gives E(Q)_L as well -, zeta, the sources, lambda' and the
+density. In the script Lambda of CCSDT is solved twice, because the
+CCSDT(Q) part in between replaces it; the second time is not counted.)
 
-### 12.7 Validation
+**The cost of zeta in amplitude iterations.** A Jacobi step of the
+equation is one amplitude step per point of the stencil, and an amplitude
+step is an amplitude iteration without its DIIS: 20 steps for 15
+iterations with the default ladder (1 for N(t), 13 forward iterations, one
+central one, and the last iterate with the four points of the exact
+formula), 32 with central differences from the start, 60 with the exact
+formula throughout - 1.33, 2.13 and 4 amplitude steps per iteration, the
+same zeta to 2e-11 of the full tensors (threshold 1e-9). Measured per
+iteration: 1.32 (HBr) and 1.31 (H2O, third run) CCSDT iterations; 1.71 in
+the first H2O run, whose amplitude steps took 5.04 s against 4.27 s of the
+CCSDT iterations half an hour before, on a node that had filled up in
+between. The whole solve: 20 to 26 CCSDT iterations, where CCSDT itself
+took 19.
+
+**Where the time goes** (H2O, first run, 568 s): the pass 38%, zeta 19%,
+lambda' 16%, Lambda of CCSDT 16%, the densities 5%, the sources of lambda'
+5%. The pass is 3.5 times the (Q)_L energy and 4.9 times (Q) on the packed
+block (estimated before it was written: 3 and 4.5 to 5), 2.0 and 2.4 times
+in sectors; the two derivatives that are taken once cost 5.7 (HBr: 7.9)
+Lambda iterations (the sources: four builds of the intermediates and four
+residuals) and four density passes. With frozen spinors the integrals with one frozen index
+are transformed once (HBr: 0.6 s of the 5.6 s).
+
+**Memory.** Peak of the anonymous resident memory of the process during a
+stage, less what was resident before it, against the plan of the stage
+(H2O; T3 is 0.185 GB, the packed `<vv||vv>` 0.25 GB):
+
+| | 26 GB: plan | peak - before | 4 GB: plan | peak - before | peak |
+|---|---|---|---|---|---|
+| (Q)_L gradient pass | 7.25 GB | 6.86 GB | 2.34 GB (0.62 GB more in the scratch file) | 2.01 GB | 3.90 GB |
+| zeta | 3.82 GB (0.93 GB of it the vectors) | | 2.17 GB (the vectors mapped) | | |
+| lambda' | 3.30 GB | | 2.72 GB | | |
+| zeta, sources, lambda' together | | 3.10 GB | | 1.93 GB | 3.93 GB |
+| relaxed density, CCSDT(Q)_L | | 4.67 GB | | 0.65 GB | 2.83 GB |
+
+With 4 GB every stage stays below `max_memory` (the largest peak of the
+run: 3.98 GB, in the pass of CCSDT(Q)) and gives the same numbers to the
+twelve decimals printed; the pass takes twice as long with its three large
+arrays in the scratch file (as that of (Q) does), zeta is not slower with
+its vectors there. The plans of zeta and of the Lambda equations are upper
+bounds that count 0.7 GB for what the threaded BLAS keeps (section 9.3):
+not tight.
+
+### 12.8 Validation
+
+#### The production code against the dense reference
+
+`tests/test_quadruples_lambda_grad.py`, `tests/test_quadruples_lambda_grad_sym.py`
+(13 + 5 tests, 100 s with four threads on the login node).
+
+**The pass** (random amplitudes and lambda that solve nothing, 5 + 6 and
+4 + 7 complex, 6 + 5 real; every memory plan; with and without the C
+kernels): e (real and imaginary part), s2, s3, q2, q3, `de`, Gamma and the
+densities - as an antisymmetric array over all spin orbitals in the form
+that Hermitian integrals see - are those of `qlgrad_ref` to 4e-16 to 2e-15
+relative (asserted: 1e-12). Sectors against the packed block (HBr /
+cc-pVDZ-DK, 8 + 28, label-conserving parts; labels 2 m_j, modulo 4, one
+label; complex amplitudes by a phase on every spinor): 2e-16 to 2e-15
+relative for every array.
+
+**Molecules** (converged CCSDT and Lambda to 1e-11; `zeta_opt.kernel` with
+the default ladder; the sources and the densities with the exact stencil).
+Largest absolute differences to `qlgrad_ref.relaxed_rdm1`:
+
+| | o + v | E(Q)_L | zeta | sources of lambda' | lambda' | unrelaxed density | orbital gradient (largest element) | relaxed density |
+|---|---|---|---|---|---|---|---|---|
+| BH / STO-3G | 6 + 6 | -5.57e-5 | 1e-15 | 6e-17 | 2e-12 | 4.0e-13 | 1.1e-13 (1.1e-5) | 4.0e-13 |
+| BH / STO-3G, complex | 6 + 6 | -5.57e-5 | | | | 4.0e-13 | 8e-14 (8.6e-6) | 4.0e-13 |
+| LiH / STO-3G, complex | 4 + 8 | -1.35e-7 | 2e-17 | 2e-17 | 2e-13 | 8e-14 | 2e-14 (2.4e-7) | 6e-14 |
+| H2O / STO-3G, X2C, 2 frozen | 8 + 4 | -1.57e-5 | | | | 2.7e-13 | 6e-14 (8.8e-4) | 3.5e-13 |
+| BH / STO-3G, X2C, 2 frozen, 2 dropped | 4 + 4 | -1.45e-5 | 1e-14 | 4e-16 | 4e-12 | 2.0e-12 | 1.8e-12 (7.4e-3) | 2.6e-12 |
+
+(asserted: 1e-10. The tests have four of the rows; BH with complex spin
+orbitals was run by hand with the same code; empty cells: not printed.) What is left is the
+convergence of the iterations: with the reference's own zeta the sources
+agree to 6e-17 (exact stencil) and 1e-15 (central). Every block of the
+gradient agrees by itself - frozen-active 2e-14 of 5e-3, dropped-active
+2e-12 of 7e-3, among the occupied 1e-13 of 4e-6, among the virtual 4e-15 of
+6e-9 (LiH). The density with the central stencil is that of the exact one
+to 1e-12 (asserted), and the density of CCSDT is 1e-6 to 2e-4 away.
+
+**The stencils of zeta** (BH with complex spin orbitals, 1e-11): the three
+starting points of the ladder end at the same zeta (asserted 1e-11) with 48
+(exact), 26 (central) and 18 (forward) amplitude steps for 12 iterations
+each; H2O / STO-3G with X2C: 44, 24, 16 for 11; at a threshold of 1e-8: 32,
+18, 13 and 28, 16, 12. The central step against the exact one at the last
+iterate: 1e-16 to 8e-14 of the full tensors in all runs, 12.7 included.
+With the vectors of the equation in a scratch file: the same zeta.
+
+**Front end.** HF / 6-31G with X2C spinors, 2 frozen (8 + 12; real spinors,
+T3 in the blocks of the labels): trace(z D) of
+`make_rdm1(with_q='lambda')` = 0.873992419899 against the four-point
+finite field of E(SCF) + E_corr(CCSDT) + E(Q)_L (step 1e-3, energies of
+the front end, thresholds 1e-12 and 1e-10): 0.873992419985, difference
+-9e-11 (asserted 2e-9; CCSDT 0.873691371042, CCSDT(Q) 0.874002176879).
+Lambda, lambda' and the densities in the blocks of the labels (`blocks_min
+= 0`) against the packed block: 1e-12. After `make_rdm1()` and
+`make_rdm1(with_q=True)` the same density again, and `ccsdt_q_lambda()` the
+same energy. HBr / cc-pVDZ-DK, 28 frozen (Kramers pairs), everything in
+blocks and sectors against `symmetry = False`, everything on the packed
+block: the densities in the AO basis agree within the thresholds of the
+iterations (1e-9; asserted 2e-8), norms of zeta_2, zeta_3 and lambda'_2 -
+lambda_2 to 1e-8.
+
+**Memory** (tracemalloc; 12.7 has the resident memory of the large runs).
+The pass on the packed block: allocations within `Plan.need` and above 0.8
+of it for four plans from the floor up, 5 + 20 complex and 6 + 26 real;
+in sectors 0.5 to 1 of the plan. zeta (H2O / 6-31G with X2C spinors, T3 of
+1.08 MB, DIIS space 4): 36.1 MB allocated with the vectors in memory, 22.2
+MB with them in the scratch file - the difference is the 13 vectors of the
+plan (14.0 MB); the amplitude plan itself is the upper bound of 12.7.
+
+#### The dense reference
 
 **Derivatives of e** (5 + 5 spin orbitals, random amplitudes, lambda and
 integrals that are antisymmetric and nothing else - not Hermitian -,
@@ -2299,16 +2571,24 @@ the other STO-3G ones.
   derivative, of a (Q)_L part of 1e-6: six digits of what (Q)_L adds.
   (STO-3G on the login node, 6-31G: job 31770606 on c158, MRCC first.)
 
-### 12.8 Not done
+### 12.9 Not done
 
-- anything on packed amplitudes (12.6): the pass over the quadruples, the
-  zeta solver, the one-off directional derivatives through the production
-  codes, the front end;
-- the symmetry labels; memory plans;
+- linearized amplitude equations, Lambda residuals and densities of their
+  own: all three derivatives along zeta are differences of the production
+  codes (12.6). For zeta that is one amplitude iteration per iteration in
+  the forward phase; for the Lambda residuals and the densities four
+  evaluations each, once;
+- the Lambda equations hold T3, l3 and the residual in memory (section 9),
+  so lambda' does too, and its sources are one more array of that size;
+  only the pass and zeta go to scratch files;
+- E[Q]_L (`e_ql5`) is not made by the gradient pass (`ccsdt_q_lambda()`
+  has it);
 - the two-particle density as an array, geometric gradients,
   non-canonical or non-Hartree-Fock references;
 - CCSDT[Q]_Lambda (the part of Lambda_2 in z);
-- between degenerate spinors no rotation is made, as in 11.4.
+- between degenerate spinors no rotation is made, as in 11.4;
+- no comparison with another program's analytic number: none has one
+  (12.8).
 
 ## 13. Full CCSDTQ: Lambda, densities and the relaxed density
 

@@ -19,12 +19,21 @@ def _tmp(monkeypatch, tmp_path):
 
 
 def test_registry_follows_the_mappings():
-    gc.collect()        # (mappings that earlier tests left in reference cycles go now, not below)
+    # mappings that earlier tests of the process left to the garbage collector go now, not in
+    # the middle of this test; and what is counted below are the entries of this file - those
+    # of other files may still come and go
+    gc.collect()
     n0 = len(scratch._MAPS)
     s = Scratch(prefix='zccsdt_test_')
+    fd0 = s.raw.fileno()
+
+    def mine():
+        return [m for m in scratch._MAPS if m[2] == fd0]
+    assert mine() == []
     a = s.create('a', (100, 1000))
     b = s.create('b', 5000, np.complex128)
-    assert len(scratch._MAPS) == n0 + 2 and scratch.is_mapped(a)
+    assert len(mine()) == 2 and len(scratch._MAPS) == n0 + 2 and scratch.is_mapped(a)
+    assert sorted(m[1] - m[0] for m in mine()) == [80000, 800000]
     v = np.asarray(a)[10:20]                    # a plain ndarray view
     fd, off = scratch.file_range(a)
     assert scratch.file_range(v) == (fd, off + 10 * 8000)
@@ -36,10 +45,10 @@ def test_registry_follows_the_mappings():
     # an entry goes with its mapping (the address range may be reused) ...
     del a, v
     gc.collect()
-    assert len(scratch._MAPS) == n0 + 1
+    assert [m[1] - m[0] for m in mine()] == [80000]
     # ... or with its file
     s.close()
-    assert len(scratch._MAPS) == n0
+    assert mine() == [] and len(scratch._MAPS) <= n0
     b[:] = 2                                    # the mapping itself stays valid
     scratch.written(b)
     scratch.unmap(b)

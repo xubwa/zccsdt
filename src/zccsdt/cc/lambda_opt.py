@@ -899,11 +899,20 @@ def plan_for(eris, t1, dtype, opts, blocks=False, sources=None):
     return _plan_for(eris, t1, dtype, opts, blocks, _source_bytes(eris, dtype, sources, blocks))
 
 
+class ResidualSources(tuple):
+    '''Sources of kernel() that are in the layouts of the residuals of
+    update_lams already: (s1[i,a], s2[(i<j), (a<b)], s3 flat, as l3 is held
+    in the iterations - the packed block, or the blocks of the symmetry
+    labels with ``blocks``; None for one that is not there), the pairs in
+    the order of the engine.  They are used as they are, the caller's
+    arrays: what zccsdt.cc.zeta_opt.lambda_sources returns.'''
+
+
 def _source_bytes(eris, dtype, sources, blocks):
     '''Bytes of the copy of s3 that _sources makes.'''
     from zccsdt.scratch import is_mapped
     s3 = None if sources is None else sources[2]
-    if s3 is None:
+    if s3 is None or isinstance(sources, ResidualSources):
         return 0
     if blocks:
         return block_engine(eris, dtype).size * np.dtype(dtype).itemsize
@@ -995,6 +1004,8 @@ def _sources(im, eris, sources, blocks):
     from zccsdt.scratch import is_mapped
     if sources is None:
         return None
+    if isinstance(sources, ResidualSources):
+        return tuple(sources)
     s1, s2, s3 = sources
     om, vm, dtype = im.om, im.vm, im.dtype
     if s1 is not None:
@@ -1039,7 +1050,8 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False,
     zccsdt.cc.quadruples_grad.  s3 is one more array of the size of l3: the
     caller's where it is in memory in the layout of the residual, else a copy
     that is in the plan (in the blocks of the labels with ``blocks``; of an
-    s3 in a scratch file, which is read once).
+    s3 in a scratch file, which is read once).  A ResidualSources is taken
+    as it is.
 
     T3, l3 and the residual are held in memory (plan_memory,
     plan_memory_blocks raise MemoryError if they do not fit in
