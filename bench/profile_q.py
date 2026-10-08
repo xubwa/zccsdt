@@ -10,6 +10,7 @@ usage: python bench/profile_q.py MOLECULE BASIS KIND [NITER] [FROZEN]
   FROZEN: frozen occupied spin orbitals or spinors (rhf: orbitals)
   ZC_MAXMEM: max_memory in MB (default: 80% of the available memory)
   ZC_QPLAN: 'cols22, cols13, xv, rows' of an explicit quadruples.Plan
+  ZC_INCORE=1: the DIIS vectors of CCSDT in memory
 '''
 import os
 import sys
@@ -49,6 +50,8 @@ def main():
         cc.max_cycle = niter
     if os.environ.get('ZC_MAXMEM'):
         cc.max_memory = float(os.environ['ZC_MAXMEM'])
+    if os.environ.get('ZC_INCORE') == '1':          # DIIS vectors in memory (no scratch file)
+        cc.incore_complete = True
     cc.run()
     snap = timing.snapshot()
     watch = MemWatch()
