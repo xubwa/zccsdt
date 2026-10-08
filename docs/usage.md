@@ -291,6 +291,15 @@ e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), 
   what ran.  HBr / cc-pVQZ-DK, 8 + 160 spinors, from the spinors to the
   relaxed density: 194 s with the labels, 645 s without.  (Q)_Lambda takes
   T3 and Lambda_3 packed and forms its products in the sectors.
+- **Properties of CCSDT(Q)**: `mycc.solve_lambda(with_q=True)` and
+  `mycc.make_rdm1(with_q=True)` - the Lambda equations of CCSDT with the
+  derivatives of E(Q) as sources, and the relaxed density with the parts
+  of (Q) (`zccsdt.cc.quadruples_grad`; docs/lambda.md section 11), frozen
+  and left-out spinors included.  The pass over the quadruples takes 3.4
+  to 3.6 times the (Q) energy on the packed block (it does not use the
+  labels yet), the Lambda iterations cost what they cost without (Q).
+  H2O / cc-pVTZ, the dipole moment against CFOUR's `ncc`
+  (`CALC=CCSDT(Q)`, `PROPS=FIRST_ORDER`): 0.7492563653 in both.
 - An RHF reference makes `zccsdt.CCSDT` the closed-shell class, which has
   none of this: `zccsdt.CCSDT(mf.to_ghf())` for these methods.
 
