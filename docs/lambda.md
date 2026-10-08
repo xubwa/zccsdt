@@ -550,3 +550,201 @@ since (`test_memory_plan` has a buffer size with a short last batch).
 - A front end: `GCCSDT` has no `solve_lambda` (its file was not to be
   touched); the hook would be `lambda_opt.kernel(self.ao2mo(), self.t1,
   self.t2, self.t3, options)`.
+
+- Any factorization for packed amplitudes: the tables are flat lists of
+  terms, each a product of at most four tensors.
+
+## 10. Densities, orbital gradient and relaxed density from packed amplitudes
+
+`src/zccsdt/cc/density_opt.py` (`tests/test_density_opt.py`,
+`bench/density_ccsdt.py`, `bench/cfour/write_density_ccsdt.py`): the
+one-particle density, the orbital gradient and - through
+`zccsd.zvector` - the relaxed density from t3 and lambda3 as the amplitude
+code stores them, `[C(o,3), C(v,3)]` (or the symmetry blocks of the engine
+of the front end). It takes the place of the first and the last item of
+section 8 for the densities and the gradient; Lambda itself is still that of
+the dense reference.
+
+```python
+from zccsdt.cc import density_opt
+res = density_opt.kernel(eris, t1, t2, t3, l1, l2, l3)       # res.d1[p,q] = <p+ q>, res.gnh[a,i]
+rel = density_opt.relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff,
+                               frozen_occ=None, dropped_vir=None)
+# rel.relaxed, rel.unrelaxed: D[p,q] = <q+ p>, Hermitian, in the spinors rel.mo_coeff
+# [frozen occupied, active occupied, active virtual, dropped virtual]; C D C^+ in the AO basis
+```
+
+### 9.1 Factorization of the gradient
+
+The 81 terms are not evaluated one by one. With g1 and g2 the coefficients
+of the dressed f and <pq||rs> in the Lagrangian (g2: `DENSITY`,
+antisymmetrized),
+
+    Gnh[a,i] = f[a,i] + sum_q f[a,q] g1[i,q] - sum_p f[p,i] g1[p,a] + sum_pq <pa||qi> g1[p,q]
+             + 1/2 sum <aq||rs> g2[i,q,r,s] - 1/2 sum <pq||is> g2[p,q,a,s]
+
+and every block of g2 but one is made once and contracted with its blocks
+of dressed integrals:
+
+| Block of g2 | Elements | Made of | Meets |
+|---|---|---|---|
+| `ijkl` | o^4 / 4 | l2 t2; l3 t3 (`O4`) | `<am\|\|jk>` |
+| `ijak` | o^3 v | l1 t2; l2 t3; l3 t2 t2 (`C3`, `Z`) | `<am\|\|ej>`, `<mn\|\|ij>` |
+| `iajk` | o^3 v / 2 | l3 t2 (`Z`) | `<ae\|\|jk>` |
+| `ijab` | o^2 v^2 / 4 | t2; l1 t3; l2 t2 t2; l3 t2 t3 (7 terms: through g1, `R3`, `O4`, `Z`, `C3` and one o^5 v intermediate) | `<am\|\|ef>`, `<mn\|\|ie>` |
+| `iabj` | o^2 v^2 | l2 t2; l3 t3 (`R3`) | `<ae\|\|fm>`, `<em\|\|ij>` |
+| `abci` | o v^3 / 2 | l3 t2 (`C3`) | `<ef\|\|im>` |
+| `aibc` | o v^3 / 2 | l1 t2; l2 t3; l3 t2 t2 (`C3`, `Z`) | `<ae\|\|fg>`, `<em\|\|if>` |
+| `abcd` | not made | l2 t2; l3 t3 | `<ef\|\|gi>`: through its factors |
+
+The intermediates of lambda3 and t3 (P, Q: occupied and virtual pairs):
+
+| Name | Definition | Elements | Product |
+|---|---|---|---|
+| `Z[P,g,i]` | 1/2 sum_(m,ef) l3[m,P,e,f,g] t2[i,m,e,f] | o^3 v / 2 | o^4 v^3 / 4 |
+| `C3[Q,c,i]` | sum_(mn,e) l3[i,m,n,Q,e] t2[m,n,c,e] | o v^3 / 2 | o^3 v^4 / 4 |
+| `R3[(a j),(b i)]` | 1/4 sum l3[j,m,n,a,e,f] t3[i,m,n,b,e,f]: the ring density | o^2 v^2 | o^4 v^4 / 4 |
+| `O4[P,P']` | sum_(m, a<b<c) l3[m,P,abc] t3[m,P',abc] | o^4 / 4 | C(o,3)^2 C(v,3) |
+| `Y[P,g,m,h,i]` | sum_(e<f) l3[m,P,g,e,f] `<ef\|\|hi>` for a batch of P | batch | o^4 v^4 / 4 |
+| `H[P,g,m,P']` | sum_(e<f) l3[m,P,g,e,f] t2[P',e,f] for a batch of P | batch | o^5 v^3 / 4 |
+
+`R3` also gives the l3 t3 parts of the one-particle blocks (its traces over
+the occupied and over the virtual pair of indices), and the terms of `ijab`
+with one-particle densities collapse: `l2 t2 t2` and `l3 t2 t3` with a
+two-index contraction of lambda and t are `t2` times the block `ab` or `ij`
+of g1.
+
+Passes over the packed arrays, both through the half-expanded batches of the
+amplitude code (`t3pack.gather_half`: `X[P, d, m, Q]`, a matrix `(P d) x (m
+Q)`):
+
+1. lambda3 alone: `Z` and `C3`, one GEMM each per batch;
+2. t3 and lambda3 together: t3 with (l2, `Z`) stacked over (P, d) and with
+   (l2, `C3`) stacked over (m, Q) - the l2 t3 parts of `aibc` and `ijak` and
+   two terms of `ijab` -, t3 with l1 and l2 (matrix-vector); `R3`, one GEMM
+   per occupied pair; `Y`, antisymmetrized in (g, h) and contracted with t3
+   of the same batch; `H` and its product with t3;
+3. the Gram matrix of the rows of the two packed arrays, one GEMM without a
+   gather: `O4`.
+
+t3 is gathered once, lambda3 twice. The two o^4 v^4 / 4 products (`R3`, `Y`)
+are the cost - a CCSDT iteration has one of them and the o^3 v^5 / 24
+ladder. The packed dressed `<ab||de>` is used twice in slabs of rows, for
+the dressed `<ef||gi>` and `<ef||ij>` before the passes and with `aibc`
+after them; if all of it fits next to the batches it is dressed once.
+
+Memory (`density_opt.plan_memory`, a `Plan`): five arrays of o v^3 / 2
+elements (the dressed `<ef||gi>`, `C3` with l2, `aibc` with a term of
+`ijab`, the bare packed `<ma||ef>` of the amplitude code, one transient),
+about twenty of o^2 v^2, the batch buffers (two half-expanded batches and
+`Y`: 2 o v^3 / 2 + o^2 v^2 elements per occupied pair) and the slab of
+`<ab||de>`. The batches take what the budget leaves up to 4 GB, then the
+operator; `MemoryError` below one pair and the rows of one first index.
+
+### 9.2 Frozen and dropped spinors
+
+The orbital gradient between a frozen spinor f (occupied or virtual) and an
+active one x is, in the convention of `zccsd.zvector`,
+
+    G[f,x] = (B[f,x] + conj(K[f,x])) / 2 + (n_x - n_f) V[f,x],
+    B[f,x] = 1/2 sum_qrs <fq||rs> gamma2[x,q,r,s],   K[f,x] = 1/2 sum_pqs <pq||fs> gamma2[p,q,x,s],
+
+gamma2 the two-particle density of the bare integrals without its
+one-particle terms and V the Fock matrix of the Hermitian part of gamma1 =
+d1 - 1(occupied). In the dressed basis
+
+    gamma2 = (g2 transformed back) + A[(gamma1 - tau / 2) x tau],   tau = t1 in the occupied-virtual block,
+
+so B and K are the contractions of the blocks of g2 above with the
+integrals `<fq||rs>` dressed in their three active indices (as a bra index:
+32 block contractions; the block `abcd` through two more products of the
+kind of `Y` in pass 2, one with t3 first), transformed back in the fourth
+index, plus Fock matrices of gamma1 - tau / 2 and of tau
+(`density_opt.frozen_terms`). The integrals come from a transformation with
+the frozen spinors as the first index (`frozen_integrals`: (o + v)^3 numbers
+for each, in batches of 2 GB; it is done twice, before and after the
+passes). `relaxed_rdm1` then hands the gradient of all spinors to
+`zvector._relax`: the rotations between frozen and active spinors of a kind
+follow from the Fock matrix staying diagonal.
+
+`density_opt.all_blocks` takes every spinor as the index outside: all four
+blocks of the one-index transformed Lagrangian from the same contractions
+(n^4 integrals: a check for small cases).
+
+### 9.3 Validation
+
+`tests/test_density_opt.py` (34 tests, 64 s):
+
+- g1, d1 and the table `GRADIENT` for complex amplitudes that solve nothing,
+  4+5 to 6+3 spin orbitals, also without triples (o = 2, v = 2), real
+  arithmetic, without the C kernels, and in every plan of the memory: 1e-13
+  of their size (1e-15 found);
+- B and K of three "frozen spinors" with random integrals against the dense
+  gamma2, and all four blocks of the one-index transformed Lagrangian
+  against `lambda_ref.one_index` (1e-15);
+- H2O / STO-3G, converged CCSDT (the packed solver) and the Lambda of the
+  dense reference: d1 and Gnh of the dense tables (5e-18); the blocks among
+  occupied, among virtual spin orbitals and the excitation block vanish
+  (4e-9 of the de-excitation block);
+- the CCSD limit (t3 = lambda3 = None, amplitudes and lambda of
+  `zccsd.DirectZCCSD` in its spinors): the relaxed density of
+  `zccsd.zvector.kernel`, 1.5e-11 (all spinors active) and 2.4e-11 (H2O /
+  6-31G, two frozen, four dropped, and both);
+- the allocations of `kernel` (tracemalloc) within the plan, for one pair
+  per batch with the thinnest slab and for everything at once (5 + 40 spin
+  orbitals: 0.76 and 0.85 of the plan);
+- the relaxed dipole derivative against E(SCF) + E_corr(CCSDT) with the SCF
+  repeated in the field (four-point differences, step 1e-3), tests and
+  `bench/density_ccsdt.py validate` (job 31736990):
+
+| | unrelaxed | relaxed | finite field | difference |
+|---|---|---|---|---|
+| H2O / STO-3G, spin orbitals | 1.582638016243 | 1.582604399041 | 1.582604399056 | 1.5e-11 |
+| H2O / STO-3G, X2C spinors | 1.583149382876 | 1.583115567033 | 1.583115567046 | 1.3e-11 |
+| H2O / STO-3G, X2C, 2 frozen | 1.583089763541 | 1.583062831139 | 1.583062831172 | 3.4e-11 |
+| H2O / 6-31G, spin orbitals | 1.227823998609 | 1.227708663950 | 1.227708663909 | 4.1e-11 |
+| H2O / 6-31G, complex spin orbitals | 1.227823998609 | 1.227708663950 | 1.227708663916 | 3.4e-11 |
+| H2O / 6-31G, X2C spinors | 1.229477115815 | 1.229360128032 | 1.229360127966 | 6.6e-11 |
+| H2O / 6-31G, X2C, 2 frozen, 4 dropped | 1.256218427307 | 1.265120598104 | 1.265120598041 | 6.4e-11 |
+| HF / 6-31G, X2C, 2 frozen, through `GCCSDT` (real spinors, T3 in blocks) | 16.451171123641 | 16.451317738981 | 16.451317738986 | 5.3e-12 |
+
+  (at step 2e-3 the differences of the 6-31G rows are 7e-10 to 1e-9: the
+  truncation error of the stencil.)
+
+- CFOUR (`bench/cfour/write_density_ccsdt.py`, H2O / 6-31G, X2C-1e, CFOUR's
+  own spinors through `cfour.reference`): the CCSD limit of the code path
+  gives CFOUR's own `denfinal` element by element to 3.2e-12; with the
+  relaxed CCSDT density as `denfinal`, `xsox2cprop` prints for every
+  operator the trace of CFOUR's operator with the density made here (2e-13
+  of the size of the operator; electronic dipole 0.0120771406 against
+  0.0158031375 for CCSD and 0.0570680934 for the SCF; job 31737542). There
+  is no CCSDT property of CFOUR to compare with.
+
+### 9.4 Timing
+
+H2O / cc-pVTZ, 8 cores of a Xeon Gold 6248R (`bench/density_ccsdt.py time`,
+jobs 31737824 and 31737656 on c105, a node that other jobs shared: load 5 to
+11). Lambda is the conjugate of t in these runs - the cost does not depend
+on the numbers, and the dense reference cannot make Lambda at this size.
+Second of two runs; "density" is everything of `relaxed_rdm1`: densities,
+orbital gradient and the Z-vector equations.
+
+| | o + v | CCSDT iteration | density | ratio | cores busy | peak memory of the call (plan) |
+|---|---|---|---|---|---|---|
+| spin orbitals, real | 10 + 106 | 4.10 s | 4.43 s | 1.08 | 7.0 | 4.7 GB (5.7) |
+| the same, 3 pairs per batch, slabs of 60 MB | 10 + 106 | 4.07 s | 4.62 s | 1.14 | 6.7 | 0.55 GB (1.5) |
+| X2C spinors, complex | 10 + 106 | 13.42 s | 13.37 s | 1.00 | 7.3 | 5.0 GB (6.3) |
+| spin orbitals, 2 frozen, 20 dropped | 8 + 86 | 0.94 s | 6.68 s | 7.1 | 3.5 | 1.7 GB (3.7) |
+| X2C spinors, 2 frozen, 20 dropped | 8 + 86 | 2.76 s | 13.82 s | 5.0 | 4.9 | 3.6 GB (6.6) |
+
+(the plan counts 0.7 GB for the threaded BLAS.)  Where the time goes, real
+spin orbitals, all active: pass 2 3.15 s (`Y` 1.19, `R3` 1.09, the products
+of t3 alone 0.39, gathers 0.31, `H` 0.16), pass 1 0.38, the blocks 0.24, the
+contractions with the integrals 0.24, dressing 0.29, the Z-vector equations
+0.08, the Gram matrix 0.01.
+
+The frozen spinors are not at that level: for 22 of them the integrals with
+one frozen index and their contractions take 4.4 s at 1.8 cores (the
+transformation, done twice, 2.7 s; the contractions are einsum calls on
+(o + v)^3 arrays per frozen spinor), and the two products of pass 2 with
+their integrals 1.0 s - together more than the rest.
