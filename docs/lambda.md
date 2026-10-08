@@ -798,8 +798,8 @@ orbital gradient and the Z-vector equations.
 | spin orbitals, real | 10 + 106 | 4.10 s | 4.43 s | 1.08 | 7.0 | 4.7 GB (5.7) |
 | the same, 3 pairs per batch, slabs of 60 MB | 10 + 106 | 4.07 s | 4.62 s | 1.14 | 6.7 | 0.55 GB (1.5) |
 | X2C spinors, complex | 10 + 106 | 13.42 s | 13.37 s | 1.00 | 7.3 | 5.0 GB (6.3) |
-| spin orbitals, 2 frozen, 20 dropped | 8 + 86 | 0.94 s | 6.68 s | 7.1 | 3.5 | 1.7 GB (3.7) |
-| X2C spinors, 2 frozen, 20 dropped | 8 + 86 | 2.76 s | 13.82 s | 5.0 | 4.9 | 3.6 GB (6.6) |
+
+(frozen and dropped spinors: the next table.)
 
 (the plan counts 0.7 GB for the threaded BLAS.)  Where the time goes, real
 spin orbitals, all active: pass 2 3.15 s (`Y` 1.19, `R3` 1.09, the products
@@ -807,8 +807,69 @@ of t3 alone 0.39, gathers 0.31, `H` 0.16), pass 1 0.38, the blocks 0.24, the
 contractions with the integrals 0.24, dressing 0.29, the Z-vector equations
 0.08, the Gram matrix 0.01.
 
-The frozen spinors are not at that level: for 22 of them the integrals with
-one frozen index and their contractions take 4.4 s at 1.8 cores (the
-transformation, done twice, 2.7 s; the contractions are einsum calls on
-(o + v)^3 arrays per frozen spinor), and the two products of pass 2 with
-their integrals 1.0 s - together more than the rest.
+**With frozen and dropped spinors.** The first version (6de131c) made the
+integrals with one frozen index twice with PySCF's transformation,
+contracted them by einsum calls on (o + v)^3 arrays, one frozen spinor
+after the other, and had two columns of `Y` in pass 2 for every frozen
+spinor. Each of the first three rows is one job with the tree before and
+the trees after in turn on one node (8 cores; second of two runs; the ratio is to the CCSDT
+iteration of the same process; the checksums of the relaxed density and of
+the orbital gradient over all spinors - Frobenius norms and occupation
+numbers, which do not depend on how the SCF mixed degenerate spinors -
+agree to 12 and 11 digits between the trees):
+
+| | o + v, frozen + dropped | CCSDT iteration | before | after | cores busy | peak memory of the call (plan) |
+|---|---|---|---|---|---|---|
+| H2O / cc-pVTZ, spin orbitals, real (job 31740284, c659) | 8 + 86, 2 + 20 | 1.15 s | 8.04 s = 7.0 | 2.26 s = 1.96 | 5.6 | 1.3 GB (2.4) |
+| H2O / cc-pVTZ, X2C spinors (job 31740285, c561) | 8 + 86, 2 + 20 | 3.31 s | 15.64 s = 4.7 | 4.90 s = 1.48 | 6.3 | 2.6 GB (4.1) |
+| HI / dyall.v2z (H: cc-pVDZ, uncontracted), X2C spinors (job 31740283, c659) | 18 + 86, 36 + 116 | 53.3 s, 48.6 s | 717.9 s = 13.5 | 64.0 s = 1.32 | 7.5 | 7.7 GB (14.5) |
+| the same under `max_memory` 9000 MB: 8 frozen spinors at a time (job 31740406, c659) | 18 + 86, 36 + 116 | 54.8 s | | 85.0 s = 1.55 | 7.1 | 2.2 GB (3.6); 7.57 GB with what was there |
+
+(c659 and c561 were shared with jobs of other users: load 44 to 51 during
+the runs of HI before, 7 to 18 during those after - hence the two iteration
+times, each measured next to its density; the run under 9000 MB shared
+the node with the job of the row above for its first minutes. On c105, in
+separate jobs: 588.3 s = 13.5 iterations before (31738966) and 57.9 s =
+1.33 after (31739579), iteration 43.5 s in both.)
+
+Step by step (the trees in turn in one job: H2O with real spin orbitals
+31740187 and with X2C spinors 31740201 on c105, second runs; HI in separate
+jobs on c105, 31738966, 31739169, 31739579):
+
+| | H2O real | H2O X2C | HI |
+|---|---|---|---|
+| CCSDT iteration | 0.94 s | 2.76 s | 43.5 s |
+| before | 6.83 s | 13.90 s | 588.3 s |
+| the integrals once, from `zccsd.ao2mo.slabs`, in batches from the plan; blocks and GEMMs; `Gamma` (as a sum over occupied pairs) | 2.94 s | 7.16 s | 90.7 s |
+| `Gamma` as a ladder, the dressing on threads | 2.22 s | 4.50 s | |
+| Kramers pairs | 1.98 s | 4.30 s | 57.9 s |
+| the gathers on threads (other nodes, see above: 2.31 to 2.26 s, 5.08 to 4.90 s) | | | |
+
+Where the time went for HI before (c105, the first run, 584.5 s): the columns of `Y` of
+the frozen spinors 302 s, the integral transformation (twice) 176 s, the
+dressing 20 s, the contractions 25 s; everything else 61 s. After (64.0 s,
+job 31740283): pass 2 30.6 s (`R3` 18.2), `Gamma` 13.3 s - it replaces the
+`Y` of the active spinors, 18.5 s on c105 before -, the Z-vector
+equations 6.2 s, and the frozen stage 5.5 s: the transformation of 77
+frozen spinors 2.5 s, dressing 1.1 s, the contractions 1.0 s, the blocks 0.6
+s. The T3 work does not depend on the number of frozen spinors any more,
+and what does - the frozen stage - is a tenth of the whole for 152 of
+them.
+
+Under 9000 MB the frozen stage takes 13 s in 13 slabs: the gathers of
+`Gamma` and of the packed blocks of g2 are done for every slab (their
+contractions 5.0 s, against 1.0 s in one slab).
+
+What is left for the frozen spinors:
+
+- real spin orbitals go through the complex transformation and take the
+  real part; the relaxed density of H2O with real spin orbitals is at 2.0
+  iterations because its iteration is short (the densities do not use the
+  spin symmetry either);
+- no Kramers pairs for the real integrals of `eris.axial_spinors`;
+- `Gamma` needs v^4 / 4 elements in memory; without them route `y` costs
+  two columns of `Y` for every frozen spinor again (a mapped `Gamma`, made
+  in slabs of its columns, would remove that);
+- with slabs of few frozen spinors, the gathers per slab (above);
+- with no frozen spinors `Y` is kept although `Gamma` would be cheaper
+  where v < 6 o (HI: about 13 s against 18 s).
