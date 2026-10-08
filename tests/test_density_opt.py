@@ -172,19 +172,32 @@ def _field(mf, V, eps):
     return mf
 
 
-def _relaxed_and_finite_field(make_scf, V, mix=None, eps=1e-3):
+def _relaxed_and_finite_field(make_scf, V, mix=None, eps=1e-3, nfrozen=0, ndrop=0):
     '''(relaxed, unrelaxed, four-point difference) of the dipole derivative:
-    make_scf(eps) is the SCF in the field eps V (AO basis of the SCF).'''
+    make_scf(eps) is the SCF in the field eps V (AO basis of the SCF); the
+    ``nfrozen`` lowest occupied spinors frozen and the ``ndrop`` highest
+    virtual ones left out.'''
     def run(e):
         mf = make_scf(e)
         C = mf.mo_coeff if mix is None else mix(mf)
-        eris = E.from_scf(mf, mo_coeff=C)
+        n = C.shape[1]
+        eris = E.from_scf(mf, mo_coeff=C[:, :n - ndrop], mo_occ=mf.mo_occ[:n - ndrop], frozen=nfrozen)
         return mf, C, eris, _ccsdt(eris, 1e-13)
     mf, C, eris, r = run(0.0)
+    n = C.shape[1]
+    assert (mf.mo_occ[:-1] >= mf.mo_occ[1:]).all()
     l1, l2, l3, _ = _lambda(eris, r)
-    rel = D.relaxed_rdm1(mf, eris, r.t1, r.t2, r.t3, l1, l2, l3, C, tol=1e-11)
+    rel = D.relaxed_rdm1(mf, eris, r.t1, r.t2, r.t3, l1, l2, l3, C[:, nfrozen:n - ndrop],
+                         frozen_occ=C[:, :nfrozen] if nfrozen else None,
+                         dropped_vir=C[:, n - ndrop:] if ndrop else None, tol=1e-11)
     assert rel.converged and abs(rel.relaxed - rel.relaxed.conj().T).max() < 1e-13
-    assert abs(np.trace(rel.relaxed) - eris.nocc) < 1e-11
+    assert abs(np.trace(rel.relaxed) - eris.nocc - nfrozen) < 1e-11
+    assert abs(rel.mo_coeff - C).max() == 0 and rel.nocc == eris.nocc + nfrozen
+    if nfrozen or ndrop:
+        # the rotations between frozen and active spinors of a kind are in the relaxed density only
+        fr, ac = (slice(0, nfrozen), slice(nfrozen, rel.nocc)) if nfrozen else (
+            slice(n - ndrop, n), slice(rel.nocc, n - ndrop))
+        assert abs(rel.unrelaxed[ac, fr]).max() == 0 and abs(rel.relaxed[ac, fr]).max() > 1e-6
     Vmo = C.conj().T @ V @ C
     e = {}
     for k in (-2, -1, 1, 2):
@@ -331,3 +344,135 @@ def test_allocations_stay_within_the_plan(tight):
                                                              peak / 1e6, need / 1e6, peak / need))
     assert 0.6 * need < peak < need
     assert abs(np.trace(r.d1) - no) < 1e-10
+
+
+# ------------------------------------------------------------- frozen spinors
+
+def _gamma2(amps, lams, no):
+    '''(gamma1, gamma2) of the bare integrals from the dense reference: d1
+    and d2 without the reference and the products with it.'''
+    d1, d2 = LR.densities(amps, lams, no)
+    occ = np.zeros(d1.shape[0])
+    occ[:no] = 1.0
+    g1 = d1 - np.diag(occ)
+    x = np.einsum('pr,qs->pqrs', g1 + 0.5 * np.diag(occ), np.diag(occ))
+    x = x - x.transpose(1, 0, 2, 3)
+    return g1, d2 - (x - x.transpose(0, 1, 3, 2))
+
+
+@pytest.mark.parametrize('no,nv,seed', [(4, 5, 31), (5, 4, 32), (3, 6, 33), (2, 4, 34)])
+def test_integrals_with_a_frozen_index(no, nv, seed, monkeypatch):
+    '''The contractions of the two-particle density with integrals <fq||rs>
+    that have one index f outside the active space (random numbers,
+    antisymmetric in r and s; three "frozen spinors", one at a time and all
+    at once) against the dense densities: B[f,x] = 1/2 sum <fq||rs>
+    gamma2[x,q,r,s] and K[f,x] = 1/2 sum <pq||fs> gamma2[p,q,x,s] with
+    <pq||fs> = conj(<fs||pq>).'''
+    f, v, amps, lams = random_case(no, nv, seed)
+    n, nf = no + nv, 3
+    rng = np.random.default_rng(seed)
+    S0 = rng.standard_normal((nf, n, n, n)) + 1j * rng.standard_normal((nf, n, n, n))
+    S0 = S0 - S0.transpose(0, 1, 3, 2)
+    g1, g2 = _gamma2(amps, lams, no)
+    B = 0.5 * np.einsum('fqrs,xqrs->fx', S0, g2)
+    K = 0.5 * np.einsum('fspq,pqxs->fx', S0.conj(), g2)
+
+    def fock_of(M):
+        return np.einsum('fqrs,qs->fr', S0, M), np.einsum('fwtu,uw->tf', S0.conj(), M)
+    args = (container(f, v, no), amps[0], amps[1], packed(amps[2]), lams[0], lams[1], packed(lams[2]))
+    calls = []
+
+    def ints(f0, f1):
+        calls.append((f0, f1))
+        return S0[f0:f1]
+    for per_batch in (3, 1):
+        monkeypatch.setattr(D, 'frozen_batch', lambda *a: per_batch)
+        r = D.kernel(*args, frozen=(nf, ints), plan=D.Plan(nb=2, slab_bytes=None))
+        Bk, Kk = D.frozen_terms(r, amps[0], fock_of)
+        assert abs(Bk - B).max() < 1e-12 * abs(B).max(), abs(Bk - B).max() / abs(B).max()
+        assert abs(Kk - K).max() < 1e-12 * abs(K).max(), abs(Kk - K).max() / abs(K).max()
+    assert calls == [(0, 3), (0, 3), (0, 1), (1, 2), (2, 3), (0, 1), (1, 2), (2, 3)]
+    # (the terms of gamma1 and t1 are part of it)
+    assert abs(r.bf - B).max() > 1e-3 * abs(B).max()
+
+
+def _x2c_in_field(mol):
+    with mol.with_common_orig((0, 0, 0)):
+        z = mol.intor('int1e_r_spinor')[2]
+
+    def make_scf(eps):
+        mf = _field(x2c.UHF(mol), z, eps)
+        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
+        mf.kernel()
+        assert mf.converged
+        return mf
+    return make_scf, z
+
+
+@pytest.mark.parametrize('basis,nfrozen,ndrop', [('sto-3g', 2, 0), ('6-31g', 2, 4)])
+def test_relaxed_dipole_with_frozen_spinors(basis, nfrozen, ndrop):
+    '''CCSDT of H2O with X2C spinors, the two lowest occupied spinors
+    frozen and (6-31G) the four highest virtual ones left out: the relaxed
+    density in the basis of all spinors against the derivative of E(SCF) +
+    E_corr(CCSDT) with the SCF repeated in the field - the gradient between
+    frozen and active spinors from the integrals with one frozen index
+    (density_opt.frozen_integrals), the rotations between frozen and active
+    spinors of a kind from the Fock matrix staying diagonal.'''
+    make_scf, z = _x2c_in_field(gto.M(atom=WATER, basis=basis, verbose=0))
+    relaxed, unrelaxed, fd = _relaxed_and_finite_field(make_scf, z, nfrozen=nfrozen, ndrop=ndrop)
+    print('H2O / %s X2C, %d frozen, %d dropped: relaxed %.12f unrelaxed %.12f finite field %.12f, difference %.1e'
+          % (basis, nfrozen, ndrop, relaxed, unrelaxed, fd, relaxed - fd))
+    assert abs(relaxed - fd) < 2e-10
+    assert abs(unrelaxed - relaxed) > 5e-6
+
+
+def test_frozen_spin_orbitals_real_and_complex():
+    '''The same with RHF orbitals as spin orbitals (real integrals: the
+    transformation of pyscf.ao2mo) and with every pair mixed by its own
+    SU(2) matrix (complex): the two relaxed densities give the same dipole,
+    that of the finite field.  H2O / STO-3G, the 1s pair frozen.'''
+    mol = gto.M(atom=WATER, basis='sto-3g', verbose=0)
+    with mol.with_common_orig((0, 0, 0)):
+        z = mol.intor('int1e_r')[2]
+    z2 = np.kron(np.eye(2), z)
+
+    def make_scf(eps):
+        mf = _field(scf.RHF(mol), z, eps)
+        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
+        mf.kernel()
+        ghf = scf.addons.convert_to_ghf(mf)
+        h2 = np.kron(np.eye(2), mf.get_hcore())
+        ghf.get_hcore = lambda *args: h2
+        return ghf
+    real = _relaxed_and_finite_field(make_scf, z2, nfrozen=2)
+    cplx = _relaxed_and_finite_field(make_scf, z2, lambda m: _spin_mixed(m)[0], nfrozen=2)
+    assert abs(real[0] - real[2]) < 2e-10 and abs(cplx[0] - cplx[2]) < 2e-10
+    assert abs(real[0] - cplx[0]) < 1e-11 and abs(real[0] - real[1]) > 5e-6
+
+
+@pytest.mark.parametrize('frozen', [[0, 1], [22, 23, 24, 25], [0, 1, 22, 23, 24, 25]])
+def test_ccsd_limit_with_frozen_spinors(frozen):
+    '''Frozen occupied spinors, dropped virtual ones and both, without T3
+    and Lambda3 and with the amplitudes of the spinor CCSD: the relaxed
+    density of zccsd.zvector.kernel (zccsd.orbgrad_frozen), which is
+    validated against CFOUR.  H2O / 6-31G, X2C.'''
+    from zccsdt.zccsd import DirectZCCSD, zvector
+    mol = gto.M(atom=WATER, basis='6-31g', verbose=0)
+    mf = _x2c_in_field(mol)[0](0.0)
+    mycc = DirectZCCSD(mf, frozen=frozen)
+    mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt, mycc.max_cycle = 0, 1e-13, 1e-10, 200
+    mycc.kernel()
+    l1, l2 = mycc.solve_lambda()
+    want, plain, z = zvector.kernel(mycc, l1=l1, l2=l2, mf=mf, tol=1e-11)
+    C = zvector.full_space(mycc)[0]
+    n, nocc = C.shape[1], 10
+    fo, fv = [f for f in frozen if f < nocc], [f for f in frozen if f >= nocc]
+    act = [p for p in range(n) if p not in frozen]
+    eris = E.from_scf(mf, mo_coeff=C[:, fo + act], mo_occ=mf.mo_occ[fo + act], frozen=len(fo))
+    rel = D.relaxed_rdm1(mf, eris, mycc.t1, mycc.t2, None, l1, l2, None, C[:, act],
+                         frozen_occ=C[:, fo] if fo else None, dropped_vir=C[:, fv] if fv else None, tol=1e-11)
+    print('CCSD limit, frozen %s: unrelaxed %.1e, relaxed %.1e off zccsd.zvector (relaxation %.1e)'
+          % (frozen, abs(rel.unrelaxed - plain).max(), abs(rel.relaxed - want).max(), abs(want - plain).max()))
+    assert abs(rel.mo_coeff - C).max() == 0
+    assert abs(rel.unrelaxed - plain).max() < 1e-10
+    assert abs(rel.relaxed - want).max() < 1e-9

@@ -46,7 +46,8 @@ def amplitudes_ccsdt(mf, C, nfrozen, ndropped, log):
     n = C.shape[1]
     nocc = int((mf.mo_occ > 0).sum())
     cols = np.arange(n - ndropped)
-    eris = E.from_scf(mf, mo_coeff=C[:, cols], mo_occ=mf.mo_occ[cols], frozen=nfrozen, packed_vvvv=True)
+    # (the full <ab||cd>: the dense reference of Lambda takes it)
+    eris = E.from_scf(mf, mo_coeff=C[:, cols], mo_occ=mf.mo_occ[cols], frozen=nfrozen)
     t0 = time.perf_counter()
     r = solver.kernel(eris, 'ccsdt', solver.Options(conv_tol=1e-12, conv_tol_normt=1e-9))
     if not r.converged:
