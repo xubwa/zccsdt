@@ -38,7 +38,7 @@ subroutine N(xzq)(w, eq5, eq6)
   implicit none
   real(8) :: w(*)
   real(8), intent(out) :: eq5, eq6
-  integer(8) :: m0, m1, na4, nslot
+  integer(8) :: m0, m1, na4, nslot, nxv
   integer(8) :: kt2pp, kt2p, kt2px, kxo, kg, kkm, kb, koo
   integer(8) :: kev4, kz, krt3, krtt, kw22, kw13, kla, kra, klb, krb, klc, krc, kxv, kwx, kmx, kwh
   integer(8) :: i, j, k, l, x, n, size, ng, g1, g2, g3, nquad, ndone
@@ -85,27 +85,62 @@ subroutine N(xzq)(w, eq5, eq6)
   call xzrel(m1)
 
   ! ---- the work arrays of a quadruple
-  kev4 = xzget(na4, '(Q): energies of the virtual quadruples')
-  kz = xzget(NW * na4, '(Q): z')
-  krt3 = xzget(NW * na4, '(Q): r of [V,T3]')
-  krtt = xzget(NW * na4, '(Q): r of T2 T2')
-  kw22 = xzget(NW * nvp * qc22, '(Q): product [(ab)][(cd)]')
-  kw13 = xzget(NW * nv * qc13, '(Q): product [a][(bcd)]')
-  kla = xzget(NW * 4 * nv * nvp, '(Q): stacked operand')
-  kra = xzget(NW * 4 * nv * nvp, '(Q): stacked operand')
-  klb = xzget(NW * 4 * no * nvp, '(Q): stacked operand')
-  krb = xzget(NW * 4 * no * nvp, '(Q): stacked operand')
-  klc = xzget(NW * 6 * no * nv, '(Q): stacked operand')
-  krc = xzget(NW * 6 * no * nvt, '(Q): stacked operand')
-  kwh = xzget(NW * 12 * nvp, '(Q): operands of z')
-  kxv = xzget(NW * nslot * nv * nvt, '(Q): Xv')
-  kwx = xzget(NW * qrows * nv * nv, '(Q): rows of <vv||vv>')
-  kmx = xzget(NW * qrows * nv * nv, '(Q): product of Xv')
+  if (ncls == 1) then
+    kev4 = xzget(na4, '(Q): energies of the virtual quadruples')
+    kz = xzget(NW * na4, '(Q): z')
+    krt3 = xzget(NW * na4, '(Q): r of [V,T3]')
+    krtt = xzget(NW * na4, '(Q): r of T2 T2')
+    kw22 = xzget(NW * nvp * qc22, '(Q): product [(ab)][(cd)]')
+    kw13 = xzget(NW * nv * qc13, '(Q): product [a][(bcd)]')
+    kla = xzget(NW * 4 * nv * nvp, '(Q): stacked operand')
+    kra = xzget(NW * 4 * nv * nvp, '(Q): stacked operand')
+    klb = xzget(NW * 4 * no * nvp, '(Q): stacked operand')
+    krb = xzget(NW * 4 * no * nvp, '(Q): stacked operand')
+    klc = xzget(NW * 6 * no * nv, '(Q): stacked operand')
+    krc = xzget(NW * 6 * no * nvt, '(Q): stacked operand')
+    kwh = xzget(NW * 12 * nvp, '(Q): operands of z')
+    nxv = nv * nvt
+    kxv = xzget(NW * nslot * nxv, '(Q): Xv')
+    kwx = xzget(NW * qrows * nv * nv, '(Q): rows of <vv||vv>')
+    kmx = xzget(NW * qrows * nv * nv, '(Q): product of Xv')
+  else
+    ! in the sectors of the labels (xzqs.inc): the tables of the kernels
+    ! (32-bit integers), the blocks of the five products, the operands
+    jqkv = xzget(nv / 2 + 1, '(Q): tables')
+    jqlid = xzget(ncls / 2 + 1, '(Q): tables')
+    jqlst = xzget(ncls / 2 + 2, '(Q): tables')
+    jqlmem = xzget(nv / 2 + 1, '(Q): tables')
+    jqposv = xzget(nv / 2 + 1, '(Q): tables')
+    jqposq = xzget(nvp / 2 + 1, '(Q): tables')
+    jqpos3 = xzget(nvt / 2 + 1, '(Q): tables')
+    jqtri = xzget(3 * nvt / 2 + 2, '(Q): tables')
+    kz = xzget(NW * qn22max, '(Q): blocks of [V,T3] on two pairs')
+    krt3 = xzget(NW * qn22max, '(Q): blocks of T2 T2 on two pairs')
+    krtt = xzget(NW * qn22max, '(Q): blocks of z')
+    kw22 = xzget(NW * qn13max, '(Q): blocks of [V,T3] on an index and a triple')
+    kw13 = xzget(NW * qn13max, '(Q): blocks of T2 T2 on an index and a triple')
+    kla = xzget(NW * 4 * nvcmax * nqmax, '(Q): stacked operand')
+    kra = xzget(NW * 4 * nvcmax * nqmax, '(Q): stacked operand')
+    klb = xzget(NW * 4 * nocmax * nqmax, '(Q): stacked operand')
+    krb = xzget(NW * 4 * nocmax * nqmax, '(Q): stacked operand')
+    kwh = xzget(NW * 12 * nqmax, '(Q): operands of z')
+    klc = xzget(NW * 6 * nocmax * nvcmax, '(Q): stacked operand')
+    krc = xzget(12 * nocmax, '(Q): rows of T3 of a product')
+    nxv = qxvmax
+    kxv = xzget(NW * nslot * nxv, '(Q): Xv')
+    kwx = xzget(NW * qwbmax, '(Q): block of <vv||vv>')
+    kmx = xzget(NW * qm3max, '(Q): products of Xv')
+  end if
   if (xzdry) then
     call xzrel(m0)
     return
   end if
-  call zc_tn_tuple_sums(w(jeps + no), int(nv, 4), 4_4, w(kev4))
+  if (ncls == 1) then
+    call zc_tn_tuple_sums(w(jeps + no), int(nv, 4), 4_4, w(kev4))
+  else
+    call xzqstab(nv, nvp, nvt, ncls, vcls, vcoff, vpoff, vtoff, w(jvpidx), w(jvpgrp), w(jvtri), w(jvfree), &
+                 w(jqkv), w(jqlid), w(jqlst), w(jqlmem), w(jqposv), w(jqposq), w(jqpos3), w(jqtri))
+  end if
 
   ! ---- the tasks (xzpar.F90): the list, what an earlier run has finished
   cq = dble(nvp) * dble(nvp) * dble(4 * nv + 4 * no + 6) + dble(nv) * dble(nvt) * dble(6 * no + 3 * nv) &
@@ -193,8 +228,12 @@ subroutine N(xzq)(w, eq5, eq6)
           do x = 0, l - 1
             if (need(x) .and. slot(x) < 0) then
               slot(x) = N(xzqslot)(nslot, l, slot)
-              call N(xzqxv)(nv, nvp, nvt, qrows, w(jt2 + NW * nv * nv * (l + no * x)), w(jvvvv), &
-                            w(kxv + NW * slot(x) * nv * nvt), w(kwx), w(kmx))
+              if (ncls == 1) then
+                call N(xzqxv)(nv, nvp, nvt, qrows, w(jt2 + NW * nv * nv * (l + no * x)), w(jvvvv), &
+                              w(kxv + NW * slot(x) * nxv), w(kwx), w(kmx))
+              else
+                call N(xzqsxv)(w, x, l, w(jqtri), w(kxv + NW * slot(x) * nxv), w(kmx), w(kwx))
+              end if
             end if
           end do
           tq(2) = tq(2) + omp_get_wtime() - t0
@@ -202,9 +241,16 @@ subroutine N(xzq)(w, eq5, eq6)
           do i = lo1, hi1 - 1
             do j = max(i + 1, lo2), hi2 - 1
               do k = max(j + 1, lo3), hi3 - 1
-                call N(xzquad)(w, i, j, k, l, na4, w(jotri), w(josgn), w(kt2pp), w(kt2p), w(kt2px), w(kxo), &
-                               w(kev4), w(kz), w(krt3), w(krtt), w(kw22), w(kw13), w(kla), w(kra), w(klb), &
-                               w(krb), w(klc), w(krc), w(kwh), w(kxv), slot, e1, tq)
+                if (ncls == 1) then
+                  call N(xzquad)(w, i, j, k, l, na4, w(jotri), w(josgn), w(kt2pp), w(kt2p), w(kt2px), w(kxo), &
+                                 w(kev4), w(kz), w(krt3), w(krtt), w(kw22), w(kw13), w(kla), w(kra), w(klb), &
+                                 w(krb), w(klc), w(krc), w(kwh), w(kxv), slot, e1, tq)
+                else
+                  call N(xzqsquad)(w, i, j, k, l, w(jotri), w(josgn), w(jopidx), w(jopgrp), w(kt2pp), &
+                                   w(kt2p), w(kt2px), w(kxo), w(kz), w(krt3), w(krtt), w(kw22), w(kw13), &
+                                   w(kla), w(kra), w(klb), w(krb), w(kwh), w(kwh + NW * 6 * nqmax), w(klc), &
+                                   w(krc), w(krc + 6 * nocmax), w(kxv), slot, e1, tq)
+                end if
                 e = e + e1
                 ndone = ndone + 1
                 if (ndone >= nlimit) exit groups

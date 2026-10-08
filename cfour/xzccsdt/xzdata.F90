@@ -109,6 +109,16 @@ module xzdata
   integer(8) :: qxv = 3             ! occupied x whose Xv(x, l) are held at a time
   integer(8) :: qrows = 1           ! rows (bc) of <bc||ef> of a step of the formation of Xv
 
+  ! ---- (Q) in the sectors of the labels: the largest sets of blocks
+  integer(8) :: qn22max = 0         ! products [(ab)][(cd)] of one occupied quadruple
+  integer(8) :: qn13max = 0         ! products [a][(bcd)]
+  integer(8) :: qxvmax = 0          ! Xv of one pair of occupied indices
+  integer(8) :: qm3max = 0          ! the products that one block of Xv is made from
+  integer(8) :: qwbmax = 0          ! a block of <bc||ef> as [(bc)][e][f]
+  integer(8) :: nvcmax = 0, nocmax = 0      ! spinors of the largest class
+  integer(8) :: natmax = 0          ! virtual triples of the largest group
+  integer(8) :: jqkv = 0, jqlid = 0, jqlst = 0, jqlmem = 0, jqposv = 0, jqposq = 0, jqpos3 = 0, jqtri = 0
+
   logical :: qdebug = .false.       ! print the parts of (Q) (XZ_QDEBUG)
   real(8) :: qparts(4) = 0d0
   logical :: qsampled = .false.     ! (Q) ran in sample mode: its energies are not (Q)

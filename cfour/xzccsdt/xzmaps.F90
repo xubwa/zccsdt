@@ -271,3 +271,52 @@ subroutine xzclasses(no, nv, lab, maxcls, nc, operm, vperm, ocls, vcls, ocoff, v
   end do
   vcoff(nc) = k
 end subroutine xzclasses
+
+! ---------------------------------------------------------------------------
+! The tables of the sector kernels of (Q) (csrc/tnpack.c: zc_q_sector_energy,
+! zc_xv_sector), 32-bit integers; the classes of the virtual spinors are
+! their labels there.
+!   kv[a]          class of a
+!   lid[k], lst[k], lmem[a]   class -> itself, its first spinor, the spinors
+!   posv[a]        the place of a in its class
+!   posq, pos3     the place of a pair / triple in its group, by the number
+!                  of the pair / triple in lexicographic order
+!   tri[A][3]      the indices of the triple A (the order of the program)
+subroutine xzqstab(nv, nvp, nvt, nc, vcls, vcoff, vpoff, vtoff, vpidx, vpgrp, vtri, vfree, &
+                   kv, lid, lst, lmem, posv, posq, pos3, tri)
+  implicit none
+  integer(8), intent(in) :: nv, nvp, nvt, nc
+  integer(8), intent(in) :: vcls(0:nv-1), vcoff(0:nc), vpoff(0:*), vtoff(0:*)
+  integer(8), intent(in) :: vpidx(0:nv-1, 0:nv-1), vpgrp(0:nvp-1), vtri(0:nvp-1, 0:nv-1)
+  integer(8), intent(in) :: vfree(0:nvt-1, 0:2)
+  integer(4), intent(out) :: kv(0:nv-1), lid(0:nc-1), lst(0:nc), lmem(0:nv-1), posv(0:nv-1)
+  integer(4), intent(out) :: posq(0:nvp-1), pos3(0:nvt-1), tri(0:2, 0:nvt-1)
+  integer(8) :: a, b, c, k, p, t, g
+  integer(8), external :: xzpidx, xztrank
+  do a = 0, nv - 1
+    kv(a) = int(vcls(a), 4)
+    lmem(a) = int(a, 4)
+    posv(a) = int(a - vcoff(vcls(a)), 4)
+  end do
+  do k = 0, nc - 1
+    lid(k) = int(k, 4)
+    lst(k) = int(vcoff(k), 4)
+  end do
+  lst(nc) = int(vcoff(nc), 4)
+  do a = 0, nv - 1
+    do b = a + 1, nv - 1
+      p = vpidx(b, a)
+      posq(xzpidx(a, b, nv)) = int(p - vpoff(vpgrp(p)), 4)
+      do c = b + 1, nv - 1
+        t = vtri(vpidx(c, b), a)
+        g = vcls(a) + vcls(b) + vcls(c)
+        pos3(xztrank(a, b, c, nv)) = int(t - vtoff(g), 4)
+      end do
+    end do
+  end do
+  do t = 0, nvt - 1
+    tri(0, t) = int(vfree(t, 0), 4)
+    tri(1, t) = int(vfree(t, 1), 4)
+    tri(2, t) = int(vfree(t, 2), 4)
+  end do
+end subroutine xzqstab

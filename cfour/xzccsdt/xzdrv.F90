@@ -88,10 +88,6 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a)') '   XZ_LABELS=0: the labels are not used'
     uselab = .false.
   end if
-  if (with_q .and. uselab) then
-    write(6, '(a)') ' @XZCCSDT-W, (Q) in the blocks of the labels is not there yet: the labels are not used.'
-    uselab = .false.
-  end if
   tryreal = .true.
   call get_environment_variable('XZ_REAL', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0') then
@@ -285,7 +281,7 @@ subroutine xzsetmode(uselab)
   use xzdata
   implicit none
   logical, intent(in) :: uselab
-  integer(8) :: p, i, j, k, g, n, d, sa, si
+  integer(8) :: p, i, j, k, g, n, d, sa, si, m
 
   ncls = 1
   if (uselab) then
@@ -383,6 +379,56 @@ subroutine xzsetmode(uselab)
       nbd = nbd + n
     end do
   end do
+  ! the sectors of (Q): M the total class of an occupied quadruple, k the
+  ! class of an occupied pair
+  nvcmax = 0
+  nocmax = 0
+  do sa = 0, ncls - 1
+    nvcmax = max(nvcmax, vcoff(sa + 1) - vcoff(sa))
+    nocmax = max(nocmax, ocoff(sa + 1) - ocoff(sa))
+  end do
+  natmax = 0
+  do g = 0, ntg - 1
+    natmax = max(natmax, vtoff(g + 1) - vtoff(g))
+  end do
+  qn22max = 0
+  qn13max = 0
+  do m = 0, 4 * (ncls - 1)
+    n = 0
+    do g = 0, npg - 1
+      if (m - g < 0 .or. m - g >= npg) cycle
+      n = n + (vpoff(g + 1) - vpoff(g)) * (vpoff(m - g + 1) - vpoff(m - g))
+    end do
+    qn22max = max(qn22max, n)
+    n = 0
+    do sa = 0, ncls - 1
+      if (m - sa < 0 .or. m - sa >= ntg) cycle
+      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(m - sa + 1) - vtoff(m - sa))
+    end do
+    qn13max = max(qn13max, n)
+  end do
+  qxvmax = 0
+  qm3max = 0
+  qwbmax = 0
+  do k = 0, 2 * (ncls - 1)
+    n = 0
+    do sa = 0, ncls - 1
+      if (sa + k >= ntg) cycle
+      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(sa + k + 1) - vtoff(sa + k))
+      ! the products of this block: pairs (bc) of group g, f of class g - sa, d of class k - (g - sa)
+      d = 0
+      do g = 0, npg - 1
+        si = g - sa
+        if (si < 0 .or. si >= ncls) cycle
+        if (k - si < 0 .or. k - si >= ncls) cycle
+        d = d + (vpoff(g + 1) - vpoff(g)) * (vcoff(sa + 1) - vcoff(sa)) * (vcoff(k - si + 1) - vcoff(k - si))
+        qwbmax = max(qwbmax, (vpoff(g + 1) - vpoff(g)) * (vcoff(sa + 1) - vcoff(sa)) &
+                             * (vcoff(si + 1) - vcoff(si)))
+      end do
+      qm3max = max(qm3max, d)
+    end do
+    qxvmax = max(qxvmax, n)
+  end do
 end subroutine xzsetmode
 
 ! ---------------------------------------------------------------------------
@@ -425,7 +471,7 @@ subroutine xzlayout(w, status)
   jvpb = xzget(nvp, 'virtual tables')
   jvpidx = xzget(nv * nv, 'virtual tables')
   jvpgrp = xzget(nvp, 'virtual tables')
-  jrows = xzget(max(nto, npo, nv, no), 'rows')
+  jrows = xzget(max(nto, npo, nv, no, natmax), 'rows')
   jeps = xzget(ny, 'spinor energies')
   jeo3 = xzget(nto, 'spinor energies')
   jev3 = xzget(nvt, 'spinor energies')
@@ -444,7 +490,7 @@ subroutine xzlayout(w, status)
                 w(jopidx), w(jopgrp), opoff, otoff, w(ktn))
     call xzmaps(nv, nvp, nvt, ncls, vcls, w(jvtri), w(jvsgn), w(jvfree), w(jvpair), w(jvpa), w(jvpb), &
                 w(jvpidx), w(jvpgrp), vpoff, vtoff, w(ktn))
-    call xziota(max(nto, npo, nv, no), w(jrows))
+    call xziota(max(nto, npo, nv, no, natmax), w(jrows))
     if (ncls > 1) call xzt3lay(no, nv, npo, nvp, nto, nvt, ncls, ocls, vcls, otoff, vtoff, w(jvtri), &
                                w(jvsgn), ocoff, vcoff, boff, n3, w(jobase), w(jvcol), w(josig), &
                                w(jvsig), w(jvci), w(jrowpos))

@@ -179,3 +179,27 @@
       real(c_double), value :: eo
       real(c_double) :: e(2)
     end subroutine
+
+    ! ---- (Q) in sectors (csrc/tnpack.c)
+    subroutine N(zc_q_sector_energy)(n, kv, modulus, m, ev, eo, kmin, nk, lid_of, lstart, lmem, qmin, nq, &
+                                     off22, nc22, off13, nc13, posv, posq, pos3, b1, b2, b3, c1, c2, e) bind(C)
+      import
+      integer(c_int), value :: n, modulus, m, kmin, nk, qmin, nq
+      real(c_double), value :: eo
+      type(*), dimension(*) :: kv, ev, lid_of, lstart, lmem, off22, nc22, off13, nc13, posv, posq, pos3
+      type(*), dimension(*) :: b1, b2, b3, c1, c2
+      real(c_double) :: e(2)
+    end subroutine
+
+    subroutine N(zc_rows_gemm)(m, ld, rows, sg, nr, cols, nc, l, na, x) bind(C)
+      import
+      integer(c_int64_t), value :: ld, nr, nc, na
+      type(*), dimension(*) :: m, rows, sg, cols, l, x
+    end subroutine
+
+    subroutine N(zc_xv_sector)(n, kv, modulus, tri, nt, ne, qmin, nq, off, nd, posv, posq, m3, out) bind(C)
+      import
+      integer(c_int), value :: n, modulus, ne, qmin, nq
+      integer(c_int64_t), value :: nt
+      type(*), dimension(*) :: kv, tri, off, nd, posv, posq, m3, out
+    end subroutine
