@@ -44,7 +44,7 @@ subroutine N(xzq)(w, eq5, eq6)
   integer(8) :: i, j, k, l, x, n, size, ng, g1, g2, g3, nquad, ndone
   integer(8) :: lo1, hi1, lo2, hi2, lo3, hi3
   integer(8) :: it, want, nold, nmine, lastl, nlimit, nx, nqnow, nstop
-  integer(8) :: slot(0:no-1)
+  integer(8) :: slot(0:no-1), xnew(0:no-1), nnew
   logical :: need(0:no-1), first
   real(8) :: e(2), e1(2), t0, tq(6), tstart, cq, cx, costmine, costleft, costdone, tloop, ttask, txv
   real(8) :: estimate, part(6), tot(6), tmx(2)
@@ -225,17 +225,18 @@ subroutine N(xzq)(w, eq5, eq6)
             if (.not. need(x)) slot(x) = -1
           end do
           t0 = omp_get_wtime()
+          nnew = 0
           do x = 0, l - 1
             if (need(x) .and. slot(x) < 0) then
               slot(x) = N(xzqslot)(nslot, l, slot)
-              if (ncls == 1) then
-                call N(xzqxv)(nv, nvp, nvt, qrows, w(jt2 + NW * nv * nv * (l + no * x)), w(jvvvv), &
-                              w(kxv + NW * slot(x) * nxv), w(kwx), w(kmx))
-              else
-                call N(xzqsxv)(w, x, l, w(jqtri), w(kxv + NW * slot(x) * nxv), w(kmx), w(kwx))
-              end if
+              xnew(nnew) = x
+              nnew = nnew + 1
+              if (ncls > 1) call N(xzqsxv)(w, x, l, w(jqtri), w(kxv + NW * slot(x) * nxv), w(kmx), w(kwx))
             end if
           end do
+          ! (dense: the rows of <vv||vv> are expanded once for all new x)
+          if (ncls == 1 .and. nnew > 0) call N(xzqxv)(no, nv, nvp, nvt, qrows, nnew, xnew, l, slot, w(jt2), &
+                                                      w(jvvvv), w(kxv), w(kwx), w(kmx))
           tq(2) = tq(2) + omp_get_wtime() - t0
           txv = txv + omp_get_wtime() - t0
           do i = lo1, hi1 - 1
@@ -430,29 +431,36 @@ subroutine N(xzqxo)(no, nv, npo, nvp, nto, oooo, ovvo, t2p, t2px, opa, opb, vpa,
 end subroutine
 
 ! ---------------------------------------------------------------------------
-! xv[e][(bcd)] = P(d/bc) 1/2 sum_f <bc||ef> tl[f][d] for one pair (x, l),
-! tl = t2[x][l]; from nrw rows (bc) of <bc||ef> at a time.
+! Xv for the pairs (x, l) of the nnew occupied x of xnew, each into its slot:
+!   xv[e][(bcd)] = P(d/bc) 1/2 sum_f <bc||ef> t2[x][l][f][d]
+! from nrw rows (bc) of <bc||ef> at a time, which are expanded once for all x.
 ! wx: work [(bc)][e][f], mx: work [(bc)][e][d]
-subroutine N(xzqxv)(nv, nvp, nvt, nrw, tl, vvvv, xv, wx, mx)
+subroutine N(xzqxv)(no, nv, nvp, nvt, nrw, nnew, xnew, l, slot, t2, vvvv, xv, wx, mx)
   use xzkern
   implicit none
-  integer(8), intent(in) :: nv, nvp, nvt, nrw
-  ZT, intent(in) :: tl(*)
+  integer(8), intent(in) :: no, nv, nvp, nvt, nrw, nnew, l
+  integer(8), intent(in) :: xnew(0:*), slot(0:*)
+  ZT, intent(in) :: t2(0:nv*nv-1, 0:no-1, 0:no-1)              ! [i][j][(a, b)]
   ZT, intent(in) :: vvvv(0:nvp-1, 0:*)
-  ZT :: xv(*), wx(*), mx(*)
-  integer(8) :: b0, nb
+  ZT :: xv(0:nv*nvt-1, 0:*), wx(*), mx(*)
+  integer(8) :: b0, nb, k, x
   ZT :: one, zero
   one = 1
   zero = 0
-  call zc_tn_zero(xv, 8 * NW * nv * nvt)
+  do k = 0, nnew - 1
+    call zc_tn_zero(xv(0, slot(xnew(k))), 8 * NW * nv * nvt)
+  end do
   do b0 = 0, nvp - 1, nrw
     nb = min(nrw, nvp - b0)
     call zc_tn_zero(wx, 8 * NW * nb * nv * nv)
     call N(zc_tn_expand)(vvvv(0, b0), nb, nvp, int(nv, 4), 1_4, 1_4, 0_8, nv, 0_8, nv, wx, nv, 1_8, &
                          nv * nv, 1d0)
-    call N(zc_gemm)(0_4, 0_4, nb * nv, nv, nv, one, wx, nv, tl, nv, zero, mx, nv)
-    call N(zc_tn_reduce)(xv, nv, nvt, int(nv, 4), 2_4, 1_4, b0, b0 + nb, 0_8, nv, mx, nv * nv, 1_8, nv, &
-                         0.5d0)
+    do k = 0, nnew - 1
+      x = xnew(k)
+      call N(zc_gemm)(0_4, 0_4, nb * nv, nv, nv, one, wx, nv, t2(0, l, x), nv, zero, mx, nv)
+      call N(zc_tn_reduce)(xv(0, slot(x)), nv, nvt, int(nv, 4), 2_4, 1_4, b0, b0 + nb, 0_8, nv, mx, nv * nv, &
+                           1_8, nv, 0.5d0)
+    end do
   end do
 end subroutine
 
