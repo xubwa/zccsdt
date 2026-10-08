@@ -63,6 +63,15 @@ module xzdata
   integer(8) :: nba = 1             ! first virtual indices of a batch of the W_vvvo terms
   integer(8) :: ncb = 0             ! columns of a product of the occupied operator
 
+  ! ---- batch sizes of (Q)
+  integer(8) :: qc22 = 1            ! columns (cd) of a product [(ab)][(cd)]
+  integer(8) :: qc13 = 1            ! columns (bcd) of a product [a][(bcd)]
+  integer(8) :: qxv = 3             ! occupied x whose Xv(x, l) are held at a time
+  integer(8) :: qrows = 1           ! rows (bc) of <bc||ef> of a step of the formation of Xv
+
+  logical :: qdebug = .false.       ! print the parts of (Q) (XZ_QDEBUG)
+  real(8) :: qparts(4) = 0d0
+
   ! ---- wall times of the stages of the iterations (seconds)
   integer, parameter :: ntime = 16
   real(8) :: tstage(ntime) = 0d0

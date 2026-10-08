@@ -13,6 +13,10 @@ subroutine xzplan(w, nslot, usefile, nch)
   nbt = max(1_8, min(nto, 1300000000_8 / (2 * 16 * nvp * nv)))
   nba = nv
   ncb = 0
+  qc22 = max(1_8, min(nvp, 1073741824_8 / (16 * nvp)))
+  qc13 = max(1_8, min(nvt, 1073741824_8 / (16 * nv)))
+  qxv = max(3_8, no - 1)
+  qrows = max(1_8, min(nvp, 1073741824_8 / (32 * nv * nv)))
   nslot = ndiis
   usefile = .false.
   nch = 0

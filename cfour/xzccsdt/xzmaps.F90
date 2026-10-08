@@ -96,3 +96,10 @@ subroutine xziota(n, rows)
     rows(i) = i
   end do
 end subroutine xziota
+
+! the number of the pair p<q of 0..n-1
+integer(8) function xzpidx(p, q, n)
+  implicit none
+  integer(8), intent(in) :: p, q, n
+  xzpidx = p * n - p * (p + 1) / 2 + (q - p - 1)
+end function xzpidx
