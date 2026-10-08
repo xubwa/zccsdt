@@ -496,3 +496,32 @@ blocks of the one-index transformed Lagrangian from the same contractions
   of the size of the operator; electronic dipole 0.0120771406 against
   0.0158031375 for CCSD and 0.0570680934 for the SCF; job 31737542). There
   is no CCSDT property of CFOUR to compare with.
+
+### 9.4 Timing
+
+H2O / cc-pVTZ, 8 cores of a Xeon Gold 6248R (`bench/density_ccsdt.py time`,
+jobs 31737824 and 31737656 on c105, a node that other jobs shared: load 5 to
+11). Lambda is the conjugate of t in these runs - the cost does not depend
+on the numbers, and the dense reference cannot make Lambda at this size.
+Second of two runs; "density" is everything of `relaxed_rdm1`: densities,
+orbital gradient and the Z-vector equations.
+
+| | o + v | CCSDT iteration | density | ratio | cores busy | peak memory of the call (plan) |
+|---|---|---|---|---|---|---|
+| spin orbitals, real | 10 + 106 | 4.10 s | 4.43 s | 1.08 | 7.0 | 4.7 GB (5.7) |
+| the same, 3 pairs per batch, slabs of 60 MB | 10 + 106 | 4.07 s | 4.62 s | 1.14 | 6.7 | 0.55 GB (1.5) |
+| X2C spinors, complex | 10 + 106 | 13.42 s | 13.37 s | 1.00 | 7.3 | 5.0 GB (6.3) |
+| spin orbitals, 2 frozen, 20 dropped | 8 + 86 | 0.94 s | 6.68 s | 7.1 | 3.5 | 1.7 GB (3.7) |
+| X2C spinors, 2 frozen, 20 dropped | 8 + 86 | 2.76 s | 13.82 s | 5.0 | 4.9 | 3.6 GB (6.6) |
+
+(the plan counts 0.7 GB for the threaded BLAS.)  Where the time goes, real
+spin orbitals, all active: pass 2 3.15 s (`Y` 1.19, `R3` 1.09, the products
+of t3 alone 0.39, gathers 0.31, `H` 0.16), pass 1 0.38, the blocks 0.24, the
+contractions with the integrals 0.24, dressing 0.29, the Z-vector equations
+0.08, the Gram matrix 0.01.
+
+The frozen spinors are not at that level: for 22 of them the integrals with
+one frozen index and their contractions take 4.4 s at 1.8 cores (the
+transformation, done twice, 2.7 s; the contractions are einsum calls on
+(o + v)^3 arrays per frozen spinor), and the two products of pass 2 with
+their integrals 1.0 s - together more than the rest.
