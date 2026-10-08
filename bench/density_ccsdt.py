@@ -15,6 +15,8 @@ usage: python bench/density_ccsdt.py validate MOLECULE BASIS KIND [NDROP]
            densities are not those of the molecule).
   MOLECULE: h2o | hf | n2 | hbr      KIND: ghf (RHF orbitals as spin orbitals)
   | ghfc (the same, every pair mixed by its own SU(2) matrix: complex) | x2c
+  A molecule of bench/spinors.py (hi, auh, ...; time, x2c): its basis sets
+  ('heavy,light'), Hamiltonian and SCF (ZC_HAM, ZC_SCF, ZC_SPINORS).
 environment: ZC_MAXMEM: max_memory in MB (default: 80% of what is available);
              ZC_DENS_PLAN: 'NB,MB' - the plan of the densities given (time):
              NB occupied pairs per batch, slabs of MB megabytes of dressed <ab||de>
@@ -73,9 +75,17 @@ def spin_mixed(ghf, seed=4):
     return ghf.mo_coeff @ u
 
 
+HEAVY = [False]     # the molecule and the SCF are those of bench/spinors.py
+
+
 def make_scf(mol, kind, eps=0.0):
     '''(SCF object, orbitals, the operator z in its AO basis) in the field
     eps z, converged tightly.'''
+    if HEAVY[0]:
+        import spinors
+        assert kind == 'x2c' and eps == 0.0
+        mf = spinors.scf(mol, 1e-12, 1e-9)
+        return mf, mf.mo_coeff, None
     with mol.with_common_orig((0, 0, 0)):
         z = mol.intor('int1e_r_spinor' if kind == 'x2c' else 'int1e_r')[2]
     if kind == 'x2c':
@@ -214,7 +224,13 @@ def profile(mol, kind, niter, nfrozen=0, ndrop=0):
 
 def main():
     mode, name, basis, kind = sys.argv[1:5]
-    mol = gto.M(atom=GEOM[name], basis=basis, verbose=0)
+    if name in GEOM and ',' not in basis:
+        mol = gto.M(atom=GEOM[name], basis=basis, verbose=0)
+    else:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import spinors
+        HEAVY[0] = True
+        mol = spinors.molecule(name, basis)
     if mode == 'validate':
         fr = (sys.argv[5] if len(sys.argv) > 5 else '0').split(',')
         validate(mol, kind, int(fr[0]), int(fr[1]) if len(fr) > 1 else 0)

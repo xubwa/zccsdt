@@ -351,7 +351,10 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             Sq = np.empty((nQ, v, nfz), dtype=dtype)        # <f e||Q>
             for f0 in range(0, nfz, nfb):
                 f1 = min(f0 + nfb, nfz)
-                S, Wf = _dressed_frozen(fints(f0, f1), xm, ym, dtype)
+                S0 = fints(f0, f1)
+                with timer('dens.frozen.dress'):
+                    S, Wf = _dressed_frozen(S0, xm, ym, dtype)
+                del S0
                 Sq[:, :, f0:f1] = S[:, o:, o:, o:][:, :, md, ne].transpose(2, 1, 0)
                 Vf[:, :, f0:f1] = -Wf[:, o:, o:, o:][:, :, md, ne].transpose(2, 1, 0)
                 del S, Wf
@@ -594,7 +597,10 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         for f0 in range(0, nfz, nfb):
             f1 = min(f0 + nfb, nfz)
             k = f1 - f0
-            S, Wf = _dressed_frozen(fints(f0, f1), xm, ym, dtype)
+            S0 = fints(f0, f1)
+            with timer('dens.frozen.dress'):
+                S, Wf = _dressed_frozen(S0, xm, ym, dtype)
+            del S0
             SeQ = np.ascontiguousarray(S[:, o:, o:, o:][:, :, md, ne])      # [f, e, Q]
             SmQ = np.ascontiguousarray(S[:, :o, o:, o:][:, :, md, ne])      # [f, m, Q]
             SeP = S[:, o:, :o, :o][:, :, mm, nn]                            # [f, e, P]
