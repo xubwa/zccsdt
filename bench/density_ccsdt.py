@@ -15,9 +15,13 @@ usage: python bench/density_ccsdt.py validate MOLECULE BASIS KIND [NDROP]
            densities are not those of the molecule).
   MOLECULE: h2o | hf | n2 | hbr      KIND: ghf (RHF orbitals as spin orbitals)
   | ghfc (the same, every pair mixed by its own SU(2) matrix: complex) | x2c
+  A molecule of bench/spinors.py (hi, auh, ...; time, x2c): its basis sets
+  ('heavy,light'), Hamiltonian and SCF (ZC_HAM, ZC_SCF, ZC_SPINORS).
 environment: ZC_MAXMEM: max_memory in MB (default: 80% of what is available);
              ZC_DENS_PLAN: 'NB,MB' - the plan of the densities given (time):
-             NB occupied pairs per batch, slabs of MB megabytes of dressed <ab||de>
+             NB occupied pairs per batch, slabs of MB megabytes of dressed <ab||de>;
+             ZC_RUNS: how often the density is made (time; default 2 - under a
+             tight ZC_MAXMEM the second call has less left than the first)
 '''
 import os
 import sys
@@ -73,9 +77,17 @@ def spin_mixed(ghf, seed=4):
     return ghf.mo_coeff @ u
 
 
+HEAVY = [False]     # the molecule and the SCF are those of bench/spinors.py
+
+
 def make_scf(mol, kind, eps=0.0):
     '''(SCF object, orbitals, the operator z in its AO basis) in the field
     eps z, converged tightly.'''
+    if HEAVY[0]:
+        import spinors
+        assert kind == 'x2c' and eps == 0.0
+        mf = spinors.scf(mol, 1e-12, 1e-9)
+        return mf, mf.mo_coeff, None
     with mol.with_common_orig((0, 0, 0)):
         z = mol.intor('int1e_r_spinor' if kind == 'x2c' else 'int1e_r')[2]
     if kind == 'x2c':
@@ -192,8 +204,8 @@ def profile(mol, kind, niter, nfrozen=0, ndrop=0):
         isz, nvp = t3.dtype.itemsize, nvir * (nvir - 1) // 2
         slab = max(1, int(float(slab) * 1e6) // (isz * nvp)) * isz * nvp
         dmem = {'plan': D.Plan(nb=int(nb), slab_bytes=slab, need=D.fixed_bytes(nocc, nvir, isz, nfrozen + ndrop) + max(
-            int(nb) * D.pair_bytes(nocc, nvir, isz, nfrozen + ndrop), slab))}
-    for attempt in range(2):
+            int(nb) * D.pair_bytes(nocc, nvir, isz), slab))}
+    for attempt in range(int(os.environ.get('ZC_RUNS', 2))):
         timing.reset()
         base = memory.resident()
         watch = MemWatch()
@@ -205,16 +217,32 @@ def profile(mol, kind, niter, nfrozen=0, ndrop=0):
         wall, cpu = time.perf_counter() - t0, time.process_time() - c0
         peak = watch.stop()
         print('run %d: densities + orbital gradient + Z-vector %.2f s, %.1f cores busy = %.2f CCSDT iterations; '
-              'peak anonymous memory %.2f GB (%.2f GB before the call); plan: %d pairs per batch, slab %s, need %.2f GB'
+              'peak anonymous memory %.2f GB (%.2f GB before the call); plan: %d pairs per batch, slab %s, need %.2f GB%s'
               % (attempt + 1, wall, cpu / wall, wall / t_iter, peak / 1e9, base / 1e9, rel.result.plan.nb,
-                 rel.result.plan.slab_bytes, rel.result.plan.need / 1e9))
+                 rel.result.plan.slab_bytes, rel.result.plan.need / 1e9,
+                 '; frozen spinors: route %s, %s at a time%s' % (
+                     rel.result.plan.route, rel.result.plan.nk,
+                     ', Kramers pairs (half of them)' if getattr(rel.result.plan, 'kramers', False) else '')
+                 if getattr(rel.result.plan, 'route', None) else ''))
         tree(timing.snapshot())
     print('Z-vector converged: %s; trace of the density %.10f' % (rel.converged, np.trace(rel.relaxed).real))
+    # numbers that do not depend on how the SCF mixed the spinors of a degenerate level
+    w = np.linalg.eigvalsh(rel.relaxed)
+    print('checksum: |D|^2 %.12f  |D - D(unrelaxed)|^2 %.6e  occupation numbers %.12f .. %.12f, sum of squares %.12f'
+          % (np.linalg.norm(rel.relaxed) ** 2, np.linalg.norm(rel.relaxed - rel.unrelaxed) ** 2, w[0], w[-1], (w ** 2).sum()))
+    if rel.gradient is not None:
+        print('checksum: |G|^2 %.12e over all spinors' % np.linalg.norm(rel.gradient) ** 2)
 
 
 def main():
     mode, name, basis, kind = sys.argv[1:5]
-    mol = gto.M(atom=GEOM[name], basis=basis, verbose=0)
+    if name in GEOM and ',' not in basis:
+        mol = gto.M(atom=GEOM[name], basis=basis, verbose=0)
+    else:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import spinors
+        HEAVY[0] = True
+        mol = spinors.molecule(name, basis)
     if mode == 'validate':
         fr = (sys.argv[5] if len(sys.argv) > 5 else '0').split(',')
         validate(mol, kind, int(fr[0]), int(fr[1]) if len(fr) > 1 else 0)

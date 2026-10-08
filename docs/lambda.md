@@ -885,16 +885,69 @@ d1 - 1(occupied). In the dressed basis
     gamma2 = (g2 transformed back) + A[(gamma1 - tau / 2) x tau],   tau = t1 in the occupied-virtual block,
 
 so B and K are the contractions of the blocks of g2 above with the
-integrals `<fq||rs>` dressed in their three active indices (as a bra index:
-32 block contractions; the block `abcd` through two more products of the
-kind of `Y` in pass 2, one with t3 first), transformed back in the fourth
-index, plus Fock matrices of gamma1 - tau / 2 and of tau
-(`density_opt.frozen_terms`). The integrals come from a transformation with
-the frozen spinors as the first index (`frozen_integrals`: (o + v)^3 numbers
-for each, in batches of 2 GB; it is done twice, before and after the
-passes). `relaxed_rdm1` then hands the gradient of all spinors to
-`zvector._relax`: the rotations between frozen and active spinors of a kind
-follow from the Fock matrix staying diagonal.
+integrals `<fq||rs>` dressed in their three active indices, transformed back
+in the fourth index, plus Fock matrices of gamma1 - tau / 2 and of tau
+(`density_opt.frozen_terms`). `relaxed_rdm1` then hands the gradient of all
+spinors to `zvector._relax`: the rotations between frozen and active spinors
+of a kind follow from the Fock matrix staying diagonal.
+
+**The integrals** come once, from the transformation of the spinor CCSD
+with the frozen spinors as the first index (`FrozenIntegrals`:
+`zccsd.ao2mo.slabs` on the scalar AO integrals - spin orbitals of a GHF,
+real or complex, and j-adapted spinors alike), in slabs (f q|r s) of as many
+frozen spinors as the plan allows: (o + v)^3 numbers for each, never all in
+memory. A slab is copied, T1-dressed in place (the last index by one GEMM
+for the slab, the first by one for each frozen spinor, the middle one by
+small products on threads) and cut into six blocks of T[f,a,b,c] = X[f,b,a,c]
+- X[f,c,a,b]: `ooo`, `ovo`, `voo`, `vvo`, and the two with a virtual pair,
+packed, with the pair first (`T[Q, q, f]`). That is done twice: for B
+(`<fq||rs>`: q a bra index, r and s ket indices) and, from the conjugate of
+the slab, for K (`<pq||fs>`). Every block of g2 then meets a block of T in
+one GEMM, or in one for each value of an index (the packed blocks of g2 with
+three virtual indices): the blocks of g2 are laid out for that once, before
+the first slab.
+
+**The block `abcd`** is not made, and with frozen spinors there are two
+ways to its l3 t3 part (`density_opt.frozen_route`):
+
+| route | what is formed | multiply-adds | memory |
+|---|---|---|---|
+| `y` | `Y[P,g,m,h,x]` for the pairs of a batch: lambda3 with `<ef\|\|hx>` (and t3 with `<xe\|\|gh>`), one column x for every occupied spinor and two for every frozen one | o^3 v^4 / 4 for each column | a batch |
+| `gamma` | `Gamma[(e<f),(g<h)]` = 3 sum_(m<n<o, d) l3[mno, d, (ef)] t3[mno, d, (gh)], one GEMM per batch of occupied triples on `t3pack.gather_vir_half` | o^3 v^5 / 24: a particle-particle ladder | v^4 / 4 elements |
+
+`Gamma` serves the active spinors (in the place of `Y`) and any number of
+frozen ones - `Gamma` times a packed block, the pair of `Gamma` that holds
+the free index unpacked by ranges of columns (or rows) and by gathers - and
+is taken where 6 (2 nfrozen + o) > v and it fits; `y` is then the fallback
+of a small budget, as a pass over t3 and lambda3 for every batch of frozen
+spinors. With many frozen spinors the frozen part of the T3 work is so one
+ladder, whatever their number (in the first version it was two columns of
+`Y` for each: 302 of 585 s for HI below).
+
+**Kramers pairs** (`density_opt.kramers_pairs`, the default of
+`relaxed_rdm1` where they are found): the frozen spinors are rotated into
+pairs f, K f level by level (`zccsd.kramers.pair`), the slabs are made for
+the unbarred half and for one barred spinor, and with U[y,x] = <y|K x> of the
+active spinors
+
+    B[K f, :] = conj(B[f, :]) U^+,    K[K f, :] = conj(K[f, :]) U^T
+
+if t and lambda are symmetric under time reversal - which the one barred
+spinor tells (1e-7 of the row); if it does not agree, the other half is done
+as well. The rows are rotated back to the frozen spinors that were given.
+Not done for real integrals of complex spinors (`eris.axial_spinors`: the
+partner that `kramers.pair` makes need not have real integrals).
+
+**Memory** (`plan_memory(..., nfrozen, source)`): `Gamma` and the buffers
+of its pass (2 v C(v,2) elements per occupied triple), eight more arrays of
+o^2 v^2 for the layouts of g2, and for a batch of nk frozen spinors the slab,
+its dressed copy, the blocks (together about three times (o + v)^3 numbers
+for each) and what
+the transformation needs for them (`zccsd.ao2mo.plan_slabs`). nk is the
+largest number that fits in what the budget leaves (bisection, as
+`orbgrad_frozen.slab_plan`); the batches of the passes, the slab of
+`<ab||de>` and the frozen stage are not alive together. `MemoryError` if
+the integrals of one frozen spinor do not fit.
 
 `density_opt.all_blocks` takes every spinor as the index outside: all four
 blocks of the one-index transformed Lagrangian from the same contractions
@@ -902,15 +955,22 @@ blocks of the one-index transformed Lagrangian from the same contractions
 
 ### 9.3 Validation
 
-`tests/test_density_opt.py` (34 tests, 64 s):
+`tests/test_density_opt.py` (51 tests, 95 s):
 
 - g1, d1 and the table `GRADIENT` for complex amplitudes that solve nothing,
   4+5 to 6+3 spin orbitals, also without triples (o = 2, v = 2), real
   arithmetic, without the C kernels, and in every plan of the memory: 1e-13
   of their size (1e-15 found);
 - B and K of three "frozen spinors" with random integrals against the dense
-  gamma2, and all four blocks of the one-index transformed Lagrangian
-  against `lambda_ref.one_index` (1e-15);
+  gamma2 - both routes, batches of one, two and three frozen spinors, the
+  integrals asked for once -, and all four blocks of the one-index
+  transformed Lagrangian against `lambda_ref.one_index` (1e-15);
+- `FrozenIntegrals` against all AO integrals transformed at once, for real
+  and complex spin orbitals and for j-adapted spinors (1e-12);
+- the Kramers pairs: the same B, K, gradient and relaxed density with half
+  of the frozen spinors as with all (H2O / 6-31G, X2C and real spin
+  orbitals, CCSDT, 1e-9 of their size), and for a lambda1 that is not
+  symmetric under time reversal the check finds it and all are done;
 - H2O / STO-3G, converged CCSDT (the packed solver) and the Lambda of the
   dense reference: d1 and Gnh of the dense tables (5e-18); the blocks among
   occupied, among virtual spin orbitals and the excitation block vanish
@@ -921,7 +981,11 @@ blocks of the one-index transformed Lagrangian from the same contractions
   6-31G, two frozen, four dropped, and both);
 - the allocations of `kernel` (tracemalloc) within the plan, for one pair
   per batch with the thinnest slab and for everything at once (5 + 40 spin
-  orbitals: 0.76 and 0.85 of the plan);
+  orbitals: 0.76 and 0.85 of the plan), and with frozen spinors in both
+  routes, one frozen spinor at a time and all at once (0.62 to 0.83);
+- the plan with frozen spinors over 150 budgets (never above the budget;
+  `Gamma` where it fits; the batches of frozen spinors grow with the budget
+  and one more does not fit), and the slabs of `FrozenIntegrals` over 60;
 - the relaxed dipole derivative against E(SCF) + E_corr(CCSDT) with the SCF
   repeated in the field (four-point differences, step 1e-3), tests and
   `bench/density_ccsdt.py validate` (job 31736990):
@@ -963,8 +1027,8 @@ orbital gradient and the Z-vector equations.
 | spin orbitals, real | 10 + 106 | 4.10 s | 4.43 s | 1.08 | 7.0 | 4.7 GB (5.7) |
 | the same, 3 pairs per batch, slabs of 60 MB | 10 + 106 | 4.07 s | 4.62 s | 1.14 | 6.7 | 0.55 GB (1.5) |
 | X2C spinors, complex | 10 + 106 | 13.42 s | 13.37 s | 1.00 | 7.3 | 5.0 GB (6.3) |
-| spin orbitals, 2 frozen, 20 dropped | 8 + 86 | 0.94 s | 6.68 s | 7.1 | 3.5 | 1.7 GB (3.7) |
-| X2C spinors, 2 frozen, 20 dropped | 8 + 86 | 2.76 s | 13.82 s | 5.0 | 4.9 | 3.6 GB (6.6) |
+
+(frozen and dropped spinors: the next table.)
 
 (the plan counts 0.7 GB for the threaded BLAS.)  Where the time goes, real
 spin orbitals, all active: pass 2 3.15 s (`Y` 1.19, `R3` 1.09, the products
@@ -972,8 +1036,72 @@ of t3 alone 0.39, gathers 0.31, `H` 0.16), pass 1 0.38, the blocks 0.24, the
 contractions with the integrals 0.24, dressing 0.29, the Z-vector equations
 0.08, the Gram matrix 0.01.
 
-The frozen spinors are not at that level: for 22 of them the integrals with
-one frozen index and their contractions take 4.4 s at 1.8 cores (the
-transformation, done twice, 2.7 s; the contractions are einsum calls on
-(o + v)^3 arrays per frozen spinor), and the two products of pass 2 with
-their integrals 1.0 s - together more than the rest.
+**With frozen and dropped spinors.** The first version (6de131c) made the
+integrals with one frozen index twice with PySCF's transformation,
+contracted them by einsum calls on (o + v)^3 arrays, one frozen spinor
+after the other, and had two columns of `Y` in pass 2 for every frozen
+spinor. Each of the first three rows is one job with the tree before and
+the trees after in turn on one node (8 cores; second of two runs; the ratio is to the CCSDT
+iteration of the same process; the checksums of the relaxed density and of
+the orbital gradient over all spinors - Frobenius norms and occupation
+numbers, which do not depend on how the SCF mixed degenerate spinors -
+agree to 12 and 11 digits between the trees):
+
+| | o + v, frozen + dropped | CCSDT iteration | before | after | cores busy | peak memory of the call (plan) |
+|---|---|---|---|---|---|---|
+| H2O / cc-pVTZ, spin orbitals, real (job 31740284, c659) | 8 + 86, 2 + 20 | 1.15 s | 8.04 s = 7.0 | 2.26 s = 1.96 | 5.6 | 1.3 GB (2.4) |
+| H2O / cc-pVTZ, X2C spinors (job 31740285, c561) | 8 + 86, 2 + 20 | 3.31 s | 15.64 s = 4.7 | 4.90 s = 1.48 | 6.3 | 2.6 GB (4.1) |
+| HI / dyall.v2z (H: cc-pVDZ, uncontracted), X2C spinors (job 31740283, c659) | 18 + 86, 36 + 116 | 53.3 s, 48.6 s | 717.9 s = 13.5 | 64.0 s = 1.32 | 7.5 | 7.7 GB (14.5) |
+| the same, no limit and under `max_memory` 9000 and 8700 MB with the spinors of one SCF (job 31741942, c561; one run each) | 18 + 86, 36 + 116 | 48.6 s | | 63.6 s = 1.31; 69.7 s = 1.43; 72.0 s = 1.48 | 7.5; 7.3; 7.2 | 8.4 GB (10.7); 2.4 GB (3.6), 7.79 GB with what was there; 2.0 GB (3.3), 7.42 GB |
+
+(c659 and c561 were shared with jobs of other users: load 44 to 51 during
+the runs of HI before, 7 to 18 during those after - hence the two iteration
+times, each measured next to its density. Under 9000 MB the plan has 3
+occupied pairs per batch, the dressed `<ab||de>` in slabs and 8 frozen
+spinors at a time, under 8700 MB 1 pair and 5; the three runs of the last
+row give the same checksums in all 13 digits. On c105, in
+separate jobs: 588.3 s = 13.5 iterations before (31738966) and 57.9 s =
+1.33 after (31739579), iteration 43.5 s in both.)
+
+Step by step (the trees in turn in one job: H2O with real spin orbitals
+31740187 and with X2C spinors 31740201 on c105, second runs; HI in separate
+jobs on c105, 31738966, 31739169, 31739579):
+
+| | H2O real | H2O X2C | HI |
+|---|---|---|---|
+| CCSDT iteration | 0.94 s | 2.76 s | 43.5 s |
+| before | 6.83 s | 13.90 s | 588.3 s |
+| the integrals once, from `zccsd.ao2mo.slabs`, in batches from the plan; blocks and GEMMs; `Gamma` (as a sum over occupied pairs) | 2.94 s | 7.16 s | 90.7 s |
+| `Gamma` as a ladder, the dressing on threads | 2.22 s | 4.50 s | |
+| Kramers pairs | 1.98 s | 4.30 s | 57.9 s |
+| the gathers on threads (other nodes, see above: 2.31 to 2.26 s, 5.08 to 4.90 s) | | | |
+
+Where the time went for HI before (c105, the first run, 584.5 s): the columns of `Y` of
+the frozen spinors 302 s, the integral transformation (twice) 176 s, the
+dressing 20 s, the contractions 25 s; everything else 61 s. After (64.0 s,
+job 31740283): pass 2 30.6 s (`R3` 18.2), `Gamma` 13.3 s - it replaces the
+`Y` of the active spinors, 18.5 s on c105 before -, the Z-vector
+equations 6.2 s, and the frozen stage 5.5 s: the transformation of 77
+frozen spinors 2.5 s, dressing 1.1 s, the contractions 1.0 s, the blocks 0.6
+s. The T3 work does not depend on the number of frozen spinors any more,
+and what does - the frozen stage - is a tenth of the whole for 152 of
+them.
+
+Under 9000 MB the frozen stage takes 9.7 s in 14 slabs: the gathers of
+`Gamma` and of the packed blocks of g2 are done for every slab (their
+contractions 3.8 s, against 1.0 s in one slab), and the AO integrals are
+made in 5 bra passes (2.8 s against 1.2 s).
+
+What is left for the frozen spinors:
+
+- real spin orbitals go through the complex transformation and take the
+  real part; the relaxed density of H2O with real spin orbitals is at 2.0
+  iterations because its iteration is short (the densities do not use the
+  spin symmetry either);
+- no Kramers pairs for the real integrals of `eris.axial_spinors`;
+- `Gamma` needs v^4 / 4 elements in memory; without them route `y` costs
+  two columns of `Y` for every frozen spinor again (a mapped `Gamma`, made
+  in slabs of its columns, would remove that);
+- with slabs of few frozen spinors, the gathers per slab (above);
+- with no frozen spinors `Y` is kept although `Gamma` would be cheaper
+  where v < 6 o (HI: about 13 s against 18 s).
