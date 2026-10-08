@@ -401,6 +401,159 @@ def test_integrals_with_a_frozen_index(no, nv, seed):
     assert abs(r.bf - B).max() > 1e-3 * abs(B).max()
 
 
+def _frozen_case(no, nv, nf, seed=21):
+    '''(arguments of kernel, source of random integrals with a frozen index).'''
+    n = no + nv
+    f, v, amps, lams = random_case(no, nv, seed)
+    er = container(f, v, no)
+    args = (er, amps[0], amps[1], packed(amps[2]), lams[0], lams[1], packed(lams[2]))
+    rng = np.random.default_rng(seed)
+    S0 = rng.standard_normal((nf, n, n, n)) + 1j * rng.standard_normal((nf, n, n, n))
+    S0 = S0 - S0.transpose(0, 1, 3, 2)
+    return args, D._Given(nf, lambda f0, f1: S0[f0:f1], n)
+
+
+@pytest.mark.parametrize('no,nv,nf', [(10, 106, 40), (18, 86, 152), (8, 106, 2)])
+def test_plan_with_frozen_spinors(no, nv, nf):
+    '''The plan with frozen spinors over a scan of budgets: never more than
+    the budget; Gamma where frozen_route() asks for it and it fits, else
+    route 'y'; within a route the batches of frozen spinors grow with the
+    budget and are as large as fit - one more spinor does not -;
+    MemoryError below the integrals of one.'''
+    n, isz = no + nv, 16
+    src = D._Given(nf, None, n)
+    fixed, unit = D.fixed_bytes(no, nv, isz, nf), D.pair_bytes(no, nv, isz)
+    gam, pp = D.gamma_bytes(nv), 16 * (nv * (nv - 1) // 2) ** 2
+    want = D.frozen_route(no, nv, nf)
+    assert want == ('gamma' if nf == 40 or nf == 152 else 'y')
+    utri = D.gamma_triple(nv)
+    free = D.plan_memory(no, nv, isz, None, False, nf, src)
+    assert free.route == want and free.slab_bytes is None and 1 <= free.nk <= nf
+
+    def stage(nk, way):
+        return nk * 2 * 16 * n ** 3 + D.frozen_own(no, nv, nk, isz, int(way == 'y'))
+    least = fixed + max(unit, 16 * nv * nv * (nv - 1) // 2, stage(1, 'y'))
+    with pytest.raises(MemoryError, match='frozen'):
+        D.plan_memory(no, nv, isz, fixed + max(unit, 16 * nv * nv * (nv - 1) // 2, stage(1, 'y') - 1), False, nf, src)
+    last, routes = {}, set()
+    for budget in np.linspace(least, free.need + 1, 150).astype(np.int64):
+        p = D.plan_memory(no, nv, isz, int(budget), False, nf, src)
+        routes.add(p.route)
+        left = budget - fixed - (gam if p.route == 'gamma' else 0) - (pp if p.slab_bytes is None else 0)
+        assert p.need <= budget and stage(p.nk, p.route) <= left
+        assert p.nk == free.nk or stage(p.nk + 1, p.route) > left + (pp if p.slab_bytes is None else 0)
+        if p.route == 'y':
+            assert p.nbf >= 1 and stage(p.nk, 'y') + (p.nbf - 1) * D.frozen_pair(no, nv, p.nk) <= left
+            assert want == 'y' or budget - fixed - gam < max(unit, 16 * nv * nv * (nv - 1) // 2, utri, stage(1, 'gamma'))
+        else:
+            assert p.ng >= 1 and p.ng * utri <= left and (p.ng == free.ng or (p.ng + 1) * utri > left + (
+                pp if p.slab_bytes is None else 0))
+        if p.route in last and p.slab_bytes is not None:
+            assert p.nk >= last[p.route]
+        last[p.route] = p.nk if p.slab_bytes is not None else 0
+    assert want in routes
+    p = D.plan_memory(no, nv, isz, free.need, False, nf, src)
+    assert (p.route, p.nk, p.nb, p.ng, p.slab_bytes) == (free.route, free.nk, free.nb, free.ng, None)
+
+
+def test_slabs_of_the_frozen_integrals_as_large_as_fit():
+    '''FrozenIntegrals.plan over a scan of what is left: the transformation
+    and the caller's arrays for the frozen spinors of a slab fit, the slabs
+    grow with the budget, and one more spinor does not fit (by the rules of
+    zccsd.ao2mo.plan_slabs: a slab takes a third of what it is given at
+    most); MemoryError below one.'''
+    mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
+    mf = scf.GHF(mol)
+    n, nf = 40, 8
+    C = np.linalg.qr(np.random.default_rng(3).standard_normal((2 * mol.nao_nr(), n + nf)))[0]
+    src = D.frozen_integrals(mf, C[:, nf:], C[:, :nf])
+
+    def own(nk):
+        return D.frozen_own(8, n - 8, nk)
+    free = src.plan(None, own)
+    assert free.nket == nf
+    least = src.plan(None, lambda nk: 0).need + own(1)
+    with pytest.raises(MemoryError, match='frozen'):
+        src.plan(least - 1, own)
+    last = 0
+    for left in np.linspace(least, 4 * free.work, 60).astype(np.int64):
+        p = src.plan(int(left), own)
+        assert p.work <= left and p.nket >= last
+        if p.nket < nf:
+            with pytest.raises(MemoryError):
+                src.slab_plan(p.nket + 1, int(left), own(p.nket + 1))
+        last = p.nket
+    assert last == nf
+
+
+@pytest.mark.parametrize('no,nv,nf,route', [(3, 44, 2, 'y'), (4, 14, 40, 'gamma'), (5, 30, 20, 'gamma')])
+@pytest.mark.parametrize('tight', [True, False])
+def test_allocations_with_frozen_spinors_stay_within_the_plan(no, nv, nf, route, tight):
+    '''What kernel() allocates with frozen spinors is within the plan, for
+    the smallest plan of the route - the integrals of one frozen spinor at
+    a time - and with no limit, and the numbers are the same.'''
+    import tracemalloc
+    from zccsdt.cc import ccsdt_opt
+    n, nvp = no + nv, nv * (nv - 1) // 2
+    args, src = _frozen_case(no, nv, nf)
+    ccsdt_opt.vvvv_packed(args[0], t3pack.triple_map(nv))
+    fixed, unit = D.fixed_bytes(no, nv, 16, nf), D.pair_bytes(no, nv)
+    stage = 2 * 16 * n ** 3 + D.frozen_own(no, nv, 1, 16, int(route == 'y'))
+    budget = fixed + (D.gamma_bytes(nv) if route == 'gamma' else 0) + max(
+        unit, 16 * nv * nvp, stage, D.gamma_triple(nv) if route == 'gamma' else 0)
+    out = []
+    for b in (budget, None) if tight else (None,):
+        plan = D.plan_memory(no, nv, 16, b, False, nf, src)
+        assert plan.route == route and (plan.nk == 1) == (b is not None)
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        r = D.kernel(*args, plan=plan, frozen=(nf, src))
+        peak = tracemalloc.get_traced_memory()[1] - base
+        tracemalloc.stop()
+        need = plan.need - ccsdt_opt.overhead()
+        print('%d + %d, %d frozen, route %s, %d at a time: allocated %.1f MB, planned %.1f MB (%.2f)'
+              % (no, nv, nf, route, plan.nk, peak / 1e6, need / 1e6, peak / need))
+        assert 0.5 * need < peak < need
+        out.append(r)
+    if tight:
+        assert abs(out[0].bf - out[1].bf).max() < 1e-12 * abs(out[1].bf).max()
+        assert abs(out[0].kf - out[1].kf).max() < 1e-12 * abs(out[1].kf).max()
+        assert abs(out[0].gnh - out[1].gnh).max() < 1e-12 * abs(out[1].gnh).max()
+
+
+@pytest.mark.parametrize('kind', ['ghf', 'ghfc', 'x2c'])
+def test_frozen_integrals_are_those_of_the_ao_integrals(kind):
+    '''FrozenIntegrals (the transformation of the spinor CCSD, slabs of two
+    frozen spinors) against all AO integrals transformed at once: real and
+    complex spin orbitals of a GHF and j-adapted spinors.  H2O / STO-3G.'''
+    mol = gto.M(atom=WATER, basis='sto-3g', verbose=0)
+    rng = np.random.default_rng(5)
+    if kind == 'x2c':
+        mf = x2c.UHF(mol)
+        nao = mol.nao_2c()
+        C = np.linalg.qr(rng.standard_normal((nao, nao)) + 1j * rng.standard_normal((nao, nao)))[0]
+    else:
+        mf = scf.GHF(mol)
+        nao = 2 * mol.nao_nr()
+        C = rng.standard_normal((nao, nao))
+        if kind == 'ghfc':
+            C = C + 1j * rng.standard_normal((nao, nao))
+        C = np.linalg.qr(C)[0]
+    nf = 5
+    Cf, Ca = C[:, :nf], C[:, nf:]
+    full = E._mo_chemist(mol, C, 'spinor' if kind == 'x2c' else 'ghf')[:nf, nf:, nf:, nf:]
+    want = full.transpose(0, 2, 1, 3) - full.transpose(0, 2, 3, 1)
+    src = D.frozen_integrals(mf, Ca, Cf, real=kind == 'ghf')
+    got = src(0, nf)
+    assert got.dtype == (np.float64 if kind == 'ghf' else np.complex128)
+    assert abs(got - want).max() < 1e-12
+    seen = []
+    for f0, f1, G in src.batches(src.slab_plan(2)):
+        assert abs(G - full[f0:f1]).max() < 1e-12
+        seen.append((f0, f1))
+    assert seen == [(0, 2), (2, 4), (4, 5)]
+
+
 def _x2c_in_field(mol):
     with mol.with_common_orig((0, 0, 0)):
         z = mol.intor('int1e_r_spinor')[2]

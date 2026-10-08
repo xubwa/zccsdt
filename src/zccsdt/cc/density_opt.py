@@ -74,6 +74,7 @@ Timers (zccsdt.timing): 'dens.dress', 'dens.vvvv', 'dens.pass_l',
 'dens.blocks', 'dens.gradient', 'dens.frozen', 'dens.zvector'.
 '''
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -98,6 +99,7 @@ class Plan:
     need: int = 0               # bytes of ordinary memory the plan takes
     # with frozen spinors (None: chosen by kernel() as if memory were not short)
     route: str = None           # 'gamma' | 'y': how the block abcd meets their integrals
+    ng: int = None              # route 'gamma': occupied triples per batch of the pass that makes it
     nk: int = None              # frozen spinors per batch of their integrals
     nbf: int = None             # route 'y': occupied pairs per batch of the pass for a batch of them
     frozen: object = None       # the plan of the integral transformation (FrozenIntegrals.plan)
@@ -118,9 +120,9 @@ def frozen_route(nocc, nvir, nfrozen):
     three virtual indices, by the multiply-adds: 'y' - lambda3 (or t3) with
     the integrals first, one column of Y for every occupied spinor and two
     for every frozen one (o^3 v^4 / 4 each) -, or 'gamma' - lambda3 with t3
-    first, Gamma[(e<f), (g<h)] (o^3 v^5 / 8, v^4 / 4 elements), which serves
-    the active and all frozen spinors.'''
-    return 'gamma' if nfrozen and 2 * (2 * nfrozen + nocc) > nvir else 'y'
+    first, Gamma[(e<f), (g<h)] (o^3 v^5 / 24: a particle-particle ladder;
+    v^4 / 4 elements), which serves the active and all frozen spinors.'''
+    return 'gamma' if nfrozen and 6 * (2 * nfrozen + nocc) > nvir else 'y'
 
 
 def gamma_bytes(nvir, itemsize=16):
@@ -138,6 +140,12 @@ def frozen_own(nocc, nvir, nk, itemsize=16, pairs=0):
     n, nvp, npo = o + v, v * (v - 1) // 2, o * (o - 1) // 2
     per = n ** 3 + o ** 3 + 2 * o * o * v + v * v * o + nvp * (o + 2 * v) + 3 * npo * v + 8 * n
     return (nk * per + pairs * frozen_pair(o, v, nk, 1)) * itemsize
+
+
+def gamma_triple(nvir, itemsize=16):
+    '''Route 'gamma': bytes of the buffers of its pass per occupied triple
+    (t3 and lambda3 with one virtual index apart: v C(v,2) each).'''
+    return 2 * nvir * (nvir * (nvir - 1) // 2) * itemsize
 
 
 def frozen_pair(nocc, nvir, nk, itemsize=16):
@@ -186,7 +194,8 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
     ``nfrozen`` frozen occupied and dropped virtual spinors with the
     integrals of ``source`` (kernel(frozen=); an object with plan(), as
     FrozenIntegrals): Gamma is kept if frozen_route() asks for it and it
-    fits - else route 'y', which needs no array of that size -, and the
+    fits with the buffers of its pass for one occupied triple - else route
+    'y', which needs no array of that size -, and the
     integrals come in batches of as many frozen spinors as fit in what is
     left with the arrays they are cut into (they, the batches of the passes
     and the slab are not alive together); MemoryError if those of one do
@@ -197,6 +206,8 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
     pp, row = nvp * nvp * itemsize, max(nvp * itemsize, 1)
     nb_most = min(npo, max(1, BATCH_BYTES // unit))
     route = frozen_route(o, v, nfrozen) if nfrozen else None
+    nto, utri = max(o * (o - 1) * (o - 2) // 6, 1), max(gamma_triple(v, itemsize), 1)
+    ng_most = min(nto, max(1, BATCH_BYTES // utri))
 
     def frozen_plan(left, way):
         '''(plan of the transformation, nk, nbf, bytes) of the frozen stage within ``left``.'''
@@ -217,9 +228,11 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
 
     if budget is None:
         gam = gamma_bytes(v, itemsize) if route == 'gamma' else 0
+        ng = ng_most if route == 'gamma' else None
         fp, nk, nbf, fwork = frozen_plan(None, route)
-        return Plan(nb=nb_most, slab_bytes=None, need=fixed + gam + max(nb_most * unit, fwork) + pp,
-                    route=route, nk=nk, nbf=nbf, frozen=fp)
+        return Plan(nb=nb_most, slab_bytes=None,
+                    need=fixed + gam + max(nb_most * unit, fwork, (ng or 0) * utri) + pp,
+                    route=route, ng=ng, nk=nk, nbf=nbf, frozen=fp)
     left = budget - fixed
     row_min = min(v * row, pp)
     if left < max(unit, row_min):
@@ -228,13 +241,13 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
                           'are available (max_memory, or what the node and the memory limit of the '
                           'job leave)' % (o, v, (fixed + max(unit, row_min)) / 1e9, budget / 1e9))
     gam = 0
-    fp = nk = nbf = None
+    fp = nk = nbf = ng = None
     fwork = 0
     if nfrozen:
         for way in ((route, 'y') if route == 'gamma' else ('y',)):
             gam = gamma_bytes(v, itemsize) if way == 'gamma' else 0
             try:
-                if left - gam < max(unit, row_min):
+                if left - gam < max(unit, row_min, utri if gam else 0):
                     raise MemoryError
                 fp, nk, nbf, fwork = frozen_plan(left - gam, way)
             except MemoryError as err:
@@ -246,13 +259,16 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
             route = way
             break
         left -= gam
+        if route == 'gamma':
+            ng = int(min(ng_most, left // utri))
     nb = int(min(nb_most, left // unit))
-    if left >= pp + max(nb * unit, fwork):
-        return Plan(nb=nb, slab_bytes=None, need=fixed + gam + pp + max(nb * unit, fwork),
-                    route=route, nk=nk, nbf=nbf, frozen=fp)
+    gwork = (ng or 0) * utri
+    if left >= pp + max(nb * unit, fwork, gwork):
+        return Plan(nb=nb, slab_bytes=None, need=fixed + gam + pp + max(nb * unit, fwork, gwork),
+                    route=route, ng=ng, nk=nk, nbf=nbf, frozen=fp)
     slab = int(min(pp, left // row * row))
-    return Plan(nb=nb, slab_bytes=slab, need=fixed + gam + max(nb * unit, slab, fwork),
-                route=route, nk=nk, nbf=nbf, frozen=fp)
+    return Plan(nb=nb, slab_bytes=slab, need=fixed + gam + max(nb * unit, slab, fwork, gwork),
+                route=route, ng=ng, nk=nk, nbf=nbf, frozen=fp)
 
 
 def _packed3(eris, x, dtype):
@@ -394,10 +410,14 @@ def _pair_term(out, Tvvo, rows_of, vm, alpha):
     if vm.npair == 0 or k == 0:
         return
     T2 = Tvvo.reshape(k, v, o * v)
+    # D[e2][m, (a e1)] as [(m e1), a]: the pair (e1 a) with its sign, the other way round
+    pidx = np.where(vm.pidx >= 0, vm.pidx, vm.pidx.T)
+    sign = np.sign(np.arange(v)[:, None] - np.arange(v)[None, :]).astype(T2.real.dtype)    # [e1, a]: + for a < e1
+    take, sign = np.where(pidx >= 0, pidx, 0).ravel(), sign.ravel()
     for e2 in range(v):
-        U = _unpack_vir(rows_of(e2), vm)                    # [m, a, e1]
-        gemm(T2[:, e2, :], np.ascontiguousarray(U.transpose(0, 2, 1)).reshape(o * v, v), out,
-             alpha=alpha, beta=1.0)
+        U = np.take(rows_of(e2), take, axis=1)
+        U *= sign
+        gemm(T2[:, e2, :], U.reshape(o * v, v), out, alpha=alpha, beta=1.0)
 
 
 def _dress(X, t1, kinds):
@@ -422,11 +442,32 @@ def _dress(X, t1, kinds):
             gemm(t1, Xf[o:], Xf[:o], beta=1.0)
         else:
             gemm(tT, Xf[:o], Xf[o:], alpha=-1.0, beta=1.0)
-        M = X[f]                                    # the middle one: n small products
+
+    def middle(f):                                  # the middle one: n small products, on threads
+        M = X[f]
         if kinds[1] == 'y':
             M[:, :o, :] += np.matmul(t1, M[:, o:, :])
         else:
             M[:, o:, :] -= np.matmul(tT, M[:, :o, :])
+    nthr = max(1, min(k, lib.num_threads()))
+    if nthr == 1:
+        for f in range(k):
+            middle(f)
+    else:
+        with ThreadPoolExecutor(nthr) as pool:
+            list(pool.map(middle, range(k)))
+
+
+def _conj(G, X):
+    '''X = conj(G).'''
+    if G.dtype == X.dtype == np.complex128 and G.flags.c_contiguous and X.flags.c_contiguous:
+        try:
+            from zccsdt.zccsd import kernels
+            kernels.copy(G, X, conj=True)
+            return
+        except (ImportError, OSError):
+            pass
+    np.conjugate(G, out=X)
 
 
 def _cut(X, sa, sb, sc, perm=(0, 1, 2, 3)):
@@ -603,7 +644,7 @@ def _frozen_stage(c):
             if real:
                 X[...] = G.real
             else:
-                np.conjugate(G, out=X)
+                _conj(G, X)
             del G, item
             _dress(X, t1, 'xyx')
         with timer('dens.frozen.blocks'):
@@ -762,9 +803,7 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     R3 = np.zeros((v * o, v * o), dtype=dtype)      # [(a j), (b i)]
     Kg = np.zeros((nP, nQ), dtype=dtype)
     S13 = np.zeros((v, o), dtype=dtype)
-    # Gamma[(e<f), (g<h)] = sum_(P, d, m) L[P,d,m,(ef)] T[P,d,m,(gh)]: three times the l3 t3 part
-    # of the block abcd of g2
-    Gam = np.zeros((nQ, nQ), dtype=dtype) if route == 'gamma' and triples else None
+    Gam = None
     if triples:
         with timer('dens.pass_tl'):
             GxT = np.concatenate((-l2mn, 2.0 * Z), axis=2)                          # [P, d, a | i]
@@ -772,7 +811,7 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             l1v = np.ascontiguousarray(l1.T).ravel()                                # [(e m)]
             Vvo2 = Vvo.reshape(nQ, v * o)
             t2ppT = np.ascontiguousarray(t2pp.T)
-            Y1 = np.empty((nb * v * o, v * o), dtype=dtype) if gradient and Gam is None else None
+            Y1 = np.empty((nb * v * o, v * o), dtype=dtype) if gradient and route != 'gamma' else None
             H = np.empty((nb * v * o, nP), dtype=dtype)
             for p0 in range(0, nP, nb):
                 p1 = min(p0 + nb, nP)
@@ -798,20 +837,35 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
                 with timer('dens.pass_tl.h'):
                     gemm(Lr, t2ppT, H[:k * v * o])
                     gemm(H[:k * v * o].T, Tr, Kg, beta=1.0)
-                if Gam is not None:
-                    with timer('dens.pass_tl.gamma'):
-                        gemm(Lr.T, Tr, Gam, beta=1.0)
-                elif gradient:
+                if gradient and route != 'gamma':
                     with timer('dens.pass_tl.y'):
                         # Y[(P g m), (h i)], antisymmetrized in (g, h), with T[P, a, m, (g<h)]
                         _yterm(Lr, Vvo2, o, T, S13, Y1, vm, o)
                 del T, L, Tf, Tr, Lr
-            if Gam is not None:
-                with timer('dens.pass_tl.gamma'):
-                    _gamma_pairs(S13, Gam, Vvo, vm, True)
             del GxT, Y1, H, Vvo2
     R3 = R3.reshape(v, o, v, o)
     B1 = B1.reshape(v, o)
+    if triples and route == 'gamma':
+        # Gamma[(e<f), (g<h)] = 3 sum_(m<n<o, d) l3[mno, d, (ef)] t3[mno, d, (gh)] (= sum_(P, d, m)
+        # L[P,d,m,(ef)] T[P,d,m,(gh)]): three times the l3 t3 part of the block abcd of g2
+        with timer('dens.gamma'):
+            Gam = np.zeros((nQ, nQ), dtype=dtype)
+            nto = T3p.shape[0]
+            ng = max(1, plan.ng or min(nto, max(1, BATCH_BYTES // gamma_triple(v, isz))))
+            Tv = Lv = None
+            for i0 in range(0, nto, ng):
+                rows = np.arange(i0, min(i0 + ng, nto))
+                k = len(rows)
+                if Tv is None or Tv.shape[1] != k:
+                    Tv = Lv = None
+                    Tv = np.empty((nQ, k, v), dtype=dtype)
+                    Lv = np.empty((nQ, k, v), dtype=dtype)
+                with timer('dens.gamma.gather'):
+                    t3pack.gather_vir_half(T3p, vm, rows, Tv)
+                    t3pack.gather_vir_half(L3p, vm, rows, Lv)
+                gemm(Lv.reshape(nQ, k * v), Tv.reshape(nQ, k * v).T, Gam, alpha=3.0, beta=1.0)
+            del Tv, Lv
+            _gamma_pairs(S13, Gam, Vvo, vm, True)
 
     # ---- pass 3: the Gram matrix of the occupied triples
     O4 = np.zeros((nP, nP), dtype=dtype)            # [(k<l), (i<j)]: sum_(m,A) l3[m,k,l,A] t3[m,i,j,A]
