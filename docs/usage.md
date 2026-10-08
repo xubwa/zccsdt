@@ -382,6 +382,7 @@ everything in the directory they run in.  What is read: `JOBARC` and
 | ZMAT | here |
 |---|---|
 | `CALC=CCSD`, `CCSDT`, `CCSDT[Q]`, `CCSDT(Q)`, `CCSDTQ` | the method (joda accepts all of these in a two-component input, and the chain up to `xx2cvtran` runs with each of them) |
+| `CALC=CC(n-1)(n)` with `EXCITATION=4`, `5`; `CALC=CC(n)` with `EXCITATION=2`, `3`, `4` | CCSDT(Q), CCSDTQ(P); CCSD, CCSDT, CCSDTQ (CFOUR's general names, `EXCITATION` as joda stored it) |
 | `CC_CONV=N` | `conv_tol_normt = 1e-N`, `conv_tol = 1e-(N+2)` |
 | `CC_MAXCYC` | `max_cycle` |
 | `MEMORY_SIZE`, `MEM_UNIT` | `max_memory` (CFOUR counts 1 GB as 1e9 bytes) |
@@ -389,9 +390,12 @@ everything in the directory they run in.  What is read: `JOBARC` and
 
 The thresholds and the memory are taken as joda understood them (the
 flags in `JOBARC`), so abbreviated keywords and defaults are CFOUR's.
-`CCSDTQ(P)` is not a `CALC` of CFOUR: joda warns and falls back to
-`CALC=SCF` (the chain still makes the integrals), so it is asked for in
-the section, which CFOUR ignores like every section it does not know:
+`CCSDTQ(P)` is not a `CALC` of CFOUR by that name: joda warns and falls back
+to `CALC=SCF` (the chain still makes the integrals).  It is
+`CALC=CC(n-1)(n),EXCITATION=5`, or it is asked for in the section, which
+CFOUR ignores like every section it does not know - and which is the only
+place for `method=ccsdt(q)_l`, CCSDT(Q)_Lambda, that this joda has no
+`CALC` for:
 
 ```
 *CFOUR(CALC=CCSDTQ,BASIS=SPECIAL

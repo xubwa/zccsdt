@@ -127,6 +127,20 @@ def test_zmat_and_job(rundir, tmp_path):
     open(d / 'ZMAT', 'w').write(text + '%zccsdt\nmemory=3\n\n')
     with pytest.raises(ValueError, match='memory'):
         cfour.job(str(d))
+    # CFOUR's own way to (Q) and (P): CALC=CC(n-1)(n) with EXCITATION=n as joda stored it; (Q)_Lambda by name
+    open(d / 'ZMAT', 'w').write(text.replace('CALC=CCSD(T)', 'CALC=CC(n-1)(n),EXCITATION=5'))
+    arc = cfour.JobArc(str(d))
+    flags2 = np.array(arc.get('IFLAGS2'))
+    for n, method in ((5, 'ccsdtq(p)'), (4, 'ccsdt(q)')):
+        flags2[37] = n
+        arc.put('IFLAGS2', flags2)
+        j = cfour.job(str(d))
+        assert j.method == method and j.source['method'].endswith('EXCITATION=%d' % n)
+    flags2[37] = 7
+    arc.put('IFLAGS2', flags2)
+    with pytest.raises(ValueError, match='EXCITATION=7'):
+        cfour.job(str(d))
+    assert cfour.job(str(d), method='CCSDT(Q)_L').method == 'ccsdt(q)_l'
 
 
 def test_jobarc_records(rundir, tmp_path):

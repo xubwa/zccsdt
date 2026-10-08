@@ -385,7 +385,10 @@ def write(directory, eris, nfrozen=0, flags=None):
 
 # CALC of joda (IFLAGS(2)) -> method
 LEVELS = {0: 'scf', 10: 'ccsd', 22: 'ccsd(t)', 18: 'ccsdt', 30: 'ccsdt[q]', 54: 'ccsdt(q)', 46: 'ccsdtq'}
-METHODS = ('ccsd', 'ccsd(t)', 'ccsdt', 'ccsdt[q]', 'ccsdt(q)', 'ccsdtq', 'ccsdtq(p)')
+METHODS = ('ccsd', 'ccsd(t)', 'ccsdt', 'ccsdt[q]', 'ccsdt(q)', 'ccsdt(q)_l', 'ccsdtq', 'ccsdtq(p)')
+# CALC=CC(n) and CC(n-1)(n) of CFOUR with EXCITATION=n (IFLAGS2(38))
+BY_EXCITATION = {'cc(n)': {2: 'ccsd', 3: 'ccsdt', 4: 'ccsdtq'}, 'cc(n-1)(n)': {3: 'ccsd(t)', 4: 'ccsdt(q)', 5: 'ccsdtq(p)'}}
+LEVELS_N = {49: 'cc(n)', 53: 'cc(n-1)(n)'}
 SECTION = 'zccsdt'              # the section of the ZMAT with what CFOUR does not know
 PROGRAMS = ('xjoda', 'xsox2catm', 'xsox2chf', 'xx2cvtran')
 BIN = '/home/xwang405/apps/cfour-x2cso/bin'
@@ -465,10 +468,16 @@ def job(directory='.', method=None, max_memory=None):
     src = {}
     calc = next((keywords[k] for k in ('CALC', 'CALCLEVEL', 'CALC_LEVEL') if k in keywords), None)
     for value, where in ((method, 'argument'), (own.get('method'), '%' + SECTION), (calc, 'CALC of the ZMAT'),
-                         (LEVELS.get(int(flags[1])), 'JOBARC')):
+                         (LEVELS.get(int(flags[1]), LEVELS_N.get(int(flags[1]))), 'JOBARC')):
         if value:
             method, src['method'] = value.lower().replace(' ', ''), where
             break
+    if method in BY_EXCITATION:
+        n = int(JobArc(directory).get('IFLAGS2')[37])
+        if n not in BY_EXCITATION[method]:
+            raise ValueError('CALC=%s with EXCITATION=%d: here EXCITATION is one of %s'
+                             % (method.upper(), n, ', '.join(str(k) for k in BY_EXCITATION[method])))
+        method, src['method'] = BY_EXCITATION[method][n], src['method'] + ', EXCITATION=%d' % n
     if method not in METHODS:
         raise ValueError('method %s (%s): not one of %s' % (method, src.get('method'), ', '.join(METHODS)))
     n = int(flags[3])
@@ -795,6 +804,11 @@ def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, job
         if j.method in ('ccsdt[q]', 'ccsdt(q)'):
             e_q = cc.ccsdt_q()
             e['ccsdt[q]'], e['ccsdt(q)'] = float(run3.e_tot + run3.e_q5), float(run3.e_tot + e_q)
+        if j.method == 'ccsdt(q)_l':
+            e_q = cc.ccsdt_q_lambda()
+            if not cc.converged_lambda:
+                raise RuntimeError('the Lambda equations of CCSDT did not converge in %d cycles' % j.max_cycle)
+            e['ccsdt[q]_l'], e['ccsdt(q)_l'] = float(run3.e_tot + cc.e_ql5), float(run3.e_tot + e_q)
         if full:
             e['ccsdtq'] = float(cc.e_tot)
         if j.method == 'ccsdtq(p)':
