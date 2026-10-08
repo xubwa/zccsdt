@@ -503,3 +503,59 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             _bra_pairs(G, W, Dai, vm.pairs[q0:q1], -1.0)
         slabs.close()
     return Result(d1, G, g1, plan)
+
+
+# ------------------------------------------------------------ relaxed density
+
+@dataclass
+class Relaxed:
+    relaxed: np.ndarray         # D[p,q] = <q+ p>, Hermitian, with the response of the spinors
+    unrelaxed: np.ndarray       # the same without it: (d1^T + conj(d1)) / 2
+    z: np.ndarray               # z[a,i] of the Z-vector equations
+    mo_coeff: np.ndarray        # the spinors of the two densities: [frozen occupied, active
+                                # occupied, active virtual, dropped virtual]
+    mo_energy: np.ndarray
+    nocc: int                   # occupied ones among them
+    converged: bool = True
+    result: Result = None
+
+
+def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dropped_vir=None,
+                 tol=1e-9, max_memory=None, verbose=None, plan=None):
+    '''The relaxed one-particle density of CCSDT: kernel() for the density
+    of t and lambda and the orbital gradient, the Z-vector equations of the
+    SCF ``mf`` (zccsd.zvector.solve) and zvector.relaxed_rdm1.
+
+    ``mo_coeff``: the spin orbitals or spinors of ``eris`` in the AO basis of
+    ``mf``, [active occupied, active virtual], canonical; ``frozen_occ`` and
+    ``dropped_vir``: those of the frozen occupied and of the dropped virtual
+    ones (None: none).  Returns a Relaxed: the densities in the convention
+    of zccsd.zvector and pyscf.cc.gccsd_rdm, D[p,q] = <q+ p>, Hermitian, in
+    the basis of all spinors, Relaxed.mo_coeff - so that an expectation
+    value is sum V[p,q] D[q,p] with V = C^+ V(AO) C, and the density in the
+    AO basis C D C^+.'''
+    from pyscf.lib import logger
+    from zccsdt.zccsd import zvector
+    log = logger.new_logger(mf, verbose)
+    o = eris.nocc
+    mo_coeff = np.asarray(mo_coeff)
+    nf = 0 if frozen_occ is None else np.asarray(frozen_occ).shape[1]
+    nd = 0 if dropped_vir is None else np.asarray(dropped_vir).shape[1]
+    fov = abs(np.asarray(eris.fock)[:o, o:]).max() if o and mo_coeff.shape[1] > o else 0.0
+    if fov > zvector.SCF_GRADIENT:
+        log.warn('The Fock matrix of the SCF has occupied-virtual elements of %.1e: the relaxed '
+                 'density carries an error of that size. Converge the SCF further (PySCF: '
+                 'conv_tol_grad; its default is sqrt(conv_tol)).', fov)
+    res = kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=max_memory, plan=plan)
+    dm1 = res.d1.T
+    dm1 = 0.5 * (dm1 + dm1.conj().T)
+    mo_e = np.asarray(eris.mo_energy, dtype=np.float64)
+    if nf or nd:
+        raise NotImplementedError('frozen occupied or dropped virtual spinors')
+    with timer('dens.zvector'):
+        veff = zvector.scf_veff(mf, max_memory)
+        conv, z = zvector.solve(mf, mo_coeff, mo_e, o, -0.5 * res.gnh, tol=tol, verbose=verbose,
+                                veff=veff)
+    if not conv:
+        log.warn('Z-vector equations not converged')
+    return Relaxed(zvector.relaxed_rdm1(dm1, z, o), dm1, z, mo_coeff, mo_e, o, bool(conv), res)
