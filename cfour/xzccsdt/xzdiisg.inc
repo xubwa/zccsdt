@@ -14,11 +14,10 @@ subroutine N(xzdiis_alloc)(nslot, usefile, nch)
   implicit none
   integer(8), intent(in) :: nslot, nch
   logical, intent(in) :: usefile
-  integer(8) :: k, n1, n2, n3
+  integer(8) :: k, n1, n2
   integer :: ios
   n1 = no * nv
   n2 = npo * nvp
-  n3 = nto * nvt
   mdiis = nslot
   ncnt = 0
   ncall = 0
@@ -112,7 +111,7 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
   ZT, intent(in) :: t1n(0:nv-1, 0:no-1), t2n(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)
   integer(8), intent(in) :: kt3, kr3
   real(8), intent(out) :: norms(3)
-  integer(8) :: n1, n2, n3, slot, k, l, s, ir, nn, off
+  integer(8) :: n1, n2, slot, k, l, s, ir, nn, off
   integer(8) :: ptr(maxdiis)
   ZT :: cz(maxdiis), d(maxdiis), dd, one
   complex(8) :: h(maxdiis, maxdiis), c(maxdiis)
@@ -120,7 +119,6 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
   one = 1
   n1 = no * nv
   n2 = npo * nvp
-  n3 = nto * nvt
   ncall = ncall + 1
   call N(xzdiff2)(n1, t1n, t1, s1)
   call N(xzdiff2)(nv * nv * no * no, t2n, t2, s2)

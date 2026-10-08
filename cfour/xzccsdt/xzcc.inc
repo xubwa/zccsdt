@@ -27,7 +27,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
 
   jt1 = xzget(NW * no * nv, 'T1')
   jt2 = xzget(NW * no * no * nv * nv, 'T2')
-  jt3 = xzget(NW * nto * nvt, 'T3')
+  jt3 = xzget(NW * n3, 'T3')
   m0 = xzmark()
   kt1n = xzget(NW * no * nv, 'new T1')
   kt2n = xzget(NW * no * no * nv * nv, 'new T2')
@@ -39,22 +39,22 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   end if
 
   call N(xzguess)(no, nv, w(jeps), w(joovv), w(jt1), w(jt2))
-  call zc_vzero_d(NW * nto * nvt, w(jt3))
+  call zc_vzero_d(NW * n3, w(jt3))
   call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
   eold = dble(e)
   call get_environment_variable('XZ_DEBUG', dbg, ldbg)
   if (ldbg > 0) then
     ! one step on amplitudes read from a file, the result written next to it
-    n = NW * (no * nv + no * no * nv * nv + nto * nvt)
+    n = NW * (no * nv + no * no * nv * nv + n3)
     open(unit=74, file=dbg(1:ldbg), form='unformatted', access='stream', status='old')
     read(74) w(jt1:jt1 + NW * no * nv - 1), w(jt2:jt2 + NW * no * no * nv * nv - 1), &
-             w(jt3:jt3 + NW * nto * nvt - 1)
+             w(jt3:jt3 + NW * n3 - 1)
     close(74)
     kr3 = N(xzdiis_target)()
     call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
     open(unit=74, file=dbg(1:ldbg) // '.out', form='unformatted', access='stream', status='replace')
     write(74) w(kt1n:kt1n + NW * no * nv - 1), w(kt2n:kt2n + NW * no * no * nv * nv - 1), &
-              w(kr3:kr3 + NW * nto * nvt - 1)
+              w(kr3:kr3 + NW * n3 - 1)
     close(74)
     write(6, '(a,a)') ' XZ_DEBUG: one step written to ', dbg(1:ldbg) // '.out'
     call N(xzdiis_close)()

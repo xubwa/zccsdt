@@ -13,6 +13,12 @@
 !   hh ladder and F_oo: one operator on the occupied triples
 !   update     new T3 = T3 + R / D, written over R
 !
+! Everything that is not a sum over T3 or <ab||cd> is done on dense arrays,
+! with the tables of pairs and triples that the layout made.  T3 and
+! <ab||cd> are on the blocks of the groups of the symmetry labels: with one
+! class (no labels) that is the whole packed array and the dense kernels
+! run; with more classes the passes of xzblk.inc.
+!
 ! Every array is a region of the work array w, taken from the stack of
 ! xzmem.  In a dry run (xzdry) the routine goes through its allocations and
 ! computes nothing.
@@ -36,8 +42,9 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   integer(8) :: kgpd, kyall, kr1c, kr1v, kra, kr2, klad, kwkl
   integer(8) :: kweff, kwo, kadrv, ko6, kwring, ka2, kb2, kx2
   integer(8) :: kd, kxacc, kgmq, kbuf, kwv, kg2, kyb, ku, kxb
-  integer(8) :: kslab, ktv, kxp, kbd, ktb, kz
-  integer(8) :: q0, nq, i0, nb, n8
+  integer(8) :: kslab, ktv, kxp, kbd, ktb, kz, kgq, kpib, kgh, nbdw
+  integer(8) :: q0, nq, i0, nb, h, lo, nqh
+  logical :: dense
   real(8) :: stats(4), t0
   ZT :: one, zero, half
   one = 1
@@ -45,6 +52,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   half = 0.5d0
   ov = no * nv
   ov2 = ov * ov
+  dense = ncls == 1
   m0 = xzmark()
 
   ! ---- the arrays of the size of T2 and smaller
@@ -103,19 +111,27 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   kxacc = xzget(NW * ny * no * nvp, 'pass-1 result X')
   m1 = xzmark()
   kgmq = xzget(NW * no * nvp * ny, 'pass-1 operand G')
-  kbuf = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
   if (.not. xzdry) then
     t0 = omp_get_wtime()
     call N(xzp1ops)(no, nv, npo, nvp, w(joovv), w(kooovd), w(joovvp), w(kd), w(kfov), &
                     w(jopa), w(jopb), w(kgpd), w(kgmq), w(kft))
     tstage(2) = tstage(2) + omp_get_wtime() - t0
-    t0 = omp_get_wtime()
-    call zc_vzero_d(NW * ny * no * nvp, w(kxacc))
-    call zc_vzero_d(NW * ov, w(kr1c))
-    stats = 0
-    call N(zc_t3_pass1w)(w(kt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), w(jvsgn), &
-                         nbp, w(kgpd), w(kgmq), ny, w(jgpp), w(kft), w(kxacc), w(kyall), w(kr1c), &
-                         w(kra), c_null_ptr, stats, w(kbuf))
+  end if
+  t0 = omp_get_wtime()
+  if (dense) then
+    kbuf = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
+    if (.not. xzdry) then
+      call zc_vzero_d(NW * ny * no * nvp, w(kxacc))
+      call zc_vzero_d(NW * ov, w(kr1c))
+      stats = 0
+      call N(zc_t3_pass1w)(w(kt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), w(jvsgn), &
+                           nbp, w(kgpd), w(kgmq), ny, w(jgpp), w(kft), w(kxacc), w(kyall), w(kr1c), &
+                           w(kra), c_null_ptr, stats, w(kbuf))
+    end if
+  else
+    call N(xzbpass1)(w, kt3, w(kgpd), w(kgmq), w(jgpp), w(kfov), w(kxacc), w(kyall), w(kr1c), w(kra))
+  end if
+  if (.not. xzdry) then
     ! sum_{k,Q} ~<ak||Q> t2[i][k][Q], at the columns no + a
     call N(zc_gemm)(0_4, 0_4, no, ny, no * nvp, one, w(kt2p), no * nvp, w(kgmq), ny, zero, w(kr1v), ny)
     call N(xzr2t3)(no, nv, npo, nvp, w(jopa), w(jopb), w(jvpa), w(jvpb), w(kyall), w(kxacc), w(kra))
@@ -157,51 +173,76 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   if (.not. xzdry) call N(xzmove)(nvp * ov, w(kwv), w(kd))
   kwv = kd
 
-  ! ---- the sweep over the rows of the dressed <ab||cd>
+  ! ---- the sweep over the rows of the dressed <ab||cd>, block by block
   m2 = xzmark()
-  kslab = xzget(NW * nqs * nvp, 'slab of the dressed <ab||cd>')
-  ktv = xzget(NW * nvp * nbt * nv, 'pp-ladder batch of T3')
-  kxp = xzget(NW * nqs * nbt * nv, 'pp-ladder product')
-  if (.not. xzdry) then
-    call zc_vzero_d(NW * nto * nvt, w(kr3))
-    do q0 = 0, nvp - 1, nqs
-      nq = min(nqs, nvp - q0)
-      t0 = omp_get_wtime()
-      ! ~<ab||de> = <ab||de> - sum_m t1[m][a] <mb||de> + sum_m t1[m][b] <ma||de>
-      !             + sum_{m<n} tau1[mn][ab] <mn||de>
-      call N(xzdrrows)(no, nv, npo, nvp, q0, nq, w(kt1), w(ktau), w(jvvvv), w(jovvq), w(jgpp), &
-                       w(jvpa), w(jvpb), w(kslab), w(ka2))
-      ! W_vvvo[Q][e][i] += sum_f ~<ab||ef> t1[i][f]
-      call N(zc_pair_t1_contract)(w(kwv + NW * q0 * ov), w(kslab), w(kt1), nq, nv, nvp, w(jvpidx), no)
-      tstage(6) = tstage(6) + omp_get_wtime() - t0
-      t0 = omp_get_wtime()
-      ! the CCSD ladder: lad[P][q] = sum_Q ~<q||Q> (t2 + tau1)[P][Q]
-      if (npo > 0) call N(zc_gemm)(0_4, 1_4, npo, nq, nvp, one, w(ktt), nvp, w(kslab), nvp, zero, &
-                                   w(klad + NW * q0), nvp)
-      tstage(10) = tstage(10) + omp_get_wtime() - t0
-      t0 = omp_get_wtime()
-      ! the pp operator of T3: + sum_{m<n} t2[mn][ab] <mn||de> + 1/2 A[F_vv delta]
-      if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nvp, npo, one, w(kt2pp + NW * q0), nvp, w(jgpp), nvp, &
-                                   one, w(kslab), nvp)
-      call N(zc_pair_one_body_add)(w(kslab), nq, nvp, w(jvpa + q0), w(jvpb + q0), w(jvpidx), nv, &
-                                   w(kfevv), nv, half)
-      tstage(6) = tstage(6) + omp_get_wtime() - t0
-      do i0 = 0, nto - 1, nbt
-        nb = min(nbt, nto - i0)
-        t0 = omp_get_wtime()
-        call N(zc_gather_vir_half)(w(kt3), nvt, w(jrows + i0), nb, w(jvtri), w(jvsgn), nv, nvp, w(ktv))
-        tstage(7) = tstage(7) + omp_get_wtime() - t0
-        t0 = omp_get_wtime()
-        call N(zc_gemm)(0_4, 0_4, nq, nb * nv, nvp, one, w(kslab), nvp, w(ktv), nb * nv, zero, &
-                        w(kxp), nb * nv)
-        tstage(8) = tstage(8) + omp_get_wtime() - t0
-        t0 = omp_get_wtime()
-        call N(zc_reduce_pair_first_rows)(w(kr3), nvt, w(kxp), w(jrows + i0), nb, nv, q0, q0 + nq, &
-                                          w(jvfree), w(jvpair))
-        tstage(9) = tstage(9) + omp_get_wtime() - t0
-      end do
-    end do
+  kslab = xzget(NW * nqs * nqmax, 'slab of the dressed <ab||cd>')
+  kgq = jovvq
+  kpib = jvpidx
+  if (.not. dense) then
+    kgq = xzget(NW * ov * nqmax, '<ov||vv> on the pairs of a group')
+    kgh = xzget(NW * npo * nqmax, '<oo||vv> on the pairs of a group')
+    kpib = xzget(nv * nv, 'pairs of a group')
+  else
+    kgh = jgpp
+    ktv = xzget(NW * nvp * nbt * nv, 'pp-ladder batch of T3')
+    kxp = xzget(NW * nqs * nbt * nv, 'pp-ladder product')
   end if
+  if (.not. xzdry) then
+    call zc_vzero_d(NW * n3, w(kr3))
+    call zc_vzero_d(NW * npo * nvp, w(klad))
+  end if
+  do h = 0, npg - 1
+    lo = vpoff(h)
+    nqh = vpoff(h + 1) - lo
+    if (nqh == 0) cycle
+    if (.not. dense .and. .not. xzdry) call N(xzgrpcols)(no, nv, npo, nvp, lo, nqh, w(jovvq), w(jgpp), &
+                                                          w(jvpidx), w(kgq), w(kgh), w(kpib))
+    do q0 = 0, nqh - 1, nqs
+      nq = min(nqs, nqh - q0)
+      if (.not. xzdry) then
+        t0 = omp_get_wtime()
+        ! ~<ab||de> = <ab||de> - sum_m t1[m][a] <mb||de> + sum_m t1[m][b] <ma||de>
+        !             + sum_{m<n} tau1[mn][ab] <mn||de>
+        call N(xzdrrows)(no, nv, npo, nvp, nqh, nq, w(kt1), w(ktau + NW * (lo + q0)), &
+                         w(jvvvv + NW * (vvoff(h) + q0 * nqh)), w(kgq), w(kgh), w(jvpa + lo + q0), &
+                         w(jvpb + lo + q0), w(kslab), w(ka2))
+        ! W_vvvo[Q][e][i] += sum_f ~<ab||ef> t1[i][f]
+        call N(zc_pair_t1_contract)(w(kwv + NW * (lo + q0) * ov), w(kslab), w(kt1), nq, nv, nqh, w(kpib), no)
+        tstage(6) = tstage(6) + omp_get_wtime() - t0
+        t0 = omp_get_wtime()
+        ! the CCSD ladder: lad[P][q] = sum_Q ~<q||Q> (t2 + tau1)[P][Q]
+        if (npo > 0) call N(zc_gemm)(0_4, 1_4, npo, nq, nqh, one, w(ktt + NW * lo), nvp, w(kslab), nqh, &
+                                     zero, w(klad + NW * (lo + q0)), nvp)
+        tstage(10) = tstage(10) + omp_get_wtime() - t0
+        t0 = omp_get_wtime()
+        ! the pp operator of T3: + sum_{m<n} t2[mn][ab] <mn||de> + 1/2 A[F_vv delta]
+        if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nqh, npo, one, w(kt2pp + NW * (lo + q0)), nvp, &
+                                     w(jgpp + NW * lo), nvp, one, w(kslab), nqh)
+        call N(zc_pair_one_body_add)(w(kslab), nq, nqh, w(jvpa + lo + q0), w(jvpb + lo + q0), w(kpib), nv, &
+                                     w(kfevv), nv, half)
+        tstage(6) = tstage(6) + omp_get_wtime() - t0
+      end if
+      if (dense) then
+        if (xzdry) cycle
+        do i0 = 0, nto - 1, nbt
+          nb = min(nbt, nto - i0)
+          t0 = omp_get_wtime()
+          call N(zc_gather_vir_half)(w(kt3), nvt, w(jrows + i0), nb, w(jvtri), w(jvsgn), nv, nvp, w(ktv))
+          tstage(7) = tstage(7) + omp_get_wtime() - t0
+          t0 = omp_get_wtime()
+          call N(zc_gemm)(0_4, 0_4, nq, nb * nv, nvp, one, w(kslab), nvp, w(ktv), nb * nv, zero, &
+                          w(kxp), nb * nv)
+          tstage(8) = tstage(8) + omp_get_wtime() - t0
+          t0 = omp_get_wtime()
+          call N(zc_reduce_pair_first_rows)(w(kr3), nvt, w(kxp), w(jrows + i0), nb, nv, q0, q0 + nq, &
+                                            w(jvfree), w(jvpair))
+          tstage(9) = tstage(9) + omp_get_wtime() - t0
+        end do
+      else
+        call N(xzbppl)(w, kt3, kr3, h, q0, nq, w(kslab))
+      end if
+    end do
+  end do
   call xzrel(m2)
 
   ! ---- the CCSD part and the operator on the occupied triples
@@ -217,54 +258,99 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     tstage(11) = tstage(11) + omp_get_wtime() - t0
   end if
 
-  ! ---- pass 2: W_vvvo transposed, in the place of W_vvvo
-  kbd = xzget(NW * ny * no * nvp, 'pass-2 operand B')
+  ! ---- pass 2: its right-hand side from W_vvvo, in the place of W_vvvo
+  nbdw = ny * no * nvp
+  if (.not. dense) nbdw = nbd
+  kbd = xzget(NW * nbdw, 'pass-2 operand B')
+  t0 = omp_get_wtime()
   if (.not. xzdry) then
-    t0 = omp_get_wtime()
-    call N(xzbdrv)(no, nv, nvp, w(kwv), w(kt2p), w(kbd))
+    if (dense) then
+      call N(xzbdrv)(no, nv, nvp, w(kwv), w(kt2p), w(kbd))
+    else
+      call N(xzbbd)(w(kwv), w(kt2p), w(kbd))
+    end if
   end if
   call xzrel(md)
-  kd = xzget(NW * ny * no * nvp, 'pass-2 operand B')
-  if (.not. xzdry) call N(xzmove)(ny * no * nvp, w(kbd), w(kd))
+  kd = xzget(NW * nbdw, 'pass-2 operand B')
+  if (.not. xzdry) call N(xzmove)(nbdw, w(kbd), w(kd))
   kbd = kd
-  ktb = xzget(NW * nbp * ov * nvp, 'pass-2 batch of T3')
-  kz = xzget(NW * nbp * ov * nvp, 'pass-2 product')
+  if (dense) then
+    ktb = xzget(NW * nbp * ov * nvp, 'pass-2 batch of T3')
+    kz = xzget(NW * nbp * ov * nvp, 'pass-2 product')
+    if (.not. xzdry) then
+      stats = 0
+      call N(zc_t3_pass2w)(w(kt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
+                           w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, w(kwring), w(kadrv), w(kbd), &
+                           w(kr3), c_null_ptr, stats, w(ktb), w(kz))
+    end if
+  else
+    call N(xzbpass2)(w, kt3, kr3, w(kwring), w(kadrv), w(kbd))
+  end if
   if (.not. xzdry) then
-    stats = 0
-    call N(zc_t3_pass2w)(w(kt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
-                         w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, w(kwring), w(kadrv), w(kbd), &
-                         w(kr3), c_null_ptr, stats, w(ktb), w(kz))
     tstage(12) = tstage(12) + omp_get_wtime() - t0
     t0 = omp_get_wtime()
-    call N(zc_t3_occop)(w(ko6), w(kt3), nto, nvt, ncb, c_null_ptr, w(kr3))
+    if (dense) then
+      call N(zc_t3_occop)(w(ko6), w(kt3), nto, nvt, ncb, c_null_ptr, w(kr3))
+    else
+      call N(xzbocc)(w, kt3, kr3, w(ko6))
+    end if
     tstage(13) = tstage(13) + omp_get_wtime() - t0
     t0 = omp_get_wtime()
-    call N(zc_t3_update)(w(kt3), w(kr3), nto, nvt, w(jeo3), w(jev3), c_null_ptr)
+    if (dense) then
+      call N(zc_t3_update)(w(kt3), w(kr3), nto, nvt, w(jeo3), w(jev3), c_null_ptr)
+    else
+      call N(xzbupd)(w, kt3, kr3)
+    end if
     tstage(14) = tstage(14) + omp_get_wtime() - t0
   end if
   call xzrel(m0)
-  n8 = 0
 end subroutine
 
 ! ---------------------------------------------------------------------------
-! Rows q0 .. q0 + nq - 1 of the T1-dressed <ab||de> on pairs (the C kernel
-! does the two terms with one t1; the term with tau1 is a GEMM).
-! tm: work no * nv.
-subroutine N(xzdrrows)(no, nv, npo, nvp, q0, nq, t1, tau, vvvv, gq, gpp, vpa, vpb, slab, tm)
+! Rows of the T1-dressed <ab||de> of one group of pairs (the C kernel does
+! the two terms with one t1; the term with tau1 is a GEMM).
+!   nqh       pairs of the group; nq: rows
+!   tau       tau1[P][Q] from the first row (the whole array, leading dimension nvp)
+!   vv        the bare rows [q][Q'] of the block
+!   gq, gh    <my||Q'> [m][y][Q'] and <mn||Q'> [P][Q'] on the pairs Q' of the group
+!   pa, pb    the pairs of the rows
+!   tm        work no * nv
+subroutine N(xzdrrows)(no, nv, npo, nvp, nqh, nq, t1, tau, vv, gq, gh, pa, pb, slab, tm)
   use xzkern
   implicit none
-  integer(8), intent(in) :: no, nv, npo, nvp, q0, nq
+  integer(8), intent(in) :: no, nv, npo, nvp, nqh, nq
   ZT, intent(in) :: t1(0:nv-1, 0:no-1)
-  ZT, intent(in) :: tau(0:nvp-1, 0:npo-1)
-  ZT, intent(in) :: vvvv(0:nvp-1, 0:*)                         ! [Q][Q']
-  ZT, intent(in) :: gq(*), gpp(*)
-  integer(8), intent(in) :: vpa(0:nvp-1), vpb(0:nvp-1)
+  ZT, intent(in) :: tau(*), vv(*), gq(*), gh(*)
+  integer(8), intent(in) :: pa(*), pb(*)
   ZT :: slab(*)
   ZT :: tm(0:nv-1, 0:no-1)
   ZT :: one
   one = 1
   tm = -t1
-  call N(zc_vvvv_dress)(slab, vvvv(0, q0), nq, nvp, vpa(q0), vpb(q0), tm, nv, gq, no, nv, &
-                        t1, nv, gq, no, nv, tm, tm, 0_8)
-  if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nvp, npo, one, tau(q0, 0), nvp, gpp, nvp, one, slab, nvp)
+  call N(zc_vvvv_dress)(slab, vv, nq, nqh, pa, pb, tm, nv, gq, no, nv, t1, nv, gq, no, nv, tm, tm, 0_8)
+  if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nqh, npo, one, tau, nvp, gh, nqh, one, slab, nqh)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! The columns of <my||Q> and <mn||Q> of the pairs Q of one group, and the
+! numbers of these pairs inside the group (-1: a pair of another group).
+subroutine N(xzgrpcols)(no, nv, npo, nvp, lo, nqh, gq, gpp, vpidx, gqh, gph, pib)
+  implicit none
+  integer(8), intent(in) :: no, nv, npo, nvp, lo, nqh
+  ZT, intent(in) :: gq(0:nvp-1, 0:no*nv-1), gpp(0:nvp-1, 0:npo-1)
+  integer(8), intent(in) :: vpidx(0:nv*nv-1)
+  ZT, intent(out) :: gqh(0:nqh-1, 0:no*nv-1), gph(0:nqh-1, 0:npo-1)
+  integer(8), intent(out) :: pib(0:nv*nv-1)
+  integer(8) :: k
+  !$omp parallel do
+  do k = 0, no * nv - 1
+    gqh(:, k) = gq(lo:lo + nqh - 1, k)
+  end do
+  do k = 0, npo - 1
+    gph(:, k) = gpp(lo:lo + nqh - 1, k)
+  end do
+  do k = 0, nv * nv - 1
+    pib(k) = -1
+    if (vpidx(k) >= lo .and. vpidx(k) < lo + nqh) pib(k) = vpidx(k) - lo
+  end do
 end subroutine

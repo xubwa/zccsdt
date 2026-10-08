@@ -67,9 +67,9 @@ integer(8) function xzpeak_cc(w)
   real(8) :: w(*)
   real(8) :: e
   logical :: c
-  integer(8) :: n, peak
-  call xzdry_begin()
-  call xzlayout(w)
+  integer(8) :: n, peak, status
+  call xzdry_begin(0_8)
+  call xzlayout(w, status)
   if (nwe == 2) then
     call xzcc_z(w, pslot, pfile, pchunk, e, c, n)
   else
@@ -86,12 +86,12 @@ integer(8) function xzpeak_q(w)
   implicit none
   real(8) :: w(*)
   real(8) :: e5, e6
-  integer(8) :: peak, k
-  call xzdry_begin()
-  call xzlayout(w)
+  integer(8) :: peak, k, status
+  call xzdry_begin(0_8)
+  call xzlayout(w, status)
   k = xzget(nwe * no * nv, 'T1')
   k = xzget(nwe * no * no * nv * nv, 'T2')
-  k = xzget(nwe * nto * nvt, 'T3')
+  k = xzget(nwe * n3, 'T3')
   if (with_q) then
     if (nwe == 2) then
       call xzq_z(w, e5, e6)
@@ -104,7 +104,8 @@ integer(8) function xzpeak_q(w)
 end function xzpeak_q
 
 ! ---------------------------------------------------------------------------
-subroutine xzplan(w, nslot, usefile, nch)
+! flooronly: only the check of the floor, which says nothing unless it fails
+subroutine xzplan(w, nslot, usefile, nch, flooronly)
   use xzdata
   use xzmem
   use xzkern
@@ -113,17 +114,17 @@ subroutine xzplan(w, nslot, usefile, nch)
   real(8) :: w(*)
   integer(8), intent(out) :: nslot, nch
   logical, intent(out) :: usefile
+  logical, intent(in) :: flooronly
   integer(8), external :: xzpeak_cc, xzpeak_q
-  integer(8) :: f, n3, floor_cc, floor_q, need_cc, need_q, free_bytes, per_vec, nfit, k8
+  integer(8) :: f, floor_cc, floor_q, need_cc, need_q, free_bytes, per_vec, nfit, k8
   integer :: k
   character(len=8) :: arg
   integer :: larg
 
   f = no * nv * nvp                       ! elements of a half-expanded batch of one pair
-  n3 = nto * nvt
   ! ---- the smallest and the target batch sizes
-  plo(1) = min(nv, nvp)
-  phi(1) = nvp
+  plo(1) = min(nv, nqmax)
+  phi(1) = nqmax
   plo(2) = 1
   phi(2) = max(1_8, min(nto, 1300000000_8 / (2 * 8 * nwe * nvp * nv)))
   plo(3) = 1
@@ -149,13 +150,15 @@ subroutine xzplan(w, nslot, usefile, nch)
   pchunk = min(max(n3, 1_8), 1048576_8)
   floor_cc = xzpeak_cc(w)
   floor_q = xzpeak_q(w)
-  write(6, '(/,a)') '   Memory plan (words of 8 bytes; a complex number is 2 words)'
+  if (flooronly .and. max(floor_cc, floor_q) <= xzsize) return
+  write(6, '(/,a,a,a)') '   Memory plan (words of 8 bytes; ', merge('real numbers   ', 'complex numbers', nwe == 1), ')'
   write(6, '(a,i16,a,f10.1,a)') '     the least that CCSDT takes:     ', floor_cc, '  = ', 8d-6 * floor_cc, ' MB'
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     the least that (Q) takes:       ', floor_q, '  = ', &
     8d-6 * floor_q, ' MB'
   write(6, '(a,i16,a,f10.1,a)') '     the work array has:             ', xzsize, '  = ', 8d-6 * xzsize, ' MB'
   if (max(floor_cc, floor_q) > xzsize) then
     write(6, '(/,a)') ' @XZCCSDT-F, the work array is too short for this calculation.'
+    if (nwe == 1) write(6, '(a)') '   (even if all integrals are real; complex integrals take about twice as much)'
     write(6, '(a,i16,a,i16)') '   words needed: ', max(floor_cc, floor_q), '   words there: ', xzsize
     write(6, '(a,i16,a,f12.1,a)') '   Set MEMORY_SIZE to at least ', max(floor_cc, floor_q) + 64, &
       ' words (', 8d-6 * (max(floor_cc, floor_q) + 64), ' MB).'
@@ -221,7 +224,7 @@ subroutine xzplan(w, nslot, usefile, nch)
   write(6, '(a,i16,a,f10.1,a)') '     CCSDT with this plan:           ', need_cc, '  = ', 8d-6 * need_cc, ' MB'
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with this plan:             ', need_q, '  = ', &
     8d-6 * need_q, ' MB'
-  write(6, '(a,i8,a,i8)') '     rows of a slab of the dressed <ab||cd>:      ', nqs, '  of ', nvp
+  write(6, '(a,i8,a,i8)') '     rows of a slab of the dressed <ab||cd>:      ', nqs, '  of ', nqmax
   write(6, '(a,i8,a,i8)') '     occupied triples of a pp-ladder batch:       ', nbt, '  of ', nto
   write(6, '(a,i8,a,i8)') '     occupied pairs of a batch of pass 1, pass 2: ', nbp, '  of ', npo
   write(6, '(a,i8,a,i8)') '     first indices of a batch of W_vvvo terms:    ', nba, '  of ', nv

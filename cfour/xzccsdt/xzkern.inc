@@ -57,6 +57,35 @@
       type(*), dimension(*) :: r, x, rows, vfree, vpair
     end subroutine
 
+    ! ---- T3 in blocks (csrc/t3pack.c)
+    subroutine N(zc_bgather2)(t3, obase, osig, otri, osgn, npo, vci, vcs, nvp, np, pidx, nd, didx, &
+                              nm, midx, qlo, nq, ldp, out) bind(C)
+      import
+      integer(c_int64_t), value :: npo, nvp, np, nd, nm, qlo, nq, ldp
+      type(*), dimension(*) :: t3, obase, osig, otri, osgn, vci, vcs, pidx, didx, midx, out
+    end subroutine
+
+    subroutine N(zc_breduce2)(r, rcol, ntg, tbase, tx, tp, tsg, a0, a1, nvt, vfree, vpair, vpgrp, zoff, &
+                              npg, nqg, qoff, rowpos, no, z) bind(C)
+      import
+      integer(c_int64_t), value :: ntg, a0, a1, nvt, npg, no
+      type(*), dimension(*) :: r, rcol, tbase, tx, tp, tsg, vfree, vpair, vpgrp, zoff, nqg, qoff, rowpos, z
+    end subroutine
+
+    subroutine N(zc_bgather_vir)(t3, obase, vcol, osig, vsig, vtri, vsgn, nvp, nrows, rows, qlo, nq, &
+                                 c0, nc, out) bind(C)
+      import
+      integer(c_int64_t), value :: nvp, nrows, qlo, nq, c0, nc
+      type(*), dimension(*) :: t3, obase, vcol, osig, vsig, vtri, vsgn, rows, out
+    end subroutine
+
+    subroutine N(zc_breduce_ppl_rows)(r, rbase, rcol, nrows, rows, nvt, a0, a1, vfree, vpair, vspin, &
+                                      sc, hoff, q0, q1, nc, coff, x) bind(C)
+      import
+      integer(c_int64_t), value :: nrows, nvt, a0, a1, sc, hoff, q0, q1, nc, coff
+      type(*), dimension(*) :: r, rbase, rcol, rows, vfree, vpair, vspin, x
+    end subroutine
+
     subroutine N(zc_pair_antisym_batch_add)(out, y, n, npair, pa, pb, ncol, x0, x1, alpha) bind(C)
       import
       integer(c_int64_t), value :: n, npair, ncol, x0, x1

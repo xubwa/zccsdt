@@ -1,6 +1,18 @@
 !
-! The driver of xzccsdt: the job, the sizes, the memory plan, the integrals,
-! the CCSDT iterations, (Q), the energies.
+! The driver of xzccsdt: the job, the sizes, the symmetry labels, the memory
+! plan, the integrals, the CCSDT iterations, (Q), the energies.
+!
+! Two things are decided from the integrals that are read:
+!   blocks   if the file xzlabels is there, its labels are used - the spinors
+!            in the order of their classes, T3 and <ab||cd> on the allowed
+!            blocks only - provided no integral that they forbid is larger
+!            than 1e-8; otherwise the labels are dropped with a warning (one
+!            class: the dense case of the same code)
+!   real     if no integral has an imaginary part above 1e-10, the real
+!            instance of the code runs (half the memory, real kernels)
+! The integrals are read for the most favourable case first (labels, real);
+! what does not hold shows in the small blocks, which are read first, and the
+! integrals are then read again for the next case.
 !
 subroutine xzdrv(w, maxcor)
   use xzdata
@@ -12,12 +24,11 @@ subroutine xzdrv(w, maxcor)
   real(8) :: w(maxcor)
   integer(8) :: iintln, ifltln, iintfp, ialone, ibitwd
   common /machsp/ iintln, ifltln, iintfp, ialone, ibitwd
-  integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2)
-  logical :: usefile, converged
+  integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2), nmax, status
+  logical :: usefile, converged, uselab, tryreal, isreal, there
   real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall
   character(len=32) :: arg
   integer :: larg
-  integer(8) :: nmax
 
   twall = omp_get_wtime()
   call xzinit(loc(w(1)), maxcor)
@@ -39,7 +50,6 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,i6,a,i6,a,i6)') '   frozen occupied ', nfrozen, '   dropped virtual ', ndropped, &
     '   of ', ntot
   write(6, '(a,i14,a,i14)') '   triples: occupied ', nto, '   virtual ', nvt
-  write(6, '(a,f12.1,a)') '   T3 on i<j<k, a<b<c: ', 16d-6 * nto * nvt, ' MB (complex)'
   write(6, '(a,es9.1,a,es9.1,a,i5)') '   convergence: energy ', conv_e, '   amplitudes ', conv_t, &
     '   cycles ', maxcyc
   write(6, '(a,f20.12)') '   E(SCF) of JOBARC: ', escf
@@ -54,24 +64,77 @@ subroutine xzdrv(w, maxcor)
     call errex
   end if
 
-  ! ---- the memory plan, before anything is placed
-  nwe = 2
-  call xzplan(w, nslot, usefile, nch)
+  ! ---- the symmetry labels
+  allocate(lab(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
+  call xzrdlab(ntot, lab, modulus, there)
+  have_labels = there
+  uselab = there
+  if (there) then
+    write(6, '(a,i4)') '   symmetry labels: the file xzlabels, modulus ', modulus
+    if (modulus /= 0) then
+      write(6, '(a)') ' @XZCCSDT-W, labels with a modulus are not used by this program: one block.'
+      uselab = .false.
+    end if
+  else
+    write(6, '(a)') '   symmetry labels: none (no file xzlabels)'
+  end if
+  call get_environment_variable('XZ_LABELS', arg, larg)
+  if (larg > 0 .and. arg(1:1) == '0' .and. uselab) then
+    write(6, '(a)') '   XZ_LABELS=0: the labels are not used'
+    uselab = .false.
+  end if
+  if (with_q .and. uselab) then
+    write(6, '(a)') ' @XZCCSDT-W, (Q) in the blocks of the labels is not there yet: the labels are not used.'
+    uselab = .false.
+  end if
+  tryreal = .true.
+  call get_environment_variable('XZ_REAL', arg, larg)
+  if (larg > 0 .and. arg(1:1) == '0') then
+    write(6, '(a)') '   XZ_REAL=0: complex arithmetic whatever the integrals'
+    tryreal = .false.
+  end if
 
-  ! ---- tables and integrals
+  ! ---- the integrals: for labels and real numbers first; the memory of a
+  !      case is checked before it is read (the floor of its plan)
+  isreal = tryreal
   t0 = omp_get_wtime()
-  call xzlayout(w)
+  do
+    call xzsetmode(uselab)
+    nwe = merge(1_8, 2_8, isreal)
+    call xzplan(w, nslot, usefile, nch, .true.)
+    call xzrel(0_8)
+    call xzlayout(w, status)
+    if (status == 0) exit
+    if (status == 1) then
+      uselab = .false.
+      isreal = tryreal
+    else
+      isreal = .false.
+    end if
+  end do
   tread = omp_get_wtime() - t0
-  write(6, '(/,a,f10.2,a)') '   integrals read and sorted: ', tread, ' s'
+  write(6, '(/,a,a,a,i4,a)') '   arithmetic: ', merge('real   ', 'complex', isreal), ';  blocks: ', ncls, &
+    merge(' classes of the labels', ' class (dense)        ', ncls > 1)
+  write(6, '(a,f12.1,a,i16,a)') '   T3 on i<j<k, a<b<c: ', 8d-6 * nwe * n3, ' MB (', n3, ' amplitudes)'
+  if (ncls > 1) write(6, '(a,f8.2,a,f8.2,a)') '   of the dense arrays: T3 ', 100d0 * n3 / (nto * nvt), &
+    ' %, <ab||cd> ', 100d0 * nvv / (nvp * nvp), ' %'
+  write(6, '(a,f10.2,a)') '   integrals read and sorted: ', tread, ' s'
   flush(6)
+
+  ! ---- the memory plan
+  call xzplan(w, nslot, usefile, nch, .false.)
 
   ! ---- CCSDT
   t0 = omp_get_wtime()
-  call xzcc_z(w, nslot, usefile, nch, ecorr, converged, ncyc)
+  if (nwe == 2) then
+    call xzcc_z(w, nslot, usefile, nch, ecorr, converged, ncyc)
+  else
+    call xzcc_d(w, nslot, usefile, nch, ecorr, converged, ncyc)
+  end if
   tcc = omp_get_wtime() - t0
   if (.not. converged) then
-    call get_environment_variable('XZ_DEBUG', length=ncyc)
-    if (ncyc > 0) return
+    call get_environment_variable('XZ_DEBUG', length=larg)
+    if (larg > 0) return
     write(6, '(/,a,i5,a)') ' @XZCCSDT-F, CCSDT did not converge in ', maxcyc, ' cycles (CC_MAXCYC).'
     call errex
   end if
@@ -84,7 +147,11 @@ subroutine xzdrv(w, maxcor)
   tq = 0d0
   if (with_q) then
     t0 = omp_get_wtime()
-    call xzq_z(w, eq5, eq6)
+    if (nwe == 2) then
+      call xzq_z(w, eq5, eq6)
+    else
+      call xzq_d(w, eq5, eq6)
+    end if
     tq = omp_get_wtime() - t0
   end if
 
@@ -165,15 +232,135 @@ subroutine xzjob()
 end subroutine xzjob
 
 ! ---------------------------------------------------------------------------
+! The classes of the spinors and everything that follows from them without
+! the work array: the order of the spinors, the groups of pairs and triples,
+! the sizes of the blocks of T3 and of <vv||vv>.  uselab = .false.: one class.
+subroutine xzsetmode(uselab)
+  use xzdata
+  implicit none
+  logical, intent(in) :: uselab
+  integer(8) :: p, i, j, k, g, n, d, sa, si
+
+  ncls = 1
+  if (uselab) then
+    call xzclasses(no, nv, lab(nfrozen), maxcls, ncls, operm, vperm, ocls, vcls, ocoff, vcoff)
+    if (ncls == 0) then
+      write(6, '(a,i4,a)') ' @XZCCSDT-W, more than ', maxcls, ' classes of labels: the labels are not used.'
+      ncls = 1
+    end if
+  end if
+  if (ncls == 1) then
+    do p = 0, no - 1
+      operm(p) = p
+    end do
+    do p = 0, nv - 1
+      vperm(p) = p
+    end do
+    ocls = 0
+    vcls = 0
+    ocoff = 0
+    vcoff = 0
+    ocoff(1) = no
+    vcoff(1) = nv
+  end if
+  npg = 2 * ncls - 1
+  ntg = 3 * ncls - 2
+  ! the sizes of the groups
+  opoff = 0
+  vpoff = 0
+  otoff = 0
+  vtoff = 0
+  do i = 0, no - 1
+    do j = i + 1, no - 1
+      g = ocls(i) + ocls(j)
+      opoff(g + 1) = opoff(g + 1) + 1
+      do k = j + 1, no - 1
+        otoff(g + ocls(k) + 1) = otoff(g + ocls(k) + 1) + 1
+      end do
+    end do
+  end do
+  do i = 0, nv - 1
+    do j = i + 1, nv - 1
+      g = vcls(i) + vcls(j)
+      vpoff(g + 1) = vpoff(g + 1) + 1
+      do k = j + 1, nv - 1
+        vtoff(g + vcls(k) + 1) = vtoff(g + vcls(k) + 1) + 1
+      end do
+    end do
+  end do
+  do g = 0, npg - 1
+    opoff(g + 1) = opoff(g + 1) + opoff(g)
+    vpoff(g + 1) = vpoff(g + 1) + vpoff(g)
+  end do
+  do g = 0, ntg - 1
+    otoff(g + 1) = otoff(g + 1) + otoff(g)
+    vtoff(g + 1) = vtoff(g + 1) + vtoff(g)
+  end do
+  n3 = 0
+  do g = 0, ntg - 1
+    boff(g) = n3
+    n3 = n3 + (otoff(g + 1) - otoff(g)) * (vtoff(g + 1) - vtoff(g))
+  end do
+  boff(ntg) = n3
+  nvv = 0
+  nqmax = 0
+  do g = 0, npg - 1
+    n = vpoff(g + 1) - vpoff(g)
+    vvoff(g) = nvv
+    nvv = nvv + n * n
+    nqmax = max(nqmax, n)
+  end do
+  vvoff(npg) = nvv
+  ! the composite indices of pass 2
+  ndel = 0
+  wdoff = 0
+  nwd = 0
+  do d = 1 - ncls, ncls - 1
+    do sa = 0, ncls - 1
+      si = sa - d
+      if (si < 0 .or. si >= ncls) cycle
+      ndel(d) = ndel(d) + (vcoff(sa + 1) - vcoff(sa)) * (ocoff(si + 1) - ocoff(si))
+    end do
+    wdoff(d) = nwd
+    nwd = nwd + ndel(d) * ndel(d)
+  end do
+  bdoff = -1
+  nbd = 0
+  do g = 0, npg - 1
+    do si = 0, ncls - 1
+      sa = g - si
+      if (sa < 0 .or. sa >= ncls) cycle
+      n = (vcoff(sa + 1) - vcoff(sa) + ocoff(sa + 1) - ocoff(sa)) * (ocoff(si + 1) - ocoff(si)) &
+          * (vpoff(g + 1) - vpoff(g))
+      if (n == 0) cycle
+      bdoff(g, si) = nbd
+      nbd = nbd + n
+    end do
+  end do
+end subroutine xzsetmode
+
+! ---------------------------------------------------------------------------
 ! The arrays that live for the whole run: tables, spinor energies, integrals.
-! In a dry run only their places.
-subroutine xzlayout(w)
+! In a dry run only their places.  status on return (not in a dry run):
+!   0  the integrals are there
+!   1  an integral that the labels forbid is not zero: read again without them
+!   2  real arithmetic was assumed (nwe = 1) and an integral has an imaginary
+!      part: read again as complex numbers
+subroutine xzlayout(w, status)
   use xzdata
   use xzmem
   implicit none
   real(8) :: w(*)
-  integer(8) :: m, kbuf, krow, ksrc, po, pv, nbuf
+  integer(8), intent(out) :: status
+  integer(8) :: m, mint, kbuf, krow, ksrc, ksg, po, pv, nbuf, k, jold(7), nel(7), ktn
+  real(8) :: vmax, offmax, ximag
+  real(8), external :: xzimag
+  real(8), parameter :: tol_label = 1d-8, tol_imag = 1d-10
+  character(len=8) :: what
+  character(len=24), parameter :: names(7) = [character(len=24) :: '<oo||oo>', '<oo||ov>', '<oo||vv>', &
+    '<ov||vo>', '<oo||vv> on a<b', '<oo||vv> on i<j, a<b', '<ov||vv> on a<b']
 
+  status = 0
   po = no * (no + 1) / 2
   pv = nv * (nv + 1) / 2
   jotri = xzget(no * npo, 'occupied tables')
@@ -183,6 +370,7 @@ subroutine xzlayout(w)
   jopa = xzget(npo, 'occupied tables')
   jopb = xzget(npo, 'occupied tables')
   jopidx = xzget(no * no, 'occupied tables')
+  jopgrp = xzget(npo, 'occupied tables')
   jvtri = xzget(nv * nvp, 'virtual tables')
   jvsgn = xzget(nv * nvp / 8 + 1, 'virtual tables')
   jvfree = xzget(3 * nvt, 'virtual tables')
@@ -190,42 +378,123 @@ subroutine xzlayout(w)
   jvpa = xzget(nvp, 'virtual tables')
   jvpb = xzget(nvp, 'virtual tables')
   jvpidx = xzget(nv * nv, 'virtual tables')
-  jrows = xzget(nto, 'rows')
+  jvpgrp = xzget(nvp, 'virtual tables')
+  jrows = xzget(max(nto, npo, nv, no), 'rows')
   jeps = xzget(ny, 'spinor energies')
   jeo3 = xzget(nto, 'spinor energies')
   jev3 = xzget(nvt, 'spinor energies')
-  joooo = xzget(nwe * no ** 4, '<oo||oo>')
-  jooov = xzget(nwe * no ** 3 * nv, '<oo||ov>')
-  joovv = xzget(nwe * no * no * nv * nv, '<oo||vv>')
-  jovvo = xzget(nwe * no * no * nv * nv, '<ov||vo>')
-  joovvp = xzget(nwe * no * no * nvp, '<oo||vv> on a<b')
-  jgpp = xzget(nwe * npo * nvp, '<oo||vv> on i<j, a<b')
-  jovvq = xzget(nwe * no * nv * nvp, '<ov||vv> on a<b')
-
-  if (.not. xzdry) then
-    call xzmaps(no, npo, nto, w(jotri), w(josgn), w(jofree), w(jopair), w(jopa), w(jopb), w(jopidx))
-    call xzmaps(nv, nvp, nvt, w(jvtri), w(jvsgn), w(jvfree), w(jvpair), w(jvpa), w(jvpb), w(jvpidx))
-    call xziota(nto, w(jrows))
+  if (ncls > 1) then
+    jobase = xzget(nto, 'layout of T3')
+    jvcol = xzget(nvt, 'layout of T3')
+    josig = xzget(nto, 'layout of T3')
+    jvsig = xzget(nvt, 'layout of T3')
+    jvci = xzget(nv * nvp / 2 + 1, 'layout of T3')
+    jrowpos = xzget(nv * no, 'layout of T3')
   end if
   m = xzmark()
-  nbuf = max(2 * po * po, 2 * po * no * nv, 2 * no * no * nv * nv, 2 * pv * nv, 2 * ntot)
+  ktn = xzget(max(nto, nvt), 'work of the tables')
+  if (.not. xzdry) then
+    call xzmaps(no, npo, nto, ncls, ocls, w(jotri), w(josgn), w(jofree), w(jopair), w(jopa), w(jopb), &
+                w(jopidx), w(jopgrp), opoff, otoff, w(ktn))
+    call xzmaps(nv, nvp, nvt, ncls, vcls, w(jvtri), w(jvsgn), w(jvfree), w(jvpair), w(jvpa), w(jvpb), &
+                w(jvpidx), w(jvpgrp), vpoff, vtoff, w(ktn))
+    call xziota(max(nto, npo, nv, no), w(jrows))
+    if (ncls > 1) call xzt3lay(no, nv, npo, nvp, nto, nvt, ncls, ocls, vcls, otoff, vtoff, w(jvtri), &
+                               w(jvsgn), ocoff, vcoff, boff, n3, w(jobase), w(jvcol), w(josig), &
+                               w(jvsig), w(jvci), w(jrowpos))
+  end if
+  call xzrel(m)
+
+  ! ---- the small blocks and <ov||vv>, read as complex numbers
+  mint = xzmark()
+  nel = [no ** 4, no ** 3 * nv, no * no * nv * nv, no * no * nv * nv, no * no * nvp, npo * nvp, &
+         no * nv * nvp]
+  do k = 1, 6
+    jold(k) = xzget(2 * nel(k), names(k))
+  end do
+  m = xzmark()
+  nbuf = max(2 * po * po, 2 * po * no * nv, 2 * no * no * nv * nv, 2 * ntot)
   kbuf = xzget(nbuf, 'record of an integral file')
   if (.not. xzdry) then
     call xzrdeps(w(jeps), w(kbuf))
-    call xzsum3(no, nto, w(jeps), w(jeo3))
-    call xzsum3(nv, nvt, w(jeps + no), w(jev3))
-    call xzrdsmall(w(joooo), w(jooov), w(joovv), w(jovvo), w(joovvp), w(jgpp), w(jvpa), w(jvpb), &
-                   w(jopa), w(jopb), w(kbuf))
-    call xzrdovvq(w(jovvq), w(jvpa), w(jvpb), w(kbuf))
+    call xzsum3(no, nto, w(jofree), w(jeps), w(jeo3))
+    call xzsum3(nv, nvt, w(jvfree), w(jeps + no), w(jev3))
+    call xzrdsmall(w(jold(1)), w(jold(2)), w(jold(3)), w(jold(4)), w(jold(5)), w(jold(6)), w(jvpa), &
+                   w(jvpb), w(jopa), w(jopb), w(kbuf))
   end if
   call xzrel(m)
-  ! <ab||cd>: the record of the file is read where the packed block stays
+  jold(7) = xzget(2 * nel(7), names(7))
+  m = xzmark()
+  kbuf = xzget(2 * pv * nv, 'record of a file PPPH')
+  if (.not. xzdry) then
+    call xzrdovvq(w(jold(7)), w(jvpa), w(jvpb), w(kbuf))
+    if (ncls > 1) then
+      call xzchklab(w(jold(1)), w(jold(2)), w(jold(3)), w(jold(4)), w(jold(7)), w(jvpgrp), &
+                    vmax, what)
+      if (vmax > tol_label) then
+        write(6, '(/,a)') ' @XZCCSDT-W, the labels of xzlabels are not symmetry labels of these spinors:'
+        write(6, '(a,a,a,es10.2,a)') '             an element of ', trim(what), ' that they forbid is ', &
+          vmax, '.  The labels are not used.'
+        write(6, '(a)') '             (Spinors of an SCF without the symmetry mix the labels: a pair of'
+        write(6, '(a)') '             Kramers partners has to be rotated into the symmetry first.)'
+        status = 1
+        return
+      end if
+    end if
+    if (nwe == 1) then
+      ximag = 0d0
+      do k = 1, 7
+        ximag = max(ximag, xzimag(nel(k), w(jold(k))))
+      end do
+      if (ximag > tol_imag) then
+        status = 2
+        return
+      end if
+    end if
+  end if
+  call xzrel(m)
+  if (nwe == 1) then
+    ! the real parts, moved together
+    call xzrel(mint)
+    do k = 1, 7
+      m = xzget(nel(k), names(k))
+      if (.not. xzdry) call xztoreal(nel(k), w(jold(k)), w(m))
+      jold(k) = m
+    end do
+  end if
+  joooo = jold(1)
+  jooov = jold(2)
+  joovv = jold(3)
+  jovvo = jold(4)
+  joovvp = jold(5)
+  jgpp = jold(6)
+  jovvq = jold(7)
+
+  ! ---- <ab||cd>: the record of the file is read where the blocks stay
+  m = xzmark()
   jvvvv = xzget(2 * pv * pv, 'record of moinpppp')
   krow = xzget(2 * nvp, 'row of <vv||vv>')
   ksrc = xzget(2 * nvp, 'permutation of the pairs')
-  if (.not. xzdry) call xzrdvvvv(w(jvvvv), w(jvpidx), w(krow), w(ksrc))
+  ksg = xzget(nvp, 'signs of the pairs')
+  if (.not. xzdry) then
+    call xzrdvvvv(w(jvvvv), w(jvpa), w(jvpb), w(krow), w(ksrc), w(ksg), offmax)
+    if (offmax > tol_label) then
+      write(6, '(/,a)') ' @XZCCSDT-W, the labels of xzlabels are not symmetry labels of these spinors:'
+      write(6, '(a,es10.2,a)') '             an element of <vv||vv> that they forbid is ', offmax, &
+        '.  The labels are not used.'
+      status = 1
+      return
+    end if
+    if (nwe == 1) then
+      if (xzimag(nvv, w(jvvvv)) > tol_imag) then
+        status = 2
+        return
+      end if
+      call xztoreal(nvv, w(jvvvv), w(jvvvv))
+    end if
+  end if
   call xzrel(m)
-  jvvvv = xzget(nwe * nvp * nvp, '<vv||vv> on a<b, c<d')
+  jvvvv = xzget(nwe * nvv, '<vv||vv> on a<b, c<d')
 end subroutine xzlayout
 
 ! ---------------------------------------------------------------------------

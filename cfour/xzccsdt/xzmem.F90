@@ -65,11 +65,14 @@ contains
     xztop = mark
   end subroutine
 
-  ! a dry run starts from the present top; xzdry_end gives its peak (words
-  ! from the start of the work array) and restores the state
-  subroutine xzdry_begin()
+  ! a dry run starts from the present top (or from the mark `start'); xzdry_end
+  ! gives its peak (words from the start of the work array) and restores the
+  ! state
+  subroutine xzdry_begin(start)
+    integer(8), intent(in), optional :: start
     save_top = xztop
     save_peak = xzpeak
+    if (present(start)) xztop = start
     xzpeak = xztop
     xzdry = .true.
   end subroutine

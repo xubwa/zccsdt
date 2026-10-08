@@ -10,6 +10,13 @@
 ! Pairs p<q in the order (0,1), (0,2), .., (1,2), ..: the first index
 ! slowest; triples p<q<r likewise (lexicographic).
 !
+! With symmetry labels (ncls > 1 classes) the active spinors are in the
+! order of their classes (occupied and virtual each; by CFOUR's order inside
+! a class), and pairs and triples are numbered by groups: the sum of the
+! classes of their indices first, lexicographic inside a group.  A block of
+! an amplitude or of an integral on pairs or triples is then a range.
+! Without labels there is one class and one group: the dense case.
+!
 module xzdata
   implicit none
 
@@ -20,6 +27,39 @@ module xzdata
   integer(8) :: nto = 0, nvt = 0    ! triples i<j<k, a<b<c
   integer(8) :: nfrozen = 0, ndropped = 0, ntot = 0
   integer(8) :: nwe = 2             ! words of an element: 2 complex, 1 real
+  integer(8) :: n3 = 0              ! elements of T3 as it is stored (the allowed blocks)
+
+  ! ---- symmetry labels (the file xzlabels) and their classes
+  integer, parameter :: maxcls = 64, maxgrp = 3 * maxcls
+  logical :: have_labels = .false.  ! the file is there and can be used
+  integer(8) :: modulus = 0
+  integer(8) :: ncls = 1            ! classes of the labels: (label - smallest) / step
+  integer(8) :: npg = 1, ntg = 1    ! groups of pairs (2 ncls - 1) and of triples (3 ncls - 2)
+  integer(8) :: ocoff(0:maxcls) = 0, vcoff(0:maxcls) = 0    ! first spinor of a class
+  integer(8) :: opoff(0:maxgrp) = 0, vpoff(0:maxgrp) = 0    ! first pair of a group
+  integer(8) :: otoff(0:maxgrp) = 0, vtoff(0:maxgrp) = 0    ! first triple of a group
+  integer(8) :: boff(0:maxgrp) = 0  ! first element of the block of T3 of a group of triples
+  integer(8) :: vvoff(0:maxgrp) = 0 ! first element of the block of <vv||vv> of a group of pairs
+  integer(8) :: nvv = 0             ! elements of <vv||vv> on its diagonal pair blocks
+  integer(8) :: nqmax = 0           ! pairs a<b of the largest group
+  ! the pairs (a, i) with s(a) - s(i) = delta (the ring term of pass 2 couples
+  ! them) and the right-hand sides of the drive terms by (group of Q, class of i)
+  integer(8) :: ndel(-maxcls:maxcls) = 0    ! pairs (a, i) of a delta
+  integer(8) :: wdoff(-maxcls:maxcls) = 0   ! first element of the ring operator of a delta
+  integer(8) :: nwd = 0                     ! elements of the ring operators of all deltas
+  integer(8) :: bdoff(0:maxgrp, 0:maxcls) = -1      ! first element of a right-hand side (-1: none)
+  integer(8) :: nbd = 0                     ! elements of all of them
+  ! (small integer arrays, not in the work array: the plan needs them before
+  ! anything is placed)
+  integer(8), allocatable :: lab(:)         ! labels of all spinors, CFOUR's order (0:ntot-1)
+  integer(8), allocatable :: operm(:), vperm(:)     ! CFOUR's number (from 0, among the active
+                                            ! occupied or virtual ones) of the spinors in the order here
+  integer(8), allocatable :: ocls(:), vcls(:)       ! their classes
+  integer(8) :: jopgrp = 0, jvpgrp = 0      ! group of a pair
+  integer(8) :: jobase = 0, jvcol = 0       ! T3[I][A] = t3(obase[I] + vcol[A]) in its block
+  integer(8) :: josig = 0, jvsig = 0        ! (signs of the layout: all one)
+  integer(8) :: jvci = 0                    ! vcol[vtri[d][Q]] (int32)
+  integer(8) :: jrowpos = 0                 ! place of (a, i) among the pairs of s(a) - s(i)
 
   ! ---- the job
   character(len=16) :: method = ' '

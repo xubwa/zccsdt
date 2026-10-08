@@ -22,13 +22,16 @@ CFLAGS  := -O3 -xHost -std=c99 -qopenmp -complex-limited-range -DZC_USE_MKL -DMK
            -I$(MKLROOT)/include
 BLAS    := -L$(MKLROOT)/lib/intel64 -lmkl_intel_ilp64 -lmkl_intel_thread -lmkl_core -liomp5 \
            -lpthread -lm -ldl
-LIBS    := -L$(CFOUR)/lib -llibr $(BLAS) -lrt
+# (the run-time libraries are found without the oneAPI environment)
+ICLIB   ?= $(dir $(shell which ifort 2>/dev/null))../../compiler/lib/intel64_lin
+RPATH   := -Wl,-rpath,$(MKLROOT)/lib/intel64 -Wl,-rpath,$(abspath $(ICLIB))
+LIBS    := -L$(CFOUR)/lib -llibr $(BLAS) -lrt $(RPATH)
 
 # the C kernels that the program calls
 KERNELS := ccsdt_t3 t3pack tnpack
 MODS    := xzkern xzmem xzdata xzdiis
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
-INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzdiisg.inc xzcc.inc xzq.inc
+INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzq.inc
 
 OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil $(KERNELS)))
 
