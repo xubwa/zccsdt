@@ -476,3 +476,62 @@ def test_ccsd_limit_with_frozen_spinors(frozen):
     assert abs(rel.mo_coeff - C).max() == 0
     assert abs(rel.unrelaxed - plain).max() < 1e-10
     assert abs(rel.relaxed - want).max() < 1e-9
+
+
+def test_front_end_layout_of_a_linear_molecule():
+    '''What zccsdt.GCCSDT hands over for a linear molecule: real spinors
+    adapted to m_j, in the order of their labels, and T3 in the symmetry
+    blocks of its engine - and lambda3 in the same blocks.  HF / 6-31G with
+    X2C, the 1s pair of fluorine frozen: the relaxed dipole derivative
+    against that of the total energy of the front end with the SCF repeated
+    in the field.'''
+    from math import comb
+    import zccsdt
+    from zccsdt.cc import ccsdt_opt
+    mol = gto.M(atom='H 0 0 0; F 0 0 0.9168', basis='6-31g', verbose=0)
+    make_scf, z = _x2c_in_field(mol)
+
+    def run(eps):
+        mf = make_scf(eps)
+        mycc = zccsdt.GCCSDT(mf, frozen=2)
+        mycc.verbose, mycc.conv_tol, mycc.conv_tol_normt = 0, 1e-13, 1e-10
+        mycc.kernel()
+        assert mycc.converged
+        return mf, mycc
+    mf, mycc = run(0.0)
+    eris = mycc.ao2mo()
+    om, vm = t3pack.maps_for(eris)
+    o, v = mycc.t1.shape
+    assert om.spins is not None and eris.dtype == np.float64 and np.asarray(mycc.t3).size < comb(o, 3) * comb(v, 3)
+    # Lambda of the dense reference, lambda3 put into the blocks of the engine
+    lex = t3pack.triple_map(v)
+    vvvv = ccsdt_opt._unpack_pairs(np.asarray(eris._vvvv_pp).T, lex, lex).transpose(2, 3, 0, 1)
+    full = E.ERIs(vvvv=vvvv, **{k: getattr(eris, k) for k in (
+        'nocc', 'fock', 'mo_energy', 'e_hf', 'oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv')})
+    fock, g, mo_e, _ = R.integrals(full)
+    t3 = Q.expand(ccsdt_opt.packed_t3(eris, mycc.t3), o, v, 3)
+    rl = LR.kernel(fock, g, mo_e, o, [mycc.t1, mycc.t2, t3], conv_tol_normt=1e-11)
+    assert rl.converged
+
+    def order(m):
+        y = m.n - 1 - m.triples
+        return comb(m.n, 3) - 1 - y[:, 0] * (y[:, 0] - 1) * (y[:, 0] - 2) // 6 - y[:, 1] * (y[:, 1] - 1) // 2 - y[:, 2]
+    eng = ccsdt_opt.engine_for(eris, np.asarray(mycc.t3).dtype)
+    l3 = eng.L.from_dense(np.ascontiguousarray(packed(rl.lams[2])[np.ix_(order(om), order(vm))]))
+    assert l3.shape == np.asarray(mycc.t3).shape
+    # the spinors of the integrals, as the front end has them
+    fo, _, _, _ = mycc._active()
+    oc, vi = mycc._sorted
+    Cs = mycc._axial()
+    rel = D.relaxed_rdm1(mf, eris, mycc.t1, mycc.t2, mycc.t3, rl.lams[0], rl.lams[1], l3,
+                         Cs[:, np.concatenate((oc, vi))], frozen_occ=Cs[:, fo], tol=1e-11)
+    gnh = LR.orbital_gradient(fock, g, o, [mycc.t1, mycc.t2, t3], rl.lams, dressed=True)
+    assert abs(rel.result.gnh - gnh).max() < 1e-9 * abs(gnh).max()
+    Vmo = rel.mo_coeff.conj().T @ z @ rel.mo_coeff
+    relaxed = np.einsum('pq,qp', Vmo, rel.relaxed).real
+    eps = 1e-3
+    e = {k: run(k * eps)[1].e_tot for k in (-2, -1, 1, 2)}
+    fd = (8 * (e[1] - e[-1]) - (e[2] - e[-2])) / (12 * eps)
+    print('HF / 6-31G X2C through the front end: relaxed %.12f finite field %.12f, difference %.1e'
+          % (relaxed, fd, relaxed - fd))
+    assert abs(relaxed - fd) < 2e-10
