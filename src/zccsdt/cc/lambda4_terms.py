@@ -59,7 +59,7 @@ from fractions import Fraction
 import numpy as np
 
 from zccsdt.cc import ccsdtq_terms as Q, lambda_terms as L3
-from zccsdt.cc.lambda_terms import OCC, product, total  # noqa: F401
+from zccsdt.cc.lambda_terms import OCC, product  # noqa: F401
 
 
 def _t(coef, *factors):
@@ -537,6 +537,52 @@ GRADIENT = [
 # ------------------------------------------------------------ dense evaluation
 
 AMPLITUDES = ('t2', 't3', 't4', 'l1', 'l2', 'l3', 'l4')
+SLABS = 2 ** 26                 # elements of t4 from which a product with t4 or l4 is made in slabs
+_PATHS = {}
+
+
+def total(terms, arrays, nocc, out):
+    '''sum of coefficient * product (lambda_terms.total).  For large
+    arrays of rank eight the products with t4 or l4 are made for one value
+    of an occupied index at a time (product_slabs).'''
+    big = max((arrays[k].size for k in ('t4', 'l4') if k in arrays), default=0) >= SLABS
+    x = 0
+    for coef, factors in terms:
+        if big and quadruple([(coef, factors)]):
+            x = x + float(coef) * product_slabs(factors, arrays, nocc, out)
+        else:
+            x = x + float(coef) * product(factors, arrays, nocc, out)
+    return x
+
+
+def product_slabs(factors, arrays, nocc, out):
+    '''lambda_terms.product, summed (or, for an external letter, put
+    together) over the values of one occupied letter of l4 (of t4 if the
+    term has no l4) - the one that most of the large factors share: the
+    operands of every step are views of an eighth-rank array with one index
+    fixed, so that no copy of a whole one is made where the letter is in
+    both.'''
+    n = arrays['v'].shape[0]
+    kind, ix = next(f for f in factors if f[0] == 'l4') if any(k == 'l4' for k, _ in factors) else \
+        next(f for f in factors if f[0] == 't4')
+    large = [i2 for k2, i2 in factors if k2 in ('l4', 't4', 'l3', 't3')]
+    letter = max(ix[:4], key=lambda c: sum(c in i2 for i2 in large))
+    sub = ','.join(i2 for _, i2 in factors) + '->' + out
+    parts = []
+    for m in range(nocc):
+        ops = []
+        for k2, i2 in factors:
+            sl = tuple(slice(m, m + 1) if c == letter else
+                       slice(None) if k2 not in ('f', 'v') else
+                       slice(0, nocc) if c in OCC else slice(nocc, n) for c in i2)
+            ops.append(arrays[k2][sl])
+        key = (sub,) + tuple(a.shape for a in ops)
+        if key not in _PATHS:
+            _PATHS[key] = np.einsum_path(sub, *ops, optimize='optimal')[0]
+        parts.append(np.einsum(sub, *ops, optimize=_PATHS[key]))
+    if letter in out:
+        return np.concatenate(parts, axis=out.index(letter))
+    return sum(parts)
 
 
 def residual(rank, arrays, nocc):

@@ -76,6 +76,21 @@ def test_ccsdt_limit():
         assert abs(a - b).max() < 1e-13 * abs(b).max()
 
 
+def test_products_in_slabs(monkeypatch):
+    '''The evaluation for large arrays - every product with t4 or l4 for
+    one value of an occupied index at a time - gives the residuals, the
+    densities and the gradient of the plain one.'''
+    no, nv = 5, 4
+    f, v, amps, lams = _random(no, nv, 7)
+    want = (LR.residuals(lams, amps, f, v, no), LR.densities(amps, lams, no),
+            LR.orbital_gradient(f, v, no, amps, lams, dressed=True))
+    monkeypatch.setattr(L, 'SLABS', 1)
+    got = (LR.residuals(lams, amps, f, v, no), LR.densities(amps, lams, no),
+           LR.orbital_gradient(f, v, no, amps, lams, dressed=True))
+    for a, b in zip(want[0] + list(want[1]) + [want[2]], got[0] + list(got[1]) + [got[2]]):
+        assert abs(a - b).max() < 1e-13 * abs(a).max()
+
+
 SCALES = ((1, 0.3), (2, 0.2), (3, 0.1), (4, 0.05))
 
 
