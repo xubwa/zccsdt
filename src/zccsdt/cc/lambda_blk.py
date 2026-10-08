@@ -190,10 +190,10 @@ class BlockL3:
                             X = gemm(np.ascontiguousarray(G, dtype=dtype).reshape(ne + nj, -1), Lf)
                             Y = gemm(Lf, Gy).reshape(nbp, nd, nj + ne)
                             X = X.reshape(ne + nj, nm, nQ)
-                            X3[e0:e1, m0:m1, Qlo:Qhi] += X[:ne]
-                            X3[nv + j0:nv + j1, m0:m1, Qlo:Qhi] += X[ne:]
-                            Yall[p0:p1, d0:d1, j0:j1] += Y[:, :, :nj]
-                            Yall[p0:p1, d0:d1, no + e0:no + e1] += Y[:, :, nj:]
+                            t3pack.axpby(X3[e0:e1, m0:m1, Qlo:Qhi], X[:ne])
+                            t3pack.axpby(X3[nv + j0:nv + j1, m0:m1, Qlo:Qhi], X[ne:])
+                            t3pack.axpby(Yall[p0:p1, d0:d1, j0:j1], Y[:, :, :nj])
+                            t3pack.axpby(Yall[p0:p1, d0:d1, no + e0:no + e1], Y[:, :, nj:])
         for delta in e.deltas:
             fl = self.flat[delta]
             Dr[fl[:, None], fl] = Dd[delta]
@@ -242,8 +242,11 @@ class BlockL3:
         L3 = self.view(L3)
         B3 = Bdrv.reshape(K, no, nvp)
         Wd = None if WL is None else self._ring(WL)
-        kcols = [np.concatenate([off + np.arange(*(vr[s] if kind == 'v' else orr[s]))
-                                 for off, kind in segs]).astype(np.int64) for s in range(nc)]
+        # the columns of class s: a range of every part
+        kseg = [[(off + r[0], off + r[1]) for off, r in
+                 ((off, vr[s] if kind == 'v' else orr[s]) for off, kind in segs)] for s in range(nc)]
+        kcols = [np.concatenate([np.arange(a, b) for a, b in kseg[s]]).astype(np.int64)
+                 for s in range(nc)]
         U0 = np.ascontiguousarray(U[self.flat[0]], dtype=dtype)
         bd_cache = {}           # B[x, (i, Q)] per (gQ, class of i), x of class gQ - class(i)
 
@@ -252,8 +255,11 @@ class BlockL3:
                 (i0, i1), cols = orr[si], kcols[gQ - si]
                 Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
                 B = np.empty((len(cols), i1 - i0, Qhi - Qlo), dtype=dtype)
-                for k, x in enumerate(cols):
-                    B[k] = B3[x, i0:i1, Qlo:Qhi]
+                k = 0
+                for a, b in kseg[gQ - si]:
+                    if b > a:
+                        t3pack.axpby(B[k:k + b - a], B3[a:b, i0:i1, Qlo:Qhi], 1.0, 0.0)
+                    k += b - a
                 bd_cache[gQ, si] = B.reshape(len(cols), -1)
             return bd_cache[gQ, si]
 

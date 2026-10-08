@@ -40,10 +40,14 @@ product of the packed arrays, L3p T3p^T (C(o,3)^2 C(v,3)).
 
 Which term of the tables is where: docs/lambda.md, section 9.
 
-Dense layout only (no symmetry labels): everything that touches the packed
-arrays goes through DenseL3, whose methods are what an engine on the blocks
-of a label has to provide.  The memory is planned (plan_memory); T3, l3 and
-the residual are in ordinary memory.
+Everything that touches the packed arrays goes through an engine: DenseL3
+for the layout above, and lambda_blk.BlockL3 for l3 in the blocks of the
+symmetry labels of the integrals (kernel(..., blocks=True),
+make_intermediates(..., blocks=True)), with the same methods on the layout
+of the block engine of the T3 equation; the operands are the same dense
+arrays, pairs and triples in the order of their groups, and the pp operator
+its diagonal pair blocks.  The memory is planned (plan_memory,
+plan_memory_blocks); T3, l3 and the residual are in ordinary memory.
 '''
 
 import ctypes
@@ -892,11 +896,26 @@ def plan_for(eris, t1, dtype, opts, blocks=False):
     cached = ccsdt_opt.cached_bytes(eris)
     om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
     budget = memory.budget(opts.max_memory)
+    # what the dressing puts on the integral object if it is not there for
+    # these maps: the bare <my||Q> and <mn||Q> on pairs and, for the blocks
+    # of the labels, the pair blocks of the bare <ab||de>
+    bare = 0
+    pm = eng.vm if blocks else vm
+    isz_b = np.dtype(np.result_type(eris.oovv)).itemsize
+    held = eris.__dict__.get('_bare_Q')
+    if held is None or held[0] is not pm:
+        bare += (nocc * nvir + om.npair) * pm.npair * isz_b
+    held = eris.__dict__.get('_vvvv_blocks')
+    if blocks and (held is None or held[0] is not pm):
+        bare += sum((hi - lo) ** 2 for lo, hi in pm.blocks) * isz_b
     if budget is not None:      # (what is there already: T3, kept arrays of the amplitude step)
-        budget += cached + (eng.size if blocks else om.ntri * vm.ntri) * isz
+        budget += cached + (eng.size if blocks else om.ntri * vm.ntri) * isz - bare
     if blocks:
-        return plan_memory_blocks(eng, budget, opts.mem_mb, space)
-    return plan_memory(nocc, nvir, isz, budget, opts.mem_mb, space)
+        plan = plan_memory_blocks(eng, budget, opts.mem_mb, space)
+    else:
+        plan = plan_memory(nocc, nvir, isz, budget, opts.mem_mb, space)
+    plan.need += bare
+    return plan
 
 
 # ------------------------------------------------------------------- solver

@@ -276,6 +276,31 @@ def test_front_end(hbr, monkeypatch):
     assert abs(d1 - l1).max() < 1e-10 and abs(d2 - l2).max() < 1e-10
 
 
+def test_plan_counts_the_bare_integrals(hbr):
+    '''plan_for: what the dressing keeps on the integral object is part of
+    the plan where it is not there yet.'''
+    eris, t1, t2, t3, ref = hbr
+    e = _dense(eris)
+    e.use_labels = True
+    for key in ('_bare_Q', '_vvvv_blocks'):
+        e.__dict__.pop(key, None)
+    opts = solver.Options(max_memory=8000)
+    om, vm = t3pack.maps_for(e)
+    cold = LO.plan_for(e, t1, t3.dtype, opts, blocks=True)
+    ccsdt_opt._bare_Q(e, om, vm)
+    half = LO.plan_for(e, t1, t3.dtype, opts, blocks=True)
+    ccsdt_opt.vvvv_packed(e, vm)
+    warm = LO.plan_for(e, t1, t3.dtype, opts, blocks=True)
+    assert cold.need - half.need == (8 * 28 + 28) * 378 * 8
+    assert half.need - warm.need == sum((hi - lo) ** 2 for lo, hi in vm.blocks) * 8
+    assert warm.need == LO.plan_memory_blocks(LO.block_engine(e, t3.dtype), None, 2000.0, 8).need
+    # and on the packed block: the bare integrals on the pairs in lexicographic order
+    d = _dense(eris)
+    d.__dict__.pop('_bare_Q', None)
+    cold = LO.plan_for(d, t1, t3.dtype, opts)
+    assert cold.need == LO.plan_memory(8, 28, 8, None, 2000.0, 8).need + (8 * 28 + 28) * 378 * 8
+
+
 MODELS = {'one': ([0] * 6, [0] * 30),
           'six': ([-3, -1, -1, 1, 1, 3], [-5] * 2 + [-3] * 5 + [-1] * 8 + [1] * 8 + [3] * 5 + [5] * 2)}
 
