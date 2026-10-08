@@ -46,6 +46,14 @@ target_link_libraries(zc_t4sym PUBLIC OpenMP::OpenMP_C m)
 set_target_properties(zc_t4sym PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
 
+# CCSDT(Q)_Lambda: the sums over the virtual quadruples with a left-hand side
+# of its own (zccsdt/cc/quadruples_lambda.py, quadruples_lambda_sym.py)
+add_library(zc_qlambda SHARED qlambda.c)
+target_compile_options(zc_qlambda PRIVATE -O3 -march=native -fcx-limited-range)
+target_link_libraries(zc_qlambda PUBLIC OpenMP::OpenMP_C m)
+set_target_properties(zc_qlambda PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../src/zccsdt/lib)
+
 # the Lambda equations of CCSDT on packed Lambda_3 (zccsdt/cc/lambda_opt.py):
 # an intermediate packed over a virtual pair, expanded and contracted with the
 # columns of the packed pp operator (the passes themselves use zc_t3pack and
