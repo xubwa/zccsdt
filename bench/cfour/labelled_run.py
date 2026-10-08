@@ -15,6 +15,11 @@ usage: python bench/cfour/labelled_run.py CHAINDIR OUTDIR [phases]
   phases:   multiply every active spinor by a phase exp(i x), x random with
             this seed: complex integrals with the same labels.
 
+and: python bench/cfour/labelled_run.py --shuffle SRC DST SEED
+  the labelled directory SRC with its active occupied and virtual spinors in
+  a random order (the labels with them): the native program orders the
+  spinors by their labels itself, the Python program then runs dense.
+
 and: python bench/cfour/labelled_run.py --run OUTDIR METHOD [dense]
   the Python program on the files of OUTDIR, in the blocks of the labels
   (default) or with the labels not used (dense); prints the energies.
@@ -71,6 +76,34 @@ def make(chain, out, seed=None):
     print('E(SCF) = %.12f' % eris.e_hf)
 
 
+def shuffle(src, dst, seed):
+    from zccsdt import cfour
+    x = cfour.read(src)
+    eris = cfour.container(x, packed_vvvv=False, labels=True)
+    no, n = eris.nocc, eris.nmo
+    rng = np.random.default_rng(int(seed))
+    po, pv = rng.permutation(no), rng.permutation(n - no)
+    perm = np.concatenate((po, no + pv))
+    sl = {'o': po, 'v': pv}
+    for key in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv'):
+        a = np.asarray(getattr(eris, key))
+        setattr(eris, key, np.ascontiguousarray(a[np.ix_(*[sl[c] for c in key])]))
+    eris.mo_energy = np.asarray(eris.mo_energy)[perm].copy()
+    eris.fock = np.diag(eris.mo_energy).astype(complex)
+    eris.labels = np.asarray(eris.labels)[perm]
+    os.makedirs(dst, exist_ok=True)
+    for name in os.listdir(src):
+        if os.path.isfile(os.path.join(src, name)) and not name.startswith(('moin', 'PPPH', 'XZ', 'xzccsdt')):
+            shutil.copy(os.path.join(src, name), dst)
+    tmp = os.path.join(dst, 'written')
+    cfour.write(tmp, eris, nfrozen=x.nfrozen)
+    for name in os.listdir(tmp):
+        if name not in ('JOBARC', 'JAINDX'):
+            shutil.move(os.path.join(tmp, name), os.path.join(dst, name))
+    shutil.rmtree(tmp)
+    print('labels of the active spinors now:', eris.labels)
+
+
 def run(directory, method, dense=False):
     import zccsdt
     from zccsdt import cfour
@@ -92,7 +125,9 @@ def run(directory, method, dense=False):
 
 
 if __name__ == '__main__':
-    if sys.argv[1] == '--run':
+    if sys.argv[1] == '--shuffle':
+        shuffle(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif sys.argv[1] == '--run':
         run(sys.argv[2], sys.argv[3], len(sys.argv) > 4 and sys.argv[4] == 'dense')
     else:
         make(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
