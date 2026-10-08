@@ -31,7 +31,7 @@ print(mycc.e_tot, mycc.e_tot_q)
 
 As in PySCF: `conv_tol` (energy, default 1e-10), `conv_tol_normt` (1e-7
 for the residual norm of RCCSDT, 1e-8 for the step norm of the others),
-`max_cycle` (100), `diis_space` (8), `diis_file`, `incore_complete`,
+`max_cycle` (100), `diis_space` (8, a maximum: see `max_disk`), `diis_file`, `incore_complete`,
 `frozen` (core orbitals: spatial for RCCSDT, per spin for UCCSDT, spin
 orbitals or spinors - or a list of them - for GCCSDT and GCCSDTQ), `verbose`,
 `stdout`, `callback`.  In
@@ -42,12 +42,101 @@ addition:
   of the job (the Slurm cgroup) leave, not 4000 MB.  What does not fit goes
   to scratch files (`ZCCSDT_TMPDIR`, else PySCF's TMPDIR); see Section 3 of
   `docs/factorization.md` and `docs/spin_adapted.md`.
-- `diis_t3`: T3 in the DIIS vectors (default); `False` is an option for DIIS
-  on T1 and T2 only.
+- `max_disk`: MB for the scratch files of the process - the disk that the
+  run may use in its scratch location, the counterpart of `max_memory`.
+  The default `None` means the environment variable `ZCCSDT_MAX_DISK` (MB)
+  if it is set (for tests, and for a disk that is shared), else the free
+  space of the scratch directory (`statvfs` of `ZCCSDT_TMPDIR`, else
+  PySCF's TMPDIR; of the directory of `diis_file` for the DIIS vectors)
+  less a reserve of 2% (at most 1 GB).  It is never taken to be more than
+  that free space.  See "Disk" below for what is done with it.
+- `diis_space` is the number of DIIS vectors that is asked for: a maximum.
+- `diis_t3`: T3 in the DIIS vectors.  The default `None` means yes, unless
+  neither the disk nor the memory holds three vectors of it (then DIIS on T1
+  and T2, T3 by its Jacobi step: a few more iterations, about a quarter for
+  N2 and H2S / cc-pVTZ); `True` insists (an error then); `False` is DIIS on
+  T1 and T2 only.  `diis_t4` of GCCSDTQ is the same for T4.
 - `plan`: an explicit memory plan instead of the automatic one.
 
+### Disk
+
+Every scratch file takes its whole space when it is created
+(`posix_fallocate`), so a disk that is too small is an `OSError` with the
+numbers at that point and never a bus error (SIGBUS) hours later on a write
+to a mapped array.  The solvers do not let it come to that: before the
+first iteration they plan the disk (`zccsdt/disk.py`), as they plan the
+memory.
+
+1. The arrays that the memory plan maps to scratch files come first (T3
+   or T4 and their residuals, the packed <ab||cd>, the kept rows of the
+   ladder operator).  If `max_disk` does not hold them the run stops with
+   a `DiskFullError` (an `OSError`, ENOSPC) before anything is allocated.
+2. The DIIS vectors get the rest.  One stored vector is a pair - the
+   amplitudes and their error vector - of p bytes for its large parts
+   (2 T3 for CCSDT and its Lambda equations, 2 (T3 + T4) for CCSDTQ).  In
+   this order of preference:
+   - (a) all `diis_space` pairs in the scratch file (the default
+     placement), if the disk budget holds them;
+   - (b) a split: as many pairs in the file as the disk holds, the others
+     in memory - in what `max_memory` leaves beyond the memory plan of the
+     solver (nothing, if that plan had to map its own T3);
+   - (c) a smaller subspace: n = floor(disk / p) + floor(memory / p) pairs,
+     if n is at least 3;
+   - (d) DIIS without T3 (T4 for CCSDTQ, l3 for the Lambda equations),
+     which then takes its Jacobi step, if not even 3 pairs fit;
+   - (e) an error before the first iteration, with what was needed and what
+     is there - only with `diis_t3 = True` (no (d)), or when the mapped
+     arrays of step 1 do not fit.
+3. (c) and (d) are reductions that the log states with the numbers (the
+   line `DIIS vectors` of the memory plan: asked for, used, bytes per pair,
+   the two budgets); they are not errors, because `diis_space` is a
+   maximum.  `incore_complete` is kept as it is asked for: all pairs in
+   memory, whatever `max_memory`, and a `MemoryError` if the node does not
+   hold them.  The plan that was used is `mycc.diis_plan_used`.
+
+All file-backed DIIS vectors are created in the first iteration that stores
+one, so a disk that another job has filled since the plan was made shows
+then.  `DirectZCCSD` (CCSD and its Lambda equations) has `max_disk` too, in
+a smaller form: where its memory plan has the DIIS vectors in the scratch
+file, as many of `diis_space` are kept as the disk holds, at least 3 (T2
+cannot be left out; below that the run stops before the iterations).  Not
+planned ahead: its other scratch files (integrals, intermediates, (T)) and
+those of the perturbative corrections (Q), (P) and their gradients - they
+are checked when they are created (free space, `ZCCSDT_MAX_DISK`, the
+`max_disk` of a CCSDT or CCSDTQ run that is under way), with the same kind
+of message.  The integral files that PySCF writes (`lib.H5TmpFile` of an
+out-of-core transformation) are neither counted nor preallocated; a full
+disk is an error of HDF5 there, not a bus error.  A scratch directory on
+tmpfs (`/dev/shm`) takes memory, not disk: its pages count against the
+memory limit of the job, which this plan does not know.
+
+`zccsdt.disk.dry_run(nocc, nvir, dtype, max_memory, max_disk)` gives the two
+plans of a spin-orbital or spinor CCSDT calculation without integrals (T3 on
+its unique block, no symmetry labels: the upper bound), for choosing the
+memory and the local disk of a job before it is submitted.  Benzene /
+cc-pVDZ with X2C, 30 occupied and 186 virtual spinors: the complex T3 takes
+68.5 GB, a pair 137.1 GB, the 8 pairs of the default 1.1 TB.
+
+```python
+from zccsdt import disk
+print(disk.describe(*disk.dry_run(30, 186, complex, max_memory=320000, max_disk=900000)))
+print(disk.describe(*disk.dry_run(30, 186, complex, max_memory=1400000, max_disk=900000)))
+```
+
+```
+memory plan  157.7 GB of memory, 0 bytes of disk: T3 in memory, its residual in memory
+DIIS         7 vectors with T3, 137.1 GB per pair: 6 in a scratch file (822.6 GB of disk), 1 in memory (137.1 GB); reduced from the 8 asked for (diis_space): disk 900.0 GB, memory 162.3 GB; memory 137.1 GB, disk 822.6 GB
+memory plan  157.7 GB of memory, 0 bytes of disk: T3 in memory, its residual in memory
+DIIS         8 vectors with T3, 137.1 GB per pair: 6 in a scratch file (822.6 GB of disk), 2 in memory (274.2 GB); disk budget 900.0 GB; memory 274.2 GB, disk 822.6 GB
+```
+
+With 320 GB of memory and 900 GB of disk the run keeps 7 of the 8 vectors
+(6 in the file, 1 in memory); with 1.4 TB of memory all 8 (6 in the file, 2
+in memory).  These are plans, computed from the sizes; neither calculation
+has been run.
+
 Results: `converged`, `e_hf`, `e_corr`, `e_tot`, `cycles`, `t1`, `t2`,
-`t3`, `plan_used`, `timings` (wall time per iteration), `peak_memory`, and
+`t3`, `plan_used`, `diis_plan_used`, `timings` (wall time per iteration), `peak_memory`, and
 after `ccsdt_q()` `e_q`, `e_q5`, `e_tot_q`; for GCCSDTQ in addition `t4`,
 `e_ccsdt` and `ccsdt_run`, `e_corr` and `e_tot` are those of CCSDTQ, and
 after `ccsdtq_p()` `e_p`, `e_tot_p`.
@@ -415,7 +504,7 @@ everything in the directory they run in.  What is read: `JOBARC` and
 | `CC_CONV=N` | `conv_tol_normt = 1e-N`, `conv_tol = 1e-(N+2)` |
 | `CC_MAXCYC` | `max_cycle` |
 | `MEMORY_SIZE`, `MEM_UNIT` | `max_memory` (CFOUR counts 1 GB as 1e9 bytes) |
-| section `%zccsdt` | `method=`, `max_memory=` (MB), `conv_tol=`, `conv_tol_normt=`, `max_cycle=`: one per line, they override the keywords |
+| section `%zccsdt` | `method=`, `max_memory=` (MB), `max_disk=` (MB, CCSDT and beyond), `conv_tol=`, `conv_tol_normt=`, `max_cycle=`: one per line, they override the keywords |
 
 The thresholds and the memory are taken as joda understood them (the
 flags in `JOBARC`), so abbreviated keywords and defaults are CFOUR's.

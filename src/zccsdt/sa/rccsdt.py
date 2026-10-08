@@ -19,7 +19,7 @@ operator; the first version (residuals_terms) folds both into the ladder
 operators.  Design notes: docs/spin_adapted.md.
 '''
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -45,6 +45,13 @@ class MemoryPlan:
                                    # between the stages and the iterations (False:
                                    # memory is short, each goes after its stage)
     need: int = 0                  # bytes of ordinary memory the plan takes
+    disk: int = 0                  # bytes that the plan puts into scratch files (T3, its
+                                   # residual, the packed <vv|vv> if it is built there, the
+                                   # kept rows of the dressed operator); the DIIS vectors
+                                   # come on top
+    # bytes of the memory budget beyond ``need`` (None: no budget known; not
+    # a part of the plan: two plans that differ in it alone are the same)
+    spare: int = field(default=None, compare=False)
 
 
 def pair_rows(v, a0, a1):
@@ -290,7 +297,7 @@ def residuals_terms(ints, blocks, t1, t2, t3b):
 
 def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=8,
            verbose=False, diis_file=None, incore_complete=False, max_memory=None, plan=None,
-           diis_t3=True, callback=None):
+           diis_t3=None, callback=None, max_disk=None, diis_plan=None):
     '''Closed-shell spin-adapted CCSDT (Jacobi steps with DIIS).
 
     DIIS storage follows the PySCF settings (zccsdt.cc.diis): unless
@@ -306,11 +313,22 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
     everything in memory whatever the budget; ``plan`` gives a MemoryPlan
     explicitly.
 
-    ``diis_t3=False`` (an option, never chosen automatically): DIIS on T1 and
-    T2 only, T3 follows by its Jacobi step.  No T3-sized DIIS vectors are
-    stored then (2 ``diis_space`` of them otherwise) and an iteration does
-    without their passes, at the price of a few more iterations (about a
-    quarter more for N2 and H2S / cc-pVTZ).
+    ``max_disk`` (MB; default: ZCCSDT_MAX_DISK, else the free space of the
+    scratch directory less a reserve) is what the scratch files of the run
+    may take: first the mapped arrays of the plan (DiskFullError before
+    anything is allocated if they do not fit), then the DIIS vectors
+    (diis_plan_for, zccsdt.disk): ``diis_space`` is a maximum - all of them
+    in the file, else some in the memory that the plan leaves, else fewer,
+    else DIIS without T3.  ``diis_plan`` gives a zccsdt.disk.DiisPlan
+    explicitly; the one used is the ``diis_plan`` of the result.
+
+    ``diis_t3=False``: DIIS on T1 and T2 only, T3 follows by its Jacobi
+    step.  No T3-sized DIIS vectors are stored then (2 ``diis_space`` of them
+    otherwise) and an iteration does without their passes, at the price of a
+    few more iterations (about a quarter more for N2 and H2S / cc-pVTZ).
+    The default (None) is DIIS with T3 unless neither the disk nor the
+    memory holds three vectors of it; ``diis_t3=True`` insists (an error
+    then).
 
     numpy's own BLAS (OpenBLAS) is kept single-threaded while it runs: its
     spinning threads would otherwise compete with the MKL threads of
@@ -322,14 +340,42 @@ def kernel(ints, conv_tol=1e-10, conv_tol_normt=1e-7, max_cycle=200, diis_space=
     ints.__dict__['_max_memory'] = max_memory       # for the integral transformations
     if plan is None:
         plan = make_plan(ints, max_memory, incore_complete)
-    args = (ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
-            incore_complete, plan, diis_t3, callback)
-    try:
-        from threadpoolctl import threadpool_limits
-    except ImportError:
-        return _kernel(*args)
-    with threadpool_limits(limits={'openblas': 1}):
-        return _kernel(*args)
+    from zccsdt import disk
+    with disk.limit(max_disk):
+        # (before anything is allocated: the disk holds the plan or the run stops here)
+        if diis_plan is None:
+            diis_plan = diis_plan_for(ints, plan, diis_space, diis_file, incore_complete, diis_t3,
+                                      max_disk)
+        args = (ints, conv_tol, conv_tol_normt, max_cycle, diis_plan, verbose, diis_file,
+                incore_complete, plan, diis_plan.with_big, callback)
+        try:
+            from threadpoolctl import threadpool_limits
+        except ImportError:
+            return _kernel(*args)
+        with threadpool_limits(limits={'openblas': 1}):
+            return _kernel(*args)
+
+
+def diis_plan_for(ints, plan, diis_space=8, diis_file=None, incore_complete=False, diis_t3=None,
+                  max_disk=None):
+    '''Where the DIIS vectors of kernel() with the MemoryPlan ``plan`` go
+    (zccsdt.disk.DiisPlan; the rule: zccsdt.disk): from ``max_disk`` less
+    what the plan maps to scratch files, and the memory that the plan leaves
+    of its budget.  Raises DiskFullError if the mapped arrays of the plan do
+    not fit on the disk, or the vectors with an explicit ``diis_t3=True``;
+    MemoryError if ``incore_complete`` cannot be met.'''
+    from zccsdt import disk, memory
+    from zccsdt.sa.t3blocks import Blocks
+    size = Blocks.count(ints.nocc) * ints.nvir ** 3
+    no, nv = ints.nocc, ints.nvir
+    big = disk.file_bytes([no * nv, no * no * nv * nv, size], 8)
+    r3_file = bool(plan.t3_file if plan.r3_file is None else plan.r3_file)
+    spare = plan.spare
+    if incore_complete:         # (whatever max_memory: what the node and the job leave)
+        avail = memory.available()
+        spare = None if avail is None else max(0, avail + cached_bytes(ints) - plan.need)
+    return disk.diis_plan(big, diis_space, max_disk, diis_file, plan.disk, spare, diis_t3,
+                          incore_complete, 'T3', memory_tight=bool(plan.t3_file or r3_file))
 
 
 def make_plan(ints, max_memory=None, incore_complete=False):
@@ -337,15 +383,16 @@ def make_plan(ints, max_memory=None, incore_complete=False):
     with ``incore_complete``, else what fits in ``max_memory`` (MB for the
     whole process; default: 80% of what the node and the memory cgroups of
     the process leave).'''
+    packed = getattr(ints, '_sa_packed', None)
     if incore_complete:
-        return plan_memory(ints.nocc, ints.nvir)
+        return plan_memory(ints.nocc, ints.nvir, pp_cached=None if packed is None else
+                           ('memory' if packed['scratch'] is None else 'file'))
     from zccsdt import memory
     # arrays cached on the integral object by an earlier run are part of what
     # the plan accounts for: they do not reduce the budget
     cached = cached_bytes(ints)
     budget = memory.budget(max_memory)
     limit = budget if max_memory is not None else memory.available()
-    packed = getattr(ints, '_sa_packed', None)
     return plan_memory(ints.nocc, ints.nvir,
                        None if budget is None else budget + cached,
                        None if limit is None else limit + cached,
@@ -381,7 +428,7 @@ def add_q(ints, res, max_memory=None, tiles=None):
     return res
 
 
-def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis_file,
+def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, dplan, verbose, diis_file,
             incore_complete, plan, diis_t3=True, callback=None):
     import time
     from zccsdt.cc.diis import DIIS
@@ -410,7 +457,8 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
                       hint=' or give the calculation more memory (max_memory)')
     t3b = scr.create('t3', shape) if t3_file else np.zeros(shape)
     r3b = scr.create('r3', shape) if r3_file else np.empty(shape)
-    adiis = DIIS(space=diis_space, filename=diis_file, incore=incore_complete)
+    adiis = DIIS(space=dplan.space, filename=diis_file,
+                 incore=incore_complete or dplan.n_file == 0, in_memory=dplan.n_memory)
     # DIIS metric of the full t_ijk^abc: a block stands for 6 (distinct
     # occupied indices) or 3 (one repeated index) ordered triples; the T3
     # error vector carries the weight, the stored T3 vector does not
@@ -478,6 +526,7 @@ def _kernel(ints, conv_tol, conv_tol_normt, max_cycle, diis_space, verbose, diis
     res.diis_on_disk = diis_on_disk
     res.plan = plan
     res.diis_t3 = diis_t3
+    res.diis_plan = dplan
     return res
 
 
@@ -495,6 +544,26 @@ def cached_bytes(ints):
 
 
 def plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
+    '''MemoryPlan for ``budget`` bytes of ordinary memory (_plan_memory, which
+    has the rules), with what it puts on the scratch disk (``disk``: T3 and
+    its residual where they are mapped, the packed <vv|vv> if it is built
+    in a file, the rows of the dressed operator that the batch-wise ladder
+    keeps there) and what it leaves of the budget (``spare``).'''
+    from zccsdt.sa.t3blocks import Blocks
+    plan = _plan_memory(nocc, nvir, budget, limit, pp_cached)
+    v = nvir
+    ps, pa = v * (v + 1) // 2, v * (v - 1) // 2
+    t3 = 8 * Blocks.count(nocc) * v ** 3
+    pp = 8 * (ps * ps + pa * pa)
+    r3_file = plan.t3_file if plan.r3_file is None else plan.r3_file
+    plan.disk = (t3 if plan.t3_file else 0) + (t3 if r3_file else 0) \
+        + (pp if plan.pp_file and pp_cached != 'file' else 0) \
+        + (pp if plan.pp_order == 'batch' and plan.pp_bytes is not None and plan.pp_bytes < pp else 0)
+    plan.spare = None if budget is None else max(0, int(budget) - plan.need)
+    return plan
+
+
+def _plan_memory(nocc, nvir, budget=None, limit=None, pp_cached=None):
     '''MemoryPlan for ``budget`` bytes of ordinary memory (None: no limit,
     everything in memory).
 

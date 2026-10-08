@@ -53,7 +53,7 @@ plan_memory_blocks); T3, l3 and the residual are in ordinary memory.
 import ctypes
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from pyscf import lib
@@ -737,6 +737,8 @@ class LambdaPlan:
     diis: int = 0               # DIIS vectors that are not in the scratch file
     blocks: bool = False        # l3 in the blocks of the symmetry labels (plan_memory_blocks)
     buffers: int = 0            # ... then: the work array of the block engine
+    # bytes of the memory budget beyond ``need`` (None: no budget; not compared)
+    spare: int = field(default=None, compare=False)
 
 
 def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0, diis_space=0):
@@ -948,8 +950,26 @@ def _plan_for(eris, t1, dtype, opts, blocks, reserve):
         plan = plan_memory_blocks(eng, budget, opts.mem_mb, space)
     else:
         plan = plan_memory(nocc, nvir, isz, budget, opts.mem_mb, space)
+    plan.spare = None if budget is None else max(0, int(budget - plan.need))
     plan.need += bare + reserve
     return plan
+
+
+def diis_plan_for(plan, nocc, nvir, size, dtype, opts):
+    '''Where the DIIS vectors of the Lambda equations go (zccsdt.disk.DiisPlan;
+    the rule: zccsdt.disk, with l3 as the large part): ``opts.max_disk`` -
+    nothing else of these equations is in scratch files - and the memory
+    that the LambdaPlan ``plan`` leaves of its budget.  ``size``: the
+    elements of l3.'''
+    from zccsdt import disk, memory
+    isz = np.dtype(dtype).itemsize
+    big = disk.file_bytes([nocc * nvir, nocc * (nocc - 1) // 2 * (nvir * (nvir - 1) // 2), size], isz)
+    spare = plan.spare
+    if opts.incore_complete:    # (whatever max_memory: what the node leaves next to l3 and its residual)
+        avail = memory.available()
+        spare = None if avail is None else max(0, avail - 2 * size * isz)
+    return disk.diis_plan(big, opts.diis_space, opts.max_disk, opts.diis_file, 0, spare,
+                          getattr(opts, 'diis_t3', None), opts.incore_complete, 'l3')
 
 
 # ------------------------------------------------------------------- solver
@@ -963,6 +983,7 @@ class Result:
     l3: np.ndarray              # packed (i<j<k, a<b<c), flat; or its blocks (``blocks``)
     timings: list = None        # wall time per iteration
     plan: object = None         # the LambdaPlan
+    diis_plan: object = None    # where the DIIS vectors were (zccsdt.disk.DiisPlan)
     setup: float = 0.0          # wall time of the intermediates
     blocks: bool = False        # l3 in the blocks of the symmetry labels, as T3 was given
 
@@ -996,9 +1017,13 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False,
     dense, t3 packed as solver.kernel returns it.  Jacobi steps with DIIS
     from conj(t) (or from l1, l2, l3), converged when the norm of the change
     of the full tensors is below ``opts.conv_tol_normt``.  ``opts``:
-    solver.Options (level_shift, max_cycle, diis_space, diis_file,
-    incore_complete, mem_mb, max_memory, verbose, callback are used; ``plan``
-    takes a LambdaPlan).  Returns a Result with l3 packed.
+    solver.Options (level_shift, max_cycle, diis_space, diis_file, diis_t3,
+    incore_complete, mem_mb, max_memory, max_disk, verbose, callback are
+    used; ``plan`` takes a LambdaPlan).  Returns a Result with l3 packed.
+    The DIIS vectors follow ``max_disk`` and the memory that the plan leaves
+    (diis_plan_for; zccsdt.disk): ``diis_space`` is a maximum, and where not
+    even three vectors with l3 fit, DIIS is done on l1 and l2 and l3 takes
+    its Jacobi step.  The plan used is Result.diis_plan.
 
     Integrals with symmetry labels in use, whose T3 solver.kernel returns in
     the blocks of the labels: by default the blocks are put on the unique
@@ -1028,6 +1053,10 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False,
     else:
         plan = plan_for(eris, t1, dtype, opts, blocks, sources)
     T3p = np.ascontiguousarray(T3p, dtype=dtype)
+    from zccsdt import disk
+    with disk.limit(opts.max_disk):     # (before the intermediates are made)
+        dplan = opts.diis_plan or diis_plan_for(
+            plan, nocc, nvir, T3p.size, dtype, opts)
     t0 = time.perf_counter()
     with timer('lam.setup'):
         im = make_intermediates(eris, t1, t2, T3p, mem_mb=plan.mem_mb, blocks=blocks)
@@ -1040,9 +1069,12 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False,
     l3 = np.conj(T3p).ravel() if l3 is None else np.array(l3, dtype=dtype).ravel()
     if not l3.flags.writeable or l3.base is T3p or np.shares_memory(l3, T3p):
         l3 = l3.copy()
-    adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=opts.incore_complete)
+    adiis = DIIS(space=dplan.space, filename=opts.diis_file,
+                 incore=opts.incore_complete or dplan.n_file == 0, in_memory=dplan.n_memory)
     timings, conv = [], False
     rbuf = None
+    limit = disk.limit(opts.max_disk)
+    limit.__enter__()
     try:
         for icycle in range(opts.max_cycle):
             t0, c0 = time.perf_counter(), time.process_time()
@@ -1056,16 +1088,25 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False,
                 if first:
                     norms = [np.linalg.norm(l1n - l1), np.linalg.norm(l2n - l2),
                              6.0 * solver._diff_norm(l3n, l3)]
-                parts = adiis.update(solver._parts(l1n, l2n, l3n), out=[None, None, l3])
+                if dplan.with_big:
+                    parts = adiis.update(solver._parts(l1n, l2n, l3n), out=[None, None, l3])
+                else:
+                    n3 = 6.0 * solver._diff_norm(l3n, l3)
+                    parts = adiis.update(solver._parts(l1n, l2n, None))
                 if not first:
                     en = adiis.err_norms
-                    norms = [en[0], 2.0 * en[1], 6.0 * en[2]]
+                    norms = [en[0], 2.0 * en[1], 6.0 * en[2] if dplan.with_big else n3]
                 norms = [float(x) for x in norms]
                 normt = sum(norms)
-                l1, l2, l3 = solver._from_parts(parts, nocc, nvir, True)
-                # the array of the new l3 is free again unless DIIS keeps it
-                if rbuf is not None and any(np.shares_memory(rbuf, x[2]) for x in adiis.xs):
-                    rbuf = None
+                if dplan.with_big:
+                    l1, l2, l3 = solver._from_parts(parts, nocc, nvir, True)
+                    # the array of the new l3 is free again unless DIIS keeps it
+                    if rbuf is not None and any(np.shares_memory(rbuf, x[2]) for x in adiis.xs):
+                        rbuf = None
+                else:
+                    # DIIS without l3: its Jacobi step as it is, the old array is the next target
+                    l1, l2, _ = solver._from_parts(parts, nocc, nvir, False)
+                    rbuf, l3 = (l3 if l3.size else None), l3n
             timings.append(time.perf_counter() - t0)
             if opts.verbose:
                 print('lambda cycle %3d  |dl| = %.3e  %.2fs' % (icycle + 1, normt, timings[-1]))
@@ -1077,9 +1118,10 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False,
                 conv = True
                 break
     finally:
+        limit.__exit__(None, None, None)
         adiis.close()
     return Result(converged=conv, ncycle=icycle + 1, l1=l1, l2=l2, l3=l3, timings=timings,
-                  plan=plan, setup=setup, blocks=bool(blocks))
+                  plan=plan, setup=setup, blocks=bool(blocks), diis_plan=dplan)
 
 
 def packed_l3(eris, l3):

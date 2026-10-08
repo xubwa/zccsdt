@@ -16,6 +16,14 @@ numpy.memmap instead of explicit reads and writes (zccsdt.scratch): the
 kernels work directly on the page cache, so nothing is copied while the
 vectors fit in memory, and the operating system writes them out and pages
 them back in when they do not.
+
+Where the vectors go when the scratch disk is small is planned by the solvers
+(zccsdt.disk.plan_diis): a smaller ``space``, and ``in_memory`` - the number
+of stored vectors (each with its error vector) whose large parts stay in
+memory while those of the other ``space - in_memory`` are in the file.  The
+file-backed vectors are all created, and their space allocated, when the
+first one is asked for: a disk that does not hold them fails then, in the
+first iteration, with an OSError that has the numbers.
 '''
 
 import ctypes
@@ -129,10 +137,12 @@ class DIIS:
     can also build the new vector directly in the storage: buffers() returns
     the arrays of the vector that the next update() stores.'''
 
-    def __init__(self, space=8, filename=None, incore=False, incore_size=None):
+    def __init__(self, space=8, filename=None, incore=False, incore_size=None, in_memory=0):
         self.space = space
         self.filename = filename
         self.incore = incore
+        # stored vectors whose large parts are in memory although not incore
+        self.in_memory = min(max(int(in_memory), 0), space)
         # parts with fewer elements stay in memory whatever ``incore`` says
         self.incore_size = INCORE_SIZE if incore_size is None else int(incore_size)
         self.xs, self.es = [], []           # stored vectors, oldest first
@@ -150,10 +160,11 @@ class DIIS:
         '''Is any part of the stored vectors file-backed?'''
         return self._scratch is not None
 
-    def _new_part(self, like, key, in_memory=True):
+    def _new_part(self, like, key, in_memory=True, on_file=True):
         '''Storage of one part: a file-backed array if it is large and not
-        incore, else an array in memory (None without ``in_memory``).'''
-        if self.incore or like.size < self.incore_size:
+        incore (and the vector is one of those in the file: ``on_file``),
+        else an array in memory (None without ``in_memory``).'''
+        if self.incore or not on_file or like.size < self.incore_size:
             return np.empty(like.size, dtype=like.dtype) if in_memory else None
         if self._scratch is None:
             self._scratch = _Scratch(self.filename)
@@ -169,11 +180,22 @@ class DIIS:
             return self.xs.pop(0), self.es.pop(0)
         if self._free:
             return self._free.pop()
+        like = [np.asarray(a) for a in like]
+        n_file = self.space - self.in_memory
+
+        def new(k):
+            f = k < n_file
+            return ([self._new_part(a, 'x%d.%d' % (k, j), own_x, f) for j, a in enumerate(like)],
+                    [self._new_part(a, 'e%d.%d' % (k, j), True, f) for j, a in enumerate(like)])
+        if self._nslot == 0 and not self.incore and any(a.size >= self.incore_size for a in like):
+            # all vectors of the file now: the disk has room for them or says so here
+            self._free = [new(k) for k in range(n_file)][::-1]
+            self._nslot = n_file
+            if self._free:
+                return self._free.pop()
         k = self._nslot
         self._nslot += 1
-        like = [np.asarray(a) for a in like]
-        return ([self._new_part(a, 'x%d.%d' % (k, j), own_x) for j, a in enumerate(like)],
-                [self._new_part(a, 'e%d.%d' % (k, j)) for j, a in enumerate(like)])
+        return new(k)
 
     def buffers(self, like):
         '''(x parts, error parts) of flat arrays, shaped like the arrays of
@@ -238,6 +260,10 @@ class DIIS:
                 raise ValueError('update() without errors after a call with errors')
             with timer('diis.sub'):
                 e = [_stored(_sub(a, b, r)) for a, b, r in zip(x, self.xprev, se)]
+        # (storage in memory that was not adopted - that of the vector that
+        # left the subspace, with the caller's array in its place - goes now
+        # and not at the end of the call: one large part less at the peak)
+        sx = se = pending = None
         for part in x + e:              # written by the caller or just above
             _stored(part)
         self.xs.append(x)

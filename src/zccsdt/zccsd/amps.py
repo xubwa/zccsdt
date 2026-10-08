@@ -139,6 +139,25 @@ def step_arrays(nocc, nvir):
 DIIS_SMALL = 1 << 16
 
 
+def diis_space(mycc, plan, size, log=None, what='T2'):
+    '''The number of DIIS vectors of a run whose memory plan is ``plan``:
+    mycc.diis_space, a maximum - fewer (never fewer than 3) where the plan
+    has the vectors in the scratch file and the disk does not hold them
+    (mycc.max_disk in MB, default: ZCCSDT_MAX_DISK, else the free space of
+    the scratch directory less a reserve; zccsdt.disk), which the log
+    states; DiskFullError if not even three fit.  ``size``: the elements of
+    the packed doubles part of a vector.  The other scratch files of the
+    run are checked when they are created (zccsdt.scratch).'''
+    from zccsdt import disk
+    if plan.diis_incore:
+        return mycc.diis_space
+    dp = disk.diis_plan(disk.file_bytes([size], 16, DIIS_SMALL), mycc.diis_space,
+                        getattr(mycc, 'max_disk', None), mycc.diis_file, 0, 0, True, False, what)
+    if log is not None and dp.reduced:
+        log.note('DIIS: %s', dp.text())
+    return dp.space
+
+
 def plan_step(nocc, nvir, nao, budget=None, mapped=(), diis_space=6, diis_incore=None,
               three_m=None, kramers=False, ladder_units=None):
     '''The Plan of one step within ``budget`` bytes (None: unlimited).
@@ -939,7 +958,7 @@ def kernel(mycc, eris, t1=None, t2=None, max_cycle=50, tol=1e-8, tolnormt=1e-6, 
     log.info('Init E_corr(%s) = %.15g', name, eccsd)
     adiis = None
     if mycc.diis:
-        adiis = DIIS(space=mycc.diis_space, filename=mycc.diis_file,
+        adiis = DIIS(space=diis_space(mycc, res.plan, t2p.size, log), filename=mycc.diis_file,
                      incore=res.plan.diis_incore, incore_size=DIIS_SMALL)
     conv = False
     try:
