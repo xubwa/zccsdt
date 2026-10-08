@@ -57,10 +57,11 @@ CALC=CCSDTQ,PROPS=FIRST_ORDER)
 def setup(name, basis, kind):
     '''(make_scf(eps) -> (SCF with eps * z in the core Hamiltonian, its
     spinors), z in the AO basis of that SCF): bench/qlgrad_ccsdt_ql.setup
-    for the dipole operator, with an SCF that starts again from its last
-    density when it has not reached conv_tol = 1e-13 (the X2C SCF of BH
-    stops short of it in some runs and not in others, at the same
-    strength).'''
+    for the dipole operator, conv_tol = 1e-13 and conv_tol_grad = 1e-10.
+    For X2C spinors DIIS keeps 20 vectors: with PySCF's 8 the SCF of BH /
+    STO-3G at the strength 0.001 creeps (gradient 5e-10 after 50 cycles,
+    6e-8 after 300; 23 cycles with 20 vectors).  An SCF that has not
+    converged starts again from its last density.'''
     if kind == 'x2c':
         mol = gto.M(atom=GEOM[name], basis=basis, verbose=0)
     else:
@@ -76,6 +77,8 @@ def setup(name, basis, kind):
         h0 = mf.get_hcore()
         mf.get_hcore = lambda *args: h0 + eps * v1
         mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
+        if kind == 'x2c':
+            mf.diis_space = 20
         mf.kernel()
         for attempt in range(5):
             if mf.converged:

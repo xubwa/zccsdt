@@ -11,7 +11,7 @@
 # fields (bench/l4grad_ccsdtq.py) and against CFOUR's ncc (CALC=CCSDTQ,
 # PROPS=FIRST_ORDER, the inputs bench/refs/cfour/*/ZMAT.ccsdtq_props.bohr),
 # one after the other on one node.
-# usage: ZC_ROOT=<snapshot of the repository> ZC_SET=small|large sbatch -o <log> bench/slurm_l4grad.sh
+# usage: ZC_ROOT=<snapshot of the repository> ZC_SET=small|x2c|large sbatch -o <log> bench/slurm_l4grad.sh
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export MKL_NUM_THREADS=$OMP_NUM_THREADS OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
 ROOT=${ZC_ROOT:-/home/xwang405/apps/zccsdt}
@@ -54,6 +54,9 @@ if [ "${ZC_SET:-small}" = small ]; then
     run bh:STO-3G:x2c 2 2
     run nh3:STO-3G:real
     run nh3:STO-3G:complex 2 0
+elif [ "$ZC_SET" = x2c ]; then
+    run bh:STO-3G:x2c
+    run bh:STO-3G:x2c 2 2
 else
     cfour h2o_631g
     run h2o:6-31G:real 2 4
