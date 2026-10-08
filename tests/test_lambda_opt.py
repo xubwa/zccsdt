@@ -150,6 +150,25 @@ def test_pair_kernels(cplx, monkeypatch):
     assert abs(LO.pair_expand(Y, vm) - full.transpose(0, 3, 1, 2)).max() == 0
 
 
+@pytest.mark.parametrize('no,nv', [(2, 4), (4, 2)])
+def test_without_triples(no, nv):
+    '''Two occupied or two virtual spin orbitals: there is no Lambda_3, and
+    the residuals of rank 1 and 2 are those of the tables.'''
+    eris = _model_eris(no, nv, seed=3)
+    rng = np.random.default_rng(2)
+    t, l = _amps(rng, no, nv, True), _amps(rng, no, nv, True)
+    fock, g, mo_e, nocc = R.integrals(eris)
+    T3p, L3p = Q.unique(t[2], 3), Q.unique(l[2], 3)
+    assert T3p.size == 0 and abs(t[2]).max() < 1e-14
+    t[2], l[2] = 0 * t[2], 0 * l[2]
+    im = LO.make_intermediates(eris, t[0], t[1], T3p)
+    ref = LR.residuals(l, t, fock, g, nocc)
+    r1, r2, r3 = LO.residuals(im, l[0], l[1], L3p, T3p)
+    assert _rel(r1, ref[0]) < 1e-12 and _rel(r2, Q.unique(ref[1], 2)) < 1e-12 and r3.size == 0
+    new = LO.update_lams(im, l[0], l[1], L3p, T3p)
+    assert new[2].size == 0 and _rel(new[0], l[0] + ref[0] / R.denominator(mo_e, nocc, 1)) < 1e-12
+
+
 def test_integrals_and_amplitudes_are_not_modified():
     no, nv = 4, 5
     eris = _model_eris(no, nv)

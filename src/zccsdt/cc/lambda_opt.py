@@ -180,6 +180,9 @@ class DenseL3:
         Dr = np.zeros((dm, dm), dtype=dtype)
         D1 = np.zeros(dm, dtype=dtype)
         Xacc[...] = 0
+        if not self.size:           # no triples
+            Yall[...] = 0
+            return Yall, Dr, D1
         nb = self.nb
         bufL = np.empty((nb, nv, no, nvp), dtype=dtype)
         bufT = np.empty((nb, nv, no, nvp), dtype=dtype)
@@ -518,10 +521,13 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
         G = eng.gram(L3p, T3p)
         sg = om.sgn.astype(np.float64)
         Do4 = np.zeros((npo, npo), dtype=dtype)                 # l3[ijm,efg] t3[nom,efg]
-        for m in range(no):
-            Do4 += 6.0 * (sg[m][:, None] * sg[m][None, :]) * G[om.tri[m][:, None], om.tri[m][None, :]]
-        Goo3 = 12.0 * np.einsum('iP,oP,ioP->io', sg, sg, G[om.tri[:, None, :], om.tri[None, :, :]]) \
-            if npo else np.zeros((no, no), dtype=dtype)         # l3[imn,efg] t3[omn,efg]
+        Goo3 = np.zeros((no, no), dtype=dtype)                  # l3[imn,efg] t3[omn,efg]
+        if om.ntri:
+            for m in range(no):
+                Do4 += 6.0 * (sg[m][:, None] * sg[m][None, :]) \
+                    * G[om.tri[m][:, None], om.tri[m][None, :]]
+            Goo3 = 12.0 * np.einsum('iP,oP,ioP->io', sg, sg,
+                                    G[om.tri[:, None, :], om.tri[None, :, :]])
         del G
     with timer('r12'):
         Dr4 = Dr.reshape(nv, no, nv, no)                        # [a, i, g, o]
