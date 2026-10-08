@@ -21,7 +21,7 @@ form is then built, used and dropped in slabs of rows (_pp_sweep).
 See docs/factorization.md for the derivation of each step.
 '''
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from pyscf import lib
@@ -52,8 +52,9 @@ class MemoryPlan:
     disk: int = 0               # bytes that the plan puts into scratch files (T3, the
                                 # bare <ab||de> if it is in memory now, the kept rows
                                 # of the ladder operator); the DIIS vectors come on top
-    spare: int = None           # bytes of the memory budget beyond ``need`` (None:
-                                # no budget known)
+    # bytes of the memory budget beyond ``need`` (None: no budget known; not
+    # a part of the plan: two plans that differ in it alone are the same)
+    spare: int = field(default=None, compare=False)
 
 
 _STEPS = [0]                # CCSDT steps taken by this process

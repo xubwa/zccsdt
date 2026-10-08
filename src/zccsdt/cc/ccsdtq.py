@@ -16,7 +16,7 @@ or full.  The steps divide by the differences of the orbital energies
 '''
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import comb
 
 import numpy as np
@@ -38,7 +38,14 @@ class Options:
     incore_complete: bool = False   # keep all DIIS vectors in memory
     max_memory: float = None    # MB for the whole process, as in PySCF (default:
                                 # 80% of what the node and the job limit leave)
+    max_disk: float = None      # MB for the scratch files of the process (default:
+                                # ZCCSDT_MAX_DISK, else the free space of the scratch
+                                # directory less a reserve)
+    diis_t4: bool = None        # T4 in the DIIS vectors: None - yes, unless neither disk
+                                # nor memory holds three of them; True - yes, or an
+                                # error; False - T1, T2 and T3 only, T4 by its Jacobi step
     plan: object = None         # a Plan given explicitly
+    diis_plan: object = None    # a zccsdt.disk.DiisPlan given explicitly
     mem_mb: float = 2000.0      # batch buffers of the CCSDT step
     verbose: bool = False
     callback: object = None     # callback(info) after every iteration
@@ -59,6 +66,9 @@ class Plan:
     r4_file: bool = False       # the residual of T4 in a scratch file
     xv_file: bool = False       # the six-index intermediate of the engine in the scratch file
     t4_file: bool = False       # T4 in the scratch file
+    disk: int = 0               # bytes of the arrays that the plan maps to the scratch file
+    # bytes of the memory budget beyond ``need`` (None: no budget; not compared)
+    spare: int = field(default=None, compare=False)
 
 
 def _dressed_bytes(no, nv, isz):
@@ -146,8 +156,30 @@ def plan(nocc, nvir, isz, budget=None, diis_space=8, incore_complete=False, step
                 batch == top and mb == mem_mb and step_need(mb) + rest_fixed + t4 + engine(batch) + diis <= budget)
     need = (step_need(mb) + rest_fixed + (0 if t4_file else t4) + engine(batch, not r4_file, not xv_file)
             + (0 if on_file else diis))
+    mapped = (t4 if t4_file else 0) + (t4 if r4_file else 0) + (xv if xv_file else 0)
     return Plan(int(batch), bool(on_file), int(need), int(floor), int(t4), float(mb), bool(r4_file), bool(xv_file),
-                bool(t4_file))
+                bool(t4_file), int(mapped), None if budget is None else max(0, int(budget - need)))
+
+
+def diis_plan_for(pl, sizes, isz, opts, mapped=0, tight=False):
+    '''Where the DIIS vectors of a CCSDTQ run with the Plan ``pl`` go
+    (zccsdt.disk.DiisPlan; the rule: zccsdt.disk, with T4 as the large part
+    that can be left out).  ``sizes``: the elements of the parts of a vector
+    (t1, packed t2, T3, T4), of which those from the size of T4 on go to the
+    file.  A plan that has the vectors in memory (they are in its ``need``)
+    stays as it is; else they get ``opts.max_disk`` less ``mapped`` - the
+    arrays that the plan maps - and the memory that the plan leaves (none if
+    it had to map: ``tight``).'''
+    from zccsdt import disk
+    big = disk.file_bytes(sizes, isz, min(INCORE_SIZE, max(1, sizes[-1])))
+    with_t4 = getattr(opts, 'diis_t4', None)
+    if not pl.diis_file and with_t4 is not False:
+        if mapped:
+            disk.require(mapped, 'T4, its residual and the six-index intermediate', opts.max_disk)
+        return disk.DiisPlan(opts.diis_space, opts.diis_space, n_memory=opts.diis_space,
+                             pair=2 * isz * (sizes[-1] + sizes[-2]), what='T4', case='m')
+    return disk.diis_plan(big, opts.diis_space, opts.max_disk, opts.diis_file, mapped, getattr(pl, 'spare', None),
+                          with_t4, False, 'T4', memory_tight=tight)
 
 
 def plan_for(eris, dtype, max_memory=None, diis_space=8, incore_complete=False, mem_mb=2000.0):
@@ -175,6 +207,7 @@ class Result:
     t4: np.ndarray              # packed [C(no,4), C(nv,4)]
     timings: list = None        # wall time per iteration
     plan: object = None         # the Plan of the run
+    diis_plan: object = None    # where its DIIS vectors were (zccsdt.disk.DiisPlan)
 
 
 def _jacobi4(T4, R4, eo4, ev4):
@@ -188,8 +221,22 @@ def _jacobi4(T4, R4, eo4, ev4):
 
 def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     '''CCSDTQ by Jacobi steps with DIIS, from the given amplitudes (those of
-    CCSDT, say: t1[i,a], t2[i,j,a,b], t3 packed) or from those of MP2.'''
+    CCSDT, say: t1[i,a], t2[i,j,a,b], t3 packed) or from those of MP2.
+
+    ``opts.max_disk`` (MB) bounds the scratch files of the run: the arrays
+    that the plan maps (DiskFullError before anything is allocated if they do
+    not fit) and the DIIS vectors (diis_plan_for; zccsdt.disk):
+    ``opts.diis_space`` is a maximum, and where not even three vectors with
+    T4 fit DIIS is done on T1, T2 and T3 and T4 takes its Jacobi step
+    (``opts.diis_t4``).  The plan used is Result.diis_plan.'''
+    from zccsdt import disk
     opts = opts or Options()
+    with disk.limit(opts.max_disk):     # (every scratch file of the run counts against max_disk)
+        return _kernel(eris, opts, t1, t2, t3, t4)
+
+
+def _kernel(eris, opts, t1, t2, t3, t4):
+    from zccsdt import disk
     nocc = eris.nocc
     nvir = np.asarray(eris.fock).shape[0] - nocc
     if t1 is None or t2 is None:
@@ -205,6 +252,10 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     eo4, ev4 = eo[P.tuples(nocc, 4)].sum(axis=1), P.tuple_sums(ev, 4)
     pl = opts.plan or plan_for(eris, dtype, opts.max_memory, opts.diis_space, opts.incore_complete, opts.mem_mb)
     mem_mb = opts.mem_mb if pl.mem_mb is None else pl.mem_mb
+    # (before anything is allocated: the disk holds the plan or the run stops here)
+    dplan = opts.diis_plan or diis_plan_for(
+        pl, [nocc * nvir, comb(nocc, 2) * comb(nvir, 2), nI3 * nA3, nI * nA], np.dtype(dtype).itemsize, opts,
+        pl.disk, pl.t4_file or pl.r4_file or pl.xv_file)
     # T4, and with too little memory T4, the intermediate Xv and the residual as arrays of a
     # scratch file (new file space reads as zeros)
     scr = r4_buf = xv_buf = None
@@ -225,8 +276,8 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
         T4 = np.zeros((nI, nA), dtype=dtype) if t4 is None else np.array(t4, dtype=dtype).reshape(nI, nA)
     step = solver.Options(mem_mb=mem_mb)                        # (of the CCSDT step: no level shift)
     step_plan = ccsdt_opt.plan_for(eris, dtype, solver.Options(mem_mb=mem_mb, incore_complete=True))
-    adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=not pl.diis_file,
-                 incore_size=min(INCORE_SIZE, max(1, nI * nA)))
+    adiis = DIIS(space=dplan.space, filename=opts.diis_file, incore=dplan.n_file == 0,
+                 incore_size=min(INCORE_SIZE, max(1, nI * nA)), in_memory=dplan.n_memory)
     e_old = ccsd.energy(t1, t2, eris)
     conv, timings = False, []
     try:
@@ -250,11 +301,19 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
                 if first:
                     norms = [np.linalg.norm(t1n - t1), np.linalg.norm(t2n - t2),
                              6.0 * solver._diff_norm(t3n, T3), 24.0 * solver._diff_norm(R4.ravel(), T4.ravel())]
-                parts = adiis.update(solver._parts(t1n, t2n, t3n) + [R4.ravel()],
-                                     out=[None, None, T3, T4])
+                if dplan.with_big:
+                    parts = adiis.update(solver._parts(t1n, t2n, t3n) + [R4.ravel()],
+                                         out=[None, None, T3, T4])
+                else:
+                    # DIIS without T4: the Jacobi step is the new T4, its old array the next residual
+                    n4 = 24.0 * solver._diff_norm(R4.ravel(), T4.ravel())
+                    parts = adiis.update(solver._parts(t1n, t2n, t3n), out=[None, None, T3])
+                    if r4_buf is not None:
+                        r4_buf = T4
+                    T4 = R4.reshape(nI, nA)
                 if not first:
                     en = adiis.err_norms
-                    norms = [en[0], 2.0 * en[1], 6.0 * en[2], 24.0 * en[3]]
+                    norms = [en[0], 2.0 * en[1], 6.0 * en[2], 24.0 * en[3] if dplan.with_big else n4]
                 norms = [float(x) for x in norms]
                 normt = sum(norms)
                 t1, t2, _ = solver._from_parts(parts[:3], nocc, nvir, True)
@@ -278,4 +337,4 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
         if scr is not None:
             scr.close()                 # (a mapped T4 stays valid: the file is unlinked, not gone)
     return Result(e_corr=float(np.real(e_old)), e_tot=eris.e_hf + float(np.real(e_old)), converged=conv,
-                  ncycle=cycle + 1, t1=t1, t2=t2, t3=T3, t4=T4, timings=timings, plan=pl)
+                  ncycle=cycle + 1, t1=t1, t2=t2, t3=T3, t4=T4, timings=timings, plan=pl, diis_plan=dplan)

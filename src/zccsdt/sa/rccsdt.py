@@ -19,7 +19,7 @@ operator; the first version (residuals_terms) folds both into the ladder
 operators.  Design notes: docs/spin_adapted.md.
 '''
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -49,8 +49,9 @@ class MemoryPlan:
                                    # residual, the packed <vv|vv> if it is built there, the
                                    # kept rows of the dressed operator); the DIIS vectors
                                    # come on top
-    spare: int = None              # bytes of the memory budget beyond ``need`` (None: no
-                                   # budget known)
+    # bytes of the memory budget beyond ``need`` (None: no budget known; not
+    # a part of the plan: two plans that differ in it alone are the same)
+    spare: int = field(default=None, compare=False)
 
 
 def pair_rows(v, a0, a1):

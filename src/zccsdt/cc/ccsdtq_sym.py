@@ -30,7 +30,7 @@ available() is False for them and the dense solver is to be used.
 '''
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import comb
 
 import numpy as np
@@ -54,6 +54,9 @@ class Plan:
     t4: int                     # bytes of T4 in its blocks
     mem_mb: float = None        # batch buffers of the CCSDT step
     layout: object = None       # the blocks (zccsdt.cc.t4engine_sym.Layout)
+    disk: int = 0               # bytes that the plan maps to scratch files (nothing)
+    # bytes of the memory budget beyond ``need`` (None: no budget; not compared)
+    spare: int = field(default=None, compare=False)
 
 
 def available(eris):
@@ -146,7 +149,8 @@ def plan(lay, isz, budget=None, diis_space=8, incore_complete=False, step_need=N
         on_file = not incore_complete and not (
             batch == top and mb == mem_mb and step_need(mb) + fixed + engine(batch) + diis <= budget)
     need = step_need(mb) + fixed + engine(batch) + (0 if on_file else diis)
-    return Plan(int(batch), bool(on_file), int(need), int(floor), int(t4), float(mb), lay)
+    return Plan(int(batch), bool(on_file), int(need), int(floor), int(t4), float(mb), lay, 0,
+                None if budget is None else max(0, int(budget - need)))
 
 
 def plan_for(eris, dtype, max_memory=None, diis_space=8, incore_complete=False, mem_mb=2000.0):
@@ -167,8 +171,17 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     '''CCSDTQ by Jacobi steps with DIIS as zccsdt.cc.ccsdtq.kernel, in the
     blocks of the labels of ``eris``: from the given amplitudes (those of
     CCSDT, say: t1[i,a], t2[i,j,a,b], t3 in the blocks of the CCSDT step or
-    packed, t4 in blocks or packed) or from those of MP2.'''
+    packed, t4 in blocks or packed) or from those of MP2.  ``opts.max_disk``,
+    ``opts.diis_t4``: as there (the DIIS vectors by zccsdt.disk; nothing
+    else of this solver is in scratch files).'''
+    from zccsdt import disk
     opts = opts or Options()
+    with disk.limit(opts.max_disk):     # (every scratch file of the run counts against max_disk)
+        return _kernel(eris, opts, t1, t2, t3, t4)
+
+
+def _kernel(eris, opts, t1, t2, t3, t4):
+    from zccsdt import disk
     lay = S.layout_for(eris)
     if lay is None:
         raise ValueError('no blocks for these integrals: no labels without a modulus in their order')
@@ -203,8 +216,10 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     mem_mb = opts.mem_mb if pl.mem_mb is None else pl.mem_mb
     step = solver.Options(mem_mb=mem_mb)                        # (of the CCSDT step: no level shift)
     step_plan = ccsdt_opt.plan_for(eris, dtype, solver.Options(mem_mb=mem_mb, incore_complete=True))
-    adiis = DIIS(space=opts.diis_space, filename=opts.diis_file, incore=not pl.diis_file,
-                 incore_size=min(INCORE_SIZE, max(1, lay.size)))
+    dplan = opts.diis_plan or ccsdtq.diis_plan_for(
+        pl, [nocc * nvir, comb(nocc, 2) * comb(nvir, 2), n3, lay.size], np.dtype(dtype).itemsize, opts)
+    adiis = DIIS(space=dplan.space, filename=opts.diis_file, incore=dplan.n_file == 0,
+                 incore_size=min(INCORE_SIZE, max(1, lay.size)), in_memory=dplan.n_memory)
     e_old = ccsd.energy(t1, t2, eris)
     conv, timings = False, []
     try:
@@ -229,10 +244,15 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
                 if first:
                     norms = [np.linalg.norm(t1n - t1), np.linalg.norm(t2n - t2),
                              6.0 * solver._diff_norm(t3n, T3), 24.0 * solver._diff_norm(R4, T4)]
-                parts = adiis.update(solver._parts(t1n, t2n, t3n) + [R4], out=[None, None, T3, T4])
+                if dplan.with_big:
+                    parts = adiis.update(solver._parts(t1n, t2n, t3n) + [R4], out=[None, None, T3, T4])
+                else:                   # DIIS without T4: its Jacobi step is the new T4
+                    n4 = 24.0 * solver._diff_norm(R4, T4)
+                    parts = adiis.update(solver._parts(t1n, t2n, t3n), out=[None, None, T3])
+                    T4 = R4
                 if not first:
                     en = adiis.err_norms
-                    norms = [en[0], 2.0 * en[1], 6.0 * en[2], 24.0 * en[3]]
+                    norms = [en[0], 2.0 * en[1], 6.0 * en[2], 24.0 * en[3] if dplan.with_big else n4]
                 norms = [float(x) for x in norms]
                 normt = sum(norms)
                 t1, t2, _ = solver._from_parts(parts[:3], nocc, nvir, True)
@@ -254,4 +274,4 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     finally:
         adiis.close()
     return Result(e_corr=float(np.real(e_old)), e_tot=eris.e_hf + float(np.real(e_old)), converged=conv,
-                  ncycle=cycle + 1, t1=t1, t2=t2, t3=T3, t4=T4, timings=timings, plan=pl)
+                  ncycle=cycle + 1, t1=t1, t2=t2, t3=T3, t4=T4, timings=timings, plan=pl, diis_plan=dplan)
