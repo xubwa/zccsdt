@@ -19,7 +19,9 @@ usage: python bench/density_ccsdt.py validate MOLECULE BASIS KIND [NDROP]
   ('heavy,light'), Hamiltonian and SCF (ZC_HAM, ZC_SCF, ZC_SPINORS).
 environment: ZC_MAXMEM: max_memory in MB (default: 80% of what is available);
              ZC_DENS_PLAN: 'NB,MB' - the plan of the densities given (time):
-             NB occupied pairs per batch, slabs of MB megabytes of dressed <ab||de>
+             NB occupied pairs per batch, slabs of MB megabytes of dressed <ab||de>;
+             ZC_RUNS: how often the density is made (time; default 2 - under a
+             tight ZC_MAXMEM the second call has less left than the first)
 '''
 import os
 import sys
@@ -203,7 +205,7 @@ def profile(mol, kind, niter, nfrozen=0, ndrop=0):
         slab = max(1, int(float(slab) * 1e6) // (isz * nvp)) * isz * nvp
         dmem = {'plan': D.Plan(nb=int(nb), slab_bytes=slab, need=D.fixed_bytes(nocc, nvir, isz, nfrozen + ndrop) + max(
             int(nb) * D.pair_bytes(nocc, nvir, isz), slab))}
-    for attempt in range(2):
+    for attempt in range(int(os.environ.get('ZC_RUNS', 2))):
         timing.reset()
         base = memory.resident()
         watch = MemWatch()
