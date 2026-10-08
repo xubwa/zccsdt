@@ -702,7 +702,7 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
 - Lambda: the residuals of rank 1 and 2 and the o v^3-sized operands in
   blocks of the labels (they are dense, as in the Python program: with
   labels they are most of the memory and of the time of an iteration,
-  section 10); l3, T3 or the residual in a mapped scratch file; the Lambda
+  section 11); l3, T3 or the residual in a mapped scratch file; the Lambda
   equations with constant terms (lambda of CCSDT(Q), the equations of the
   first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); densities.
 - (Q) over ranks on separate nodes was not timed (section 8); a smaller
