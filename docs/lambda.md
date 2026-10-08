@@ -1364,11 +1364,12 @@ spinors (0.08 against 0.04 s per iteration).
 |---|---|
 | `src/zccsdt/cc/qgrad_ref.py` | the dense reference: the derivatives of E(Q) from the term table, the relaxed density from full arrays |
 | `src/zccsdt/cc/quadruples_grad.py` | the same from packed amplitudes, one occupied quadruple at a time; the orbital gradient of E(Q); the terms of the frozen spinors |
+| `src/zccsdt/cc/quadruples_grad_sym.py`, `csrc/tnpack.c` (`zc_qg_sector_vectors`, `zc_xv_sector_adj`) | the pass in the sectors of the symmetry labels |
 | `lambda_ref.kernel(sources=)`, `lambda_opt.kernel(sources=)` | the Lambda equations with constant terms |
 | `density_opt.relaxed_rdm1(q=)` | the density and the Z-vector equations of CCSDT(Q) |
 | `GCCSDT.solve_lambda(with_q=True)`, `make_rdm1(with_q=True)` | the front end (`GCCSDTQ`: through its CCSDT step) |
-| `tests/test_qgrad_ref.py`, `tests/test_quadruples_grad.py` | the checks of 11.5 |
-| `bench/qgrad_ccsdt_q.py`, `bench/profile_q_gradient.py`, `bench/slurm_q_gradient.sh` | finite fields at several steps; timing |
+| `tests/test_qgrad_ref.py`, `tests/test_quadruples_grad.py`, `tests/test_quadruples_grad_sym.py` | the checks of 11.5 |
+| `bench/qgrad_ccsdt_q.py`, `bench/profile_q_gradient.py`, `bench/slurm_q_gradient.sh`, `bench/slurm_q_gradient_sectors.sh` | finite fields at several steps; timing |
 
 ### 11.1 The functional
 
@@ -1532,34 +1533,96 @@ density of `<bc||ef>` on pairs, with the packed `<vv||vv>` in the slabs of
 rows that made Xv. Gamma of the virtual spin orbitals is one more product
 per quadruple, on the expanded conj(w) and y.
 
-Then (`orbital_gradient`, `active_terms`): every block of the densities
-with the blocks of integrals that one changed index gives, as matrix
-products of dense blocks - all integrals with an occupied index are kept
-by the amplitude code. Two meet arrays of the size of `<vv||vv>`: the
-density of `<cd||el>` with the packed `<cd||ea>` (slabs of rows), and the
-density of `<bc||ef>` with `<ie||bc>` on pairs. In the virtual block the
-density of `<bc||ef>` would meet `<vv||vv>`; identity 3 replaces that
-block.
+The disconnected product z has rank-six operands. They are six more rows
+under the stacked operands of the two other products on pairs, and its
+adjoints are the differences of theirs, conj(y) = (conj(y) + conj(w)) -
+conj(w): two expansions on pairs per quadruple instead of three, no sum of
+two expanded arrays, no products with six rows that only stream through
+the expanded array.
+
+**In the sectors of the symmetry labels** (`quadruples_grad_sym`, the pass
+of `quadruples_sym` with its adjoints; labels 2 m_j, a modulus, one label =
+no symmetry). For an occupied quadruple of total label M the products are
+formed in their blocks as for the energy; `zc_qg_sector_vectors` walks
+through the virtual quadruples of the sector, sums the splits of each (r
+and z), and writes conj(y), conj(w), y back with their signs to the places
+that the splits were read from - every place of a block belongs to one
+split of one quadruple, so the blocks of the expanded left-hand quadruples
+are filled without tables and without races (the places of groups that
+share an index stay zero). Then, block by block, X_ B^T and A^T X_ on the
+rows and columns that were picked for X = A B; s3 is scattered into the
+packed rows of the occupied triples. The adjoint of Xv is in the blocks
+of Xv and goes back through the blocks `<bc||ef> t(xl,fd)`
+(`zc_xv_sector_adj`); the density of `<bc||ef>` has the label of (bc) on
+(ef) and is kept in the diagonal blocks of the pair labels
+(`quadruples_grad.PairBlocks`: sum |Q2(q)|^2 elements, a seventh of
+C(v,2)^2 for HBr / cc-pVTZ-DK). The adjoint of Xo goes back through the
+dense code (o^4 v^2 (o + v) multiplications). The dense pass keeps the
+symmetry-breaking elements of the amplitudes (1e-10 of the others after
+the iterations) and the sectors do not have them; the derivatives are
+linear in them, so the two passes agree to 1e-10 on converged amplitudes
+and to 2e-15 on their label-conserving parts.
+
+Then (`orbital_gradient`, `active_terms`): the densities with at most two
+virtual indices as dense blocks, every one with the blocks of integrals
+that one changed index gives - matrix products; all integrals with an
+occupied index are kept by the amplitude code. The density of `<ab||ei>`
+stays on its pairs [i, e, (a<b)]: with `<kb||ei>` (one occupied index of
+the density at a time, the pair unpacked: v^3 elements), `<ab||ki>` and
+`<ab||ek>` on pairs, and with the packed `<cd||ea>` in slabs of rows. The
+density of `<bc||ef>` meets `<ie||bc>` on pairs (`_vvvv_terms`): it is read
+in slabs of rows - an array in memory, a mapped one, or the blocks of the
+pair labels. In the virtual block the density of `<bc||ef>` would meet
+`<vv||vv>`; identity 3 replaces that block. The parts of identity 1 with
+s3 and t3 are made at the end of the pass, where T3 is on the packed
+block (`Gradient.src3`): the density step needs no packed copy of T3 when
+it runs in the blocks of the labels.
+
+Frozen spinors (`FrozenTerms`): a batch at a time, as the frozen stage of
+`density_opt` has its own terms - the integrals `<fu||vw>` of the batch
+once, every density with at most two virtual indices laid out for each of
+its four indices and one matrix product with the block of the integrals of
+the batch; the densities of `<ab||ei>` and `<bc||ef>` with `<fe||ab>` on
+pairs.
 
 Cost: every product of (Q) twice more (three times its products in all:
-o^4 v^4 (v + o) / 4 multiplications), three expansions for two reductions,
-Gamma (o^4 v^5 / 144), Xv twice more (o^2 v^5 / 2); the contractions with
-the integrals are o v^5 / 2 and less.
+o^4 v^4 (v + o) / 4 multiplications), five expansions (two on pairs, three
+on an index and a triple), Gamma (o^4 v^5 / 144), Xv twice more (o^2 v^5 / 2); the
+contractions with the integrals are o v^5 / 2 and less.
 
-Memory (`plan`): what is returned - s3 (the size of T3), the density of
-`<bc||ef>` (C(v,2)^2 elements: the size of the packed `<vv||vv>`, in
-memory), that of `<ab||ei>` (o v C(v,2)) and the small ones -, the adjoint
-of Xv next to Xv, three work arrays per batch of columns for one of (Q),
-and the adjoints of the stacked operands. The batches are those of the
-plan of (Q) with the largest budget of its own for which all of this fits
-(bisection: the plan grows with the budget and uses it - at least 0.9 of
-every budget below the full plan in the tests); MemoryError with the
-numbers below the smallest batches. Afterwards `relaxed_rdm1(q=)` holds
-the dense blocks of the densities (that of `<ab||ei>` on all four
-indices, o v^3) and the work of the contractions (o v C(v,2) elements for
-the density of `<bc||ef>`); with frozen spinors arrays of n^3 elements for
-one frozen spinor at a time. These last are not in a plan: `memory.budget`
-sees them as resident when the density kernel plans.
+Memory. Nothing of it only raises where a smaller batch or a scratch file
+is possible:
+
+- the pass on the packed block (`plan`): what is returned - s3 (the size
+  of T3), the density of `<bc||ef>` (C(v,2)^2 elements: the size of the
+  packed `<vv||vv>`), that of `<ab||ei>` (o v C(v,2)) and the small ones -,
+  the adjoint of Xv next to Xv, three work arrays per batch of columns for
+  one of (Q), and the adjoints of the stacked operands. The batches are
+  those of the plan of (Q) with the largest budget of its own for which
+  all of this fits (bisection). **Where the largest batches do not fit, s3
+  and the density of `<bc||ef>` go to a scratch file** (`Plan.mapped`,
+  `zccsdt.scratch`; the density is written in the slabs of rows of Xv and
+  read in slabs, s3 by rows of occupied triples) and the batches take the
+  memory; with the largest batches the density alone is mapped if s3
+  fits, and nothing if both do - so the plan is monotone in the budget
+  (the batches never shrink, the mapped set never grows) and uses it (0.9
+  of every budget while the batches grow, in the tests). MemoryError with
+  the numbers below the smallest batches with both arrays mapped;
+- the pass in sectors (`quadruples_grad_sym.plan`): the plan of (Q) in
+  sectors, what is returned (the density of `<bc||ef>` in its blocks), five
+  expanded blocks and the stacked operands of a quadruple, the adjoint of
+  Xv with the work of its way back. The front end plans the sectors first
+  and takes the packed block if they do not fit (`q_gradient_sectors`);
+- Lambda: s3 in memory in the layout of the residual is used as it is;
+  the copy in the blocks of the labels, or of a mapped s3, is in the plan
+  (`lambda_opt.plan_for(sources=)`);
+- the density step (`relaxed_rdm1(q=)`): the work of the orbital gradient
+  (`active_bytes`: the largest of its three stages, 2 o v^3 elements and
+  less) is checked against the budget before anything is done and is the
+  least of `Plan.need`; the work of a batch of frozen spinors
+  (`FrozenTerms.own(nk)`: n^3 + n v^2 elements per frozen spinor) is in the
+  plan of the batches (`plan_memory(extra_own=)`), which takes as many
+  frozen spinors per batch as fit.
 
 Front end: `GCCSDT.solve_lambda(with_q=True)` makes the pass
 (`_q_terms`, kept for `make_rdm1`) and solves with the sources - in the
@@ -1569,15 +1632,12 @@ other one, and so do `make_rdm1()` and `ccsdt_q_lambda()`.
 
 **Not done**:
 
-- the pass in the sectors of the symmetry labels (`quadruples_sym`): it
-  runs on the packed block, also where Lambda and the densities run in
-  blocks;
-- the densities of (Q) on disk: the density of `<bc||ef>` and s3 are in
-  memory;
-- the dense blocks of the densities in `relaxed_rdm1(q=)` are o v^3
-  elements for `<ab||ei>` where o v^3 / 2 would do, and the contractions
-  with the integrals of a frozen spinor are einsums over n^3 elements, one
-  spinor at a time;
+- the adjoint of Xo and the orbital gradient of E(Q) among the active
+  spinors do not use the labels (small: o^4 v^2 and o v^5 / 2);
+- s3 of the pass in sectors is on the packed block (the pass reads T3
+  there), and the plan of (Q) in sectors counts Xv of an occupied index
+  by its dense size (v C(v,3)) where its blocks have a part: with little
+  memory it holds fewer indices at a time than would fit;
 - the two-particle density of CCSDT(Q) as an array, geometric gradients,
   non-canonical or non-Hartree-Fock references;
 - the unrelaxed density of CCSDT(Q) is returned but is not the derivative
@@ -1597,6 +1657,28 @@ The pass on packed amplitudes against the dense reference (5+6, 6+5, 4+7
 and 7+5 spin orbitals, real and complex, in every plan, with and without
 the C kernels): E(Q), s2, s3, the six blocks of densities, `de` and Gamma
 to 3e-15 of their size.
+
+The pass in sectors against the pass on the packed block
+(`tests/test_quadruples_grad_sym.py`; HBr / cc-pVDZ-DK with X2C spinors, 28
+frozen, 8 + 28, labels 2 m_j; integrals and amplitudes projected on their
+label-conserving parts): E(Q), s2, s3, all densities, `de`, Gamma and the
+parts of the gradient with s3 and t3 to 2e-15 of their size (1e-12 asked) -
+with the labels as they are, modulo 4, with one label, and with a phase on
+every spinor (complex amplitudes); 3e-15 for HBr / cc-pVTZ-DK (8 + 78, on
+the login node). On the amplitudes as the iterations leave them the two
+passes differ by 1e-10 of the size of each array (2e-9 asked): the
+symmetry-breaking elements, which the packed block keeps. The orbital
+gradient among the active spinors and the terms of frozen spinors from the
+density of `<bc||ef>` in blocks are those from the array (1e-12), and the
+front end gives the same Gradient from the sectors, from the packed block
+(`symmetry` off) and from the packed block with s3 and the density of
+`<bc||ef>` in a scratch file (a budget between the two floors).
+
+The orbital gradient of E(Q) and the terms of frozen spinors (matrix
+products on the packed densities, a batch of frozen spinors) against the
+dense densities contracted index by index with dense integrals
+(`test_gradient_terms_equal_einsums`, 5 + 8 complex and 4 + 9 real spin
+orbitals, random): 1e-12 asked.
 
 Relaxed dipole derivative, trace(z D) of the dense reference against
 E(SCF) + E_corr(CCSDT) + E(Q) with the SCF repeated in the field
@@ -1688,12 +1770,19 @@ to m_j): `make_rdm1(with_q=True)` against the finite field of
 densities in the blocks of the labels give the density of the packed block
 (5e-9 asked, the convergence of lambda).
 
-Memory (`tests/test_quadruples_grad.py::test_memory_plan`, tracemalloc):
-5 + 20 complex and 6 + 22 real spin orbitals, the smallest batches, a plan
-in between and everything at once: the peak of the allocations is 0.83 to
-0.97 of `Plan.need`.
+Memory (tracemalloc; the mapped arrays are not allocations):
 
-### 11.6 Timing
+| | cases | peak of the allocations / plan |
+|---|---|---|
+| the pass on the packed block (`test_memory_plan`) | 5 + 20 complex, 6 + 26 real; the smallest batches with s3 and the density of `<bc||ef>` mapped, a plan in between, the largest batches with the density mapped, everything in memory | 0.86 to 0.94 of `Plan.need` (0.8 asked); the plans of 40 budgets from the floor up are monotone and take 0.90 to 1.00 of the budget while the batches grow |
+| the pass in sectors (`test_quadruples_grad_sym.py::test_memory_plan`) | HBr / cc-pVDZ-DK, 8 + 28 | 0.56 (the plan of (Q) in sectors counts Xv by its dense size) |
+| the orbital gradient of E(Q) (`test_gradient_terms_within_their_plan`) | 5 + 22, real and complex | 0.60 of `active_bytes` |
+| the terms of 1 and of 4 frozen spinors | 5 + 22, real and complex | 0.83 to 0.90 of `FrozenTerms.own` |
+
+### 11.6 Timing of the first version
+
+(The pass on the packed block only, as of commits bd2c483 and 2774438; the
+state after the sectors, the plans and the changes to the pass: 11.7.)
 
 `bench/profile_q_gradient.py` through the front end with its defaults, 8
 cores of a Xeon Gold 6248R, `max_memory` 26 GB, the steps one after the
@@ -1762,6 +1851,91 @@ of it - CCSDT 9.0 s (22 iterations), (Q) as it does it for a density
 zccsdt has no spin adaptation and no point group on this path (GCCSDT on
 116 spin orbitals: 84 s for CCSDT, 46 s for (Q), 259 s for the property):
 the numbers agree, the times are not a comparison of like with like.
+
+### 11.7 Sectors, memory and speed of the pass: before and after
+
+One job, 31769367 on c105 (8 cores of a Xeon Gold 6248R, `--mem=30G`,
+`bench/slurm_q_gradient_sectors.sh`): the tree of commit 8059a77 (before)
+and that of 129de08 (after), one after the other, each with its own
+`bench/profile_q_gradient.py`, `max_memory` 26 GB; then, after only, HBr /
+cc-pVQZ-DK and H2O again with `max_memory` 4 GB. The node is shared: load
+1.4 at the start, 6 to 9 from the second run on; a test run of this work
+(4 threads) overlapped the first minute and a half of the job - the SCF and
+the first CCSDT iterations of the first run. Molecules and convergence as
+in 11.6.
+
+| | H2O / cc-pVTZ, 10 + 106, before | after | HBr / cc-pVTZ-DK, 8 + 78, before | after | HBr / cc-pVQZ-DK, 8 + 160, after |
+|---|---|---|---|---|---|
+| CCSDT iteration | 4.28 s | 4.28 s | 0.30 s | 0.30 s | 1.98 s |
+| (Q), front end | 44.7 s | 44.7 s | 1.50 s (sectors) | 1.49 s (sectors) | 14.5 s (sectors) |
+| (Q), dense code | 43.8 s | 44.1 s | 4.46 s | 4.39 s | 94.7 s |
+| (Q) gradient pass, front end | 141.8 s | 129.9 s | 14.43 s (packed block) | 3.19 s (sectors) | 27.4 s (sectors) |
+| ... over (Q) of the front end | 3.17 | 2.90 | 9.59 | 2.14 | 1.89 |
+| (Q) gradient pass, packed block | 141.8 s | 129.9 s | 14.43 s | 13.65 s | 283.1 s (density of `<bc||ef>` mapped, 10551 of 12720 columns per batch) |
+| ... over (Q) dense | 3.23 | 2.94 | 3.23 | 3.11 | 2.99 |
+| Lambda iteration, CCSDT / with the sources | 5.15 / 5.17 s | 5.15 / 5.16 s | 0.24 / 0.24 s | 0.24 / 0.24 s | 1.23 / 1.23 s |
+| relaxed density after Lambda, CCSDT | 4.56 s | 5.62 s | 1.79 s | 1.63 s | 9.54 s |
+| relaxed density after Lambda, CCSDT(Q) | 5.67 s | 5.25 s | 3.43 s | 1.99 s | 14.73 s |
+| all after the CCSDT energy, CCSDT | 93.9 s | 95.2 s | 6.15 s | 5.96 s | 32.6 s |
+| all after the CCSDT energy, CCSDT(Q) | 237.2 s | 224.8 s | 22.0 s | 9.31 s | 65.3 s |
+| ... over (Q) of the front end | 5.30 | 5.02 | 14.6 | 6.25 | 4.49 |
+| trace(z D), CCSDT(Q) | 1.469282104952 | 1.469282104952 | 2.335750517122 | 2.335750517122 | 2.347398874663 |
+
+The numbers of the two trees are the same to the twelve decimals printed
+(E(Q), trace(z D) of CCSDT and of CCSDT(Q)); HBr after has the pass in
+sectors, before on the packed block. The densities of H2O (4.6 to 5.7 s)
+scatter by a second between runs of the same code (the CCSDT one is not
+changed).
+
+Where the time goes now:
+
+- the pass on the packed block, H2O: the adjoint products 46.2 s (58.3 s
+  before) for 21.9 s of the products of (Q) - 2.11 times, for 2.09 times
+  the multiplications; the expansions 18.2 s (five per quadruple, for
+  8.7 s of the five reductions of the energy: the expansion sets its array
+  to zero and writes through the index tables); the adjoint of Xv 11.4 s
+  at 5.3 cores for 4.0 s of Xv (two products, an expansion and a
+  reduction per slab where Xv has one product and a reduction); the
+  vectors of a quadruple 4.3 s; Gamma 3.0 s. These three are what is
+  left above three times (Q);
+- the pass in sectors, HBr / cc-pVQZ-DK: the kernel that sums the splits
+  and writes the left-hand quadruples 6.7 s (8 cores), the adjoints on
+  pairs 5.4 s at 3.4 cores and the products on pairs 3.4 s at 3.7 cores
+  (many small blocks: numpy picks rows and columns on one core), the
+  adjoints on an index and a triple 3.2 s, the adjoint of Xv 3.0 s for
+  1.9 s of Xv. For 8 + 78: 3.19 s at 3.4 cores - Python between small
+  products;
+- the density step with frozen spinors: the (Q) terms of the 28 frozen
+  spinors 0.24 s (HBr / cc-pVTZ-DK; the whole (Q) part of the step was
+  1.6 s before, 0.4 s now) and 3.0 s at 2.5 cores for cc-pVQZ-DK, the
+  orbital gradient among the active spinors 2.3 s at 2 cores there:
+  numpy unpacks the pairs of the density of `<ab||ei>` and gathers the
+  slices of the integrals on one core.
+
+Memory, anonymous memory of the process (sampled) against the plans:
+
+| | plan of the pass | before the pass | peak in the pass | `max_memory` |
+|---|---|---|---|---|
+| H2O, packed block | 6.86 GB, nothing mapped | 1.27 GB | 7.92 GB | 26 GB |
+| HBr / cc-pVTZ-DK, sectors | 1.04 GB (the density of `<bc||ef>`: 0.010 GB in blocks, 0.072 as an array) | 0.94 GB | 0.85 GB | 26 GB |
+| HBr / cc-pVQZ-DK, sectors | 12.01 GB (0.153 GB of 1.294) | 3.19 GB | 6.77 GB | 26 GB |
+| HBr / cc-pVQZ-DK, packed block | 22.13 GB, the density of `<bc||ef>` (1.29 GB) mapped | 3.00 GB | 24.72 GB | 26 GB |
+| H2O, packed block, tight | 2.79 GB, s3 and the density mapped; 16 batches of columns, Xv for 6 of 9 occupied indices | 1.26 GB | 3.98 GB | 4 GB |
+
+The plan of the sectors is far above what they take (it counts Xv of an
+occupied index by its dense size, see "Not done"); "before the pass"
+includes arrays of the step before that are released as the pass starts
+(HBr / cc-pVTZ-DK ends below it). The run under 4 GB: every step stays
+below `max_memory` in anonymous memory - (Q) 3.94 GB, Lambda 3.29 and
+3.70 GB, the densities 2.91 and 2.81 GB, the pass 3.98 GB -, the pass
+takes 234 s instead of 130 s (16 batches: the expansions 50 s, the
+reductions 34 s, the adjoint of Xv 33 s), and the numbers are those of the
+run with 26 GB (E(Q) -3.676439958136e-4 against ...137e-4, trace(z D)
+1.469282104952). The maximum resident size of that process was 7.08 GB:
+with the pages of the mapped scratch files (DIIS vectors, s3, the
+density), which are not anonymous memory and were not sampled apart here.
+The density step with the (Q) terms peaks at 6.69 GB (H2O), 1.63 GB (HBr
+/ cc-pVTZ-DK) and 10.44 GB (cc-pVQZ-DK) with 26 GB.
 
 ## 12. First derivatives of CCSDT(Q)_Lambda
 

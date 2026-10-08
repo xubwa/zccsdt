@@ -886,11 +886,32 @@ def plan_memory_blocks(eng, budget=None, mem_mb=2000.0, diis_space=0):
                          (plan.buffers + max(plan.setup, plan.iteration)) / 1e9, budget / 1e9))
 
 
-def plan_for(eris, t1, dtype, opts, blocks=False):
+def plan_for(eris, t1, dtype, opts, blocks=False, sources=None):
     '''LambdaPlan of a run with the solver options ``opts`` (max_memory in
     MB for the whole process; default: 80% of what is available).  T3 is
     taken to be in memory already, as the caller passes it.  ``blocks``: of
-    the equations on the blocks of the symmetry labels.'''
+    the equations on the blocks of the symmetry labels.  ``sources``: those
+    of kernel() - the copy of s3 that the run makes (in the blocks of the
+    labels, or of an array that is mapped or of another type) is in the
+    plan; an s3 in memory in the layout of the residual is the caller's.'''
+    return _plan_for(eris, t1, dtype, opts, blocks, _source_bytes(eris, dtype, sources, blocks))
+
+
+def _source_bytes(eris, dtype, sources, blocks):
+    '''Bytes of the copy of s3 that _sources makes.'''
+    from zccsdt.scratch import is_mapped
+    s3 = None if sources is None else sources[2]
+    if s3 is None:
+        return 0
+    if blocks:
+        return block_engine(eris, dtype).size * np.dtype(dtype).itemsize
+    a = np.asarray(s3)
+    if is_mapped(s3) or a.dtype != dtype or not a.flags.c_contiguous:
+        return a.size * np.dtype(dtype).itemsize
+    return 0
+
+
+def _plan_for(eris, t1, dtype, opts, blocks, reserve):
     from zccsdt import memory
     nocc, nvir = np.shape(t1)
     isz = np.dtype(dtype).itemsize
@@ -902,9 +923,10 @@ def plan_for(eris, t1, dtype, opts, blocks=False):
             raise ValueError('no blocks of symmetry labels for these integrals (labels in use, '
                              'C kernels)')
     if opts.incore_complete:
-        if blocks:
-            return plan_memory_blocks(eng, None, opts.mem_mb, space)
-        return plan_memory(nocc, nvir, isz, None, opts.mem_mb, space)
+        plan = plan_memory_blocks(eng, None, opts.mem_mb, space) if blocks else \
+            plan_memory(nocc, nvir, isz, None, opts.mem_mb, space)
+        plan.need += reserve
+        return plan
     cached = ccsdt_opt.cached_bytes(eris)
     om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
     budget = memory.budget(opts.max_memory)
@@ -921,12 +943,12 @@ def plan_for(eris, t1, dtype, opts, blocks=False):
     if blocks and (held is None or held[0] is not pm):
         bare += sum((hi - lo) ** 2 for lo, hi in pm.blocks) * isz_b
     if budget is not None:      # (what is there already: T3, kept arrays of the amplitude step)
-        budget += cached + (eng.size if blocks else om.ntri * vm.ntri) * isz - bare
+        budget += cached + (eng.size if blocks else om.ntri * vm.ntri) * isz - bare - reserve
     if blocks:
         plan = plan_memory_blocks(eng, budget, opts.mem_mb, space)
     else:
         plan = plan_memory(nocc, nvir, isz, budget, opts.mem_mb, space)
-    plan.need += bare
+    plan.need += bare + reserve
     return plan
 
 
@@ -949,6 +971,7 @@ def _sources(im, eris, sources, blocks):
     '''``sources`` = (s1[i,a], s2[i,j,a,b], s3 on the unique block [C(no,3),
     C(nv,3)] in lexicographic order, any of them None) in the layouts of
     the residuals of update_lams.'''
+    from zccsdt.scratch import is_mapped
     if sources is None:
         return None
     s1, s2, s3 = sources
@@ -962,6 +985,8 @@ def _sources(im, eris, sources, blocks):
     if s3 is not None:
         if blocks:
             s3 = blocked_l3(eris, s3)
+        elif is_mapped(s3):         # (in memory for the iterations, like l3 and the residual)
+            s3 = np.array(s3, dtype=dtype)
         s3 = np.ascontiguousarray(np.asarray(s3, dtype=dtype).ravel())
     return s1, s2, s3
 
@@ -986,8 +1011,10 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False,
     lexicographic order; None for one that is not there): constant terms
     added to the residuals dL/dt_k - the derivatives of a correction to the
     energy with respect to the amplitudes, those of (Q) from
-    zccsdt.cc.quadruples_grad.  s3 is one more array of the size of l3
-    (two with ``blocks``, while it is put into the blocks), not in the plan.
+    zccsdt.cc.quadruples_grad.  s3 is one more array of the size of l3: the
+    caller's where it is in memory in the layout of the residual, else a copy
+    that is in the plan (in the blocks of the labels with ``blocks``; of an
+    s3 in a scratch file, which is read once).
 
     T3, l3 and the residual are held in memory (plan_memory,
     plan_memory_blocks raise MemoryError if they do not fit in
@@ -999,7 +1026,7 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False,
     if isinstance(opts.plan, LambdaPlan) and opts.plan.blocks == bool(blocks):
         plan = opts.plan
     else:
-        plan = plan_for(eris, t1, dtype, opts, blocks)
+        plan = plan_for(eris, t1, dtype, opts, blocks, sources)
     T3p = np.ascontiguousarray(T3p, dtype=dtype)
     t0 = time.perf_counter()
     with timer('lam.setup'):

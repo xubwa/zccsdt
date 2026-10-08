@@ -65,12 +65,16 @@ def test_pass_equals_reference(no, nv, cplx, use_c, monkeypatch):
         assert _rel(d2, r2) < 1e-12                         # (and nothing elsewhere)
 
 
-@pytest.mark.parametrize('no,nv,cplx', [(5, 20, True), (6, 22, False)])
+@pytest.mark.parametrize('no,nv,cplx', [(5, 20, True), (6, 26, False)])
 def test_memory_plan(no, nv, cplx):
     '''plan(): monotone in the budget, within it, the whole plan when all
-    fits, MemoryError with the numbers below the floor; what a run allocates
-    (tracemalloc follows numpy's allocations) stays within Plan.need, from
-    the smallest batches up, and the plan is not a loose bound.'''
+    fits, MemoryError with the numbers below the floor; s3 and the density
+    of <bc||ef> in a scratch file where the largest batches do not fit, the
+    density alone where s3 fits with them, and the results are those of the
+    arrays in memory; what a run allocates (tracemalloc follows numpy's
+    allocations, not the mapped arrays) stays within Plan.need, from the
+    smallest batches up, and the plan is not a loose bound.'''
+    from zccsdt.scratch import is_mapped
     import tracemalloc
     eris, t2, T3 = _packed_data(no, nv, cplx)
     isz = 16 if cplx else 8
@@ -81,28 +85,139 @@ def test_memory_plan(no, nv, cplx):
     for a, b in zip(key, key[1:]):
         assert all(x <= y for x, y in zip(a, b))
     assert all(p.need <= b for p, b in zip(plans, budgets))
-    # as large as fits: at least nine tenths of every budget below the whole plan are used
-    assert all(p.need > 0.9 * b for p, b in zip(plans, budgets) if b < full.need)
+    # what is mapped: both arrays below the largest batches, then the density, then nothing
+    order = [QG.MAPPED.index(p.mapped) for p in plans]
+    assert order == sorted(order) and order[0] == 0 and order[-1] == 2 and 1 in order
+    top = (full.q.cols22, full.q.cols13, full.q.xv, full.q.rows)
+    assert all(k == top for k, p in zip(key, plans) if p.mapped != QG.MAPPED[0])
+    # as large as fits: at least nine tenths of every budget are used while the batches grow
+    assert all(p.need > 0.9 * b for p, b, k in zip(plans, budgets, key) if k != top)
     assert key[-1] == (full.q.cols22, full.q.cols13, full.q.xv, full.q.rows) and plans[-1].need == full.need
     with pytest.raises(MemoryError, match=r'derivatives of \(Q\) need [0-9.]+ MB .* [0-9.]+ MB are left'):
         QG.plan(no, nv, isz, full.floor - 1)
-    least = QG.explicit_plan(no, nv, isz, *QD._least(nv)[:2], 3, QD._least(nv)[2])
+    least = QG.explicit_plan(no, nv, isz, *QD._least(nv)[:2], 3, QD._least(nv)[2], mapped=QG.MAPPED[0])
     assert least.need == least.floor == plans[0].need < full.need
     g0 = QG.kernel(eris, t2, T3, plan_=full)
+    assert g0.scratch is None and not is_mapped(g0.vvvv) and not is_mapped(g0.s3)
     seen = []
-    for pl in [least, plans[len(plans) // 2], full]:
+    for pl in [least, plans[len(plans) // 4], plans[order.index(1)], full]:
         gc.collect()
         tracemalloc.start()
         base = tracemalloc.get_traced_memory()[0]
         g = QG.kernel(eris, t2, T3, plan_=pl)
         peak = tracemalloc.get_traced_memory()[1] - base
         tracemalloc.stop()
-        for a, b in ((g.s2, g0.s2), (g.s3, g0.s3), (g.vvvv, g0.vvvv), (g.vvvo, g0.vvvo), (g.gamma_vv, g0.gamma_vv)):
+        assert is_mapped(g.vvvv) == ('vvvv' in pl.mapped) and is_mapped(g.s3) == ('s3' in pl.mapped)
+        for a, b in ((g.s2, g0.s2), (g.s3, g0.s3), (g.vvvv, g0.vvvv), (g.vvvo, g0.vvvo), (g.gamma_vv, g0.gamma_vv),
+                     (g.src3[0], g0.src3[0]), (g.src3[1], g0.src3[1])):
             assert _rel(a, b) < 1e-11
         assert peak <= pl.need, (peak, pl)
         seen.append(peak / pl.need)
         del g
     assert min(seen) > 0.8
+    gc.collect()                # (the mappings of the scratch files go with their arrays)
+
+
+def _frozen_reference(g, no, G):
+    '''FrozenTerms spelled out: one frozen spinor at a time, every dense
+    block of the densities with the integrals <fu||vw> in each of its four
+    places.'''
+    v = g.gamma_vv.shape[0]
+    n = no + v
+    sl = {'o': slice(0, no), 'v': slice(no, n)}
+    dens = QG.dense_blocks(g, no)
+    a2, b2 = QD._pairs(v)
+    dens['vvvv'] = np.zeros((v,) * 4, dtype=g.vvvv.dtype)
+    dens['vvvv'][a2[:, None], b2[:, None], a2[None, :], b2[None, :]] = QG.dense_pairs(g.vvvv)
+    b, k = (np.zeros((G.shape[0], n), dtype=np.result_type(G, g.vvvv.dtype)) for _ in range(2))
+    for f in range(G.shape[0]):
+        S = G[f].transpose(1, 0, 2) - G[f].transpose(1, 2, 0)
+        for pat, D in dens.items():
+            x = [sl[c] for c in pat]
+            b[f, x[0]] += np.einsum('xqrs,qrs->x', D, S[x[1], x[2], x[3]])
+            b[f, x[1]] -= np.einsum('qxrs,qrs->x', D, S[x[0], x[2], x[3]])
+            k[f, x[2]] += np.einsum('pqxs,spq->x', D, S.conj()[x[3], x[0], x[1]])
+            k[f, x[3]] -= np.einsum('pqrx,rpq->x', D, S.conj()[x[2], x[0], x[1]])
+    return b, k
+
+
+def _active_reference(eris, g):
+    '''active_terms spelled out: the one-index transformation of the dense
+    integrals with the dense densities (no block among the virtual ones),
+    and the orbital energies through the Fock operator.'''
+    no, v = eris.nocc, g.gamma_vv.shape[0]
+    n = no + v
+    d2 = QG.dense_d2(g, no)
+    o_, v_ = slice(0, no), slice(no, n)
+    sl = {'o': o_, 'v': v_}
+    gint = np.zeros((n,) * 4, dtype=np.result_type(eris.oovv, d2))
+    for pat in ('oooo', 'ooov', 'oovo', 'ovoo', 'vooo', 'oovv', 'vvoo', 'ovov', 'ovvo', 'voov', 'vovo',
+                'ovvv', 'vovv', 'vvov', 'vvvo'):
+        gint[tuple(sl[c] for c in pat)] = QG.gblock(eris, pat)
+    gint[v_, v_, v_, v_] = eris.vvvv
+    G = (np.einsum('yqrs,xqrs->yx', gint, d2) + np.einsum('pyrs,pxrs->yx', gint, d2)
+         - np.einsum('pqxs,pqys->yx', gint, d2) - np.einsum('pqrx,pqry->yx', gint, d2))
+    V = np.einsum('p,papi->ai', g.de, gint[:, v_, :, o_])
+    G[v_, o_] += V
+    G[o_, v_] -= V.conj().T
+    G[v_, v_] = 0
+    return G
+
+
+@pytest.mark.parametrize('no,nv,cplx', [(5, 8, True), (4, 9, False)])
+def test_gradient_terms_equal_einsums(no, nv, cplx):
+    '''The orbital gradient of E(Q) among the active spin orbitals and the
+    terms of frozen spinors - matrix products on the packed densities, a
+    batch of frozen spinors at a time - against the dense densities
+    contracted index by index.'''
+    arr, mo_e = _random(no, nv, cplx)
+    eris = _container(arr['v'], mo_e, no)
+    g = QG.kernel(eris, arr['t2'], P.pack(arr['t3']))
+    want = _active_reference(eris, g)
+    got = QG.active_terms(eris, g)
+    assert abs(want[:no, no:]).max() > 1e-3 and abs(want[:no, :no]).max() > 1e-3
+    assert _rel(got, want) < 1e-12
+    rng = np.random.default_rng(7)
+    n = no + nv
+    G = rng.standard_normal((3, n, n, n))
+    if cplx:
+        G = G + 1j * rng.standard_normal((3, n, n, n))
+    b, k = QG.FrozenTerms(g, no, not cplx)(G)
+    bw, kw = _frozen_reference(g, no, G)
+    assert _rel(b, bw) < 1e-12 and _rel(k, kw) < 1e-12
+
+
+@pytest.mark.parametrize('cplx', [False, True])
+def test_gradient_terms_within_their_plan(cplx):
+    '''What the orbital gradient of E(Q) and the terms of a batch of frozen
+    spinors allocate (tracemalloc) against active_bytes() and
+    FrozenTerms.own(), which density_opt.kernel plans with.'''
+    import tracemalloc
+    no, nv = 5, 22
+    n = no + nv
+    eris, t2, T3 = _packed_data(no, nv, cplx)
+    isz = 16 if cplx else 8
+    g = QG.kernel(eris, t2, T3)
+
+    def peak_of(fn):
+        gc.collect()
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        fn()
+        peak = tracemalloc.get_traced_memory()[1] - base
+        tracemalloc.stop()
+        return peak
+    t1 = np.zeros((no, nv))
+    peak, need = peak_of(lambda: QG.orbital_gradient(eris, g, t1, t2, np.zeros((nv, no)))), QG.active_bytes(no, nv, isz)
+    print('orbital gradient: allocated %.2f MB, planned %.2f MB (%.2f)' % (peak / 1e6, need / 1e6, peak / need))
+    assert 0.4 * need < peak < need
+    ft = QG.FrozenTerms(g, no, not cplx)
+    rng = np.random.default_rng(1)
+    for nk in (1, 4):
+        G = rng.standard_normal((nk, n, n, n)) + (1j * rng.standard_normal((nk, n, n, n)) if cplx else 0)
+        peak, need = peak_of(lambda: ft(G)), ft.own(nk)
+        print('%d frozen: allocated %.2f MB, planned %.2f MB (%.2f)' % (nk, peak / 1e6, need / 1e6, peak / need))
+        assert 0.4 * need < peak < need
 
 
 def test_fewer_than_four():

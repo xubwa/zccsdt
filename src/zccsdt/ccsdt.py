@@ -1156,23 +1156,43 @@ class GCCSDT(UCCSDT):
         (zccsdt.cc.quadruples_grad.Gradient: the sources of the Lambda
         equations of CCSDT(Q) and the densities of (Q)), kept until self.t3
         is another array; None with fewer than four occupied or virtual
-        spinors, where (Q) vanishes.  One pass over the occupied quadruples
-        on the packed block (not in the sectors of the symmetry labels),
-        about four times the work of ccsdt_q(); it sets e_q as well.'''
-        from zccsdt.cc import ccsdt_opt, quadruples_grad
+        spinors, where (Q) vanishes.  One pass over the occupied quadruples,
+        about three to four times the work of ccsdt_q(): in the sectors of
+        the symmetry labels where the integrals have them and the blocks
+        fit (zccsdt.cc.quadruples_grad_sym; ``q_gradient_sectors`` says
+        so), else on the packed block, where the derivatives of the sizes
+        of T3 and <vv||vv> go to a scratch file if memory is short.  It sets
+        e_q as well.'''
+        from zccsdt.cc import ccsdt_opt, quadruples_grad, quadruples_grad_sym
         kept = getattr(self, '_q_gradient', None)
         if kept is not None and kept[0] is self.t3:
             return kept[1]
+        self._q_gradient = None                 # (the old one goes before the new one comes)
         eris = self._eris if self._eris is not None else self.ao2mo()
         no, nv = eris.nocc, eris.nmo - eris.nocc
         q = None
         if no >= 4 and nv >= 4:
-            t3 = ccsdt_opt.packed_t3(eris, self.t3)
+            from math import comb
+            t3 = self.t3
+            if np.size(t3) != comb(no, 3) * comb(nv, 3):
+                t3 = ccsdt_opt.packed_t3(eris, t3)  # (the blocks of the labels, as the pass reads them)
             ccsdt_opt.release_cached(eris)
             isz = np.dtype(np.result_type(self.t2, t3, eris.oovv)).itemsize
-            pl = quadruples_grad.plan(no, nv, isz, memory.budget(self.max_memory))
-            with timing.timer(ROOT_QG):
-                q = quadruples_grad.kernel(eris, self.t2, t3, plan_=pl)
+            budget = memory.budget(self.max_memory)
+            spl = None
+            if self.symmetry and quadruples_grad_sym.available(eris):
+                try:
+                    spl = quadruples_grad_sym.plan(eris, isz, budget)
+                except MemoryError:     # (the dense code can do with less: batches, scratch)
+                    pass
+            self.q_gradient_sectors = spl is not None
+            if spl is not None:
+                with timing.timer(ROOT_QG):
+                    q = quadruples_grad_sym.kernel(eris, self.t2, t3, plan_=spl)
+            else:
+                pl = quadruples_grad.plan(no, nv, isz, budget)
+                with timing.timer(ROOT_QG):
+                    q = quadruples_grad.kernel(eris, self.t2, t3, plan_=pl)
             self.e_q = q.e_q
         self._q_gradient = (self.t3, q)
         return q
@@ -1208,7 +1228,7 @@ class GCCSDT(UCCSDT):
             dtype = np.result_type(self.t1, self.t2, self.t3, eris.oovv, eris.fock)
             if lambda_opt.block_engine(eris, dtype) is not None:
                 try:
-                    plan = lambda_opt.plan_for(eris, self.t1, dtype, opts, blocks=True)
+                    plan = lambda_opt.plan_for(eris, self.t1, dtype, opts, blocks=True, sources=sources)
                 except MemoryError:     # (the packed block then, which says what it needs)
                     pass
         if plan is not None:

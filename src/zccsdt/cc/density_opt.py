@@ -231,7 +231,7 @@ def pair_bytes(nocc, nvir, itemsize=16):
     return (2 * v * o * nvp + v * o * (v * o + npo)) * itemsize
 
 
-def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0, source=None):
+def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0, source=None, extra_own=None):
     '''Plan for ``budget`` bytes of ordinary memory beyond the amplitudes,
     lambda and what the integral object holds (None: no limit).  The batches
     of the passes take what is left of the budget, up to BATCH_BYTES; the
@@ -250,9 +250,11 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
     integrals come in batches of as many frozen spinors as fit in what is
     left with the arrays they are cut into (they, the batches of the passes
     and the slab are not alive together); MemoryError if those of one do
-    not fit.'''
+    not fit.  ``extra_own``: a function nk -> bytes of what else is there
+    for a batch of nk frozen spinors (kernel(frozen_extra=)).'''
     o, v = nocc, nvir
     nvp, npo = v * (v - 1) // 2, max(o * (o - 1) // 2, 1)
+    xown = extra_own or (lambda nk: 0)
     fixed, unit = fixed_bytes(o, v, itemsize, nfrozen), max(pair_bytes(o, v, itemsize), 1)
     pp, row = nvp * nvp * itemsize, max(nvp * itemsize, 1)
     nb_most = min(npo, max(1, BATCH_BYTES // unit))
@@ -266,7 +268,7 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
             return None, None, None, 0
         pairs = 1 if way == 'y' else 0
         cap = None if left is None else left
-        fp = source.plan(cap, lambda nk: frozen_own(o, v, nk, itemsize, pairs), nfrozen)
+        fp = source.plan(cap, lambda nk: frozen_own(o, v, nk, itemsize, pairs) + xown(nk), nfrozen)
         nk, nbf = fp.nket, None
         work = fp.work
         if way == 'y':
@@ -322,7 +324,7 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
                 route=route, ng=ng, nk=nk, nbf=nbf, frozen=fp)
 
 
-def plan_memory_blocks(eng, budget=None, nfrozen=0, source=None, gradient=True):
+def plan_memory_blocks(eng, budget=None, nfrozen=0, source=None, gradient=True, extra_own=None):
     '''The Plan of kernel(..., blocks=True) for ``budget`` bytes of ordinary
     memory beyond the amplitudes, lambda and what the integral object holds
     (None: no limit); ``eng``: the density_blk.BlockDensity.  The dense
@@ -347,6 +349,7 @@ def plan_memory_blocks(eng, budget=None, nfrozen=0, source=None, gradient=True):
     the integrals of one frozen spinor do not fit.'''
     o, v, isz = eng.om.n, eng.vm.n, eng.dtype.itemsize
     nfrozen = nfrozen if gradient else 0
+    xown = extra_own or (lambda nk: 0)
     fixed = fixed_bytes(o, v, isz, nfrozen) + eng.operand_bytes()
     gam = pp = eng.gamma_bytes()
     if not gradient or not eng.size:
@@ -368,7 +371,7 @@ def plan_memory_blocks(eng, budget=None, nfrozen=0, source=None, gradient=True):
     def frozen_plan(left):
         if not nfrozen:
             return None, None, 0
-        fp = source.plan(left, lambda nk: frozen_own(o, v, nk, isz, 0), nfrozen)
+        fp = source.plan(left, lambda nk: frozen_own(o, v, nk, isz, 0) + xown(nk), nfrozen)
         return fp, fp.nket, fp.work
 
     route = 'gamma' if gam else None
@@ -927,7 +930,7 @@ def _frozen_stage(c):
 
 
 def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=None, frozen=None,
-           blocks=False, plan_only=False, frozen_extra=None):
+           blocks=False, plan_only=False, frozen_extra=None, reserve=0):
     '''The response density and the orbital gradient of CCSDT for the
     integrals ``eris`` (zccsdt.eris.ERIs, spin orbitals or spinors), the
     amplitudes t1[i,a], t2[i,j,a,b], t3 packed [C(o,3), C(v,3)] (as the
@@ -963,7 +966,11 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     spinors as their source gives them, G[f,v,u,w] with <fu||vw> =
     G[f,v,u,w] - G[f,w,u,v], that returns two arrays [f, x] added to bf and
     kf - the terms of another part of the energy, those of (Q) from
-    zccsdt.cc.quadruples_grad.FrozenTerms.'''
+    zccsdt.cc.quadruples_grad.FrozenTerms; its own(nk), the bytes of its
+    work arrays for nk frozen spinors, is in the plan of the batches.
+    ``reserve``: bytes that the caller needs after kernel() has returned
+    (the orbital gradient of (Q)): MemoryError if they do not fit either,
+    and Plan.need is not less.'''
     nocc, nvir = t1.shape
     o, v, n = nocc, nvir, nocc + nvir
     if t3 is None or l3 is None:        # CCSD
@@ -986,14 +993,21 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         source = _Given(nfz, source, n)
     # (with Kramers pairs the integrals of half of them, and of one more as a check)
     ntr = nfz // 2 + 1 if nfz >= 4 and getattr(source, 'kramers', None) is not None else nfz
-    if plan is None and eng is not None:
+    xown = getattr(frozen_extra, 'own', None)
+    if plan is None:
         budget = memory.budget(max_memory)
-        plan = plan_memory_blocks(eng, None if budget is None else budget - bare_bytes(eris, vm), ntr,
-                                  source, gradient)
-    elif plan is None:
-        from zccsdt.scratch import is_mapped
-        plan = plan_memory(o, v, isz, memory.budget(max_memory),
-                           is_mapped(getattr(eris, '_vvvv_pp', None)), ntr, source)
+        if budget is not None and reserve > budget:
+            raise MemoryError('The orbital gradient of (Q) with %d occupied and %d virtual spin orbitals '
+                              'needs about %.1f GB of memory for its o v^3 arrays; %.1f GB are available '
+                              '(max_memory, or what the node and the memory limit of the job leave)'
+                              % (o, v, reserve / 1e9, budget / 1e9))
+        if eng is not None:
+            plan = plan_memory_blocks(eng, None if budget is None else budget - bare_bytes(eris, vm), ntr,
+                                      source, gradient, xown)
+        else:
+            from zccsdt.scratch import is_mapped
+            plan = plan_memory(o, v, isz, budget, is_mapped(getattr(eris, '_vvvv_pp', None)), ntr, source, xown)
+        plan.need = max(plan.need, reserve)
     if plan_only:
         return plan
     assert bool(plan.blocks) == (eng is not None), 'a Plan of the other layout of t3'
@@ -1002,7 +1016,8 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         route = route or plan.route or frozen_route(o, v, ntr)
         if plan.frozen is None:         # a plan given without them: as if memory were not short
             if plan.nk is None:
-                plan.frozen = source.plan(None, lambda nk: frozen_own(o, v, nk, isz, int(route == 'y')), ntr)
+                plan.frozen = source.plan(None, lambda nk: frozen_own(o, v, nk, isz, int(route == 'y'))
+                                          + (xown(nk) if xown else 0), ntr)
             elif hasattr(source, 'slab_plan'):
                 plan.frozen = source.slab_plan(plan.nk)
             else:
@@ -1396,15 +1411,16 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
             source = FrozenIntegrals(mf, cact, cp, real, max_memory, components=True)
             source.kramers = U
             del cp, cact
-    qdens = extra = None
-    if q is not None and not plan_only:
+    extra, reserve = None, 0
+    if q is not None:
         from zccsdt.cc import quadruples_grad
-        qdens = quadruples_grad.dense_blocks(q, o)
-        if held_out is not None:
-            extra = quadruples_grad.FrozenTerms(q, o, real, qdens)
+        isz = np.dtype(np.result_type(t1, t2, l1, l2, eris.fock, eris.oovv, q.s2)).itemsize
+        reserve = quadruples_grad.active_bytes(o, mo_coeff.shape[1] - o, isz)
+        if held_out is not None:        # (alive while the plan is made: what it keeps is resident)
+            extra = quadruples_grad.FrozenTerms(q, o, real)
     res = kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=max_memory, plan=plan,
                  frozen=None if held_out is None else (nf + nd, source), blocks=blocks,
-                 plan_only=plan_only, frozen_extra=extra)
+                 plan_only=plan_only, frozen_extra=extra, reserve=reserve)
     if plan_only:
         if held_out is not None:
             res.held = (fock, source, rot, vref)
@@ -1419,9 +1435,11 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
         # E(Q): the orbital energies in the density, the gradient among the active spinors
         with timer('dens.q'):
             dm1 = dm1 + np.diag(q.de)
-            T3 = ccsdt_opt.packed_t3(eris, t3) if blocks else _packed3(eris, t3, np.result_type(t1, t2))
-            Ga = quadruples_grad.orbital_gradient(eris, q, np.asarray(t1), np.asarray(t2), T3, res.gnh, qdens)
-            del T3, qdens, extra
+            T3 = None
+            if q.src3 is None:          # (a Gradient without the parts of s3 with t3: from T3 here)
+                T3 = ccsdt_opt.packed_t3(eris, t3) if blocks else _packed3(eris, t3, np.result_type(t1, t2))
+            Ga = quadruples_grad.orbital_gradient(eris, q, np.asarray(t1), np.asarray(t2), res.gnh, T3)
+            del T3, extra
     if held_out is None and q is not None:
         n = mo_coeff.shape[1]
         none = np.zeros(0, dtype=int)
