@@ -55,6 +55,7 @@ direction, a container in CFOUR's files.
 '''
 
 import os
+import shutil
 from dataclasses import dataclass
 
 import numpy as np
@@ -654,11 +655,39 @@ def reference(directory='.'):
     return mf, nfrozen, ndropped
 
 
-def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True):
+def write_density(directory, mf, dm_ao):
+    '''A one-particle density in the spinor AO basis of ``mf``
+    (reference()) as the file ``denfinal`` of the directory: in the basis of
+    CFOUR's spinors, the SCF part included, D[p,q] = <q+ p> - what xx2czvec
+    leaves for xsox2cprop, which evaluates all its operators with it.  A
+    denfinal that is there already is kept once as denfinal.cfour.'''
+    C0 = np.asarray(mf.mo_coeff)
+    SC = mf.mol.intor('int1e_ovlp_spinor') @ C0
+    D = SC.conj().T @ dm_ao @ SC
+    path = os.path.join(directory, 'denfinal')
+    if os.path.isfile(path) and not os.path.isfile(path + '.cfour'):
+        shutil.copy(path, path + '.cfour')
+    _write_complex(path, D)
+    return D
+
+
+def wants_density(directory='.'):
+    '''Whether the ZMAT asks for first-order properties (PROPS other than
+    OFF), i.e. for the relaxed density.'''
+    zmat = os.path.join(directory, 'ZMAT')
+    keywords = parse_zmat(zmat)[0] if os.path.isfile(zmat) else {}
+    value = next((keywords[k] for k in ('PROPS', 'PROP', 'PROPERTIES') if k in keywords), 'OFF')
+    return value.upper() not in ('OFF', '0', '')
+
+
+def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True, density=False):
     '''CCSD and CCSD(T) of zccsdt.zccsd.DirectZCCSD - AO integrals made
-    here, the particle-particle ladder in the AO basis, Kramers pairs - on
-    CFOUR's spinors (reference()): after xjoda, xsox2catm and xsox2chf, no
-    integral file of xx2cvtran is read.  Returns {name: total energy}.'''
+    here, the particle-particle ladder in the AO basis, Kramers pairs -, or
+    CCSDT of zccsdt.CCSDT, on CFOUR's spinors (reference()): after xjoda,
+    xsox2catm and xsox2chf, no integral file of xx2cvtran is read.
+    ``density``: also Lambda, the orbital gradient and the Z-vector
+    equations, and the relaxed one-particle density written for xsox2cprop
+    (write_density).  Returns {name: total energy}.'''
     import sys
     from zccsdt.zccsd import DirectZCCSD
     stdout = stdout or sys.stdout
@@ -666,6 +695,19 @@ def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True):
     mf, nfrozen, ndropped = reference(directory)
     n = len(mf.mo_energy)
     frozen = list(range(nfrozen)) + list(range(n - ndropped, n)) if ndropped else nfrozen
+    if j.method == 'ccsdt':
+        import zccsdt
+        cc = zccsdt.CCSDT(mf, frozen=frozen)
+        cc.verbose, cc.stdout = verbose, stdout
+        cc.conv_tol, cc.conv_tol_normt, cc.max_cycle = j.conv_tol, j.conv_tol_normt, j.max_cycle
+        if j.max_memory:
+            cc.max_memory = j.max_memory
+        cc.kernel()
+        if not cc.converged:
+            raise RuntimeError('CCSDT did not converge in %d cycles' % j.max_cycle)
+        if density:
+            write_density(directory, mf, cc.make_rdm1(ao_repr=True))
+        return {'scf': float(mf.e_tot), 'ccsdt': float(cc.e_tot)}
     cc = DirectZCCSD(mf, frozen=frozen)
     cc.verbose, cc.stdout, cc.kramers = verbose, stdout, kramers
     cc.conv_tol, cc.conv_tol_normt, cc.max_cycle = j.conv_tol, j.conv_tol_normt, j.max_cycle
@@ -675,12 +717,20 @@ def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True):
     if not cc.converged:
         raise RuntimeError('CCSD did not converge in %d cycles' % j.max_cycle)
     e = {'scf': float(mf.e_tot), 'ccsd': float(mf.e_tot + cc.e_corr)}
-    if j.method == 'ccsd(t)':
+    with_t = j.method == 'ccsd(t)'
+    if with_t:
         e['ccsd(t)'] = e['ccsd'] + float(cc.ccsd_t())
+    if density:
+        from zccsdt.zccsd import zvector
+        cc.solve_lambda(with_t='gradient') if with_t else cc.solve_lambda()
+        relaxed = zvector.kernel(cc, tol=10 * j.conv_tol_normt, with_t=with_t)[0]
+        C = zvector.full_space(cc)[0]
+        write_density(directory, mf, C @ relaxed @ C.conj().T)
     return e
 
 
-def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, jobarc=False, mo_integrals=False):
+def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, jobarc=False, mo_integrals=False,
+        density=None):
     '''The CC calculation that the ZMAT of ``directory`` asks for (job()) on
     the integral files there.  Returns {name: total energy}, 'scf' and the
     methods done on the way.  ``jobarc``: write the final energy into JOBARC
@@ -695,11 +745,20 @@ def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, job
     if j.method == 'ccsd(t)' and not scf_files:
         raise FileNotFoundError('%s: CCSD(T) is done on CFOUR\'s spinors with AO integrals made here and needs '
                                 'the files scf2ccmo, MOL, GENBAS and ZMAT of the run' % directory)
-    if j.method in ('ccsd', 'ccsd(t)') and scf_files and not (mo_integrals and j.method == 'ccsd'):
+    density = wants_density(directory) if density is None else density
+    if density and (j.method not in ('ccsd', 'ccsd(t)', 'ccsdt') or not scf_files or mo_integrals):
+        raise ValueError('the relaxed density (PROPS of the ZMAT) is there for CCSD, CCSD(T) and CCSDT on '
+                         'CFOUR\'s spinors (the files scf2ccmo, MOL, GENBAS), not for %s%s'
+                         % (j.method.upper(), ' on the integral files' if mo_integrals else ''))
+    if (j.method in ('ccsd', 'ccsd(t)') and scf_files and not (mo_integrals and j.method == 'ccsd')) or \
+            (j.method == 'ccsdt' and density):
         # the AO-driven code on CFOUR's spinors: no integral files are read
-        say('CFOUR run directory %s: %s (%s), AO-driven on CFOUR\'s spinors'
-            % (os.path.abspath(directory), j.method.upper(), j.source['method']))
-        e = run_direct(directory, j, verbose, stdout)
+        say('CFOUR run directory %s: %s (%s), AO-driven on CFOUR\'s spinors%s'
+            % (os.path.abspath(directory), j.method.upper(), j.source['method'],
+               '; relaxed density for xsox2cprop' if density else ''))
+        e = run_direct(directory, j, verbose, stdout, density=density)
+        if density:
+            say('relaxed density written: %s' % os.path.join(os.path.abspath(directory), 'denfinal'))
         for name, value in e.items():
             say('E(%s)%s = %.12f%s' % (name.upper(), ' ' * (10 - len(name)), value,
                                         '' if name == 'scf' else '   correlation %.12f' % (value - e['scf'])))
@@ -776,6 +835,9 @@ def main(argv=None):
     ap.add_argument('--max-memory', type=float, help='MB, instead of the memory of the ZMAT')
     ap.add_argument('--mo-integrals', action='store_true',
                     help="CCSD on the integral files of xx2cvtran (needs moinpppp) instead of the AO-driven code")
+    ap.add_argument('--density', action='store_true', default=None,
+                    help='the relaxed density as the file denfinal (default: if the ZMAT has PROPS)')
+    ap.add_argument('--properties', action='store_true', help='xsox2cprop afterwards, on the density written here')
     ap.add_argument('--jobarc', action='store_true', help='write the final energy into JOBARC (TOTENERG)')
     ap.add_argument('--verbose', type=int, default=4)
     a = ap.parse_args(argv)
@@ -803,7 +865,12 @@ def main(argv=None):
                         if name.endswith(('.out', '.time')):
                             shutil.copy(os.path.join(work, name), start)
         if not a.no_cc:
-            run(work, a.method, a.max_memory, a.verbose, jobarc=a.jobarc, mo_integrals=a.mo_integrals)
+            run(work, a.method, a.max_memory, a.verbose, jobarc=a.jobarc, mo_integrals=a.mo_integrals,
+                density=True if a.properties else a.density)
+            if a.properties:
+                run_programs(work, ['xsox2cprop'], a.bin, log=lambda s: print(s, flush=True))
+                if work != start:
+                    shutil.copy(os.path.join(work, 'xsox2cprop.out'), start)
     except (ProgramFailed, FileNotFoundError, ValueError, RuntimeError) as err:
         print('zccsdt.cfour: %s' % err, file=sys.stderr)
         return 1
