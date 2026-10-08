@@ -63,15 +63,44 @@ not here).  The packed dressed <ab||de> is used twice in slabs of rows
 the passes, and with the block aibc after them; it is dressed once if all
 of it fits.
 
+Frozen occupied and dropped virtual spinors f (kernel(frozen=),
+relaxed_rdm1).  The gradient between f and an active spinor needs the
+contractions of the same blocks of g2 with the integrals <fq||rs> and
+<pq||fs> of one frozen index (frozen_terms).  They are made once
+(FrozenIntegrals: the transformation of the spinor CCSD, zccsd.ao2mo.slabs,
+with the frozen spinors as the first index), in batches of as many frozen
+spinors as the memory plan allows; a batch is T1-dressed in place and cut
+into six blocks, and every block of g2 is a matrix product with one of them
+(_frozen_stage).  The block abcd, which is not made, meets them in one of
+two ways (frozen_route):
+
+  'y'      as for the active spinors: two more products of the kind of Y for
+           a batch of frozen spinors, in a pass over t3 and lambda3 of its
+           own - two columns of Y for every frozen spinor, o^3 v^4 / 4 each;
+  'gamma'  lambda3 with t3 first: Gamma[(e<f), (g<h)] = 3 sum_(m<n<o, d)
+           l3[mno, d, (ef)] t3[mno, d, (gh)], one GEMM per batch of occupied
+           triples on the arrays with one virtual index apart
+           (t3pack.gather_vir_half): o^3 v^5 / 24 multiply-adds - a
+           particle-particle ladder - and v^4 / 4 elements.  It serves the
+           active spinors (in the place of Y) and any number of frozen ones,
+           and is taken where 6 (2 nfrozen + o) > v and it fits.
+
+Kramers pairs (kramers_pairs): with frozen spinors in pairs and t and
+lambda symmetric under time reversal, half of the frozen spinors are done
+and the others are their images.
+
 Memory (plan_memory): the o v^3 / 2 arrays (the dressed <ef||gi>, C3, the
 block aibc, the dressed <ma||ef>, the bare packed <ma||ef>), the batch
 buffers of pass 2 (two half-expanded batches and Y) and the slab of dressed
 <ab||de>; MemoryError if one occupied pair per batch and the rows of one
-first index do not fit.
+first index do not fit.  With frozen spinors: Gamma and the buffers of its
+pass, and the integrals of a batch of frozen spinors with the arrays they
+are cut into - as many as fit, at least those of one.
 
 Timers (zccsdt.timing): 'dens.dress', 'dens.vvvv', 'dens.pass_l',
-'dens.pass_tl' (with .gather, .t, .ring, .y, .h, .frozen), 'dens.gram',
-'dens.blocks', 'dens.gradient', 'dens.frozen', 'dens.zvector'.
+'dens.pass_tl' (with .gather, .t, .ring, .y, .h), 'dens.gamma', 'dens.gram',
+'dens.blocks', 'dens.gradient', 'dens.frozen' (with .setup, .ao2mo, .dress,
+.blocks, .contract, .gamma, .y), 'dens.kramers', 'dens.zvector'.
 '''
 
 from concurrent.futures import ThreadPoolExecutor
@@ -139,7 +168,8 @@ def frozen_own(nocc, nvir, nk, itemsize=16, pairs=0):
     buffers of the pass of route 'y' for that many occupied pairs.'''
     o, v = nocc, nvir
     n, nvp, npo = o + v, v * (v - 1) // 2, o * (o - 1) // 2
-    per = n ** 3 + o ** 3 + 2 * o * o * v + v * v * o + nvp * (o + 2 * v) + 3 * npo * v + 8 * n
+    per = n ** 3 + o ** 3 + 2 * o * o * v + v * v * o + nvp * (o + 2 * v) + 3 * npo * v + 8 * n \
+        + (2 * nvp * o if pairs else 0)
     return (nk * per + pairs * frozen_pair(o, v, nk, 1)) * itemsize
 
 
