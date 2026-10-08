@@ -303,3 +303,122 @@ def test_ao_driven_ccsd_t_on_cfours_spinors(tmp_path):
     assert abs(e['scf'] - REF['e_scf']) < 1e-9
     assert abs(e['ccsd'] - e['scf'] - REF['e_ccsd']) < 1e-9
     assert abs(e['ccsd(t)'] - e['ccsd'] - REF['e_t']) < 1e-9
+
+
+def test_handover_files(tmp_path):
+    '''The files xx2czvec reads for the relaxed density (docs/native.md):
+    written and read back; the density xx2czvec assembles from them is the
+    one handed over, also from the split of CFOUR's own files (dpoo not
+    Hermitian, a diagonal in dii0); what the files cannot carry is refused.'''
+    rng = np.random.default_rng(7)
+    nf, no, nv, nd = 2, 4, 6, 2
+    n, o = nf + no + nv + nd, nf + no
+    c = lambda *shape: rng.standard_normal(shape) + 1j * rng.standard_normal(shape)     # noqa: E731
+    D = c(n, n)
+    D = D + D.conj().T
+    D[:nf, :nf], D[o + nv:, o + nv:] = np.eye(nf), 0
+    D[nf:o, nf:o] += np.eye(no)         # (its virtual-occupied block is not handed over: xx2czvec makes it)
+    x, dvo = c(n - o, o), c(n - o, o)
+    files = cfour.handover_files(D, x, o, nf, nd)
+    assert [files[k].shape for k in cfour.HANDOVER] == [(8, 6), (4, 4), (6, 6), (4, 4), (6, 6), (2, 4), (2, 6)]
+    cfour.write_handover(str(tmp_path), files)
+    assert os.path.getsize(tmp_path / 'xfull') == 8 + 16 * 8 * 6    # one record, complex numbers
+    back = cfour.read_handover(str(tmp_path), n, o, nf, nd)
+    assert all(abs(back[k] - files[k]).max() == 0 for k in cfour.HANDOVER)
+    assert abs(back['xfull'] - x).max() == 0
+    assert abs(np.fromfile(tmp_path / 'xfull', dtype='<f8', offset=4, count=4)
+               - [x[0, 0].real, x[0, 0].imag, x[1, 0].real, x[1, 0].imag]).max() == 0     # the first index fastest
+    want = D.copy()
+    want[o:, :o], want[:o, o:] = dvo, dvo.conj().T
+    assert abs(cfour.handover_density(back, dvo) - want).max() < 1e-14
+    # the split is free: only dpoo + dpoo^+ + diag(dii0) and dpvv + dpvv^+ + diag(daa0) are used
+    other = dict(back)
+    a, b = np.triu(c(no, no), 1), np.triu(c(nv, nv), 1)
+    s, t = rng.standard_normal(no), rng.standard_normal(nv)
+    other['dpoo'] = back['dpoo'] + a - a.conj().T - 0.5 * np.diag(s)
+    other['dpvv'] = back['dpvv'] + b - b.conj().T - 0.5 * np.diag(t)
+    other['dii0'], other['daa0'] = np.diag(s) + np.triu(c(no, no), 1), np.diag(t) + np.tril(c(nv, nv), -1)
+    assert abs(cfour.handover_density(other, dvo) - want).max() < 1e-14
+    # no frozen and no dropped spinors: two empty records
+    files = cfour.handover_files(D[nf:o + nv, nf:o + nv], x[:nv, nf:], no)
+    cfour.write_handover(str(tmp_path), files)
+    assert os.path.getsize(tmp_path / 'dpopo') == 8 and os.path.getsize(tmp_path / 'dpvpv') == 8
+    assert cfour.read_handover(str(tmp_path), no + nv, no)['dpopo'].shape == (0, no)
+    for bad, what in ((D + 1e-3 * np.triu(np.ones((n, n)), 1), 'not Hermitian'),
+                      (D + np.diag([1e-3] + [0.0] * (n - 1)), 'not 1 between the frozen'),
+                      (D + np.diag([0.0] * (n - 1) + [1e-3]), 'not 0 between the dropped')):
+        with pytest.raises(ValueError, match=what):
+            cfour.handover_files(bad, x, o, nf, nd)
+    with pytest.raises(ValueError, match='all virtual, all occupied'):
+        cfour.handover_files(D, x[:nv], o, nf, nd)
+    # where xx2czvec is wrong (measured: docs/native.md): active occupied, active virtual, all spinors
+    for sizes, sound in (((10, 16, 26), True), ((8, 16, 26), True), ((8, 14, 26), True), ((8, 12, 26), False),
+                         ((10, 12, 26), False), ((8, 10, 26), False), ((10, 12, 22), False),
+                         ((8, 42, 80), True), ((8, 24, 80), False), ((18, 94, 378), True), ((18, 58, 378), False)):
+        assert cfour.xx2czvec_sound(*sizes) is sound
+
+
+@pytest.mark.parametrize('method,nfrozen,ndropped', [('ccsd(t)', 0, 0), ('ccsd', 2, 2)])
+def test_handover_to_a_stand_in_for_xx2czvec(tmp_path, monkeypatch, method, nfrozen, ndropped):
+    """--zvector cfour without CFOUR: xx2czvec replaced by a function that
+    does what it does with the files - solves R(d) = -xfull with the
+    orbital Hessian of the SCF in CFOUR's spinors and writes dpvofull and
+    the density it assembles.  Its denfinal is the one the Z-vector solver
+    of this program writes: the right-hand side and the blocks of the
+    density handed over are the whole relaxed density (the oo and vv
+    rotations of (T), the frozen and dropped spinors)."""
+    pytest.importorskip('socutils.tools.label')
+    from zccsdt.zccsd import zvector
+    src = os.path.join(HERE, 'data', 'cfour', 'h2o_sto3g_scf')
+    for name in os.listdir(src):
+        if name.endswith('.xz'):
+            with lzma.open(os.path.join(src, name)) as f:
+                open(tmp_path / name[:-3], 'wb').write(f.read())
+    open(tmp_path / 'GENBAS', 'w').write(open(os.path.join(src, 'GENBAS.txt')).read())
+    d = str(tmp_path)
+    arc = cfour.JobArc(d)
+    arc.put('NUMDROPA', np.array([nfrozen // 2], dtype=np.int64))
+    arc.put('NUMVIRTA', np.array([ndropped], dtype=np.int64))
+    j = cfour.job(d, method)
+    j.conv_tol, j.conv_tol_normt = 1e-12, 1e-10
+    cfour.run_direct(d, j, verbose=0, stdout=io.StringIO(), density=True)
+    n, o = 14, 10
+    own = cfour._complex(os.path.join(d, 'denfinal'), (n, n))
+    os.remove(os.path.join(d, 'denfinal'))
+    seen = {}
+
+    def xx2czvec(directory, progs, bindir=None, log=print, **kw):
+        assert progs == ['xx2czvec']
+        mf = cfour.reference(directory)[0]
+        files = cfour.read_handover(directory, n, o, nfrozen, ndropped)
+        conv, dvo = zvector.solve(mf, np.asarray(mf.mo_coeff), np.asarray(mf.mo_energy), o, -files['xfull'],
+                                  tol=1e-12, veff=zvector.scf_veff(mf))
+        cfour._write_complex(os.path.join(directory, 'dpvofull'), dvo)
+        cfour._write_complex(os.path.join(directory, 'denfinal'), cfour.handover_density(files, dvo))
+        open(os.path.join(directory, 'xx2czvec.out'), 'w').write(' Z-vector equation converged in 9 cycles\n')
+        seen.update(files)
+
+    monkeypatch.setattr(cfour, 'run_programs', xx2czvec)
+    out = io.StringIO()
+    cfour.run_direct(d, j, verbose=0, stdout=out, density=True, zvector='cfour')
+    assert 'max |R(D_vo) + xfull|' in out.getvalue()
+    handed = cfour._complex(os.path.join(d, 'denfinal'), (n, n))
+    assert abs(handed - handed.conj().T).max() < 1e-12 and abs(np.trace(handed) - o) < 1e-10
+    assert abs(handed - own).max() < 2e-9
+    assert seen['dpopo'].shape == (nfrozen, o - nfrozen) and seen['dpvpv'].shape == (ndropped, n - o - ndropped)
+    assert abs(seen['dii0']).max() == 0 and abs(seen['daa0']).max() == 0
+    if nfrozen:
+        assert abs(seen['dpopo']).max() > 1e-7 and abs(seen['dpvpv']).max() > 1e-5
+    # a solver that does not solve the equations is refused, and its density is not left as denfinal
+
+    def wrong(directory, progs, bindir=None, log=print, **kw):
+        xx2czvec(directory, progs)
+        files = cfour.read_handover(directory, n, o, nfrozen, ndropped)
+        dvo = 1.01 * cfour._complex(os.path.join(directory, 'dpvofull'), (n - o, o))
+        cfour._write_complex(os.path.join(directory, 'dpvofull'), dvo)
+        cfour._write_complex(os.path.join(directory, 'denfinal'), cfour.handover_density(files, dvo))
+
+    monkeypatch.setattr(cfour, 'run_programs', wrong)
+    with pytest.raises(cfour.ProgramFailed, match='did not solve the Z-vector equations'):
+        cfour.run_direct(d, j, verbose=0, stdout=io.StringIO(), density=True, zvector='cfour')
+    assert not os.path.isfile(os.path.join(d, 'denfinal')) and os.path.isfile(os.path.join(d, 'denfinal.wrong'))

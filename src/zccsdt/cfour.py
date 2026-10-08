@@ -894,6 +894,28 @@ def handover_density(files, dvo):
     return D
 
 
+def xx2czvec_sound(nocc, nvir, nspinors):
+    '''Whether xx2czvec of cfour-x2cso (the sources of 2026-10) solves the
+    Z-vector equations of a run with ``nocc`` active occupied, ``nvir``
+    active virtual and ``nspinors`` spinors in all.  It does not when few
+    virtual spinors are active: its response integrals are then made from
+    damaged AO integrals and its density - CFOUR's own relaxed density
+    too - is wrong, without a message (H2O/6-31G with 4 of 16 virtual
+    spinors dropped; HF/6-31G with none dropped: relaxed CCSD dipole
+    -1.1246 against -0.8609 from differences of CFOUR's own energies).
+
+    The rule (it separates the seven combinations of sizes run for
+    docs/native.md, two of them within 41 and 23 words of it, and the six
+    of docs/benchmarks.md, "Frozen virtual spinors"; the cause from reading
+    the source, not verified in a debugger): x2czvec/x2cccdendrv.f90 passes work(tmp2) to
+    frmfck2c3 as a scratch matrix of 2 nspinors^2 words, tmp2 is never
+    set in x2czvec/zvecini.f90, and the list of AO integrals starts at
+    word 1 + 3 C(nvir,3) + nvir (nvir+1) + nocc (nocc+1) of the same
+    array.'''
+    from math import comb
+    return 1 + 3 * comb(nvir, 3) + nvir * (nvir + 1) + nocc * (nocc + 1) >= 2 * nspinors ** 2
+
+
 def handover(directory, mf, nfrozen=0, ndropped=0, bindir=None, log=print, run=True):
     """A solver for zccsd.zvector.kernel and CCSDT.make_rdm1
     (``zvector_solver``) that leaves the Z-vector equations to CFOUR: it
@@ -935,7 +957,19 @@ def handover(directory, mf, nfrozen=0, ndropped=0, bindir=None, log=print, run=T
         err = abs(_complex(name('denfinal'), (n, n)) - handover_density(files, dvo)).max()
         if err > 1e-10:
             raise ProgramFailed('xx2czvec: its denfinal is not the density of the files handed over (%.1e)' % err)
-        return conv, Uv.conj().T @ dvo @ Uo - D[nocc:, :nocc]
+        d = Uv.conj().T @ dvo @ Uo
+        # one more Fock build: the solution in the equations it should solve
+        err, size = abs(R(d) + x).max(), abs(x).max()
+        log('xx2czvec: max |R(D_vo) + xfull| = %.1e (max |xfull| %.1e)' % (err, size))
+        if err > 1e-6 * max(size, 1e-3):
+            sound = xx2czvec_sound(nocc - nfrozen, n - nocc - ndropped, n)
+            os.replace(name('denfinal'), name('denfinal.wrong'))
+            raise ProgramFailed(
+                'xx2czvec did not solve the Z-vector equations: residual %.1e of a right-hand side of %.1e%s.  '
+                'Its density is kept as denfinal.wrong; use --zvector python.'
+                % (err, size, '' if sound else ' - with %d active virtual spinors of %d spinors its response '
+                   'integrals are wrong (cfour.xx2czvec_sound)' % (n - nocc - ndropped, n)))
+        return conv, d - D[nocc:, :nocc]
 
     return solver
 
