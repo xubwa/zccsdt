@@ -144,6 +144,7 @@ def _name(stages, key, short=False):
         return _PARTS[part]
     return key
 ROOT_INTS, ROOT_ITER, ROOT_Q, ROOT_P = 'zccsdt.integrals', 'zccsdt.iterations', 'zccsdt.q', 'zccsdt.p'
+ROOT_QG = 'zccsdt.qg'
 
 
 # ------------------------------------------------------------------ helpers
@@ -1150,7 +1151,33 @@ class GCCSDT(UCCSDT):
             kept = self._l3_packed = (l3, lambda_opt.packed_l3(eris, l3).ravel())
         return kept[1]
 
-    def solve_lambda(self):
+    def _q_terms(self):
+        '''The first derivatives of (Q) for the amplitudes of this object
+        (zccsdt.cc.quadruples_grad.Gradient: the sources of the Lambda
+        equations of CCSDT(Q) and the densities of (Q)), kept until self.t3
+        is another array; None with fewer than four occupied or virtual
+        spinors, where (Q) vanishes.  One pass over the occupied quadruples
+        on the packed block (not in the sectors of the symmetry labels),
+        about four times the work of ccsdt_q(); it sets e_q as well.'''
+        from zccsdt.cc import ccsdt_opt, quadruples_grad
+        kept = getattr(self, '_q_gradient', None)
+        if kept is not None and kept[0] is self.t3:
+            return kept[1]
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        no, nv = eris.nocc, eris.nmo - eris.nocc
+        q = None
+        if no >= 4 and nv >= 4:
+            t3 = ccsdt_opt.packed_t3(eris, self.t3)
+            ccsdt_opt.release_cached(eris)
+            isz = np.dtype(np.result_type(self.t2, t3, eris.oovv)).itemsize
+            pl = quadruples_grad.plan(no, nv, isz, memory.budget(self.max_memory))
+            with timing.timer(ROOT_QG):
+                q = quadruples_grad.kernel(eris, self.t2, t3, plan_=pl)
+            self.e_q = q.e_q
+        self._q_gradient = (self.t3, q)
+        return q
+
+    def solve_lambda(self, with_q=False):
         '''The Lambda equations of CCSDT for the converged amplitudes
         (zccsdt.cc.lambda_opt), kept as self.l1, self.l2, self.l3: l1 and l2
         dense, l3 in the layout of self.t3 - the packed block [i<j<k, a<b<c]
@@ -1159,7 +1186,13 @@ class GCCSDT(UCCSDT):
         block).  With ``symmetry`` the equations are solved in the blocks
         too (zccsdt.cc.lambda_blk); on the packed block otherwise, if the
         blocks do not fit in ``max_memory``, or if the packed block has
-        fewer than ``blocks_min`` elements (it is the faster one then).'''
+        fewer than ``blocks_min`` elements (it is the faster one then).
+
+        ``with_q``: lambda of CCSDT(Q) - the equations with the derivatives
+        of E(Q) with respect to t2 and t3 as constant terms (_q_terms;
+        docs/lambda.md 11), for the first derivatives of the CCSDT(Q)
+        energy: make_rdm1(with_q=True).  It is not the lambda of
+        ccsdt_q_lambda(), which wants that of CCSDT.'''
         from zccsdt.cc import lambda_opt, solver
         if self.t3 is None:
             raise RuntimeError('%s.solve_lambda(): no amplitudes (kernel() first)' % self.__class__.__name__)
@@ -1168,6 +1201,8 @@ class GCCSDT(UCCSDT):
             conv_tol_normt=self._conv_tol_normt(), max_cycle=self.max_cycle, diis_space=self.diis_space,
             incore_complete=self.incore_complete, max_memory=self.max_memory)
         labels = bool(getattr(eris, 'use_labels', False))
+        q = self._q_terms() if with_q else None
+        sources = None if q is None else (None, q.s2, q.s3)
         plan = None
         if self.symmetry and labels and self._blocks_pay(eris):
             dtype = np.result_type(self.t1, self.t2, self.t3, eris.oovv, eris.fock)
@@ -1178,20 +1213,21 @@ class GCCSDT(UCCSDT):
                     pass
         if plan is not None:
             opts.plan = plan
-            res = lambda_opt.kernel(eris, self.t1, self.t2, self.t3, opts, blocks=True)
+            res = lambda_opt.kernel(eris, self.t1, self.t2, self.t3, opts, blocks=True, sources=sources)
             l3 = res.l3
         else:
             dense, t3 = self._dense_view()
-            res = lambda_opt.kernel(dense, self.t1, self.t2, t3, opts)
+            res = lambda_opt.kernel(dense, self.t1, self.t2, t3, opts, sources=sources)
             # (in the layout of self.t3)
             l3 = lambda_opt.blocked_l3(eris, res.l3) if labels else res.l3
         if not res.converged:
             logger.warn(self, 'the Lambda equations of CCSDT did not converge in %d cycles', res.ncycle)
         self.l1, self.l2, self.l3, self.converged_lambda = res.l1, res.l2, l3, bool(res.converged)
         self.lambda_blocks = bool(res.blocks)
+        self._l_with_q = bool(with_q)
         return self.l1, self.l2, self.l3
 
-    def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-11):
+    def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-11, with_q=False):
         '''The one-particle density of CCSDT, D[p,q] = <q+ p>, in the basis
         of all spinors of the SCF in the order [frozen occupied, active
         occupied, active virtual, dropped virtual] (``ao_repr``: in the AO
@@ -1205,12 +1241,28 @@ class GCCSDT(UCCSDT):
         them run in these blocks (zccsdt.cc.density_blk; ``rdm1_blocks``
         says so), on the packed block otherwise, if the blocks do not fit
         in ``max_memory``, or if the packed block has fewer than
-        ``blocks_min`` elements.'''
+        ``blocks_min`` elements.
+
+        ``with_q``: the density of CCSDT(Q) - the trace of the relaxed one
+        with a one-electron operator is the derivative of E(CCSDT) + E(Q),
+        the spinors following the perturbation as canonical Hartree-Fock
+        spinors.  Lambda is that of solve_lambda(with_q=True), solved for
+        if the one that is there is not; the density has the derivative of
+        E(Q) with respect to the orbital energies on its diagonal, and the
+        relaxed one the rotations among the occupied and among the virtual
+        spinors besides (zccsdt.cc.quadruples_grad; docs/lambda.md 11).
+        The unrelaxed density of CCSDT(Q) is not the derivative of anything
+        at fixed spinors: E(Q) needs canonical ones.'''
         from zccsdt.cc import density_blk, density_opt
         if isinstance(self._scf, _Given):
             raise RuntimeError('the integrals were given: no SCF to take the response of the spinors from')
-        if getattr(self, 'l3', None) is None:
-            self.solve_lambda()
+        if getattr(self, 'l3', None) is None or bool(getattr(self, '_l_with_q', False)) != bool(with_q):
+            self.solve_lambda(with_q=with_q)
+        q = self._q_terms() if with_q else None
+        if q is not None:
+            kw_q = dict(q=q)
+        else:
+            kw_q = {}
         eris = self._eris if self._eris is not None else self.ao2mo()
         fo, o, v, fv = self._active()
         if getattr(eris, 'labels', None) is not None and getattr(self, '_sorted', None) is not None:
@@ -1219,7 +1271,7 @@ class GCCSDT(UCCSDT):
         Cs = np.asarray(self.mo_coeff) if axial is None else axial
         Ca = Cs[:, np.concatenate((o, v))]
         kw = dict(frozen_occ=Cs[:, fo] if len(fo) else None, dropped_vir=Cs[:, fv] if len(fv) else None,
-                  tol=tol, max_memory=self.max_memory)
+                  tol=tol, max_memory=self.max_memory, **kw_q)
         # in the blocks of the symmetry labels where T3 and l3 are in them and the plan fits
         plan = None
         if (self.symmetry and getattr(eris, 'use_labels', False) and np.size(self.l3) == np.size(self.t3)
@@ -1253,7 +1305,7 @@ class GCCSDT(UCCSDT):
         Lambda is solved for if it is not there.  Returns E(Q)_L and stores
         e_ql, e_ql5 (its fifth-order part, [Q]_L) and e_tot_ql.'''
         from zccsdt.cc import ccsdt_opt, quadruples_lambda, quadruples_lambda_sym
-        if getattr(self, 'l3', None) is None:
+        if getattr(self, 'l3', None) is None or getattr(self, '_l_with_q', False):
             self.solve_lambda()
         eris = self._eris if self._eris is not None else self.ao2mo()
         t3 = ccsdt_opt.packed_t3(eris, self.t3)
@@ -1394,6 +1446,22 @@ class GCCSDTQ(GCCSDT):
         if self.ccsdt_run is None:
             raise RuntimeError('GCCSDTQ.ccsdt_q_lambda(): no CCSDT step has been run (kernel() without amplitudes)')
         return self.ccsdt_run.ccsdt_q_lambda()
+
+    def solve_lambda(self, with_q=False):
+        '''Lambda of the CCSDT step (GCCSDT.solve_lambda), with ``with_q``
+        that of CCSDT(Q): CCSDTQ has no Lambda equations here.'''
+        if self.ccsdt_run is None:
+            raise RuntimeError('GCCSDTQ.solve_lambda(): no CCSDT step has been run (kernel() without amplitudes)')
+        return self.ccsdt_run.solve_lambda(with_q=with_q)
+
+    def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-11, with_q=False):
+        '''The one-particle density of the CCSDT step (GCCSDT.make_rdm1),
+        with ``with_q`` that of CCSDT(Q); not of CCSDTQ.'''
+        if self.ccsdt_run is None:
+            raise RuntimeError('GCCSDTQ.make_rdm1(): no CCSDT step has been run (kernel() without amplitudes)')
+        dm = self.ccsdt_run.make_rdm1(relaxed, ao_repr, tol, with_q)
+        self.rdm1_basis, self.rdm1_blocks = self.ccsdt_run.rdm1_basis, self.ccsdt_run.rdm1_blocks
+        return dm
 
     def ccsdtq(self, t1, t2, t3, t4=None):
         import copy
