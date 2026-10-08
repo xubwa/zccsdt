@@ -192,11 +192,13 @@ def fixed_bytes(nocc, nvir, itemsize=16, nfrozen=0):
     t2, about twenty o^2 v^2 arrays and the Gram matrix of the occupied
     triples, and what the threaded BLAS keeps.  With frozen spinors: the
     blocks of the densities in the layouts their integrals are multiplied
-    with (eight more o^2 v^2 arrays), and rows of Gamma gathered.'''
+    with (eight more o^2 v^2 arrays), and rows of Gamma gathered on every
+    thread.'''
     o, v = nocc, nvir
     nvp, npo, nto = v * (v - 1) // 2, o * (o - 1) // 2, o * (o - 1) * (o - 2) // 6
     half = o * v * nvp
-    frozen = (8 * o * o * v * v + 8 * o ** 3 * v + 4 * o ** 4 + 3 * v * nvp + 6 * o * v * v
+    nthr = max(1, lib.num_threads())
+    frozen = (8 * o * o * v * v + 8 * o ** 3 * v + 4 * o ** 4 + (nthr + 2) * v * nvp + 2 * (nthr + 2) * o * v * v
               + 4 * (o + v) * nfrozen) if nfrozen else 0
     return (5 * (o + v) * o * nvp + 4 * o * v * v + 20 * o * o * v * v + 3 * o * o * nvp
             + 2 * nto * nto + 6 * o ** 3 * v + 4 * npo * npo + half // max(v, 1) + frozen) * itemsize \
@@ -411,6 +413,24 @@ def _yterm(Ar, B2, ncol, C, out, Ybuf, vm, o):
         gemm(C[j].reshape(v, o * nQ), om_.reshape(o * nQ, ncol), out, beta=1.0)
 
 
+def _threaded(function, items):
+    '''Generator of (item, function(item)) in the order of ``items``, the
+    function evaluated on threads a few items ahead (gathers of numpy, which
+    run without the interpreter lock; one array per thread is alive).'''
+    items = list(items)
+    nthr = max(1, min(len(items), lib.num_threads()))
+    if nthr == 1:
+        for x in items:
+            yield x, function(x)
+        return
+    with ThreadPoolExecutor(nthr) as pool:
+        for i0 in range(0, len(items), nthr):
+            chunk = items[i0:i0 + nthr]
+            for x, y in zip(chunk, pool.map(function, chunk)):
+                yield x, y
+                del y
+
+
 def _gamma_pairs(out, Gam, V, vm, cols, alpha=1.0):
     '''out[q, y] += alpha sum_Q G[Q, (p<q)] V[Q, p, y] and out[p, y] -= alpha
     sum_Q G[Q, (p<q)] V[Q, q, y] over the virtual pairs (p<q): Gamma with
@@ -425,10 +445,10 @@ def _gamma_pairs(out, Gam, V, vm, cols, alpha=1.0):
         r0 = pidx[p_, p_ + 1]
         r1 = r0 + v - p_ - 1
         gemm(Gam[:, r0:r1].T if cols else Gam[r0:r1], V[:, p_, :], out[p_ + 1:], alpha=alpha, beta=1.0)
-    for q in range(1, v):
-        idx = pidx[:q, q]
-        M = np.take(Gam, idx, axis=1).T if cols else np.take(Gam, idx, axis=0)
-        gemm(M, V[:, q, :], out[:q], alpha=-alpha, beta=1.0)
+    def gather(q):          # (numpy releases the interpreter lock in a take)
+        return np.take(Gam, pidx[:q, q], axis=1 if cols else 0)
+    for q, M in _threaded(gather, range(1, v)):
+        gemm(M.T if cols else M, V[:, q, :], out[:q], alpha=-alpha, beta=1.0)
         del M
 
 
@@ -445,10 +465,13 @@ def _pair_term(out, Tvvo, rows_of, vm, alpha):
     pidx = np.where(vm.pidx >= 0, vm.pidx, vm.pidx.T)
     sign = np.sign(np.arange(v)[:, None] - np.arange(v)[None, :]).astype(T2.real.dtype)    # [e1, a]: + for a < e1
     take, sign = np.where(pidx >= 0, pidx, 0).ravel(), sign.ravel()
-    for e2 in range(v):
+    def unpack(e2):
         U = np.take(rows_of(e2), take, axis=1)
         U *= sign
+        return U
+    for e2, U in _threaded(unpack, range(v)):
         gemm(T2[:, e2, :], U.reshape(o * v, v), out, alpha=alpha, beta=1.0)
+        del U
 
 
 def _dress(X, t1, kinds):
