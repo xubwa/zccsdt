@@ -1042,7 +1042,7 @@ class GCCSDT(UCCSDT):
     # that are taken once (the Lambda residuals, the densities)
     zeta_stencil = 'forward'
     response_stencil = 'exact'
-    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'rdm1_blocks', 'blocks_min',
+    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'q_estimate', 'q_progress', 'rdm1_blocks', 'blocks_min',
                               'e_ql', 'e_ql5', 'e_tot_ql', 'zeta1', 'zeta2', 'zeta3', 'l1_ql', 'l2_ql', 'l3_ql',
                               'converged_zeta', 'converged_lambda_ql', 'ql_gradient_sectors', 'q_gradient_sectors',
                               'zeta_stencil', 'response_stencil', 'ql_info'}
@@ -1602,14 +1602,34 @@ class GCCSDT(UCCSDT):
         self.e_tot_ql = self.e_tot + self.e_ql
         return self.e_ql
 
-    def ccsdt_q(self, t2=None, t3=None):
+    q_progress = 300.0      # seconds between the progress lines of (Q)
+
+    def ccsdt_q(self, t2=None, t3=None, fraction=None):
         '''(Q) correction of the converged CCSDT amplitudes on spin orbitals
         or spinors (zccsdt.cc.quadruples; canonical orbitals); returns E(Q)
-        and stores e_q, e_q5 (its fifth-order part, [Q]) and e_tot_q.'''
+        and stores e_q, e_q5 (its fifth-order part, [Q]) and e_tot_q.
+
+        The correction is a sum over the occupied quadruples; a line with
+        the part done and the time left is printed every ``q_progress``
+        seconds.  ``fraction`` (e.g. 0.01): only that part of the occupied
+        quadruples is summed, evenly spread, and the time of the whole step
+        is estimated from it - returned in seconds and kept as
+        ``q_estimate``; the energies of the object are left as they are.'''
+        import time
         from math import comb
         from zccsdt.cc import ccsdt_opt, quadruples, quadruples_sym
         log = logger.new_logger(self)
         pr = _Printer(log)
+        stride = 1 if not fraction else max(1, int(round(1.0 / fraction)))
+        mark = [time.perf_counter()]
+
+        def progress(done, total, seconds):
+            if done == total or time.perf_counter() - mark[0] >= self.q_progress:
+                mark[0] = time.perf_counter()
+                pr.kv('progress', '%d of %d occupied quadruples (%.1f %%) in %.0f s; about %.0f s left'
+                      % (done, total, 100.0 * done / total, seconds, seconds * (total - done) / done), indent=3)
+            progress.last = (done, total, seconds)
+        progress.last = None
         t2 = self.t2 if t2 is None else t2
         t3 = self.t3 if t3 is None else t3
         eris = self._eris if self._eris is not None else self.ao2mo()
@@ -1642,7 +1662,7 @@ class GCCSDT(UCCSDT):
                     'all occupied indices' if spl.dense.xv >= xfull else
                     '%d of %d occupied indices at a time' % (spl.dense.xv, xfull)), indent=3)
                 with _PeakMemory() as peak, timing.timer(ROOT_Q):
-                    self.e_q5, self.e_q = quadruples_sym.kernel(eris, t2, t3, plan_=spl)
+                    part = quadruples_sym.kernel(eris, t2, t3, plan_=spl, stride=stride, progress=progress)
             else:
                 pl = quadruples.plan(no, nv, np.dtype(dtype).itemsize, budget)
                 pr.kv('memory', '%s besides T3 and the integrals' % _size(pl.need), indent=3)
@@ -1651,8 +1671,20 @@ class GCCSDT(UCCSDT):
                          'all occupied indices' if pl.xv >= xfull else
                          '%d of %d occupied indices at a time' % (pl.xv, xfull)), indent=3)
                 with _PeakMemory() as peak, timing.timer(ROOT_Q):
-                    self.e_q5, self.e_q = quadruples.kernel(eris, t2, t3, plan_=pl)
+                    part = quadruples.kernel(eris, t2, t3, plan_=pl, stride=stride, progress=progress)
             w, c, k = timing.since(snap0)[(ROOT_Q,)]
+            if stride > 1:
+                done, total, seconds = progress.last
+                est = seconds * comb(no, 4) / done + (w - seconds)
+                self.q_estimate = {'sampled': done, 'quadruples': comb(no, 4), 'seconds': w, 'estimate': est,
+                                   'sectors': spl is not None}
+                pr.kv('sample', 'every %d-th occupied quadruple: %d of %d in %.1f s (%.3f s each, %.1f cores)'
+                      % (stride, done, comb(no, 4), seconds, seconds / done, c / w if w > 0 else 0), indent=3)
+                pr.kv('estimate', 'the whole step: about %.0f s (%.2f h); the energies are not set' % (est, est / 3600),
+                      indent=3)
+                pr.rule(char='=')
+                return est
+            self.e_q5, self.e_q = part
         pr.kv('E[Q]', '%20.12f   (fifth order)' % self.e_q5, indent=3)
         pr.kv('E(Q)', '%20.12f' % self.e_q, indent=3)
         pr.kv('E(CCSDT(Q))', '%20.12f' % self.e_tot_q, indent=3)

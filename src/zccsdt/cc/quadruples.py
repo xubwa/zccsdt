@@ -363,11 +363,36 @@ class Quadruples:
         return rt3, rtt
 
 
-def kernel(eris, t2, t3, max_memory=None, plan_=None):
+def walk(schedule, stride=1, progress=None):
+    '''The groups (l, xs, quadruples) of a schedule with every ``stride``-th
+    occupied quadruple of each group - the correction is a sum over the
+    occupied quadruples, so that a part of them gives a part of the energy
+    in the same part of the time - and ``progress(done, total, seconds)``
+    called after each quadruple.'''
+    import time
+    groups = [(l, xs, Is[::stride]) for l, xs, Is in schedule]
+    total = sum(len(g[2]) for g in groups)
+    t0, done = time.perf_counter(), [0]
+
+    def each(Is):
+        for I in Is:
+            yield I
+            done[0] += 1
+            if progress is not None:
+                progress(done[0], total, time.perf_counter() - t0)
+    for l, xs, Is in groups:
+        if len(Is):
+            yield l, xs, each(Is)
+
+
+def kernel(eris, t2, t3, max_memory=None, plan_=None, stride=1, progress=None):
     '''(E[Q], E(Q)) from converged CCSDT amplitudes: t2[i,j,a,b] and T3
     packed [C(no,3), C(nv,3)] (or flat), on an integral container
     (zccsdt.eris.ERIs).  ``max_memory``: MB for the whole process (default:
-    what the node and the job leave); ``plan_``: a Plan given explicitly.'''
+    what the node and the job leave); ``plan_``: a Plan given explicitly.
+    ``stride`` > 1: the sum over every stride-th occupied quadruple only (a
+    sample, to time the step: see walk); ``progress(done, total, seconds)``
+    is called after every quadruple.'''
     from zccsdt import memory
     no = eris.nocc
     nv = np.asarray(eris.fock).shape[0] - no
@@ -378,7 +403,7 @@ def kernel(eris, t2, t3, max_memory=None, plan_=None):
         plan_ = plan(no, nv, isz, memory.budget(max_memory))
     q = Quadruples(eris, t2, t3, plan_)
     e5 = e6 = 0.0
-    for l, xs, Is in q.schedule():
+    for l, xs, Is in walk(q.schedule(), stride, progress):
         Xv, where = q.xi_v(l, xs)
         for I in Is:
             with timer('q.left'):

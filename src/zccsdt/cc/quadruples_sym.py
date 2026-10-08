@@ -254,9 +254,9 @@ def _stack(parts, ncol, dtype):
     return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
 
-def kernel(eris, t2, t3, max_memory=None, plan_=None):
+def kernel(eris, t2, t3, max_memory=None, plan_=None, stride=1, progress=None):
     '''(E[Q], E(Q)) as zccsdt.cc.quadruples.kernel, in the symmetry sectors
-    of ``eris.labels``.'''
+    of ``eris.labels`` (``stride``, ``progress``: as there).'''
     from zccsdt import memory
     no = eris.nocc
     nv = np.asarray(eris.fock).shape[0] - no
@@ -283,7 +283,7 @@ def kernel(eris, t2, t3, max_memory=None, plan_=None):
     nA3 = T3.shape[1]
     e = np.zeros(2)
     XV, last = {}, None
-    for l, xs, Is in q.schedule():
+    for l, xs, Is in Q.walk(q.schedule(), stride, progress):
         with timer('qs.xv'):
             if last != l:
                 XV, last = {}, l
