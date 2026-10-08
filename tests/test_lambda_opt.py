@@ -304,12 +304,17 @@ def test_memory_plan(no, nv):
     ccsdt_opt.vvvv_packed(eris, vm)             # (the packed bare <ab||de>: the integral object's)
     ccsdt_opt._bare_Q(eris, om, vm)
     f, pp = no * nv ** 3 * 16, vm.npair ** 2 * 16
-    for mem_mb in (2000.0, 1e-3):
+    # (the second: two thirds of the occupied triples in a batch of the ladder, so
+    # that the last batch is a short one)
+    uneven = 1.5e-6 * max(3, 2 * om.ntri // 3) * 2 * vm.npair * nv * 16 * 1.01
+    for mem_mb in (2000.0, uneven, 1e-3):
         plan = LO.plan_memory(no, nv, 16, None, mem_mb)
         gc.collect()
         tracemalloc.start()
         base = tracemalloc.get_traced_memory()[0]
         im = LO.make_intermediates(eris, t[0], t[1], T3p, mem_mb=plan.mem_mb)
+        if mem_mb == uneven:
+            assert om.ntri % im.eng.triple_batch() and im.eng.nb < om.npair
         setup = tracemalloc.get_traced_memory()[1] - base
         kept = tracemalloc.get_traced_memory()[0] - base
         tracemalloc.reset_peak()

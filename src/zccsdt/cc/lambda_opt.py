@@ -222,20 +222,24 @@ class DenseL3:
         no, nv, npo, nvp = om.n, vm.n, om.npair, vm.npair
         dm, K = nv * no, Bdrv.shape[0]
         L3 = self.view(L3)
-        nb = self.nb
-        bufL = np.empty((nb, nv, no, nvp), dtype=dtype)
+        nb, nu = self.nb, U.shape[1]
+        # the outer products ride on the ring GEMM: [WL | U] [L[P]; Vp[P]]
+        WLU = np.zeros((dm, dm + nu), dtype=dtype)
+        if WL is not None:
+            WLU[:, :dm] = WL
+        WLU[:, dm:] = U
+        bufL = np.empty((nb, dm + nu, nvp), dtype=dtype)
         Z = np.empty((nb, dm, nvp), dtype=dtype)
-        U = np.ascontiguousarray(U, dtype=dtype)
         for p0 in range(0, npo, nb):
             p1 = min(p0 + nb, npo)
             n = p1 - p0
             with timer('gather'):
-                L = self._half(L3, p0, p1, bufL)
+                for k in range(n):
+                    self._half(L3, p0 + k, p0 + k + 1, bufL[k, :dm].reshape(1, nv, no, nvp))
+                bufL[:n, dm:] = Vp[p0:p1]
             with timer('gemm'):
                 for k in range(n):
-                    gemm(U, np.ascontiguousarray(Vp[p0 + k], dtype=dtype), Z[k])
-                    if WL is not None:
-                        gemm(WL, L[k].reshape(dm, nvp), Z[k], beta=1.0)
+                    gemm(WLU, bufL[k], Z[k])
             with timer('drive'):
                 gemm(np.ascontiguousarray(Adrv[p0:p1], dtype=dtype).reshape(n * nv, K), Bdrv,
                      Z[:n].reshape(n * nv, no * nvp), alpha=-1.0, beta=1.0)
@@ -259,17 +263,17 @@ class DenseL3:
         if not self.size:
             return r2, r1
         nbt = self.triple_batch()
-        ws = np.empty((2, nvp, nbt * nv), dtype=dtype)
+        # the gathered batch and its product (a short last batch in the same storage)
+        ws = np.empty((2, nvp * nbt * nv), dtype=dtype)
         for i0 in range(0, om.ntri, nbt):
             rows = np.arange(i0, min(i0 + nbt, om.ntri))
             n = len(rows)
             with timer('gather'):
                 Lv = t3pack.gather_vir_half(L3, vm, rows,
-                                            out=ws[0, :, :n * nv].reshape(nvp, n, nv)
-                                            if n == nbt else None)
+                                            out=ws[0, :nvp * n * nv].reshape(nvp, n, nv))
                 Lf = Lv.reshape(nvp, n * nv)
             if Wpp is not None:
-                X = ws[1, :, :n * nv] if n == nbt else np.empty((nvp, n * nv), dtype=dtype)
+                X = ws[1, :nvp * n * nv].reshape(nvp, n * nv)
                 with timer('gemm'):
                     gemm(Wpp.T, Lf, X)
                 with timer('reduce'):
