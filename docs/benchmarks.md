@@ -3455,28 +3455,38 @@ crossover.
 
 ### Relaxed properties of CCSDT(Q)
 
-`zccsdt.cc.quadruples_grad` (docs/lambda.md section 11): one pass over the
-occupied quadruples gives E(Q), the sources of the Lambda equations and the
-densities of (Q).  8 cores, job 31766046 on c320 (load 29 at the start, 7
-to 12 later; job 31765428 on c105 gave the same ratios):
+`zccsdt.cc.quadruples_grad`, `quadruples_grad_sym` (docs/lambda.md section
+11): one pass over the occupied quadruples gives E(Q), the sources of the
+Lambda equations and the densities of (Q).  8 cores, job 31769367 on c105
+(the shared node, load 6 to 9), `max_memory` 26 GB:
 
-| | H2O / cc-pVTZ, spin orbitals, 10 + 106 | HBr / cc-pVTZ-DK, X2C, 28 frozen, 8 + 78 |
-|---|---|---|
-| (Q) energy on the packed block | 50.1 s | 5.23 s |
-| (Q) energy as the front end runs it | 50.4 s | 1.83 s (sectors) |
-| gradient pass of (Q) | 170.5 s (3.4 times) | 18.0 s (3.4 times; 9.8 times the sectors) |
-| Lambda iteration without, with the sources | 5.99, 6.08 s | 0.28, 0.28 s |
-| relaxed density after Lambda: CCSDT, CCSDT(Q) | 6.3, 6.8 s | 1.95, 4.23 s |
-| everything after the energy: CCSDT, CCSDT(Q) | 110.5, 283.0 s | 7.0, 27.0 s |
+| | H2O / cc-pVTZ, spin orbitals, 10 + 106 | HBr / cc-pVTZ-DK, X2C, 28 frozen, 8 + 78 | HBr / cc-pVQZ-DK, 8 + 160 |
+|---|---|---|---|
+| (Q) energy as the front end runs it | 44.7 s | 1.49 s (sectors) | 14.5 s (sectors) |
+| (Q) energy on the packed block | 44.1 s | 4.39 s | 94.7 s |
+| gradient pass of (Q) as the front end runs it | 129.9 s (2.9 times) | 3.19 s (sectors, 2.1 times) | 27.4 s (sectors, 1.9 times) |
+| gradient pass on the packed block | 129.9 s | 13.65 s | 283 s (vvvv density mapped) |
+| relaxed density after Lambda: CCSDT, CCSDT(Q) | 5.62, 5.25 s | 1.63, 1.99 s | 9.54, 14.73 s |
+| everything after the energy, CCSDT(Q) | 224.8 s | 9.31 s | 65.3 s |
 
-Values: finite fields to the 2 to 5e-11 that the differences resolve
-(twelve cases: real, complex, X2C, frozen and left-out spinors), and the
-dipole moment of H2O against CFOUR's `ncc` to all ten digits it prints
-(STO-3G 0.6358501673, 6-31G 0.9906864242, cc-pVTZ 0.7492563653).  CFOUR's
-closed-shell code with the point group does the whole cc-pVTZ calculation
-in 66 s on the same node: the spin-orbital code here has neither, and this
-is not a like-for-like timing.  The gradient pass does not use the labels
-yet, and holds the vvvv density of (Q) in memory.
+- Before the pass ran in sectors and its adjoint products were stacked
+  (same job, the tree of 8059a77): the pass 141.8 s for H2O and 14.43 s for
+  HBr / cc-pVTZ-DK, everything after the energy 237.2 and 22.0 s.
+- H2O under `max_memory` 4000 MB: the same numbers, every step below 4 GB
+  of anonymous memory, the pass 234 s (the source of Lambda_3 and the vvvv
+  density in a scratch file, 16 column batches).
+- Values: finite fields to the 2 to 5e-11 that the differences resolve
+  (twelve cases: real, complex, X2C, frozen and left-out spinors), and the
+  dipole moment of H2O against CFOUR's `ncc` (`CALC=CCSDT(Q)`,
+  `PROPS=FIRST_ORDER`) to all ten digits it prints (STO-3G 0.6358501673,
+  6-31G 0.9906864242, cc-pVTZ 0.7492563653).
+- CFOUR's closed-shell code with the point group does the whole cc-pVTZ
+  calculation of H2O in 66 s (job 31765428, the same node as zccsdt
+  there): the spin-orbital code here has neither spin adaptation nor point
+  group, and this is not a like-for-like timing.
+- Relaxed properties of CCSDT(Q)_Lambda: theory and a dense reference only
+  (docs/lambda.md section 12; finite fields to 1e-11, MRCC finite
+  differences to 2e-12); nothing on packed amplitudes yet.
 
 ### Complex spinors, larger cases, less memory
 

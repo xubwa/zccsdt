@@ -295,9 +295,12 @@ e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), 
   `mycc.make_rdm1(with_q=True)` - the Lambda equations of CCSDT with the
   derivatives of E(Q) as sources, and the relaxed density with the parts
   of (Q) (`zccsdt.cc.quadruples_grad`; docs/lambda.md section 11), frozen
-  and left-out spinors included.  The pass over the quadruples takes 3.4
-  to 3.6 times the (Q) energy on the packed block (it does not use the
-  labels yet), the Lambda iterations cost what they cost without (Q).
+  and left-out spinors included.  The pass over the quadruples takes about
+  three times the (Q) energy on the packed block and about twice in the
+  sectors of the labels (`quadruples_grad_sym`, `mycc.q_gradient_sectors`);
+  the Lambda iterations cost what they cost without (Q).  With little
+  memory the source of Lambda_3 and the vvvv density of (Q) go to a
+  scratch file.
   H2O / cc-pVTZ, the dipole moment against CFOUR's `ncc`
   (`CALC=CCSDT(Q)`, `PROPS=FIRST_ORDER`): 0.7492563653 in both.
 - An RHF reference makes `zccsdt.CCSDT` the closed-shell class, which has
