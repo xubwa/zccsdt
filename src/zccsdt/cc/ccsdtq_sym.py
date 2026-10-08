@@ -167,6 +167,14 @@ def plan_for(eris, dtype, max_memory=None, diis_space=8, incore_complete=False, 
                 step_need=step_need, mem_mb=mem_mb)
 
 
+def diis_plan_of(eris, dtype, opts, pl):
+    '''ccsdtq.diis_plan_for() of a run on ``eris`` with the Plan ``pl``: T3
+    and T4 in the blocks of the labels.'''
+    lay = pl.layout if pl.layout is not None else S.layout_for(eris)
+    sizes = [lay.no * lay.nv, comb(lay.no, 2) * comb(lay.nv, 2), int(lay.t3off[-1]), lay.size]
+    return ccsdtq.diis_plan_for(pl, sizes, np.dtype(dtype).itemsize, opts)
+
+
 def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
     '''CCSDTQ by Jacobi steps with DIIS as zccsdt.cc.ccsdtq.kernel, in the
     blocks of the labels of ``eris``: from the given amplitudes (those of
@@ -181,7 +189,6 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
 
 
 def _kernel(eris, opts, t1, t2, t3, t4):
-    from zccsdt import disk
     lay = S.layout_for(eris)
     if lay is None:
         raise ValueError('no blocks for these integrals: no labels without a modulus in their order')
@@ -216,8 +223,7 @@ def _kernel(eris, opts, t1, t2, t3, t4):
     mem_mb = opts.mem_mb if pl.mem_mb is None else pl.mem_mb
     step = solver.Options(mem_mb=mem_mb)                        # (of the CCSDT step: no level shift)
     step_plan = ccsdt_opt.plan_for(eris, dtype, solver.Options(mem_mb=mem_mb, incore_complete=True))
-    dplan = opts.diis_plan or ccsdtq.diis_plan_for(
-        pl, [nocc * nvir, comb(nocc, 2) * comb(nvir, 2), n3, lay.size], np.dtype(dtype).itemsize, opts)
+    dplan = opts.diis_plan or diis_plan_of(eris, dtype, opts, pl)
     adiis = DIIS(space=dplan.space, filename=opts.diis_file, incore=dplan.n_file == 0,
                  incore_size=min(INCORE_SIZE, max(1, lay.size)), in_memory=dplan.n_memory)
     e_old = ccsd.energy(t1, t2, eris)

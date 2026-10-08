@@ -19,6 +19,7 @@ def _tmp(monkeypatch, tmp_path):
 
 
 def test_registry_follows_the_mappings():
+    gc.collect()        # (mappings that earlier tests left in reference cycles go now, not below)
     n0 = len(scratch._MAPS)
     s = Scratch(prefix='zccsdt_test_')
     a = s.create('a', (100, 1000))

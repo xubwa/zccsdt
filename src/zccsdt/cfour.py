@@ -445,6 +445,7 @@ class Job:
     max_cycle: int
     max_memory: float           # MB; None: the default of the CC classes
     source: dict = None         # where each setting came from
+    max_disk: float = None      # MB for the scratch files (``max_disk=`` of %zccsdt); None: the default
 
 
 def job(directory='.', method=None, max_memory=None):
@@ -454,14 +455,15 @@ def job(directory='.', method=None, max_memory=None):
     else CC_CONV=N and CC_MAXCYC as joda understood them (IFLAGS of JOBARC):
     the change of the amplitudes below 10^-N, the energy below 10^-(N+2).
     Memory (MB): the argument, ``max_memory=`` of %zccsdt, else MEMORY_SIZE
-    of CFOUR (in JOBARC in words of 8 bytes).'''
+    of CFOUR (in JOBARC in words of 8 bytes).  Disk (MB): ``max_disk=`` of
+    %zccsdt (the CCSDT and CCSDTQ classes; default: theirs).'''
     zmat = os.path.join(directory, 'ZMAT')
     keywords, sections = parse_zmat(zmat) if os.path.isfile(zmat) else ({}, {})
     own = {}
     for line in sections.get(SECTION, []):
         name, _, value = line.replace('=', ' ', 1).partition(' ')
         own[name.strip().lower()] = value.strip()
-    unknown = set(own) - {'method', 'max_memory', 'conv_tol', 'conv_tol_normt', 'max_cycle'}
+    unknown = set(own) - {'method', 'max_memory', 'max_disk', 'conv_tol', 'conv_tol_normt', 'max_cycle'}
     if unknown:
         raise ValueError('%%%s of the ZMAT: unknown %s' % (SECTION, ', '.join(sorted(unknown))))
     flags = JobArc(directory).get('IFLAGS')
@@ -494,7 +496,8 @@ def job(directory='.', method=None, max_memory=None):
         if value:
             max_memory, src['max_memory'] = float(value), where
             break
-    return Job(method, conv_e, conv_normt, cycles, max_memory, src)
+    return Job(method, conv_e, conv_normt, cycles, max_memory, src,
+               float(own['max_disk']) if own.get('max_disk') else None)
 
 
 def programs(directory='.'):
@@ -712,6 +715,7 @@ def run_direct(directory='.', j=None, verbose=4, stdout=None, kramers=True, dens
         cc.conv_tol, cc.conv_tol_normt, cc.max_cycle = j.conv_tol, j.conv_tol_normt, j.max_cycle
         if j.max_memory:
             cc.max_memory = j.max_memory
+        cc.max_disk = j.max_disk
         cc.kernel()
         if not cc.converged:
             raise RuntimeError('CCSDT did not converge in %d cycles' % j.max_cycle)
@@ -804,6 +808,7 @@ def run(directory='.', method=None, max_memory=None, verbose=4, stdout=None, job
         cc.conv_tol, cc.conv_tol_normt, cc.max_cycle = j.conv_tol, j.conv_tol_normt, j.max_cycle
         if j.max_memory:
             cc.max_memory = j.max_memory
+        cc.max_disk = j.max_disk
         cc.kernel()
         run3 = cc.ccsdt_run if full else cc
         if not (cc.converged and run3.converged):

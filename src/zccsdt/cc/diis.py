@@ -260,6 +260,10 @@ class DIIS:
                 raise ValueError('update() without errors after a call with errors')
             with timer('diis.sub'):
                 e = [_stored(_sub(a, b, r)) for a, b, r in zip(x, self.xprev, se)]
+        # (storage in memory that was not adopted - that of the vector that
+        # left the subspace, with the caller's array in its place - goes now
+        # and not at the end of the call: one large part less at the peak)
+        sx = se = pending = None
         for part in x + e:              # written by the caller or just above
             _stored(part)
         self.xs.append(x)

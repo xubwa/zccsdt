@@ -300,6 +300,17 @@ class CCSDTBase(lib.StreamObject):
             operator) goes to scratch files (ZCCSDT_TMPDIR, else PySCF's
             TMPDIR) and the passes are sliced; see docs/factorization.md and
             docs/spin_adapted.md.
+        max_disk : float or None
+            MB for the scratch files of the process: the disk that the run
+            may use in its scratch location.  Default None: the environment
+            variable ZCCSDT_MAX_DISK if set, else the free space of the
+            scratch directory (statvfs) less a reserve of 2% (at most 1 GB).
+            The arrays that the memory plan maps come first; the DIIS
+            vectors get the rest (zccsdt.disk): all in the scratch file,
+            else some in the memory that the plan leaves, else fewer than
+            ``diis_space``, else without T3 - each stated in the log - and
+            an error before the first iteration where the disk does not
+            hold what the run has to put there.
         frozen : int or list
             Number of frozen core orbitals: spatial orbitals (RCCSDT), per
             spin (UCCSDT), spin orbitals or spinors (GCCSDT).  Default 0.
@@ -314,15 +325,20 @@ class CCSDTBase(lib.StreamObject):
         max_cycle : int
             Maximum number of iterations.  Default 100.
         diis_space : int
-            Number of DIIS vectors.  Default 8.
-        diis_t3 : bool
-            Include T3 in the DIIS vectors (default).  False: DIIS on T1 and
-            T2, T3 by its Jacobi step (an option, never chosen automatically).
+            Number of DIIS vectors asked for: a maximum.  Default 8.  Fewer
+            are used (never fewer than 3 with T3) where ``max_disk`` and the
+            memory beyond the plan do not hold them; the log says so.
+        diis_t3 : bool or None
+            T3 in the DIIS vectors.  Default None: yes, unless neither the
+            disk nor the memory holds three of them - then DIIS on T1 and
+            T2, T3 by its Jacobi step, stated in the log.  True: yes, or an
+            error.  False: DIIS on T1 and T2 only.
         diis_file : str
             HDF5 file of the DIIS vectors (default: a temporary file).
         incore_complete : bool
             Keep everything in memory, the DIIS vectors included, whatever
-            the budget.  Default False.
+            max_memory (MemoryError if the node does not hold the DIIS
+            vectors).  Default False.
         plan : MemoryPlan
             An explicit memory plan instead of the automatic one.
         callback : function(info) => None
@@ -343,7 +359,8 @@ class CCSDTBase(lib.StreamObject):
             Amplitudes; t3 in the storage of the engine (may be a mapped
             scratch array when memory is short).
         plan :
-            The memory plan used (``plan_used``).
+            The memory plan used (``plan_used``); ``diis_plan_used``: where
+            the DIIS vectors were (zccsdt.disk.DiisPlan).
         timings : list
             Wall time of each iteration.
         peak_memory : int
@@ -354,8 +371,9 @@ class CCSDTBase(lib.StreamObject):
     conv_tol_normt = None
     max_cycle = 100
     diis_space = 8
-    diis_t3 = True
+    diis_t3 = None
     diis_file = None
+    max_disk = None
     incore_complete = False
     plan = None
     callback = None
@@ -365,8 +383,8 @@ class CCSDTBase(lib.StreamObject):
     _stages = CC_STAGES
 
     _keys = {
-        'mol', 'verbose', 'stdout', 'max_memory', 'frozen', 'conv_tol', 'conv_tol_normt',
-        'max_cycle', 'diis_space', 'diis_t3', 'diis_file', 'incore_complete', 'plan',
+        'mol', 'verbose', 'stdout', 'max_memory', 'max_disk', 'frozen', 'conv_tol', 'conv_tol_normt',
+        'max_cycle', 'diis_space', 'diis_t3', 'diis_file', 'incore_complete', 'plan', 'diis_plan_used',
         'callback', 'mo_coeff', 'mo_occ', 'converged', 'e_hf', 'e_corr', 'cycles',
         't1', 't2', 't3', 'plan_used', 'timings', 'peak_memory', 'e_q', 'e_q5',
     }
@@ -398,6 +416,7 @@ class CCSDTBase(lib.StreamObject):
         self.e_corr = None
         self.t1 = self.t2 = self.t3 = None
         self.plan_used = None
+        self.diis_plan_used = None
         self.timings = []
         self.peak_memory = None
         self.e_q = self.e_q5 = None
@@ -480,13 +499,28 @@ class CCSDTBase(lib.StreamObject):
         pr.kv('convergence', '|dE| < %g Eh and %s < %g; at most %d iterations'
               % (self.conv_tol, self._norm_name, normt, self.max_cycle))
         pr.kv('DIIS', '%d vectors%s; %s'
-              % (self.diis_space, ', with T3' if self.diis_t3 else ', T1 and T2 only (diis_t3 = False)',
+              % (self.diis_space, ', T1 and T2 only (diis_t3 = False)' if self.diis_t3 is False else ', with T3',
                  'all in memory (incore_complete)' if self.incore_complete else
                  'large parts in %s' % (self.diis_file or 'a scratch file')))
         pr.kv('memory', self._budget_text())
+        pr.kv('disk', self._disk_text())
         from zccsdt.scratch import scratch_dir
         pr.kv('scratch', scratch_dir(), level=logger.INFO)
         return self
+
+    def _disk_text(self):
+        from zccsdt import disk, scratch
+        where = scratch.scratch_dir()
+        b, free, cap = disk.budget(self.max_disk, where), scratch.disk_free(where), disk.max_disk_bytes(self.max_disk)
+        if b is None:
+            return 'no limit known for the scratch files'
+        held = scratch.allocated()
+        if cap is not None:
+            return 'budget %s for scratch files (%s %d MB, %s in scratch files now; %s free in %s)' % (
+                _size(b), 'max_disk' if self.max_disk is not None else 'ZCCSDT_MAX_DISK', round(cap / 1e6),
+                _size(held), _size(free or 0), where)
+        return 'budget %s for scratch files = the free space of %s (%s) less a reserve' % (
+            _size(b), where, _size(free))
 
     _norm_name = '|dT|'
 
@@ -619,6 +653,11 @@ class CCSDTBase(lib.StreamObject):
         return self.ccsdt(t1, t2, t3)
 
     def ccsdt(self, t1=None, t2=None, t3=None):
+        from zccsdt import disk
+        with disk.limit(self.max_disk):     # (every scratch file of the run counts against max_disk)
+            return self._ccsdt(t1, t2, t3)
+
+    def _ccsdt(self, t1, t2, t3):
         log = logger.new_logger(self)
         cput0 = log.init_timer()
         if self.verbose >= logger.WARN:
@@ -633,13 +672,19 @@ class CCSDTBase(lib.StreamObject):
             pr.kv(key, value)
         plan = self.plan or self._make_plan(eris)
         self._print_plan(pr, plan, eris)
+        # (before the iterations: the disk holds the plan and the DIIS vectors, or the run stops here)
+        self._diis_plan = dplan = self._make_diis_plan(eris, plan)
+        pr.kv('DIIS vectors', '%s; they take %s of disk and %s of memory'
+              % (dplan.text(), _size(dplan.disk), _size(dplan.memory)), indent=3)
         self._iteration_header(pr)
         with _PeakMemory() as peak, timing.timer(ROOT_ITER):
             res = self._solve(eris, plan, t1, t2, t3, self._iteration_callback(pr))
+        self._diis_plan = None
         self.converged, self.cycles = bool(res.converged), int(res.ncycle)
         self.e_hf, self.e_corr = float(eris.e_hf), float(np.real(res.e_corr))
         self.t1, self.t2, self.t3 = res.t1, res.t2, res.t3
         self.plan_used = res.plan
+        self.diis_plan_used = getattr(res, 'diis_plan', None)
         self.timings = list(res.timings)
         self.peak_memory = peak.peak
         self._finalize()
@@ -709,6 +754,11 @@ class RCCSDT(CCSDTBase):
         from zccsdt.sa import rccsdt
         return rccsdt.make_plan(ints, self.max_memory, self.incore_complete)
 
+    def _make_diis_plan(self, ints, plan):
+        from zccsdt.sa import rccsdt
+        return rccsdt.diis_plan_for(ints, plan, self.diis_space, self.diis_file, self.incore_complete,
+                                    self.diis_t3, self.max_disk)
+
     def _print_plan(self, pr, plan, ints):
         from zccsdt.sa.rccsdt import pp_slabs
         from zccsdt.sa.t3blocks import Blocks
@@ -748,7 +798,7 @@ class RCCSDT(CCSDTBase):
                              max_cycle=self.max_cycle, diis_space=self.diis_space,
                              diis_file=self.diis_file, incore_complete=self.incore_complete,
                              max_memory=self.max_memory, plan=plan, diis_t3=self.diis_t3,
-                             callback=callback)
+                             callback=callback, max_disk=self.max_disk, diis_plan=self._diis_plan)
 
     def _first_iteration_note(self):
         return ' (with the integral blocks)'
@@ -887,12 +937,18 @@ class UCCSDT(CCSDTBase):
                               max_cycle=self.max_cycle, diis_space=self.diis_space,
                               diis_file=self.diis_file, incore_complete=self.incore_complete,
                               max_memory=self.max_memory, plan=plan, callback=callback,
-                              spin_flip=getattr(self, 'spin_flip', False))
+                              spin_flip=getattr(self, 'spin_flip', False), max_disk=self.max_disk,
+                              diis_t3=self.diis_t3, diis_plan=getattr(self, '_diis_plan', None))
 
     def _make_plan(self, eris):
         from zccsdt.cc import ccsdt_opt
         return ccsdt_opt.plan_for(eris, np.result_type(eris.fock, eris.oovv),
                                   self._options(None, None))
+
+    def _make_diis_plan(self, eris, plan):
+        from zccsdt.cc import solver
+        self._diis_plan = None
+        return solver.diis_plan_for(eris, np.result_type(eris.fock, eris.oovv), self._options(plan, None), plan)
 
     def _print_plan(self, pr, plan, eris):
         from zccsdt.cc import ccsdt_opt, t3pack
@@ -1219,7 +1275,8 @@ class GCCSDT(UCCSDT):
         eris = self._eris if self._eris is not None else self.ao2mo()
         opts = solver.Options(
             conv_tol_normt=self._conv_tol_normt(), max_cycle=self.max_cycle, diis_space=self.diis_space,
-            incore_complete=self.incore_complete, max_memory=self.max_memory)
+            incore_complete=self.incore_complete, max_memory=self.max_memory, max_disk=self.max_disk,
+            diis_t3=self.diis_t3)
         labels = bool(getattr(eris, 'use_labels', False))
         q = self._q_terms() if with_q else None
         sources = None if q is None else (None, q.s2, q.s3)
@@ -1240,6 +1297,8 @@ class GCCSDT(UCCSDT):
             res = lambda_opt.kernel(dense, self.t1, self.t2, t3, opts, sources=sources)
             # (in the layout of self.t3)
             l3 = lambda_opt.blocked_l3(eris, res.l3) if labels else res.l3
+        if res.diis_plan is not None and res.diis_plan.reduced:
+            logger.note(self, ' Lambda equations of CCSDT: DIIS %s', res.diis_plan.text())
         if not res.converged:
             logger.warn(self, 'the Lambda equations of CCSDT did not converge in %d cycles', res.ncycle)
         self.l1, self.l2, self.l3, self.converged_lambda = res.l1, res.l2, l3, bool(res.converged)
@@ -1432,7 +1491,8 @@ class GCCSDTQ(GCCSDT):
     _title = 'GCCSDTQ'
     _subtitle = 'CCSDTQ on spin orbitals or spinors (GHF, X2C), real or complex'
     _stages = Q_STAGES
-    _keys = GCCSDT._keys | {'t4', 'e_ccsdt', 'ccsdt_run', 'e_p'}
+    _keys = GCCSDT._keys | {'t4', 'e_ccsdt', 'ccsdt_run', 'e_p', 'diis_t4'}
+    diis_t4 = None      # T4 in the DIIS vectors: None - unless nothing holds three of them; True; False
 
     def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
         GCCSDT.__init__(self, mf, frozen, mo_coeff, mo_occ)
@@ -1448,8 +1508,8 @@ class GCCSDTQ(GCCSDT):
     def kernel(self, t1=None, t2=None, t3=None, t4=None):
         if t1 is None or t2 is None or t3 is None:
             cc3 = GCCSDT(self._scf, self.frozen, self.mo_coeff, self.mo_occ)
-            for key in ('verbose', 'stdout', 'max_memory', 'conv_tol', 'conv_tol_normt', 'max_cycle',
-                        'diis_space', 'diis_file', 'incore_complete', 'real_spinors', 'symmetry',
+            for key in ('verbose', 'stdout', 'max_memory', 'max_disk', 'conv_tol', 'conv_tol_normt', 'max_cycle',
+                        'diis_space', 'diis_t3', 'diis_file', 'incore_complete', 'real_spinors', 'symmetry',
                         '_block_iterations'):
                 setattr(cc3, key, getattr(self, key))
             cc3.kernel()
@@ -1484,6 +1544,11 @@ class GCCSDTQ(GCCSDT):
         return dm
 
     def ccsdtq(self, t1, t2, t3, t4=None):
+        from zccsdt import disk
+        with disk.limit(self.max_disk):     # (every scratch file of the run counts against max_disk)
+            return self._ccsdtq(t1, t2, t3, t4)
+
+    def _ccsdtq(self, t1, t2, t3, t4):
         import copy
         from math import comb
         from zccsdt.cc import ccsdtq, ccsdtq_sym, ccsdt_opt
@@ -1538,8 +1603,15 @@ class GCCSDTQ(GCCSDT):
         pr.kv('batches', 'products of the T4 equation in batches of %s%s'
               % (_size(plan.batch_bytes), '' if plan.mem_mb in (None, 2000.0) else
                  '; the CCSDT step with buffers of %.0f MB' % plan.mem_mb), indent=3)
-        pr.kv('DIIS', '%d vectors, those of T4 in %s' % (
-            self.diis_space, (self.diis_file or 'a scratch file') if plan.diis_file else 'memory'), indent=3)
+        pr.kv('disk', self._disk_text())
+        opts = ccsdtq.Options(conv_tol=self.conv_tol, conv_tol_normt=normt, max_cycle=self.max_cycle,
+                              diis_space=self.diis_space, diis_file=self.diis_file,
+                              incore_complete=self.incore_complete, max_memory=self.max_memory,
+                              max_disk=self.max_disk, diis_t4=self.diis_t4, plan=plan)
+        # (before the iterations: the disk holds the plan and the DIIS vectors, or the run stops here)
+        dplan = (ccsdtq_sym if splan is not None else ccsdtq).diis_plan_of(eris, dtype, opts, plan)
+        pr.kv('DIIS', '%s; they take %s of disk and %s of memory'
+              % (dplan.text(), _size(dplan.disk), _size(dplan.memory)), indent=3)
         pr.rule()
         head = ('iter', 'E_corr / Eh', 'dE / Eh', '|dT1|', '|dT2|', '|dT3|', '|dT4|', 'DIIS', 'time / s', 'cores')
         fmt = ' %4s  %20s  %12s  %9s  %9s  %9s  %9s  %4s  %9s  %5s'
@@ -1553,10 +1625,7 @@ class GCCSDTQ(GCCSDT):
                        + (info['diis'], info['wall'], busy)))
             if self.callback is not None:
                 self.callback(info)
-        opts = ccsdtq.Options(conv_tol=self.conv_tol, conv_tol_normt=normt, max_cycle=self.max_cycle,
-                              diis_space=self.diis_space, diis_file=self.diis_file,
-                              incore_complete=self.incore_complete, max_memory=self.max_memory,
-                              plan=plan, callback=report)
+        opts.callback, opts.diis_plan = report, dplan
         snap0 = timing.snapshot()
         with _PeakMemory() as peak, timing.timer(ROOT_ITER):
             res = (ccsdtq_sym if splan is not None else ccsdtq).kernel(eris, opts, t1, t2, t3, t4)
@@ -1564,6 +1633,7 @@ class GCCSDTQ(GCCSDT):
         self.e_hf, self.e_corr = float(eris.e_hf), float(res.e_corr)
         self.t1, self.t2, self.t3, self.t4 = res.t1, res.t2, res.t3, res.t4
         self.plan_used, self.timings, self.peak_memory = res.plan, list(res.timings), peak.peak
+        self.diis_plan_used = res.diis_plan
         pr.rule()
         pr.line(' GCCSDTQ %s in %d iterations' % ('converged' if self.converged else 'NOT converged', self.cycles))
         pr.kv('E(SCF)', '%20.12f' % self.e_hf, indent=3)

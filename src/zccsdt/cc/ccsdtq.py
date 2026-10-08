@@ -195,6 +195,16 @@ def plan_for(eris, dtype, max_memory=None, diis_space=8, incore_complete=False, 
                 step_need=step_need, mem_mb=mem_mb)
 
 
+def diis_plan_of(eris, dtype, opts, pl):
+    '''diis_plan_for() of a run on ``eris`` with the Plan ``pl`` (the dense
+    solver: T3 and T4 on their unique blocks).'''
+    nocc = eris.nocc
+    nvir = np.asarray(eris.fock).shape[0] - nocc
+    sizes = [nocc * nvir, comb(nocc, 2) * comb(nvir, 2), comb(nocc, 3) * comb(nvir, 3), comb(nocc, 4) * comb(nvir, 4)]
+    return diis_plan_for(pl, sizes, np.dtype(dtype).itemsize, opts, pl.disk,
+                         pl.t4_file or pl.r4_file or pl.xv_file)
+
+
 @dataclass
 class Result:
     e_corr: float
@@ -236,7 +246,6 @@ def kernel(eris, opts=None, t1=None, t2=None, t3=None, t4=None):
 
 
 def _kernel(eris, opts, t1, t2, t3, t4):
-    from zccsdt import disk
     nocc = eris.nocc
     nvir = np.asarray(eris.fock).shape[0] - nocc
     if t1 is None or t2 is None:
@@ -253,9 +262,7 @@ def _kernel(eris, opts, t1, t2, t3, t4):
     pl = opts.plan or plan_for(eris, dtype, opts.max_memory, opts.diis_space, opts.incore_complete, opts.mem_mb)
     mem_mb = opts.mem_mb if pl.mem_mb is None else pl.mem_mb
     # (before anything is allocated: the disk holds the plan or the run stops here)
-    dplan = opts.diis_plan or diis_plan_for(
-        pl, [nocc * nvir, comb(nocc, 2) * comb(nvir, 2), nI3 * nA3, nI * nA], np.dtype(dtype).itemsize, opts,
-        pl.disk, pl.t4_file or pl.r4_file or pl.xv_file)
+    dplan = opts.diis_plan or diis_plan_of(eris, dtype, opts, pl)
     # T4, and with too little memory T4, the intermediate Xv and the residual as arrays of a
     # scratch file (new file space reads as zeros)
     scr = r4_buf = xv_buf = None
