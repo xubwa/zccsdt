@@ -112,7 +112,7 @@ from pyscf import lib
 
 from zccsdt import memory
 from zccsdt.blas import gemm
-from zccsdt.cc import ccsdt_opt, t3pack
+from zccsdt.cc import ccsdt_opt, density_blk, t3engine, t3pack
 from zccsdt.timing import timer
 
 einsum = lib.einsum
@@ -133,6 +133,10 @@ class Plan:
     nbf: int = None             # route 'y': occupied pairs per batch of the pass for a batch of them
     frozen: object = None       # the plan of the integral transformation (FrozenIntegrals.plan)
     kramers: bool = False       # half of the frozen spinors were done, the others are their images
+    held: object = None         # relaxed_rdm1(plan_only=True): what it prepared for the frozen spinors
+    blocks: bool = False        # t3 and lambda3 in the blocks of the symmetry labels (plan_memory_blocks):
+                                # nb and ng are then pairs and triples of one group, slab_bytes
+                                # the rows of a pair block of <ab||de> held at a time (None: all blocks)
 
 
 @dataclass
@@ -304,6 +308,98 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False, nfrozen=0
                 route=route, ng=ng, nk=nk, nbf=nbf, frozen=fp)
 
 
+def plan_memory_blocks(eng, budget=None, nfrozen=0, source=None, gradient=True):
+    '''The Plan of kernel(..., blocks=True) for ``budget`` bytes of ordinary
+    memory beyond the amplitudes, lambda and what the integral object holds
+    (None: no limit); ``eng``: the density_blk.BlockDensity.  The dense
+    arrays are those of plan_memory (fixed_bytes); what the labels change:
+
+      operands  the copies in blocks of the operand of the stacked GEMMs and
+                the blocks of the ring density (BlockDensity.operand_bytes)
+      Gamma     its diagonal pair blocks: in blocks the l3 t3 part of the
+                block abcd always goes through it (with ``gradient``)
+      buffers   the work array of the block engine in a pass: t3 and l3
+                gathered for a batch of occupied pairs of one group and one
+                group of virtual pairs, and for a batch of occupied triples
+                with one class of the free virtual index apart; as many
+                pairs and triples as fit, up to BATCH_BYTES
+      <ab||de>  its dressed diagonal pair blocks, kept if they all fit next
+                to the buffers; else dressed twice in slabs of the rows of a
+                block, as thick as fit (not alive with the buffers)
+
+    and the integrals of ``nfrozen`` frozen spinors as in plan_memory.
+    MemoryError below one occupied pair and one occupied triple per batch
+    and the rows of one first virtual index of the widest pair block, or if
+    the integrals of one frozen spinor do not fit.'''
+    o, v, isz = eng.om.n, eng.vm.n, eng.dtype.itemsize
+    nfrozen = nfrozen if gradient else 0
+    fixed = fixed_bytes(o, v, isz, nfrozen) + eng.operand_bytes()
+    gam = pp = eng.gamma_bytes()
+    if not gradient or not eng.size:
+        gam = 0
+    row_min, block = eng.row_bytes(), eng.block_bytes()
+    nb_most, ng_most = eng.most_pairs(), eng.most_triples() if gam else 0
+
+    def most(elems, top, cap):
+        '''The largest batch (not more than ``top``) whose buffers fit in ``cap``.'''
+        lo, hi = 1, max(1, top)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            lo, hi = (mid, hi) if elems(mid) * isz <= cap else (lo, mid - 1)
+        return lo
+
+    def work(nb, ng):
+        return max(eng.pass_elems(nb), eng.gamma_elems(ng) if ng else 0) * isz
+
+    def frozen_plan(left):
+        if not nfrozen:
+            return None, None, 0
+        fp = source.plan(left, lambda nk: frozen_own(o, v, nk, isz, 0), nfrozen)
+        return fp, fp.nket, fp.work
+
+    route = 'gamma' if gam else None
+    if budget is None:
+        nb = most(eng.pass_elems, nb_most, BATCH_BYTES)
+        ng = most(eng.gamma_elems, ng_most, BATCH_BYTES) if gam else None
+        fp, nk, fwork = frozen_plan(None)
+        return Plan(nb=nb, slab_bytes=None, need=fixed + gam + pp + max(work(nb, ng), fwork),
+                    route=route, ng=ng, nk=nk, frozen=fp, blocks=True)
+    left = budget - fixed - gam
+    floor = max(work(1, 1 if gam else 0), row_min)
+    if left < floor:
+        raise MemoryError('The densities of CCSDT in the blocks of the symmetry labels, %d occupied and '
+                          '%d virtual spinors, need about %.1f GB of memory for their o v^3 arrays, the '
+                          'blocks of Gamma and work buffers; %.1f GB are available (max_memory, or what '
+                          'the node and the memory limit of the job leave)'
+                          % (o, v, (fixed + gam + floor) / 1e9, budget / 1e9))
+    try:
+        fp, nk, fwork = frozen_plan(left)
+    except MemoryError as err:
+        raise MemoryError('%s (the integrals with one frozen index of the orbital gradient of CCSDT, %d '
+                          'frozen spinors with %d + %d active ones)'
+                          % (str(err) or 'not enough memory', nfrozen, o, v)) from None
+    cap = min(left, BATCH_BYTES)
+    nb = most(eng.pass_elems, nb_most, cap)
+    ng = most(eng.gamma_elems, ng_most, cap) if gam else None
+    w = max(work(nb, ng), fwork)
+    if left >= pp + w:
+        return Plan(nb=nb, slab_bytes=None, need=fixed + gam + pp + w, route=route, ng=ng, nk=nk,
+                    frozen=fp, blocks=True)
+    slab = int(min(block, left))
+    return Plan(nb=nb, slab_bytes=slab, need=fixed + gam + max(w, slab), route=route, ng=ng, nk=nk,
+                frozen=fp, blocks=True)
+
+
+def bare_bytes(eris, vm):
+    '''Bytes that the dressing puts on the integral object where it does not
+    hold them for the grouped map ``vm``: the diagonal pair blocks of the
+    bare <ab||de> (ccsdt_opt.vvvv_packed).'''
+    held = eris.__dict__.get('_vvvv_blocks')
+    if held is not None and held[0] is vm:
+        return 0
+    return sum((hi - lo) ** 2 for lo, hi in vm.blocks) * np.dtype(np.result_type(eris.oovv)).itemsize
+
+
 def _packed3(eris, x, dtype):
     '''t3 or lambda3 as a C-contiguous [C(o,3), C(v,3)] array in the
     lexicographic order of the triples (a view where it can be).'''
@@ -367,7 +463,8 @@ def _bra_pairs(g, W, D, pairs, sign):
 class _Slabs:
     '''The packed T1-dressed <ab||de> in slabs of its rows (a<b): all of it,
     dressed once and kept, or ``slab_bytes`` at a time, dressed again for
-    every sweep.'''
+    every sweep.  Iterating gives (0, 0, npair, q0, q1, W[q0:q1]): the one
+    pair block of density_blk.Slabs.'''
 
     def __init__(self, eris, t1, om, vm, dtype, slab_bytes):
         self.args = (eris, t1, om, vm)
@@ -388,7 +485,7 @@ class _Slabs:
             if not (self.keep and self.done):
                 with timer('dens.vvvv'):
                     ccsdt_opt.dressed_vvvv_rows(*self.args, q0, q1, W)
-            yield q0, q1, W
+            yield 0, 0, nvp, q0, q1, W
         self.done = True
         if not self.keep:
             self.buf = None
@@ -438,6 +535,8 @@ def _gamma_pairs(out, Gam, V, vm, cols, alpha=1.0):
     (``cols``); else the same with G[(p<q), Q], the first one.  The pairs
     with one first index are a range of columns (rows); those with one
     second index are gathered.'''
+    if isinstance(Gam, list):       # its diagonal pair blocks, the pairs in the order of their groups
+        return density_blk.gamma_pairs(out, Gam, V, vm, cols, alpha)
     v, pidx = vm.n, vm.pidx
     if vm.npair == 0 or V.shape[2] == 0:
         return
@@ -777,7 +876,8 @@ def _frozen_stage(c):
     return bf, kf
 
 
-def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=None, frozen=None):
+def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=None, frozen=None,
+           blocks=False, plan_only=False):
     '''The response density and the orbital gradient of CCSDT for the
     integrals ``eris`` (zccsdt.eris.ERIs, spin orbitals or spinors), the
     amplitudes t1[i,a], t2[i,j,a,b], t3 packed [C(o,3), C(v,3)] (as the
@@ -798,29 +898,52 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     kf[f,x], the contractions of the two-particle density with these
     integrals that the orbital gradient between frozen and active spinors is
     made of (frozen_terms).  The integrals are made once, in batches of
-    Plan.nk frozen spinors.'''
+    Plan.nk frozen spinors.
+
+    ``blocks``: t3 and l3 are in the blocks of the symmetry labels of
+    ``eris`` (labels in use), as the amplitude and the Lambda equations in
+    blocks leave them, and the passes over them run in these blocks
+    (density_blk; the dense arrays have their pairs in the order of the
+    groups, and the l3 t3 part of the block abcd goes through the diagonal
+    pair blocks of Gamma); ValueError if these integrals have no such
+    blocks.  ``plan_only``: return the Plan (or raise its MemoryError)
+    without doing anything.'''
     nocc, nvir = t1.shape
     o, v, n = nocc, nvir, nocc + nvir
-    om, vm = t3pack.triple_map(o), t3pack.triple_map(v)
-    mm, nn = om.pairs[:, 0], om.pairs[:, 1]
-    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
-    nP, nQ = om.npair, vm.npair
     if t3 is None or l3 is None:        # CCSD
         t3 = l3 = np.zeros(0)
     dtype = np.result_type(t1, t2, t3, l1, l2, l3, eris.fock, eris.oovv)
     isz = np.dtype(dtype).itemsize
+    eng = None
+    if blocks:
+        eng = density_blk.engine(eris, dtype)
+        if eng is None:
+            raise ValueError('no blocks of symmetry labels for these integrals (labels in use, C kernels)')
+        om, vm = eng.om, eng.vm
+    else:
+        om, vm = t3pack.triple_map(o), t3pack.triple_map(v)
+    mm, nn = om.pairs[:, 0], om.pairs[:, 1]
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    nP, nQ = om.npair, vm.npair
     nfz, source = frozen if frozen and gradient and frozen[0] else (0, None)
     if nfz and not hasattr(source, 'batches'):
         source = _Given(nfz, source, n)
     # (with Kramers pairs the integrals of half of them, and of one more as a check)
     ntr = nfz // 2 + 1 if nfz >= 4 and getattr(source, 'kramers', None) is not None else nfz
-    if plan is None:
+    if plan is None and eng is not None:
+        budget = memory.budget(max_memory)
+        plan = plan_memory_blocks(eng, None if budget is None else budget - bare_bytes(eris, vm), ntr,
+                                  source, gradient)
+    elif plan is None:
         from zccsdt.scratch import is_mapped
         plan = plan_memory(o, v, isz, memory.budget(max_memory),
                            is_mapped(getattr(eris, '_vvvv_pp', None)), ntr, source)
-    route = None
+    if plan_only:
+        return plan
+    assert bool(plan.blocks) == (eng is not None), 'a Plan of the other layout of t3'
+    route = 'gamma' if eng is not None else None
     if nfz:
-        route = plan.route or frozen_route(o, v, ntr)
+        route = route or plan.route or frozen_route(o, v, ntr)
         if plan.frozen is None:         # a plan given without them: as if memory were not short
             if plan.nk is None:
                 plan.frozen = source.plan(None, lambda nk: frozen_own(o, v, nk, isz, int(route == 'y')), ntr)
@@ -831,7 +954,10 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             plan.route, plan.nk = route, plan.frozen.nket
     t1, l1 = (np.ascontiguousarray(x, dtype=dtype) for x in (t1, l1))
     t2, l2 = (np.asarray(x, dtype=dtype) for x in (t2, l2))
-    T3p, L3p = _packed3(eris, t3, dtype), _packed3(eris, l3, dtype)
+    if eng is not None:
+        T3p, L3p = eng.view(t3), eng.view(l3)
+    else:
+        T3p, L3p = _packed3(eris, t3, dtype), _packed3(eris, l3, dtype)
     triples = T3p.size > 0
     t2mn, l2mn = np.ascontiguousarray(t2[mm, nn]), np.ascontiguousarray(l2[mm, nn])     # [P, a, b]
     t2pp, l2pp = np.ascontiguousarray(t2mn[:, md, ne]), np.ascontiguousarray(l2mn[:, md, ne])
@@ -843,12 +969,16 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         Vvo = ccsdt_opt.bra_dressed_vvvo_pp(eris, t1, om, vm).astype(dtype, copy=False)    # [Q, g, i]
         vvoo = ccsdt_opt.dressed_vvoo_pp(eris, t1, Vvo, om, vm).astype(dtype, copy=False)  # [P, Q]
         tau = np.ascontiguousarray(ccsdt_opt._tau1_pairs(t1, om, vm), dtype=dtype)
-    slabs = _Slabs(eris, t1, om, vm, dtype, plan.slab_bytes)
-    for q0, q1, W in slabs:
+    if eng is not None:     # the diagonal pair blocks: (block, its pairs lo:hi, its rows q0:q1, W)
+        slabs = density_blk.Slabs(eris, t1, om, vm, dtype, plan.slab_bytes)
+    else:
+        slabs = _Slabs(eris, t1, om, vm, dtype, plan.slab_bytes)
+    W = None
+    for h, lo, hi, q0, q1, W in slabs:
         with timer('dens.dress'):
-            t3pack.pair_t1_contract(Vvo[q0:q1], W, t1, vm)
-            vvoo[:, q0:q1] += gemm(W, tau.T).T
-    del tau
+            t3pack.pair_t1_contract(Vvo[lo + q0:lo + q1], W, t1, vm, block=h)
+            vvoo[:, lo + q0:lo + q1] += gemm(W, np.ascontiguousarray(tau[:, lo:hi]).T).T
+    del tau, W
     xm = np.eye(n, dtype=dtype)
     xm[o:, :o] -= t1.T
     ym = np.eye(n, dtype=dtype)
@@ -857,7 +987,13 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     Z = np.zeros((nP, v, o), dtype=dtype)           # Z3[i,(n<o),g] = 2 Z[P,g,i]
     GyT = np.zeros((o, nQ, o + v), dtype=dtype)     # [m, Q, k | a]: l2[k,m,Q] | C3[Q,a,m]
     nb = max(1, plan.nb or 1)
-    if triples:
+    if triples and eng is not None:
+        with timer('dens.pass_l'):
+            t3engine.workspace(eng.pass_elems(nb), dtype)       # (the work array of the passes, once)
+            Z, C3x = eng.pass_l(L3p, t2mn, t2P, nb)
+            t3pack.axpby(GyT[:, :, o:], C3x.transpose(1, 2, 0), 2.0, 0.0)
+            del C3x
+    elif triples:
         with timer('dens.pass_l'):
             C3x = np.zeros((v, o * nQ), dtype=dtype)                                # [c, (i Q)]
             GyL = np.ascontiguousarray(t2P.transpose(1, 2, 0)).reshape(o * nQ, o)   # [(m Q), i]
@@ -884,7 +1020,13 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     Kg = np.zeros((nP, nQ), dtype=dtype)
     S13 = np.zeros((v, o), dtype=dtype)
     Gam = None
-    if triples:
+    if triples and eng is not None:
+        with timer('dens.pass_tl'):
+            GxT = np.concatenate((-l2mn, 2.0 * Z), axis=2)                          # [P, d, a | i]
+            B1, A1, R3, Kg = eng.pass_tl(T3p, L3p, GxT, GyT.reshape(o * nQ, o + v), l2pp,
+                                         np.ascontiguousarray(l1.T).ravel(), t2pp, nb, XT, YT)
+            del GxT
+    elif triples:
         with timer('dens.pass_tl'):
             GxT = np.concatenate((-l2mn, 2.0 * Z), axis=2)                          # [P, d, a | i]
             GyT2 = GyT.reshape(o * nQ, o + v)
@@ -925,7 +1067,11 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             del GxT, Y1, H, Vvo2
     R3 = R3.reshape(v, o, v, o)
     B1 = B1.reshape(v, o)
-    if triples and route == 'gamma':
+    if triples and eng is not None and gradient:
+        with timer('dens.gamma'):       # its diagonal pair blocks
+            Gam = eng.gamma(T3p, L3p, max(1, plan.ng or eng.most_triples()))
+            _gamma_pairs(S13, Gam, Vvo, vm, True)
+    elif triples and eng is None and route == 'gamma':
         # Gamma[(e<f), (g<h)] = 3 sum_(m<n<o, d) l3[mno, d, (ef)] t3[mno, d, (gh)] (= sum_(P, d, m)
         # L[P,d,m,(ef)] T[P,d,m,(gh)]): three times the l3 t3 part of the block abcd of g2
         with timer('dens.gamma'):
@@ -951,11 +1097,13 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     O4 = np.zeros((nP, nP), dtype=dtype)            # [(k<l), (i<j)]: sum_(m,A) l3[m,k,l,A] t3[m,i,j,A]
     if triples:
         with timer('dens.gram'):
-            M = gemm(L3p, T3p.T)
+            M = eng.gram(L3p, T3p) if eng is not None else gemm(L3p, T3p.T)
             for m in range(o):
                 idx, s = om.tri[m], om.sgn[m].astype(np.float64)
                 O4 += (s[:, None] * s[None, :]) * M[np.ix_(idx, idx)]
             del M
+    if eng is not None:
+        t3engine.release_workspace()        # (the batches: not alive with what follows)
 
     # ---- the blocks of the densities
     with timer('dens.blocks'):
@@ -1075,8 +1223,15 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
         # aibc with <em||if> and with <ae||fg>
         for e in range(v):
             G -= einsum('mfi,maf->ai', ovvo[:, e], _unpack_vir(Dai[e], vm))
-        for q0, q1, W in slabs:
-            _bra_pairs(G, W, Dai, vm.pairs[q0:q1], -1.0)
+        Dh = None
+        for h, lo, hi, q0, q1, W in slabs:
+            if hi - lo == nQ:
+                Dh = Dai
+            elif q0 == 0:           # the columns of the pair block
+                Dh = None
+                Dh = np.ascontiguousarray(Dai[:, :, lo:hi])
+            _bra_pairs(G, W, Dh, vm.pairs[lo + q0:lo + q1], -1.0)
+        del Dh
         slabs.close()
     return Result(d1, G, g1, plan, bf, kf)
 
@@ -1098,7 +1253,8 @@ class Relaxed:
 
 
 def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dropped_vir=None,
-                 tol=1e-9, max_memory=None, verbose=None, plan=None, kramers=None):
+                 tol=1e-9, max_memory=None, verbose=None, plan=None, kramers=None, blocks=False,
+                 plan_only=False):
     '''The relaxed one-particle density of CCSDT: kernel() for the density
     of t and lambda and the orbital gradient, the Z-vector equations of the
     SCF ``mf`` (zccsd.zvector.solve) and zvector.relaxed_rdm1.
@@ -1117,7 +1273,13 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     their contractions are then made for half of the frozen spinors and one
     more, whose image tells whether t and lambda have the symmetry; if not,
     the other half is done as well).  Not with real integrals of complex
-    spinors (zccsdt.eris.axial_spinors).'''
+    spinors (zccsdt.eris.axial_spinors).
+
+    ``blocks``: t3 and l3 in the blocks of the symmetry labels of ``eris``,
+    as kernel(); ``plan_only``: the Plan of kernel() for these arguments,
+    or its MemoryError, and nothing else - given back as ``plan`` with the
+    same arguments, what was prepared for the frozen spinors is not made
+    again (Plan.held).'''
     from pyscf.lib import logger
     from zccsdt.zccsd import zvector
     log = logger.new_logger(mf, verbose)
@@ -1135,7 +1297,10 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
         held_out = np.hstack([np.asarray(c) for c in (frozen_occ, dropped_vir) if c is not None and c.shape[1]])
     real = not np.iscomplexobj(np.zeros(0, dtype=np.result_type(eris.fock, eris.oovv)))
     source = rot = None
-    if held_out is not None:
+    if held_out is not None and getattr(plan, 'held', None) is not None:
+        fock, source, rot = plan.held       # (made by the call that planned)
+        fock = fock.copy()
+    elif held_out is not None:
         fock = held_out.conj().T @ mf.get_fock() @ np.hstack((held_out, mo_coeff))
         pairs = None
         if kramers is not False and (_motype(mf) == 'ghf' or not real):
@@ -1153,7 +1318,12 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
             source.kramers = U
             del cp, cact
     res = kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=max_memory, plan=plan,
-                 frozen=None if held_out is None else (nf + nd, source))
+                 frozen=None if held_out is None else (nf + nd, source), blocks=blocks,
+                 plan_only=plan_only)
+    if plan_only:
+        if held_out is not None:
+            res.held = (fock, source, rot)
+        return res
     if rot is not None:         # from the pairs back to the frozen spinors given
         res.bf, res.kf = rot.conj().T @ res.bf, rot.T @ res.kf
     dm1 = res.d1.T

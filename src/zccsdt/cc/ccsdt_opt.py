@@ -711,24 +711,30 @@ def _bare_Q(eris, om, vm):
     return c[1], c[2]
 
 
-def dressed_vvvv_rows(eris, t1, om, vm, q0, q1, out, t2pp=None):
+def dressed_vvvv_rows(eris, t1, om, vm, q0, q1, out, t2pp=None, block=None):
     '''Rows q0 <= (a<b) < q1 of the packed T1-dressed <ab||de>
     (dressed_vvvv_pp), written to ``out`` ((q1 - q0, npair), C-contiguous);
     plus sum_{m<n} t2[mn,ab] <mn||de>, the T2 part of the T3 ladder operator,
     if t2pp (packed (P, Q)) is given.  One pass over the bare rows, which may
-    be a mapped file.'''
+    be a mapped file.  ``block``: the rows q0 <= q < q1 of the diagonal pair
+    block ``block`` of ``vm`` (block-local; out (q1 - q0, pairs of the
+    block)) - for maps with groups, whose other blocks vanish.'''
     from zccsdt.scratch import need, unmap
     nocc, nvir = t1.shape
     nq, dt = q1 - q0, out.dtype
-    V = vvvv_packed(eris, vm)[0]
+    lo, hi = (0, vm.npair) if block is None else vm.blocks[block]
+    ncol = hi - lo
+    V = vvvv_packed(eris, vm)[block or 0]
     G, H = _bare_Q(eris, om, vm)
-    C = _tau1_pairs(t1, om, vm)[:, q0:q1]
+    if ncol != vm.npair:        # (the columns of the block)
+        G, H = G[:, :, lo:hi], H[:, lo:hi]
+    C = _tau1_pairs(t1, om, vm)[:, lo + q0:lo + q1]
     if t2pp is not None:
-        C = C + t2pp[:, q0:q1]
-    assert out.shape == (nq, vm.npair) and out.flags.c_contiguous
-    need(V, q0 * vm.npair, q1 * vm.npair)
+        C = C + t2pp[:, lo + q0:lo + q1]
+    assert out.shape == (nq, ncol) and out.flags.c_contiguous
+    need(V, q0 * ncol, q1 * ncol)
     t3pack.axpby(out, V[q0:q1], 1.0, 0.0)
-    unmap(V, q0 * vm.npair, q1 * vm.npair)
+    unmap(V, q0 * ncol, q1 * ncol)
     lib = t3pack._lib
     if t3pack.USE_C and hasattr(lib, 'zc_vvvv_dress_d') and dt in (np.float64, np.complex128):
         # the two one-index terms in one pass (C kernel), the pair term as a GEMM
@@ -736,15 +742,15 @@ def dressed_vvvv_rows(eris, t1, om, vm, q0, q1, out, t2pp=None):
         tp = np.ascontiguousarray(t1, dtype=dt)
         Gc = np.ascontiguousarray(G, dtype=dt)
         I64, p_ = t3pack._I64, t3pack._p
-        pa = np.ascontiguousarray(vm.pa_c[q0:q1])
-        pb = np.ascontiguousarray(vm.pb_c[q0:q1])
+        pa = np.ascontiguousarray(vm.pa_c[lo + q0:lo + q1])
+        pb = np.ascontiguousarray(vm.pb_c[lo + q0:lo + q1])
         getattr(lib, 'zc_vvvv_dress_' + t3pack._sfx(dt))(
-            p_(out), p_(out), I64(nq), I64(vm.npair), p_(pa), p_(pb),
+            p_(out), p_(out), I64(nq), I64(ncol), p_(pa), p_(pb),
             p_(tm), I64(nvir), p_(Gc), I64(nocc), I64(nvir),
             p_(tp), I64(nvir), p_(Gc), I64(nocc), I64(nvir),
             None, None, I64(0))
     else:
-        a, b = vm.pairs[q0:q1, 0], vm.pairs[q0:q1, 1]
+        a, b = vm.pairs[lo + q0:lo + q1, 0], vm.pairs[lo + q0:lo + q1, 1]
         out -= np.einsum('mq,mqc->qc', t1[:, a], G[:, b])
         out += np.einsum('mq,mqc->qc', t1[:, b], G[:, a])
     if om.npair:

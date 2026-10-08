@@ -975,7 +975,7 @@ class GCCSDT(UCCSDT):
     real_spinors = True
     symmetry = True         # use the symmetry labels of the spinors where the integrals have them
     _block_iterations = True    # ... in the iterations too: T3 in blocks, the spinors in the order of the labels
-    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis',
+    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'rdm1_blocks',
                               'e_ql', 'e_ql5', 'e_tot_ql'}
 
     def _axial(self):
@@ -1184,22 +1184,43 @@ class GCCSDT(UCCSDT):
         (zccsdt.cc.density_opt, zccsdt.zccsd.zvector) -, or with
         ``relaxed=False`` the one of t and lambda at fixed spinors.  Lambda
         is solved for if it is not there.  The trace with a one-electron
-        operator is the derivative of the CCSDT energy.'''
-        from zccsdt.cc import density_opt
+        operator is the derivative of the CCSDT energy.  With ``symmetry``
+        and T3 and l3 in the blocks of the symmetry labels, the passes over
+        them run in these blocks (zccsdt.cc.density_blk; ``rdm1_blocks``
+        says so), on the packed block otherwise or if the blocks do not fit
+        in ``max_memory``.'''
+        from zccsdt.cc import density_blk, density_opt
         if isinstance(self._scf, _Given):
             raise RuntimeError('the integrals were given: no SCF to take the response of the spinors from')
         if getattr(self, 'l3', None) is None:
             self.solve_lambda()
-        eris, t3 = self._dense_view()
+        eris = self._eris if self._eris is not None else self.ao2mo()
         fo, o, v, fv = self._active()
         if getattr(eris, 'labels', None) is not None and getattr(self, '_sorted', None) is not None:
             o, v = self._sorted
         axial = self._axial()
         Cs = np.asarray(self.mo_coeff) if axial is None else axial
-        rel = density_opt.relaxed_rdm1(
-            self._scf, eris, self.t1, self.t2, t3, self.l1, self.l2, self._packed_l3(), Cs[:, np.concatenate((o, v))],
-            frozen_occ=Cs[:, fo] if len(fo) else None, dropped_vir=Cs[:, fv] if len(fv) else None,
-            tol=tol, max_memory=self.max_memory)
+        Ca = Cs[:, np.concatenate((o, v))]
+        kw = dict(frozen_occ=Cs[:, fo] if len(fo) else None, dropped_vir=Cs[:, fv] if len(fv) else None,
+                  tol=tol, max_memory=self.max_memory)
+        # in the blocks of the symmetry labels where T3 and l3 are in them and the plan fits
+        plan = None
+        if (self.symmetry and getattr(eris, 'use_labels', False) and np.size(self.l3) == np.size(self.t3)
+                and density_blk.engine(eris, np.result_type(self.t1, self.t3, self.l3, eris.oovv,
+                                                            eris.fock)) is not None):
+            try:
+                plan = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, self.t3, self.l1, self.l2,
+                                                self.l3, Ca, blocks=True, plan_only=True, **kw)
+            except MemoryError:         # (the packed block then, which says what it needs)
+                pass
+        if plan is not None:
+            rel = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, self.t3, self.l1, self.l2,
+                                           self.l3, Ca, blocks=True, plan=plan, **kw)
+        else:
+            eris, t3 = self._dense_view()
+            rel = density_opt.relaxed_rdm1(self._scf, eris, self.t1, self.t2, t3, self.l1, self.l2,
+                                           self._packed_l3(), Ca, **kw)
+        self.rdm1_blocks = plan is not None
         dm = rel.relaxed if relaxed else rel.unrelaxed
         self.rdm1_basis = rel.mo_coeff
         if ao_repr:
