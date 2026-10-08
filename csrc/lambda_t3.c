@@ -91,3 +91,68 @@ void zc_lam_pair_matvec_##SFX(const T *Y, const T *W, T *acc, int64_t nx,      \
 
 DEFINE_LAM(double, d)
 DEFINE_LAM(double complex, z)
+
+/* ---- the same for pairs in any enumeration (the blocks of a symmetry
+ * label, zccsdt/cc/lambda_blk.py): the pairs through tables. */
+#define DEFINE_LAM_TAB(T, SFX)                                                 \
+                                                                               \
+/* out[y, e, x, a] = Y[y, x, pidx[a, e]] for a < e, -Y[y, x, pidx[e, a]] for  \
+ * a > e, 0 for a = e;  pidx (n, n): the number of the pair a < b at [a, b].  \
+ * Y: (ny, nx, nq), out: (ny, n, nx, n). */                                   \
+void zc_lam_pair_expand_tab_##SFX(const T *Y, T *out, int64_t ny, int64_t nx,  \
+                                  int64_t n, int64_t nq, const int64_t *pidx)  \
+{                                                                              \
+    _Pragma("omp parallel for collapse(2) schedule(static)")                   \
+    for (int64_t y = 0; y < ny; y++)                                           \
+    for (int64_t e = 0; e < n; e++) {                                          \
+        T *o = out + (y * n + e) * nx * n;                                     \
+        for (int64_t x = 0; x < nx; x++) {                                     \
+            const T *r = Y + (y * nx + x) * nq;                                \
+            T *ox = o + x * n;                                                 \
+            for (int64_t a = 0; a < e; a++) ox[a] = r[pidx[a * n + e]];        \
+            ox[e] = 0;                                                         \
+            for (int64_t a = e + 1; a < n; a++) ox[a] = -r[pidx[e * n + a]];   \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* acc[x, a] += sum_Q sum_h Y[h, x, q0 + Q] w[Q, (a,h)] for one diagonal      \
+ * block W (nq, nq) of the operator, whose rows and columns are the pairs     \
+ * q0 <= Q < q0 + nq = (pa[c] < pb[c]):  w[Q, (a,h)] = W[Q, c] for             \
+ * (a, h) = (pa[c], pb[c]) and -W[Q, c] for (a, h) = (pb[c], pa[c]).          \
+ * Y: (n, nx, nqt), acc: (nx, n). */                                          \
+void zc_lam_pair_matvec_tab_##SFX(const T *Y, const T *W, T *acc, int64_t nx,  \
+                                  int64_t n, int64_t nqt, int64_t q0,          \
+                                  int64_t nq, const int64_t *pa,               \
+                                  const int64_t *pb)                           \
+{                                                                              \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *yb = malloc(sizeof(T) * QBLK * n);                                  \
+        T *loc = malloc(sizeof(T) * n);                                        \
+        _Pragma("omp for schedule(dynamic, 1)")                                \
+        for (int64_t x = 0; x < nx; x++) {                                     \
+            memset(loc, 0, sizeof(T) * n);                                     \
+            for (int64_t qs = 0; qs < nq; qs += QBLK) {                        \
+                const int64_t nb = (qs + QBLK <= nq) ? QBLK : nq - qs;         \
+                for (int64_t h = 0; h < n; h++) {                              \
+                    const T *r = Y + (h * nx + x) * nqt + q0 + qs;             \
+                    for (int64_t q = 0; q < nb; q++) yb[q * n + h] = r[q];     \
+                }                                                              \
+                for (int64_t q = 0; q < nb; q++) {                             \
+                    const T *w = W + (qs + q) * nq;                            \
+                    const T *y = yb + q * n;                                   \
+                    for (int64_t c = 0; c < nq; c++) {                         \
+                        loc[pa[c]] += w[c] * y[pb[c]];                         \
+                        loc[pb[c]] -= w[c] * y[pa[c]];                         \
+                    }                                                          \
+                }                                                              \
+            }                                                                  \
+            for (int64_t a = 0; a < n; a++) acc[x * n + a] += loc[a];          \
+        }                                                                      \
+        free(yb); free(loc);                                                   \
+    }                                                                          \
+}
+
+DEFINE_LAM_TAB(double, d)
+DEFINE_LAM_TAB(double complex, z)

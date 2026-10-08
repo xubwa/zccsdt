@@ -859,19 +859,33 @@ def packed_t3(eris, t3):
     '''T3 on the unique block [C(no,3), C(nv,3)] in lexicographic order of
     the triples, whatever the engine of these integrals stores: the blocks
     of the symmetry labels are put in their places (zeros elsewhere).'''
-    from math import comb
     om, vm = t3pack.maps_for(eris)
     t3 = np.asarray(t3)
     if om.spins is None:
         return t3.reshape(om.ntri, vm.ntri)
     eng = engine_for(eris, t3.dtype)
-
-    def lex(m):
-        y = m.n - 1 - m.triples
-        return comb(m.n, 3) - 1 - y[:, 0] * (y[:, 0] - 1) * (y[:, 0] - 2) // 6 - y[:, 1] * (y[:, 1] - 1) // 2 - y[:, 2]
     out = np.zeros((om.ntri, vm.ntri), dtype=t3.dtype)
-    out[np.ix_(lex(om), lex(vm))] = eng.L.to_dense(t3)
+    out[np.ix_(_lex(om), _lex(vm))] = eng.L.to_dense(t3)
     return out
+
+
+def _lex(m):
+    '''The lexicographic numbers of the triples of a map.'''
+    from math import comb
+    y = m.n - 1 - m.triples
+    return comb(m.n, 3) - 1 - y[:, 0] * (y[:, 0] - 1) * (y[:, 0] - 2) // 6 - y[:, 1] * (y[:, 1] - 1) // 2 - y[:, 2]
+
+
+def blocked_t3(eris, t3p):
+    '''The inverse of packed_t3: what the engine of these integrals stores
+    of a T3 (or Lambda_3) on the unique block in lexicographic order - the
+    blocks of the symmetry labels; what is outside of them is dropped.'''
+    om, vm = t3pack.maps_for(eris)
+    t3p = np.asarray(t3p).reshape(om.ntri, vm.ntri)
+    if om.spins is None:
+        return t3p.ravel()
+    eng = engine_for(eris, t3p.dtype)
+    return eng.L.from_dense(t3p[np.ix_(_lex(om), _lex(vm))])
 
 
 def _engine_key(eris, dtype, flip=False):

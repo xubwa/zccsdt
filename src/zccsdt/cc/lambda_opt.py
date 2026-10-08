@@ -55,7 +55,7 @@ import numpy as np
 from pyscf import lib
 
 from zccsdt.blas import gemm
-from zccsdt.cc import ccsdt_opt, solver, t3engine, t3kern, t3pack
+from zccsdt.cc import ccsdt_opt, lambda_blk, solver, t3engine, t3kern, t3pack
 from zccsdt.cc.ccsdt_opt import (add_one_body_pairs, bra_dressed_vvvo_pp, dress_block,
                                  dress_fock, dressed_vvvv_pp, wvvvo_packed)
 from zccsdt.cc.diis import DIIS
@@ -92,6 +92,12 @@ def pair_expand(Y, vm):
         getattr(_lib, 'zc_lam_pair_expand_' + t3pack._sfx(Y.dtype))(
             t3pack._p(Y), t3pack._p(out), t3pack._I64(ny), t3pack._I64(nx), t3pack._I64(n))
         return out
+    if USE_C and hasattr(_lib, 'zc_lam_pair_expand_tab_d') and Y.flags.c_contiguous \
+            and Y.dtype in (np.float64, np.complex128):     # (pairs in the order of their groups)
+        getattr(_lib, 'zc_lam_pair_expand_tab_' + t3pack._sfx(Y.dtype))(
+            t3pack._p(Y), t3pack._p(out), t3pack._I64(ny), t3pack._I64(nx), t3pack._I64(n),
+            t3pack._I64(nq), t3pack._p(vm.pidx_c))
+        return out
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     out[...] = 0
     out[:, ne, :, md] = Y.transpose(2, 0, 1)
@@ -102,20 +108,42 @@ def pair_expand(Y, vm):
 def pair_matvec(Y, W, vm):
     '''K[x, a] = sum_{Q,h} Y[h, x, Q] w[Q, (a,h)] with the packed columns of
     W (npair, npair) on both orders of the pair: w[Q, (a,h)] = W[Q, (a<h)]
-    for a < h and -W[Q, (h<a)] for a > h.'''
+    for a < h and -W[Q, (h<a)] for a > h.  W may be the list of its diagonal
+    pair blocks (vm.blocks; nothing between the blocks).'''
     n, nx, nq = Y.shape
     out = np.zeros((nx, n), dtype=Y.dtype)
-    if USE_C and vm.spins is None and Y.flags.c_contiguous and W.flags.c_contiguous \
-            and Y.dtype == W.dtype and Y.dtype in (np.float64, np.complex128):
+    blocked = isinstance(W, (list, tuple))
+    if USE_C and not blocked and vm.spins is None and Y.flags.c_contiguous \
+            and W.flags.c_contiguous and Y.dtype == W.dtype \
+            and Y.dtype in (np.float64, np.complex128):
         getattr(_lib, 'zc_lam_pair_matvec_' + t3pack._sfx(Y.dtype))(
             t3pack._p(Y), t3pack._p(W), t3pack._p(out), t3pack._I64(nx), t3pack._I64(n))
         return out
+    if not blocked:
+        W = [W]
+        assert len(vm.blocks) == 1
+    tab = USE_C and hasattr(_lib, 'zc_lam_pair_matvec_tab_d') and Y.flags.c_contiguous \
+        and Y.dtype in (np.float64, np.complex128)
     r = np.arange(n)
-    for h in range(n):
-        a = np.delete(r, h)
-        cols = vm.pidx[np.minimum(a, h), np.maximum(a, h)]
-        out[:, a] += np.where(a < h, 1.0, -1.0) * gemm(np.ascontiguousarray(Y[h]),
-                                                        np.asarray(W[:, cols], dtype=Y.dtype))
+    for (lo, hi), Wb in zip(vm.blocks, W):
+        if hi == lo:
+            continue
+        if tab:
+            Wb = np.ascontiguousarray(Wb, dtype=Y.dtype)
+            getattr(_lib, 'zc_lam_pair_matvec_tab_' + t3pack._sfx(Y.dtype))(
+                t3pack._p(Y), t3pack._p(Wb), t3pack._p(out), t3pack._I64(nx), t3pack._I64(n),
+                t3pack._I64(nq), t3pack._I64(lo), t3pack._I64(hi - lo),
+                t3pack._p(np.ascontiguousarray(vm.pa_c[lo:hi])),
+                t3pack._p(np.ascontiguousarray(vm.pb_c[lo:hi])))
+            continue
+        for h in range(n):
+            a = np.delete(r, h)
+            cols = vm.pidx[np.minimum(a, h), np.maximum(a, h)]
+            a = a[(cols >= lo) & (cols < hi)]
+            cols = vm.pidx[np.minimum(a, h), np.maximum(a, h)] - lo
+            if len(a):
+                out[:, a] += np.where(a < h, 1.0, -1.0) * gemm(
+                    np.ascontiguousarray(Y[h, :, lo:hi]), np.asarray(Wb[:, cols], dtype=Y.dtype))
     return out
 
 
@@ -335,15 +363,38 @@ def _maps(eris, t1):
     return t3pack.triple_map(nocc), t3pack.triple_map(nvir)
 
 
-def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0):
+def block_engine(eris, dtype, mem_mb=None):
+    '''The engine on the blocks of the symmetry labels of these integrals
+    (lambda_blk.BlockL3 on the T3 engine of the amplitude equations), or
+    None: no labels in use, integrals in the U/R form, or no C kernels.'''
+    if ccsdt_opt._is_spin_eris(eris) or t3pack.maps_for(eris)[0].spins is None:
+        return None
+    t3eng = ccsdt_opt.engine_for(eris, dtype, mem_mb)
+    if not lambda_blk.available(t3eng):
+        return None
+    t3eng.io = None             # (T3, l3 and the residual are in ordinary memory here)
+    return lambda_blk.BlockL3(t3eng)
+
+
+def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0, blocks=False):
     '''Intermediates for the amplitudes t1, t2 and the packed T3
-    (C(no,3), C(nv,3)), lexicographic: ccsdt_opt.packed_t3).'''
+    (C(no,3), C(nv,3)), lexicographic: ccsdt_opt.packed_t3) - or, with
+    ``blocks``, T3 in the blocks of the symmetry labels as the amplitude
+    equations store it (the engine is then lambda_blk.BlockL3, and pairs and
+    triples are in the order of their groups in everything below).'''
     if ccsdt_opt._is_spin_eris(eris):
         raise NotImplementedError('the Lambda equations take spin-orbital integrals (zccsdt.eris)')
     nocc, nvir = t1.shape
-    om, vm = _maps(eris, t1)
     dtype = np.result_type(t1, t2, T3p, eris.oovv, eris.fock)
-    eng = DenseL3(om, vm, dtype, mem_mb)
+    if blocks:
+        eng = block_engine(eris, dtype, mem_mb)
+        if eng is None:
+            raise ValueError('no blocks of symmetry labels for these integrals (labels in use, '
+                             'C kernels)')
+        om, vm = eng.om, eng.vm
+    else:
+        om, vm = _maps(eris, t1)
+        eng = DenseL3(om, vm, dtype, mem_mb)
     T3p = eng.view(T3p)
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
@@ -441,20 +492,26 @@ def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0):
         im.goovv_pp, im.goovv_P, im.goovv_mn, im.goovo_mn = goovv_pp, goovv_P, goovv_mn, goovo_mn
         im.t2, im.t2P = t2, t2P
     with timer('Wpp'):          # the T3 ladder operator, in the dressed <ab||de>
-        Wpp = vvvv_pp[0]
+        Wpp = vvvv_pp           # (its diagonal pair blocks: one without labels)
         del vvvv_pp
-        if nvp:
-            if npo:
-                gemm(np.asfortranarray(t2pp.T), goovv_pp, Wpp, beta=1.0)
-            add_one_body_pairs(Wpp, im.Fvv, vm, 0.5)
-        im.Wpp = Wpp
+        for h, (lo, hi) in enumerate(vm.blocks):
+            if hi > lo:
+                if Wpp[h].dtype != dtype:
+                    Wpp[h] = Wpp[h].astype(dtype)
+                if npo:
+                    gemm(np.asfortranarray(t2pp[:, lo:hi].T),
+                         np.ascontiguousarray(goovv_pp[:, lo:hi]), Wpp[h], beta=1.0)
+                add_one_body_pairs(Wpp[h], im.Fvv, vm, 0.5, block=h)
+        im.Wpp = Wpp if blocks else Wpp[0]
     del ge
 
     # ---- contractions of T3 with <ij||fg> and <ei||gh>
     with timer('X'):
         im.Xq = np.zeros((npo, om.ntri, nvir), dtype=dtype)
         im.X2 = np.zeros((nvp, om.ntri, nocc), dtype=dtype)
-        if eng.size:
+        if eng.size and blocks:
+            eng.contract_x(T3p, goovv_pp, vovvQ, im.Xq, im.X2)
+        elif eng.size:
             vq = vovvQ.reshape(nvir * nocc, nvp)
             for rows, Tv in eng.vir_batches(T3p, nocc * nvir * nvir + 2 * nvp * nocc):
                 n = len(rows)
@@ -610,7 +667,12 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
             - einsum('ag,Pbg->Pab', Gvv, im.goovv_mn)
         r2 += Yab[:, md, ne] - Yab[:, ne, md]
         if nvp and npo:
-            gemm(l2pp, im.Wpp, r2, beta=1.0)
+            if isinstance(im.Wpp, list):    # (the diagonal pair blocks)
+                for (plo, phi), (lo, hi), Wb in zip(om.blocks, vm.blocks, im.Wpp):
+                    if phi > plo and hi > lo:
+                        r2[plo:phi, lo:hi] += gemm(np.ascontiguousarray(l2pp[plo:phi, lo:hi]), Wb)
+            else:
+                gemm(l2pp, im.Wpp, r2, beta=1.0)
             gemm(im.Woooo_pp, l2pp, r2, beta=1.0)
             gemm(np.ascontiguousarray(Y1).reshape(npo, dm), vovvQ.reshape(dm, nvp), r2, beta=1.0)
             gemm(Do4, im.goovv_pp, r2, alpha=1.0 / 6.0, beta=1.0)
@@ -657,6 +719,8 @@ class LambdaPlan:
     iteration: int = 0          # ... and in an iteration (the larger of the two is in ``need``)
     kept: int = 0               # of which the operands that live through the iterations
     diis: int = 0               # DIIS vectors that are not in the scratch file
+    blocks: bool = False        # l3 in the blocks of the symmetry labels (plan_memory_blocks)
+    buffers: int = 0            # ... then: the work array of the block engine
 
 
 def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0, diis_space=0):
@@ -734,21 +798,104 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0, diis_space=
                          max(plan.setup, plan.iteration) / 1e9, budget / 1e9))
 
 
-def plan_for(eris, t1, dtype, opts):
+def plan_memory_blocks(eng, budget=None, mem_mb=2000.0, diis_space=0):
+    '''LambdaPlan of the equations on the blocks of the symmetry labels
+    (``eng``: a lambda_blk.BlockL3) for ``budget`` bytes, as plan_memory.
+    The operands are the dense ones of plan_memory (f = o v^3, s = o^2 v^2
+    elements, r = 1 + o / v); what the labels change:
+
+      T3-sized  three times the blocks of T3
+      pp        the diagonal pair blocks of the ladder operator
+      buffers   the work array of the block engine (kept; its
+                buffer_bytes(mem_mb): the products of a batch of occupied
+                pairs for all groups of virtual pairs and one gathered block)
+      kept      as in plan_memory, and the blocks of the ring operator
+      setup     as in plan_memory with the dressing of one pair block, the
+                copies in blocks of the operand of pass 1 over T3, and the
+                transients of the contractions of T3 with <ei||gh>
+      iteration the kept operands and 8 s next to the copies in blocks of
+                the drive operand [x, (i, Q)] (pass 2: the elements of
+                r f whose labels add up; half of that in pass 1) or, after
+                the passes, next to 1.5 f
+
+    If that exceeds the budget the buffers shrink, to one occupied pair and
+    one occupied triple per batch; MemoryError if it still does not fit.'''
+    from zccsdt.cc import diis
+    om, vm = eng.om, eng.vm
+    o, v, isz = om.n, vm.n, eng.dtype.itemsize
+    npo, nvp, nto = om.npair, vm.npair, om.ntri
+    f = o * v ** 3 * isz
+    s = o * o * v * v * isz
+    t3 = eng.size * isz
+    nq = [hi - lo for lo, hi in vm.blocks]
+    pp = sum(n * n for n in nq) * isz
+    gmq = o * nvp * (o + v) * isz
+    bdrv = 2 * (o + v) * o * nvp * isz
+    ring = eng.ring_bytes()
+    drive = eng.drive_bytes()
+    kept = gmq + bdrv + f + (nvp * nto * o + npo * nto * v) * isz + 9 * s + ring
+    fixed = 3 * nto * nto * isz + ccsdt_opt.overhead()
+    # dressing a pair block: its rows in batches of at most 2 GB next to o v
+    # of its columns
+    dress = max([min(2_000_000_000, v * v * n * isz) + o * v * n * isz for n in nq] + [0])
+    occ = 6 * nto * o ** 3 * isz            # the occupied operator from the packed basis
+    plan = LambdaPlan(mem_mb=mem_mb, kept=kept, blocks=True)
+    plan.diis = 2 * diis_space * t3 if eng.size < diis.INCORE_SIZE else 0
+
+    def fill(mem):
+        plan.mem_mb = mem
+        plan.buffers = int(eng.buffer_bytes(mem))
+        plan.setup = max(f + dress, gmq + bdrv + 2 * f + drive,
+                         kept - 9 * s + max(eng.x_bytes(mem), occ)) + 9 * s
+        plan.iteration = kept + max(2 * drive + s, 3 * f // 2) + 8 * s + eng.occ_bytes()
+        plan.need = fixed + 3 * t3 + plan.diis + pp + plan.buffers + max(plan.setup, plan.iteration)
+        return budget is None or plan.need <= budget
+
+    if fill(mem_mb):
+        return plan
+    lo, hi = min(mem_mb, 1e-3), mem_mb
+    if fill(lo):
+        # the largest buffers that fit (the need grows with them)
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if fill(mid) else (lo, mid)
+        fill(lo)
+        return plan
+    raise MemoryError('the Lambda equations of CCSDT in the blocks of the symmetry labels, %d '
+                      'occupied and %d virtual spinors, need about %.1f GB of memory (T3, '
+                      'Lambda_3 and its residual: %.1f GB; the pp ladder operator: %.1f GB; '
+                      'operands and buffers: %.1f GB); %.1f GB are available (max_memory, or what '
+                      'the node and the memory limit of the job leave)'
+                      % (o, v, plan.need / 1e9, 3 * t3 / 1e9, pp / 1e9,
+                         (plan.buffers + max(plan.setup, plan.iteration)) / 1e9, budget / 1e9))
+
+
+def plan_for(eris, t1, dtype, opts, blocks=False):
     '''LambdaPlan of a run with the solver options ``opts`` (max_memory in
     MB for the whole process; default: 80% of what is available).  T3 is
-    taken to be in memory already, as the caller passes it.'''
+    taken to be in memory already, as the caller passes it.  ``blocks``: of
+    the equations on the blocks of the symmetry labels.'''
     from zccsdt import memory
     nocc, nvir = np.shape(t1)
     isz = np.dtype(dtype).itemsize
     space = 0 if opts.incore_complete else opts.diis_space
+    eng = None
+    if blocks:
+        eng = block_engine(eris, dtype)
+        if eng is None:
+            raise ValueError('no blocks of symmetry labels for these integrals (labels in use, '
+                             'C kernels)')
     if opts.incore_complete:
+        if blocks:
+            return plan_memory_blocks(eng, None, opts.mem_mb, space)
         return plan_memory(nocc, nvir, isz, None, opts.mem_mb, space)
     cached = ccsdt_opt.cached_bytes(eris)
     om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
     budget = memory.budget(opts.max_memory)
     if budget is not None:      # (what is there already: T3, kept arrays of the amplitude step)
-        budget += cached + om.ntri * vm.ntri * isz
+        budget += cached + (eng.size if blocks else om.ntri * vm.ntri) * isz
+    if blocks:
+        return plan_memory_blocks(eng, budget, opts.mem_mb, space)
     return plan_memory(nocc, nvir, isz, budget, opts.mem_mb, space)
 
 
@@ -760,13 +907,14 @@ class Result:
     ncycle: int
     l1: np.ndarray
     l2: np.ndarray
-    l3: np.ndarray              # packed (i<j<k, a<b<c), flat
+    l3: np.ndarray              # packed (i<j<k, a<b<c), flat; or its blocks (``blocks``)
     timings: list = None        # wall time per iteration
     plan: object = None         # the LambdaPlan
     setup: float = 0.0          # wall time of the intermediates
+    blocks: bool = False        # l3 in the blocks of the symmetry labels, as T3 was given
 
 
-def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None):
+def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False):
     '''Solve the Lambda equations of CCSDT for converged amplitudes: t1, t2
     dense, t3 packed as solver.kernel returns it.  Jacobi steps with DIIS
     from conj(t) (or from l1, l2, l3), converged when the norm of the change
@@ -775,17 +923,28 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None):
     incore_complete, mem_mb, max_memory, verbose, callback are used; ``plan``
     takes a LambdaPlan).  Returns a Result with l3 packed.
 
-    T3, l3 and the residual are held in memory (plan_memory raises
-    MemoryError if they do not fit in max_memory).'''
+    Integrals with symmetry labels in use, whose T3 solver.kernel returns in
+    the blocks of the labels: by default the blocks are put on the unique
+    block [i<j<k, a<b<c] in lexicographic order and the equations are solved
+    there, l3 returned on it; with ``blocks`` they are solved in the blocks
+    (lambda_blk) and l3 (given and returned) has the layout of t3 -
+    packed_l3() puts it on the unique block.
+
+    T3, l3 and the residual are held in memory (plan_memory,
+    plan_memory_blocks raise MemoryError if they do not fit in
+    max_memory).'''
     opts = opts or solver.Options()
     nocc, nvir = np.shape(t1)
-    T3p = ccsdt_opt.packed_t3(eris, t3)
+    T3p = np.asarray(t3).ravel() if blocks else ccsdt_opt.packed_t3(eris, t3)
     dtype = np.result_type(t1, t2, T3p, eris.oovv, eris.fock)
-    plan = opts.plan if isinstance(opts.plan, LambdaPlan) else plan_for(eris, t1, dtype, opts)
+    if isinstance(opts.plan, LambdaPlan) and opts.plan.blocks == bool(blocks):
+        plan = opts.plan
+    else:
+        plan = plan_for(eris, t1, dtype, opts, blocks)
     T3p = np.ascontiguousarray(T3p, dtype=dtype)
     t0 = time.perf_counter()
     with timer('lam.setup'):
-        im = make_intermediates(eris, t1, t2, T3p, mem_mb=plan.mem_mb)
+        im = make_intermediates(eris, t1, t2, T3p, mem_mb=plan.mem_mb, blocks=blocks)
     setup = time.perf_counter() - t0
     size = im.eng.size
     l1 = np.conj(t1).astype(dtype) if l1 is None else np.asarray(l1, dtype=dtype)
@@ -833,7 +992,20 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None):
     finally:
         adiis.close()
     return Result(converged=conv, ncycle=icycle + 1, l1=l1, l2=l2, l3=l3, timings=timings,
-                  plan=plan, setup=setup)
+                  plan=plan, setup=setup, blocks=bool(blocks))
+
+
+def packed_l3(eris, l3):
+    '''l3 of kernel(..., blocks=True) on the unique block [C(no,3),
+    C(nv,3)] in lexicographic order of the triples (zeros outside of the
+    blocks of the labels): the layout of kernel() without ``blocks``.'''
+    return ccsdt_opt.packed_t3(eris, l3)
+
+
+def blocked_l3(eris, l3):
+    '''The inverse of packed_l3: the blocks of the symmetry labels of these
+    integrals of an l3 on the unique block.'''
+    return ccsdt_opt.blocked_t3(eris, l3)
 
 
 def dense_l3(l3, nocc, nvir):
