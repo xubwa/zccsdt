@@ -249,12 +249,19 @@ def test_complex_amplitudes(hbr):
 
 def test_front_end(hbr, monkeypatch):
     '''GCCSDT.solve_lambda: in blocks with ``symmetry``, l3 in the layout of
-    T3; on the packed block without it or without memory for the blocks -
-    the same Lambda, in the same layout.'''
+    T3; on the packed block without it, without memory for the blocks or
+    for a packed block smaller than ``blocks_min`` - the same Lambda, in
+    the same layout.'''
     eris, t1, t2, t3, ref = hbr
     cc = RUN['cc']
     cc.conv_tol_normt = 1e-11
+    # 183456 elements on the packed block: below ``blocks_min`` the packed block is taken
+    assert cc.blocks_min == 1_000_000 and not cc._blocks_pay(eris)
+    p1, p2, p3 = cc.solve_lambda()
+    assert cc.converged_lambda and not cc.lambda_blocks and p3.size == 31820
+    cc.blocks_min = 0
     l1, l2, l3 = cc.solve_lambda()
+    assert abs(p1 - l1).max() < 1e-10 and abs(p2 - l2).max() < 1e-10 and abs(p3 - l3).max() < 1e-10
     assert cc.converged_lambda and cc.lambda_blocks and l3.size == cc.t3.size == 31820
     packed = cc._packed_l3()
     assert packed.size == 56 * 3276 and cc._packed_l3() is packed          # (put there once)

@@ -975,7 +975,11 @@ class GCCSDT(UCCSDT):
     real_spinors = True
     symmetry = True         # use the symmetry labels of the spinors where the integrals have them
     _block_iterations = True    # ... in the iterations too: T3 in blocks, the spinors in the order of the labels
-    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'rdm1_blocks',
+    # Lambda and the densities run in the blocks of the labels where the packed block
+    # [C(o,3), C(v,3)] has at least this many elements; below it the many small products of
+    # the blocks are slower than the few large ones of the packed block (docs/lambda.md 10.5)
+    blocks_min = 1_000_000
+    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'rdm1_blocks', 'blocks_min',
                               'e_ql', 'e_ql5', 'e_tot_ql'}
 
     def _axial(self):
@@ -1100,6 +1104,16 @@ class GCCSDT(UCCSDT):
 
     # ---- Lambda and one-electron properties (docs/lambda.md)
 
+    def _blocks_pay(self, eris):
+        '''Lambda and the densities in the blocks of the symmetry labels, or
+        on the packed block?  In blocks from ``blocks_min`` elements of the
+        packed block on (measured: HBr, N2, 8 to 10 occupied spinors - a
+        Lambda iteration in blocks takes 3.4 times as long as one on the
+        packed block with 0.18 million elements, 1.5 times with 0.55, and
+        0.86 to 0.72 of it with 1.2 to 1.4 million, a third with 4.3).'''
+        from math import comb
+        return comb(eris.nocc, 3) * comb(eris.nmo - eris.nocc, 3) >= self.blocks_min
+
     def _dense_view(self):
         '''(eris, t3) for the codes that take T3 on the packed block in
         lexicographic order: the integrals without their labels in use, the
@@ -1142,8 +1156,9 @@ class GCCSDT(UCCSDT):
         or, where the iterations ran in the blocks of the symmetry labels,
         these blocks (zccsdt.cc.lambda_opt.packed_l3 puts them on the packed
         block).  With ``symmetry`` the equations are solved in the blocks
-        too (zccsdt.cc.lambda_blk); on the packed block otherwise, or if the
-        blocks do not fit in ``max_memory``.'''
+        too (zccsdt.cc.lambda_blk); on the packed block otherwise, if the
+        blocks do not fit in ``max_memory``, or if the packed block has
+        fewer than ``blocks_min`` elements (it is the faster one then).'''
         from zccsdt.cc import lambda_opt, solver
         if self.t3 is None:
             raise RuntimeError('%s.solve_lambda(): no amplitudes (kernel() first)' % self.__class__.__name__)
@@ -1153,7 +1168,7 @@ class GCCSDT(UCCSDT):
             incore_complete=self.incore_complete, max_memory=self.max_memory)
         labels = bool(getattr(eris, 'use_labels', False))
         plan = None
-        if self.symmetry and labels:
+        if self.symmetry and labels and self._blocks_pay(eris):
             dtype = np.result_type(self.t1, self.t2, self.t3, eris.oovv, eris.fock)
             if lambda_opt.block_engine(eris, dtype) is not None:
                 try:
@@ -1187,8 +1202,9 @@ class GCCSDT(UCCSDT):
         operator is the derivative of the CCSDT energy.  With ``symmetry``
         and T3 and l3 in the blocks of the symmetry labels, the passes over
         them run in these blocks (zccsdt.cc.density_blk; ``rdm1_blocks``
-        says so), on the packed block otherwise or if the blocks do not fit
-        in ``max_memory``.'''
+        says so), on the packed block otherwise, if the blocks do not fit
+        in ``max_memory``, or if the packed block has fewer than
+        ``blocks_min`` elements.'''
         from zccsdt.cc import density_blk, density_opt
         if isinstance(self._scf, _Given):
             raise RuntimeError('the integrals were given: no SCF to take the response of the spinors from')
@@ -1206,6 +1222,7 @@ class GCCSDT(UCCSDT):
         # in the blocks of the symmetry labels where T3 and l3 are in them and the plan fits
         plan = None
         if (self.symmetry and getattr(eris, 'use_labels', False) and np.size(self.l3) == np.size(self.t3)
+                and self._blocks_pay(eris)
                 and density_blk.engine(eris, np.result_type(self.t1, self.t3, self.l3, eris.oovv,
                                                             eris.fock)) is not None):
             try:

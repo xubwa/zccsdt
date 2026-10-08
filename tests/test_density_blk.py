@@ -23,8 +23,7 @@ from pyscf import gto, x2c
 
 import zccsdt
 from test_lambda_blk import LABELS, MODELS, _dense, _labelled_model, _packed
-from zccsdt.cc import ccsdt_opt, density_blk as B, density_opt as D, lambda_opt as LO, solver, t3engine, \
-    t3kern, t3pack
+from zccsdt.cc import ccsdt_opt, density_blk as B, density_opt as D, t3engine, t3kern, t3pack
 
 pytestmark = pytest.mark.skipif(not (t3kern.USE_C and t3pack.USE_C), reason='C libraries not built')
 
@@ -159,6 +158,7 @@ def _front_end(frozen):
     cc = zccsdt.GCCSDT(RUN['mf'], frozen=frozen)
     cc.verbose = 0
     cc.conv_tol, cc.conv_tol_normt = 1e-12, 1e-10
+    cc.blocks_min = 0           # (in blocks whatever the size)
     return cc
 
 
@@ -301,7 +301,8 @@ def test_dropped_virtual_spinors():
 
 def test_front_end(hbr, monkeypatch):
     '''GCCSDT.make_rdm1: in blocks with ``symmetry``, on the packed block
-    without it or when the plan of the blocks raises - the same density.'''
+    without it, when the plan of the blocks raises or for a packed block
+    smaller than ``blocks_min`` - the same density.'''
     cc, eris, Ca, kw, ref = hbr
     D1 = cc.make_rdm1()
     assert cc.rdm1_blocks and abs(D1 - ref.relaxed).max() < 1e-10
@@ -319,6 +320,13 @@ def test_front_end(hbr, monkeypatch):
     monkeypatch.setattr(D, 'plan_memory_blocks', short)
     D3 = cc.make_rdm1()
     assert not cc.rdm1_blocks and abs(D3 - D1).max() < 1e-10
+    monkeypatch.undo()
+    assert cc.make_rdm1() is not None and cc.rdm1_blocks
+    # 183456 elements on the packed block: with the default ``blocks_min`` it is taken
+    monkeypatch.setattr(cc, 'blocks_min', type(cc).blocks_min)
+    assert cc.blocks_min == 1_000_000 and not cc._blocks_pay(eris)
+    D4 = cc.make_rdm1()
+    assert not cc.rdm1_blocks and abs(D4 - D1).max() < 1e-10
 
 
 # --------------------------------------------------------------------- memory
