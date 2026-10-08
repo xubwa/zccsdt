@@ -17,6 +17,7 @@ amplitudes; nothing here is fast.
 | `bench/lambda_ccsdt.py`, `bench/slurm_lambda_refs.sh` | molecules, and the reference runs of MRCC and CFOUR |
 | `src/zccsdt/cc/quadruples_lambda.py`, `quadruples_lambda_sym.py`, `csrc/qlambda.c` | CCSDT(Q)_Lambda on packed amplitudes, per occupied quadruple and in symmetry sectors (section 5.1); `tests/test_quadruples_lambda.py`, `tests/test_quadruples_lambda_sym.py`, `bench/profile_q_lambda.py` |
 | `src/zccsdt/cc/lambda_opt.py`, `csrc/lambda_t3.c` | the Lambda equations on packed Lambda_3 (section 9); `tests/test_lambda_opt.py`, `bench/profile_lambda_ccsdt.py` |
+| `src/zccsdt/cc/density_opt.py`, `density_blk.py` | densities, orbital gradient and relaxed density from packed amplitudes (section 10) and in the blocks of the symmetry labels (10.5); `tests/test_density_opt.py`, `tests/test_density_blk.py`, `bench/density_ccsdt.py`, `bench/profile_density_blocks.py` |
 
 ## 1. Definitions and conventions
 
@@ -682,11 +683,14 @@ planned arrays for 8 + 160 spinors without it (job 31740301), inside the
 0.7 GB that the plan allows for the BLAS and the allocator.
 
 **Front end**: `GCCSDT.solve_lambda()` solves in blocks when `symmetry` is
-set and the iterations ran in blocks, on the packed block otherwise or when
-the blocks do not fit in `max_memory` (`lambda_blocks` says which).
+set and the iterations ran in blocks, on the packed block otherwise, when
+the blocks do not fit in `max_memory`, or when the packed block has fewer
+than `blocks_min` = 800 000 elements - it is the faster one then (10.5:
+the measurements) - (`lambda_blocks` says which).
 `self.l3` has the layout of `self.t3` in every case (after the packed block
-its blocks are taken out); `make_rdm1` and `ccsdt_q_lambda` read
-`_packed_l3()`, which puts the blocks on the packed block once.
+its blocks are taken out); `ccsdt_q_lambda`, and `make_rdm1` where it runs
+on the packed block (10.5), read `_packed_l3()`, which puts the blocks on
+the packed block once.
 
 **Validation** (`tests/test_lambda_blk.py`, 45 s), against the equations on
 the packed block:
@@ -789,10 +793,10 @@ scratch fallback.
 `bench/density_ccsdt.py`, `bench/cfour/write_density_ccsdt.py`): the
 one-particle density, the orbital gradient and - through
 `zccsd.zvector` - the relaxed density from t3 and lambda3 as the amplitude
-code stores them, `[C(o,3), C(v,3)]` (or the symmetry blocks of the engine
-of the front end). It takes the place of the first and the last item of
-section 8 for the densities and the gradient; Lambda itself is still that of
-the dense reference.
+code stores them: `[C(o,3), C(v,3)]` (10.1 to 10.4), or the blocks of the
+symmetry labels, in which the passes over them then run (10.5,
+`density_blk.py`). It takes the place of the first and the last item of
+section 8 for the densities and the gradient; Lambda is section 9.
 
 ```python
 from zccsdt.cc import density_opt
@@ -1105,3 +1109,250 @@ What is left for the frozen spinors:
 - with slabs of few frozen spinors, the gathers per slab (above);
 - with no frozen spinors `Y` is kept although `Gamma` would be cheaper
   where v < 6 o (HI: about 13 s against 18 s).
+
+### 10.5 In the blocks of the symmetry labels (`zccsdt.cc.density_blk`)
+
+`density_opt.kernel(..., blocks=True)` and `relaxed_rdm1(..., blocks=True)`
+take t3 and l3 as the amplitude and the Lambda equations in blocks leave
+them for integrals with labels in use (9.7: the blocks of
+`t3engine.T3Layout`, block g the triples whose classes add up to g) and run
+every pass over them in these blocks: `density_blk.BlockDensity`, on the
+gathers of the block engines (`lambda_blk.BlockL3._gather`, `zc_bgather2`,
+`zc_bgather_vir`). The dense arrays - the blocks of g2 of 10.1, the
+integrals, everything with at most three virtual indices - are those of the
+packed block, with pairs in the order of their groups, and the code that
+makes and contracts them is the same (`kernel` branches where it touches t3
+or l3). One class of labels is no symmetry: the blocks are then the packed
+block, and the packed block (`blocks=False`) stays the reference and the
+fallback.
+
+| Step | In blocks |
+|---|---|
+| pass 1 (`pass_l`) | per batch of occupied pairs of a group gP and per group gQ of virtual pairs: l3 gathered as `[P, D, Q]`, D the (d, m) with class(d) - class(m) = gP - gQ. `Z` and `C3` are one GEMM each per class of d and of m, on the whole batch (the free index of the class gP - class(d)); the operand `t2[i,m,Q]` is copied once per (class of m, gQ, class of i) |
+| pass 2 (`pass_tl`) | t3 and l3 gathered next to each other. The two stacked GEMMs of t3 with (l2, `Z`) and (l2, `C3`) per class of d and of m; `R3` one GEMM per occupied pair into its block of the difference of classes (block diagonal: sum n_D^2 elements, scattered into the o^2 v^2 array at the end); the products with l1 and l2 where gP = gQ; `H` for the occupied pairs of the group gQ only (t2 of a pair P' and a pair Q vanishes otherwise) and its product with t3 into the block [gQ, gQ] of the o^5 v intermediate |
+| `Gamma` (`gamma`) | always - the l3 t3 part of the block `abcd` goes through `Gamma` in blocks, never through `Y` -: its diagonal pair blocks, sum n_h^2 elements for blocks of n_h pairs (as the pp ladder operator of the amplitude equations), per group of occupied triples and class of the free virtual index one GEMM on the arrays with that index apart |
+| `Gamma` times `<ef\|\|gi>` and the integrals of a frozen index (`gamma_pairs`) | per pair block and per pair of classes of the two indices of the unpacked pair: these pairs are a range of rows of the block, so each of the two terms is one GEMM (one with the antisymmetric square where the classes are equal); copies of at most 64 MB of rows of `Gamma` at a time |
+| Gram matrix, `O4` | per group of triples (`BlockL3.gram`) |
+| the dressed `<ab\|\|de>` (`Slabs`) | its diagonal pair blocks (`ccsdt_opt.dressed_vvvv_rows(..., block=h)`): all kept if they fit, else dressed twice in slabs of the rows of a block; `aibc` meets a block with the columns of that block |
+
+**What stays dense**, and what it costs (HBr / cc-pVQZ-DK, the profile
+below): the integrals with one frozen index (their transformation, the
+dressing, the six blocks and their products with the blocks of g2 - the
+frozen spinors carry no labels here), the Z-vector equations of the SCF,
+and the blocks of g2 with their contractions (the o^2 v^4 product of
+`aibc`, t2 with `C3`; the loops over a virtual index). The labels are not
+used in any of them.
+
+**Memory** (`plan_memory_blocks`, `Plan.blocks`): the dense arrays of
+`plan_memory` (`fixed_bytes`), the copies in blocks of the operand of the
+stacked GEMMs and the blocks of `R3` (`BlockDensity.operand_bytes`), the
+blocks of `Gamma`, the work array of the block engine - l3 and t3 gathered
+for a batch of occupied pairs of one group and one group of virtual pairs,
+with `H`; t3 and l3 with one class of the free virtual index apart for a
+batch of occupied triples; as many pairs and triples as fit, at most 4 GB;
+given back after the passes -, the pair blocks of the dressed `<ab||de>`
+(kept if they all fit next to the batches, else slabs of the rows of a
+block), and the frozen stage as in 10.2. `MemoryError` with the numbers
+below one pair and one triple per batch and the rows of one first virtual
+index of the widest pair block, or below the integrals of one frozen
+spinor. `kernel` takes the pair blocks of the bare `<ab||de>` from the
+budget where the integral object does not hold them for these maps
+(`bare_bytes`). One class: the whole `Gamma` and at least `v` rows of
+`<ab||de>` - the packed block with route `y` needs less.
+
+**Front end**: `GCCSDT.make_rdm1()` runs in blocks when `symmetry` is set,
+T3 and l3 are in blocks, the plan fits (`relaxed_rdm1(..., plan_only=True)`
+inside `try`, the run outside it; what was prepared for the frozen spinors
+is kept with the plan, `Plan.held`) and the packed block has at least
+`blocks_min` elements (below); else on the packed block (`_dense_view`,
+`_packed_l3`). `rdm1_blocks` says which.
+
+**Validation** (`tests/test_density_blk.py`, 26 tests, 65 s), against the
+code on the packed block:
+
+- Every product of the passes one by one - `Z`, `C3`, the two stacked
+  GEMMs of t3, the terms with l1 and l2, `R3`, the o^5 v intermediate - as
+  the sum over the half-expanded arrays, `Gamma` as the diagonal blocks of
+  the full matrix (nothing outside them) and its product with random
+  three-index integrals: 5 + 7 spin orbitals with one label and with four,
+  real and complex, whole batches and one pair and one triple per batch
+  (1e-13 of their size).
+- d1, g1, the table `GRADIENT` and the contractions B and K with the
+  integrals of three "frozen spinors" (random, without labels) for
+  amplitudes and Lambda that solve nothing, the same models, in three
+  plans (everything at once; one pair, one triple, one row of a pair block
+  and one frozen spinor at a time; between them): 1e-13 of their size
+  (1e-15 found); the density alone; CCSD (no t3) and two occupied spinors.
+- HBr / cc-pVDZ-DK, X2C, 28 frozen and 8 + 28 active spinors, labels 2 m_j
+  (31820 of 183456 elements of t3 and l3), converged amplitudes and
+  Lambda: the relaxed and the unrelaxed density, d1, `Gnh[a,i]`, the
+  orbital gradient over all 64 spinors and the solution of the Z-vector
+  equations to 1e-10 (5e-14, 4e-14, 8e-14, 1e-13, 6e-14, 5e-14 found), also
+  with the smallest plan and with the plan made by a call of its own; with
+  one label (3e-18: the same operations); with a phase on every active
+  spinor - complex integrals, amplitudes and Lambda, the Fock matrix with
+  the phases too - against the packed block with these integrals (1e-13
+  found) and, in the AO basis, against the real densities (1e-9 asserted);
+  with 4 dropped virtual spinors (28 frozen, 8 + 24 active; amplitudes
+  after three iterations, their conjugates as Lambda: 3e-13 found).
+- The front end: in blocks with `symmetry`, on the packed block without it,
+  when the plan of the blocks raises, and below `blocks_min` - the same
+  density (1e-10).
+- Memory: the allocations of `kernel` (tracemalloc, the work array of the
+  block engine among them) within the plan, for the smallest plan and with
+  no limit, 6 + 30 spin orbitals with one label and with six and 4 + 44
+  with four, with and without frozen spinors (0.49 to 0.73 of the plan
+  without its 0.7 GB for the BLAS threads: the o^2 v^2 arrays that
+  `fixed_bytes` counts are most of a plan this small), the work array given
+  back; the plan over 120 budgets from its floor to everything: never above
+  the budget, the need growing with it, one more pair, triple or frozen
+  spinor per batch does not fit, the pair blocks kept where they fit next
+  to the batches, `MemoryError` below the floor.
+- At production size, in the timing job below: blocks against the packed
+  block on the same amplitudes and Lambda, max differences of the relaxed
+  density, the unrelaxed one, `Gnh[a,i]`, the gradient over all spinors and
+  z: 3.2e-13, 2.1e-13, 2.6e-13, 1.3e-13, 3.2e-13 (cc-pVTZ-DK) and 1.1e-13,
+  1.1e-13, 1.0e-13, 5.1e-14, 1.1e-13 (cc-pVQZ-DK); the checksums of 10.4
+  are the same in all printed digits, also under the budget. Through the
+  front end, with and without `symmetry` (two CCSDT, Lambda and density
+  calculations from the spinors of one SCF): the relaxed density in the AO
+  basis to 1.1e-11 and 5.8e-12.
+
+**Timing**: `bench/profile_density_blocks.py stages`, HBr on the z axis,
+X2C, 28 frozen spinors, real integrals (spinors adapted to m_j): amplitudes
+converged in blocks, then - the packed block first and the blocks after it,
+in one process on the same integrals, amplitudes and Lambda - three
+amplitude iterations after a warm-up iteration, the Lambda equations to
+convergence (17 cycles in both layouts), and everything of `relaxed_rdm1`
+(densities, orbital gradient with the 28 frozen spinors, Z-vector
+equations) twice, the second run in the table. Job 31744031 on c028 (not
+the login node; load 0.6 before it; snapshot of commit 584fc20), 8 cores
+of a Xeon Gold 6248R, MKL. Seconds (cores busy):
+
+| | cc-pVTZ-DK | cc-pVQZ-DK |
+|---|---|---|
+| occupied + virtual spinors, frozen | 8 + 78, 28 | 8 + 160, 28 |
+| labels of the virtual spinors | 8 | 10 |
+| elements of t3 and of l3: packed block, blocks | 4 260 256, 622 138 (14.6%) | 37 515 520, 4 699 202 (12.5%) |
+| `Gamma`, 8 bytes an element: v^4 / 4, its pair blocks | 0.072 GB, 0.010 GB | 1.29 GB, 0.15 GB |
+| amplitude iteration, packed block | 0.813 (6.2) | 13.92 (6.8) |
+| amplitude iteration, blocks | 0.356 (2.6) | 2.566 (4.4) |
+| - ratio | 2.28 | 5.43 |
+| Lambda iteration, packed block | 0.895 (7.2) | 15.51 (7.7) |
+| Lambda iteration, blocks | 0.277 (3.1) | 1.641 (5.2) |
+| - ratio | 3.23 | 9.45 |
+| **relaxed density, packed block** | **2.265** (5.6) | **22.98** (6.8) |
+| **relaxed density, blocks** | **1.743** (4.4) | **10.92** (5.5) |
+| **- ratio** | **1.30** | **2.10** |
+| - in amplitude iterations of its layout: packed block, blocks | 2.79, 4.89 | 1.65, 4.26 |
+| the passes over t3 and l3 (pass 1, pass 2, `Gamma`, Gram): packed block | 0.67 (0.071, 0.351, 0.242, 0.004) | 11.30 (0.917, 4.305, 6.054, 0.025) |
+| - blocks | 0.18 (0.050, 0.099, 0.032, 0.000) | 0.87 (0.157, 0.365, 0.346, 0.001) |
+| - ratio | 3.7 | 13.0 |
+| blocks: the frozen stage (transformation, dressing, cutting, contraction, product with `Gamma`) | 0.654 (0.360, 0.083, 0.046, 0.086, 0.059) | 4.322 (1.896, 0.894, 0.488, 0.410, 0.503) |
+| blocks: Z-vector equations | 0.335 | 2.113 |
+| blocks: not under a timer - J - K of the SCF density with the integrals of the SCF, the core Hamiltonian, small steps | 0.25 | 1.35 |
+| blocks: the blocks of g2 (of which the term of `aibc` with t2 and `C3`, o^2 v^4) | 0.104 (0.066) | 0.861 (0.623) |
+| blocks: their contraction with the integrals | 0.150 | 0.776 |
+| blocks: dressing, with `<ab\|\|de>` | 0.071 | 0.618 |
+| peak anonymous memory above the start of the call: packed block (plan) | 0.86 GB (1.98) | 8.65 GB (10.33) |
+| - blocks (plan) | 0.84 GB (1.75) | 6.39 GB (8.13) |
+| blocks under a budget a quarter of the way from the floor of the plan to all of it: s, peak, plan | 2.173, 0.25 GB, 1.15 GB | 12.95, 2.07 GB, 3.82 GB |
+
+(The plans contain 0.7 GB for the BLAS threads and the allocator; most of
+the peak is the frozen stage with all 28 frozen spinors in one slab. Under
+the budget: 5 frozen spinors at a time, the pair blocks of `<ab||de>`
+dressed twice.) The same script in job 31743861 on c116 (snapshot of
+993e812: before the Fock matrix of the frozen spinors and the check of
+`scf_veff` shared their J - K, which took 0.87 s out of the Z-vector stage
+for cc-pVQZ-DK) gave 0.685, 0.286, 0.757, 0.242, 2.138, 1.714 s for
+cc-pVTZ-DK and 11.45, 1.979, 12.52, 1.224, 21.00, 10.22 s for cc-pVQZ-DK
+(ratios of the relaxed density 1.25 and 2.05): that node was a sixth to a
+fifth faster in everything, the ratios are those of the table.
+
+The passes over t3 and l3 take 0.18 and 0.87 s in blocks where the packed
+block takes 0.67 and 11.3 s, and they are a tenth and a twelfth of the
+call then. What the labels do not touch is the rest: for cc-pVQZ-DK the
+integrals with a frozen index 4.3 s (their transformation 1.9 s), the
+Z-vector equations 2.1 s, one build of J - K with the spinor integrals of
+the SCF 1.3 s, the dense blocks of g2 and their contractions 1.6 s. The
+relaxed density in blocks costs 4.3 to 4.9 amplitude iterations in blocks
+(1.7 to 2.8 on the packed block, where the iteration is the slow part).
+
+The whole front end (`bench/profile_density_blocks.py front`, the same
+job; `GCCSDT` from the spinors of one SCF, `symmetry` False and then True;
+conv_tol 1e-10, |dT| 1e-9; wall seconds):
+
+| | cc-pVTZ-DK, no symmetry | with | cc-pVQZ-DK, no symmetry | with |
+|---|---|---|---|---|
+| SCF (X2C-UHF, once) | 3.5 | | 18.9 | |
+| integrals and CCSDT (19 iterations) | 24.82 | 15.78 | 368.5 | 153.0 |
+| Lambda (17 iterations) | 15.25 | 4.98 | 252.9 | 29.90 |
+| relaxed density | 2.53 | 1.78 | 23.59 | 11.04 |
+| all three | 42.60 | 22.53 | 645.0 | 193.9 |
+| - ratio | | 1.89 | | 3.33 |
+
+(E(CCSDT) is the same in all 16 digits. The integral transformation is in
+the second row: 8.4 and 102 s where the first run of the job timed it by
+itself - more than half of the run with symmetry for cc-pVQZ-DK. On c116,
+job 31743861: 35.61 and 19.32 s, 546.8 and 158.2 s, ratios 1.84 and 3.46.)
+
+**Small molecules**: in blocks every pass is many small products, and
+below a size the few large ones of the packed block are faster. Measured
+with the same script (`stages`: five amplitude iterations, Lambda to
+convergence, the relaxed density three times), each case the packed block
+and the blocks in one process, the cases of a sample one after the other
+in one job: job 31743587 on c703 (snapshot of 81b1f05) and job 31743890 on
+c547 (993e812), nodes that other jobs shared (load 38 falling to 6, and 35
+to 6, during the jobs; the two samples differ by up to 30% in the times of
+the packed block). Time on the packed block over time in blocks, first and
+second sample:
+
+| | o + v | packed block, blocks (elements) | amplitude iteration | Lambda iteration | relaxed density |
+|---|---|---|---|---|---|
+| HBr / cc-pVDZ-DK, 28 frozen | 8 + 28 | 183 456, 31 820 | 0.46, 0.53 | 0.29, 0.34 | 0.78, 0.82 |
+| HBr / cc-pVTZ-DK, 28 frozen, 38 dropped | 8 + 40 | 553 280, 75 378 | 0.66, 0.78 | 0.67, 0.83 | 0.93, 0.96 |
+| - 32 dropped | 8 + 46 | 850 080, 119 866 | -, 1.00 | -, 1.11 | -, 1.00 |
+| - 26 dropped | 8 + 52 | 1 237 600, 170 662 | 1.06, 1.20 | 1.16, 1.37 | 0.98, 1.04 |
+| N2 / cc-pVDZ, 4 frozen | 10 + 42 | 1 377 600, 224 144 | 1.08, 1.19 | 1.38, 1.58 | 0.94, 1.15 |
+| HBr / cc-pVTZ-DK, 28 frozen, 14 dropped | 8 + 64 | 2 333 184, 324 190 | 1.64, 1.75 | 1.95, 2.20 | 1.05, 1.10 |
+| HF / cc-pVTZ, 2 frozen | 8 + 78 | 4 260 256, 622 138 | 2.33, 2.30 | 3.04, 3.26 | 1.47, 1.74 |
+
+(Lambda iteration, packed block and blocks, second sample: 0.033 and 0.098
+s, 0.120 and 0.144, 0.177 and 0.159, 0.240 and 0.175, 0.253 and 0.161,
+0.466 and 0.212, 0.905 and 0.277 s. The relaxed density of the first
+sample is that of the first commit of the blocks.) The Lambda iteration
+crosses between 0.55 and 0.85 million elements of the packed block in both
+samples and the amplitude iteration at the same place. The relaxed density,
+whose passes over t3 and l3 are a small part of it at these sizes, is
+within 7% of even from 0.55 to 1.2 million elements and ahead in blocks
+from 2.3 million on (N2 with 1.4 million: 6% behind in one sample, 15%
+ahead in the other). The rule of the front end, for `solve_lambda` and
+`make_rdm1` alike: in blocks where the packed block [C(o,3), C(v,3)] has at
+least `GCCSDT.blocks_min` = 800 000 elements, on the packed block below
+(`_blocks_pay`; `self.l3` has the layout of `self.t3` in either case). The
+amplitude iterations are not under the rule: they run in blocks whenever
+the labels are in use, at half the speed of the packed block for 8 + 28
+spinors (0.08 against 0.04 s per iteration).
+
+**Not done**:
+
+- the frozen stage, the blocks of g2 and their contractions in the blocks
+  of the labels (above: what they cost; the integrals with a frozen index
+  would need the labels of the frozen spinors, which `relaxed_rdm1` does
+  not have - it takes any frozen spinors, and rotates them into Kramers
+  pairs where it can);
+- route `y` in blocks: `Gamma` is always made, sum n_h^2 elements; with
+  one label that is the whole v^4 / 4 matrix, which the packed block
+  avoids where it does not fit (one label in blocks takes the time of the
+  packed block: 3.3 s both for cc-pVTZ-DK on the login node with 4
+  threads - not a benchmark);
+- `gamma_pairs` is bound by its copies of rows of `Gamma` (0.5 s at 1.7
+  cores for cc-pVQZ-DK, 28 frozen spinors twice), and the stacked GEMMs of
+  the passes by their number (2 to 5 cores busy);
+- the pair blocks of the bare `<ab||de>` are taken in memory
+  (`ccsdt_opt.vvvv_packed` on grouped maps), also where the packed
+  integrals are a mapped file;
+- as in 9.7: labels that add modulo something, the closed-shell flip of
+  the block engine, U / R-form integrals, a numpy form of the gathers
+  (without the C kernels `density_blk.engine` returns None and the front
+  end uses the packed block).
