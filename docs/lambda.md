@@ -803,7 +803,7 @@ rel = density_opt.relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff,
 # [frozen occupied, active occupied, active virtual, dropped virtual]; C D C^+ in the AO basis
 ```
 
-### 9.1 Factorization of the gradient
+### 10.1 Factorization of the gradient
 
 The 81 terms are not evaluated one by one. With g1 and g2 the coefficients
 of the dressed f and <pq||rs> in the Lagrangian (g2: `DENSITY`,
@@ -870,7 +870,7 @@ about twenty of o^2 v^2, the batch buffers (two half-expanded batches and
 `<ab||de>`. The batches take what the budget leaves up to 4 GB, then the
 operator; `MemoryError` below one pair and the rows of one first index.
 
-### 9.2 Frozen and dropped spinors
+### 10.2 Frozen and dropped spinors
 
 The orbital gradient between a frozen spinor f (occupied or virtual) and an
 active one x is, in the convention of `zccsd.zvector`,
@@ -953,7 +953,7 @@ the integrals of one frozen spinor do not fit.
 blocks of the one-index transformed Lagrangian from the same contractions
 (n^4 integrals: a check for small cases).
 
-### 9.3 Validation
+### 10.3 Validation
 
 `tests/test_density_opt.py` (51 tests, 95 s):
 
@@ -1013,7 +1013,7 @@ blocks of the one-index transformed Lagrangian from the same contractions
   0.0158031375 for CCSD and 0.0570680934 for the SCF; job 31737542). There
   is no CCSDT property of CFOUR to compare with.
 
-### 9.4 Timing
+### 10.4 Timing
 
 H2O / cc-pVTZ, 8 cores of a Xeon Gold 6248R (`bench/density_ccsdt.py time`,
 jobs 31737824 and 31737656 on c105, a node that other jobs shared: load 5 to
