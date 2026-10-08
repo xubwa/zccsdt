@@ -29,6 +29,7 @@ matrices, and the orbital gradient vanishes in every block
 '''
 
 from dataclasses import dataclass
+from itertools import permutations
 
 import numpy as np
 
@@ -40,8 +41,11 @@ RANKS = (1, 2, 3, 4)
 
 
 def _arrays(fock, g, nocc, amps, lams=None):
-    '''The arrays of the tables: dressed f and v, the amplitudes.'''
+    '''The arrays of the tables: dressed f and v (real ones for real
+    integrals and t1), the amplitudes.'''
     ge, fdr = ccsdt._t1_dress(g, fock, amps[0], nocc, g.shape[0])
+    if not (np.iscomplexobj(g) or np.iscomplexobj(fock) or np.iscomplexobj(amps[0])):
+        ge, fdr = ge.real.copy(), fdr.real.copy()       # (a real array of rank eight stays real in a product)
     arrays = {'v': ge, 'f': fdr, 't2': amps[1], 't3': amps[2], 't4': amps[3]}
     if lams is not None:
         arrays.update({'l%d' % k: lams[k - 1] for k in RANKS})
@@ -60,6 +64,59 @@ def residuals(lams, amps, fock, g, nocc, arrays=None, sources=None):
     return res
 
 
+def residual4_unique(arrays, nocc, blocked=False):
+    '''The residual of the Lambda_4 equation at i<j<k<l, a<b<c<d:
+    [C(no,4), C(nv,4)].  ``blocked``: the representative products for one
+    value of the first external occupied index at a time (o^3 v^4 elements
+    in the place of o^4 v^4), each slab antisymmetrized into the quadruples
+    that hold that index:
+
+        A(x)[I] = sum_p (-1)^p sum_(orders of J = I without I_p, and of a b c d) sign x[I_p, J, a, b, c, d].'''
+    if not blocked:
+        return Q.asym_unique(L.total(L.LAMBDA[4], arrays, nocc, Q.EXT[4]), 4)
+    n = arrays['v'].shape[0]
+    nvir = n - nocc
+    occ3, occ4, vir4 = Q.tuples(nocc, 3), Q.tuples(nocc, 4), Q.tuples(nvir, 4)
+    index = {tuple(int(x) for x in t): row for row, t in enumerate(occ4)}
+    perms3, perms4 = list(permutations(range(3))), list(permutations(range(4)))
+    sg4 = np.array([Q._sign(q) for q in perms4])
+    pv = vir4[:, perms4]                                # [C(nv,4), 24, 4]
+    iv = tuple(pv[:, :, x][None, :, :] for x in range(4))
+    out = None
+    for i0 in range(nocc):
+        y = 0
+        for coef, factors in L.LAMBDA[4]:
+            ops = []
+            for kind, ix in factors:
+                sl = tuple(slice(i0, i0 + 1) if c == 'i' else
+                           slice(None) if kind not in ('f', 'v') else
+                           slice(0, nocc) if c in L.OCC else slice(nocc, n) for c in ix)
+                ops.append(arrays[kind][sl])
+            sub = ','.join(ix for _, ix in factors) + '->' + Q.EXT[4]
+            key = (sub,) + tuple(a.shape for a in ops)
+            if key not in _PATHS:
+                _PATHS[key] = np.einsum_path(sub, *ops, optimize='optimal')[0]
+            y = y + float(coef) * np.einsum(sub, *ops, optimize=_PATHS[key])
+        y = y[0]                                        # [j, k, l, a, b, c, d]
+        z = np.zeros((len(occ3), len(vir4)), dtype=y.dtype)
+        for q in perms3:
+            io = tuple(occ3[:, q[x]][:, None, None] for x in range(3))
+            z += Q._sign(q) * (y[io + iv] * sg4[None, None, :]).sum(axis=2)
+        del y
+        if out is None:
+            out = np.zeros((len(occ4), len(vir4)), dtype=z.dtype)
+        for J, row in zip(occ3, z):
+            J = [int(x) for x in J]
+            if i0 not in J:
+                I = tuple(sorted(J + [i0]))
+                out[index[I]] += (-1) ** I.index(i0) * row
+    return out
+
+
+_PATHS = {}
+BLOCKED = 2 ** 26               # elements of l4 from which the residual of Lambda_4 is made in slabs
+
+
 @dataclass
 class Result:
     converged: bool
@@ -68,35 +125,56 @@ class Result:
 
 
 def kernel(fock, g, mo_energy, nocc, amps, conv_tol_normt=1e-9, max_cycle=200, diis_space=8,
-           verbose=False, sources=None):
+           verbose=False, sources=None, blocked=None):
     '''The Lambda equations of CCSDTQ for the converged amplitudes
-    ``amps`` = [t1, t2, t3, t4], by Jacobi steps with DIIS from conj(t).'''
+    ``amps`` = [t1, t2, t3, t4], by Jacobi steps with DIIS from conj(t).
+    Real arithmetic for real integrals and amplitudes.  The residual of
+    Lambda_4 is made on the unique block; ``blocked`` (default: from
+    BLOCKED elements of l4): see residual4_unique.'''
     nvir = g.shape[0] - nocc
     arrays = _arrays(fock, g, nocc, amps)
-    den = [R.denominator(mo_energy, nocc, k) for k in RANKS]
-    lams = [np.array(t, dtype=complex).conj() for t in amps]
+    cplx = (np.iscomplexobj(fock) or np.iscomplexobj(g) or any(np.iscomplexobj(t) for t in amps)
+            or (sources is not None and any(np.iscomplexobj(s) and abs(np.imag(s)).max() > 0 for s in sources)))
+    dtype = complex if cplx else float
+    if blocked is None:
+        blocked = amps[3].size >= BLOCKED
+    den = [R.denominator(mo_energy, nocc, k) for k in (1, 2, 3)]
+    eo, ev = mo_energy[:nocc], mo_energy[nocc:]
+    den4 = eo[Q.tuples(nocc, 4)].sum(axis=1)[:, None] - ev[Q.tuples(nvir, 4)].sum(axis=1)[None, :]
+    lams = [np.array(np.conj(t), dtype=dtype) for t in amps]
+    src = None
+    if sources is not None:
+        src = [np.asarray(s if cplx else np.real(s)) for s in sources[:3]] + [Q.unique(np.asarray(sources[3]), 4)]
     adiis = DIIS(space=diis_space, incore=True)
     conv = False
 
-    def parts(a):
-        return [a[0].ravel()] + [Q.unique(x, k + 1).ravel() for k, x in enumerate(a) if k]
+    def expand(p, k):
+        return Q.expand(p.reshape(len(Q.tuples(nocc, k)), -1), nocc, nvir, k)
     for cycle in range(max_cycle):
-        res = residuals(lams, amps, fock, g, nocc, arrays, sources)
-        new = [x + r / d for x, r, d in zip(lams, res, den)]
-        norm = sum(np.linalg.norm(a - b) for a, b in zip(new, lams))
+        arr = dict(arrays, **{'l%d' % k: lams[k - 1] for k in RANKS})
+        res = [L.residual(k, arr, nocc) for k in (1, 2, 3)] + [residual4_unique(arr, nocc, blocked)]
+        del arr
+        if src is not None:
+            res = [r + s for r, s in zip(res, src)]
+        steps = [r / d for r, d in zip(res, den + [den4])]
+        del res
+        # (the norm of the full arrays: 24 that of the unique quadruples)
+        norm = sum(np.linalg.norm(x) for x in steps[:3]) + 24.0 * np.linalg.norm(steps[3])
         if verbose:
             print('cycle %3d  |dl| = %.2e' % (cycle + 1, norm), flush=True)
+        new = [lams[0].ravel() + steps[0].ravel()]
+        new += [Q.unique(lams[k - 1], k).ravel() + Q.unique(steps[k - 1], k).ravel() for k in (2, 3)]
+        new.append(Q.unique(lams[3], 4).ravel() + steps[3].ravel())
+        del steps
         if norm < conv_tol_normt:
-            lams, conv = new, True
+            conv = True
+        else:
+            new = adiis.update(new)
+        lams = None
+        lams = [new[0].reshape(nocc, nvir)] + [expand(new[k - 1], k) for k in (2, 3, 4)]
+        if conv:
             break
-        ps = adiis.update(parts(new))
-        lams = [ps[0].reshape(nocc, nvir)] + [
-            Q.expand(p.reshape(len(Q.tuples(nocc, k + 1)), -1), nocc, nvir, k + 1)
-            for k, p in enumerate(ps) if k]
     adiis.close()
-    if not (np.iscomplexobj(fock) or np.iscomplexobj(g) or any(np.iscomplexobj(t) for t in amps)
-            or (sources is not None and any(np.iscomplexobj(s) and abs(np.imag(s)).max() > 0 for s in sources))):
-        lams = [x.real.copy() for x in lams]
     return Result(conv, cycle + 1, lams)
 
 
