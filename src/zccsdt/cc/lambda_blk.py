@@ -330,7 +330,7 @@ class BlockL3:
                               p_(vm.pair_grp), p_(zoff), I_(npg), p_(nQg), p_(Qoff),
                               p_(e.rowpos), I_(no), p_(Z))
 
-    def drive_bytes(self, K=None):
+    def drive_bytes(self):
         '''Bytes of the copies of the drive operand [x, (i, Q)] in blocks
         that a pass 2 holds, and of those of the operand [(m, Q), y] in
         pass 1: the elements whose labels add up.'''
@@ -487,7 +487,7 @@ class BlockL3:
         '''Bytes of the transients of contract_x next to the work array: a
         product [e, i, I, f] of one class each of e, i and f for a batch of
         triples, a selection of it, and a product [P, I, e].'''
-        _, nb1, nbt = self.t3._batch_sizes(self.mem_mb if mem_mb is None else mem_mb)
+        nbt = self.t3._batch_sizes(self.mem_mb if mem_mb is None else mem_mb)[2]
         nI = max([int(self.L.nI[g]) for g in self.L.stored] + [1])
         nv = max(r[1] - r[0] for r in self.vr)
         no = max(r[1] - r[0] for r in self.orr)
