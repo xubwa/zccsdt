@@ -823,12 +823,14 @@ agree to 12 and 11 digits between the trees):
 | H2O / cc-pVTZ, spin orbitals, real (job 31740284, c659) | 8 + 86, 2 + 20 | 1.15 s | 8.04 s = 7.0 | 2.26 s = 1.96 | 5.6 | 1.3 GB (2.4) |
 | H2O / cc-pVTZ, X2C spinors (job 31740285, c561) | 8 + 86, 2 + 20 | 3.31 s | 15.64 s = 4.7 | 4.90 s = 1.48 | 6.3 | 2.6 GB (4.1) |
 | HI / dyall.v2z (H: cc-pVDZ, uncontracted), X2C spinors (job 31740283, c659) | 18 + 86, 36 + 116 | 53.3 s, 48.6 s | 717.9 s = 13.5 | 64.0 s = 1.32 | 7.5 | 7.7 GB (14.5) |
-| the same under `max_memory` 9000 MB: 8 frozen spinors at a time (job 31740406, c659) | 18 + 86, 36 + 116 | 54.8 s | | 85.0 s = 1.55 | 7.1 | 2.2 GB (3.6); 7.57 GB with what was there |
+| the same, no limit and under `max_memory` 9000 and 8700 MB with the spinors of one SCF (job 31741942, c561; one run each) | 18 + 86, 36 + 116 | 48.6 s | | 63.6 s = 1.31; 69.7 s = 1.43; 72.0 s = 1.48 | 7.5; 7.3; 7.2 | 8.4 GB (10.7); 2.4 GB (3.6), 7.79 GB with what was there; 2.0 GB (3.3), 7.42 GB |
 
 (c659 and c561 were shared with jobs of other users: load 44 to 51 during
 the runs of HI before, 7 to 18 during those after - hence the two iteration
-times, each measured next to its density; the run under 9000 MB shared
-the node with the job of the row above for its first minutes. On c105, in
+times, each measured next to its density. Under 9000 MB the plan has 3
+occupied pairs per batch, the dressed `<ab||de>` in slabs and 8 frozen
+spinors at a time, under 8700 MB 1 pair and 5; the three runs of the last
+row give the same checksums in all 13 digits. On c105, in
 separate jobs: 588.3 s = 13.5 iterations before (31738966) and 57.9 s =
 1.33 after (31739579), iteration 43.5 s in both.)
 
@@ -856,9 +858,10 @@ s. The T3 work does not depend on the number of frozen spinors any more,
 and what does - the frozen stage - is a tenth of the whole for 152 of
 them.
 
-Under 9000 MB the frozen stage takes 13 s in 13 slabs: the gathers of
+Under 9000 MB the frozen stage takes 9.7 s in 14 slabs: the gathers of
 `Gamma` and of the packed blocks of g2 are done for every slab (their
-contractions 5.0 s, against 1.0 s in one slab).
+contractions 3.8 s, against 1.0 s in one slab), and the AO integrals are
+made in 5 bra passes (2.8 s against 1.2 s).
 
 What is left for the frozen spinors:
 
