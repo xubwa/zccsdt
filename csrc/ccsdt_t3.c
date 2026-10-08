@@ -223,7 +223,7 @@ static void gather_half_##SFX(const T *T3p, int64_t nvt, int64_t p0, int64_t nbp
  *   rA[P, Q]             = sum_{(d,m)} fT[(d, m)] T[P, d, m, Q]                \
  * GPd: (nv + no, npo, nv);  GmQ: (no * nvp, ny);  Xacc: (nv + no, no * nvp);  \
  * Yall: (npo, nv, ny);  r1: (nv * no);  rA: (npo, nvp). */                    \
-void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
+void zc_t3_pass1w_##SFX(const T *T3p, int64_t nto, int64_t nvt,                \
                        int64_t no, int64_t nv, int64_t npo, int64_t nvp,       \
                        const int64_t *otri, const int8_t *osgn,                \
                        const int64_t *vtri, const int8_t *vsgn,                \
@@ -231,11 +231,10 @@ void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                        const T *GPd, const T *GmQ, int64_t ny,                 \
                        const T *gpp, const T *fT,                              \
                        T *Xacc, T *Yall, T *r1, T *rA, const int64_t *io,      \
-                       double *stats)                                          \
+                       double *stats, T *buf)                                  \
 {                                                                              \
     (void)nto;                                                                 \
     const int64_t dm = nv * no;                                                \
-    T *buf = malloc(sizeof(T) * batch * dm * nvp);                             \
     for (int64_t p0 = 0; p0 < npo; p0 += batch) {                              \
         int64_t nbp = (p0 + batch <= npo) ? batch : npo - p0;                  \
         TIC(0);                                                                \
@@ -258,6 +257,23 @@ void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
         }                                                                      \
         TOC(2);                                                                \
     }                                                                          \
+}                                                                              \
+                                                                               \
+/* pass 1 with a batch buffer of its own */                                    \
+void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
+                       int64_t no, int64_t nv, int64_t npo, int64_t nvp,       \
+                       const int64_t *otri, const int8_t *osgn,                \
+                       const int64_t *vtri, const int8_t *vsgn,                \
+                       int64_t batch,                                          \
+                       const T *GPd, const T *GmQ, int64_t ny,                 \
+                       const T *gpp, const T *fT,                              \
+                       T *Xacc, T *Yall, T *r1, T *rA, const int64_t *io,      \
+                       double *stats)                                          \
+{                                                                              \
+    T *buf = malloc(sizeof(T) * batch * nv * no * nvp);                        \
+    zc_t3_pass1w_##SFX(T3p, nto, nvt, no, nv, npo, nvp, otri, osgn, vtri, vsgn,\
+                       batch, GPd, GmQ, ny, gpp, fT, Xacc, Yall, r1, rA, io,   \
+                       stats, buf);                                            \
     free(buf);                                                                 \
 }                                                                              \
                                                                                \
@@ -269,7 +285,7 @@ void zc_t3_pass1_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
  *              Z[pair_r(I) - p0, a_s(A), free_r(I), Q_s(A)]                   \
  * Wring: (nv * no, nv * no); Adrv: (npo, nv, nv + no); Bdrv: (nv + no,       \
  * no * nvp). */                                                               \
-void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
+void zc_t3_pass2w_##SFX(const T *T3p, int64_t nto, int64_t nvt,                \
                        int64_t no, int64_t nv, int64_t npo, int64_t nvp,       \
                        const int64_t *otri, const int8_t *osgn,                \
                        const int64_t *ofree, const int64_t *opair,             \
@@ -277,11 +293,9 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
                        const int64_t *vfree, const int64_t *vpair,             \
                        int64_t batch,                                          \
                        const T *Wring, const T *Adrv, const T *Bdrv,           \
-                       T *R, const int64_t *io, double *stats)                 \
+                       T *R, const int64_t *io, double *stats, T *Tb, T *Z)    \
 {                                                                              \
     const int64_t dm = nv * no;                                                \
-    T *Tb = malloc(sizeof(T) * batch * dm * nvp);                              \
-    T *Z = malloc(sizeof(T) * batch * dm * nvp);                               \
     const int64_t sP = dm * nvp, sa = no * nvp;                                \
     for (int64_t p0 = 0; p0 < npo; p0 += batch) {                              \
         int64_t nbp = (p0 + batch <= npo) ? batch : npo - p0;                  \
@@ -329,6 +343,24 @@ void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
         }                                                                      \
         TOC(2);                                                                \
     }                                                                          \
+}                                                                              \
+                                                                               \
+/* pass 2 with batch buffers of its own */                                     \
+void zc_t3_pass2_##SFX(const T *T3p, int64_t nto, int64_t nvt,                 \
+                       int64_t no, int64_t nv, int64_t npo, int64_t nvp,       \
+                       const int64_t *otri, const int8_t *osgn,                \
+                       const int64_t *ofree, const int64_t *opair,             \
+                       const int64_t *vtri, const int8_t *vsgn,                \
+                       const int64_t *vfree, const int64_t *vpair,             \
+                       int64_t batch,                                          \
+                       const T *Wring, const T *Adrv, const T *Bdrv,           \
+                       T *R, const int64_t *io, double *stats)                 \
+{                                                                              \
+    T *Tb = malloc(sizeof(T) * batch * nv * no * nvp);                         \
+    T *Z = malloc(sizeof(T) * batch * nv * no * nvp);                          \
+    zc_t3_pass2w_##SFX(T3p, nto, nvt, no, nv, npo, nvp, otri, osgn, ofree,     \
+                       opair, vtri, vsgn, vfree, vpair, batch, Wring, Adrv,    \
+                       Bdrv, R, io, stats, Tb, Z);                             \
     free(Tb); free(Z);                                                         \
 }                                                                              \
                                                                                \
