@@ -107,7 +107,7 @@ def main():
         watch = MemWatch()
         watch.start()
         t0, c0 = time.perf_counter(), time.process_time()
-        if a.fraction:
+        if a.fraction:      # (a sample: the time of the whole step from the time per quadruple)
             est = cc.ccsdt_q(fraction=a.fraction)
             rec.update(q_fraction=a.fraction, q_estimate=float(est), q_sampled=cc.q_estimate['sampled'],
                        q_quadruples=cc.q_estimate['quadruples'], q_sectors=cc.q_estimate['sectors'])

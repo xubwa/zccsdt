@@ -368,18 +368,22 @@ def walk(schedule, stride=1, progress=None):
     occupied quadruple of each group - the correction is a sum over the
     occupied quadruples, so that a part of them gives a part of the energy
     in the same part of the time - and ``progress(done, total, seconds)``
-    called after each quadruple.'''
+    called after each quadruple; ``seconds`` is the time spent on the
+    quadruples themselves, without what is made once per group (the
+    intermediate of T2 with <vv||vv>), which a sample does not shorten.'''
     import time
     groups = [(l, xs, Is[::stride]) for l, xs, Is in schedule]
     total = sum(len(g[2]) for g in groups)
-    t0, done = time.perf_counter(), [0]
+    done, inside = [0], [0.0]
 
     def each(Is):
         for I in Is:
+            t = time.perf_counter()
             yield I
+            inside[0] += time.perf_counter() - t
             done[0] += 1
             if progress is not None:
-                progress(done[0], total, time.perf_counter() - t0)
+                progress(done[0], total, inside[0])
     for l, xs, Is in groups:
         if len(Is):
             yield l, xs, each(Is)

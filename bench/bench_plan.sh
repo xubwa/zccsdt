@@ -2,7 +2,8 @@
 # A spinor CCSDT(Q) benchmark as an ordered list of measurements (bench/bench_step.py), cheapest
 # and most telling first, each its own process, each result appended to one JSON-lines file:
 #   1. CCSDT iterations: every mode x every number of threads (largest thread count first)
-#   2. (Q) from a sample of the occupied quadruples (BP_FRACTION): every mode x every thread count
+#   2. (Q) from a sample of the occupied quadruples: every mode x every thread count, for each fraction of
+#      BP_FRACTION in turn (e.g. "0.005 0.02": a first idea quickly, a better number after it)
 #   3. the whole (Q), only where asked for (BP_FULLQ="mode:threads ..."), last
 # A measurement already in the file is skipped, so a job that ran out of time is resubmitted as it is.
 # Threads are bound to cores (one per core, in order); a run that fits one socket also takes its
@@ -10,7 +11,7 @@
 #
 # usage (in a Slurm job with a whole node): bench/bench_plan.sh OUT.jsonl
 # environment: BP_GEOM, BP_BASIS, BP_FROZEN, BP_MODES="blocks dense", BP_THREADS="48 24 8",
-#              BP_NITER=4, BP_FRACTION=0.05, BP_FULLQ="", BP_REAL=1, BP_TAG, BP_DRY=1 (print the list only)
+#              BP_NITER=4, BP_FRACTION="0.05" ("" or "none": no (Q)), BP_ITER=1 (0: no iterations), BP_FULLQ="", BP_REAL=1, BP_TAG, BP_DRY=1 (print the list only)
 set -u
 out=$1
 : "${BP_GEOM:?}" "${BP_BASIS:?}"
@@ -51,7 +52,8 @@ step() {    # threads mode what extra...
 }
 echo "host $(hostname)  $(date)  $(lscpu | grep 'Model name' | sed 's/  */ /g')"; lscpu | grep -E "NUMA node[0-9]"; free -g | sed -n 2p
 echo "other jobs on this node:"; squeue -w "$(hostname)" -h -o "  %i %u %j %C cores" 2>/dev/null | grep -v " ${SLURM_JOB_ID:-none} " || true
-for n in $threads; do for mode in $modes; do step "$n" "$mode" iter --niter "$niter"; done; done
-for n in $threads; do for mode in $modes; do step "$n" "$mode" q --fraction "$fraction"; done; done
+if [ "${BP_ITER:-1}" != 0 ]; then for n in $threads; do for mode in $modes; do step "$n" "$mode" iter --niter "$niter"; done; done; fi
+[ "$fraction" = none ] && fraction=
+for fr in $fraction; do for n in $threads; do for mode in $modes; do step "$n" "$mode" q --fraction "$fr"; done; done; done
 for item in $fullq; do step "${item#*:}" "${item%:*}" q --fraction 0; done
 echo "done $(date)  load $(cut -d' ' -f1-3 /proc/loadavg)"

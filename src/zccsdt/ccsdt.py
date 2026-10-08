@@ -1613,7 +1613,8 @@ class GCCSDT(UCCSDT):
         the part done and the time left is printed every ``q_progress``
         seconds.  ``fraction`` (e.g. 0.01): only that part of the occupied
         quadruples is summed, evenly spread, and the time of the whole step
-        is estimated from it - returned in seconds and kept as
+        is estimated from it (the time per quadruple scaled up, what is made
+        once per group counted once) - returned in seconds and kept as
         ``q_estimate``; the energies of the object are left as they are.'''
         import time
         from math import comb
@@ -1675,7 +1676,7 @@ class GCCSDT(UCCSDT):
             w, c, k = timing.since(snap0)[(ROOT_Q,)]
             if stride > 1:
                 done, total, seconds = progress.last
-                est = seconds * comb(no, 4) / done + (w - seconds)
+                est = seconds * comb(no, 4) / done + (w - seconds)   # (w - seconds: what is made once)
                 self.q_estimate = {'sampled': done, 'quadruples': comb(no, 4), 'seconds': w, 'estimate': est,
                                    'sectors': spl is not None}
                 pr.kv('sample', 'every %d-th occupied quadruple: %d of %d in %.1f s (%.3f s each, %.1f cores)'
