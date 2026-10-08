@@ -1348,12 +1348,15 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     if nf or nd:
         held_out = np.hstack([np.asarray(c) for c in (frozen_occ, dropped_vir) if c is not None and c.shape[1]])
     real = not np.iscomplexobj(np.zeros(0, dtype=np.result_type(eris.fock, eris.oovv)))
-    source = rot = None
+    source = rot = vref = None
     if held_out is not None and getattr(plan, 'held', None) is not None:
-        fock, source, rot = plan.held       # (made by the call that planned)
+        fock, source, rot, vref = plan.held     # (made by the call that planned)
         fock = fock.copy()
     elif held_out is not None:
-        fock = held_out.conj().T @ mf.get_fock() @ np.hstack((held_out, mo_coeff))
+        # (J - K of the SCF density with the integrals of the SCF: also what scf_veff compares with)
+        dm0 = mf.make_rdm1()
+        vref = (dm0, mf.get_veff(mf.mol, dm0))
+        fock = held_out.conj().T @ mf.get_fock(vhf=vref[1], dm=dm0) @ np.hstack((held_out, mo_coeff))
         pairs = None
         if kramers is not False and (_motype(mf) == 'ghf' or not real):
             with timer('dens.kramers'):
@@ -1374,7 +1377,7 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
                  plan_only=plan_only)
     if plan_only:
         if held_out is not None:
-            res.held = (fock, source, rot)
+            res.held = (fock, source, rot, vref)
         return res
     if rot is not None:         # from the pairs back to the frozen spinors given
         res.bf, res.kf = rot.conj().T @ res.bf, rot.T @ res.kf
@@ -1408,7 +1411,7 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     full = np.diag(occ).astype(np.complex128)
     full[np.ix_(both, both)] = dm1
     with timer('dens.zvector'):
-        veff = zvector.scf_veff(mf, max_memory)
+        veff = zvector.scf_veff(mf, max_memory, ref=vref)
 
         def fock_mo(D):
             '''C^+ (J - K)(D) C over all spinors, for a density D of the AO basis

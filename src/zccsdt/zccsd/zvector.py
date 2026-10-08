@@ -270,17 +270,19 @@ def gradient_t(t1, t2, fock, g, nocc):
     return Gnh
 
 
-def scf_veff(mf, max_memory=None, coulomb=None):
+def scf_veff(mf, max_memory=None, coulomb=None, ref=None):
     '''A function dm -> J - K for a density change dm in the 2c AO basis of
     the SCF ``mf``, for the orbital Hessian: the bare Coulomb operator on the
     scalar AO integrals (orbgrad.Coulomb on the spin blocks: many times
     faster than the spinor integrals of a 2c SCF) if that is the
     two-electron part of the Fock operator of ``mf`` - it is compared with
-    mf.get_veff on the density of the SCF -, else mf.get_veff itself.'''
+    mf.get_veff on the density of the SCF -, else mf.get_veff itself.
+    ``ref``: (the density of the SCF, mf.get_veff of it) where the caller
+    has made them (one build with the integrals of the SCF less).'''
     from zccsdt.zccsd import orbgrad
     mol = mf.mol
     slow = lambda dm: mf.get_veff(mol, dm)                          # noqa: E731
-    dm = mf.make_rdm1()
+    dm = mf.make_rdm1() if ref is None else ref[0]
     nao = mol.nao_nr()
     if getattr(dm, 'ndim', 0) != 2 or dm.shape[0] not in (2 * nao, mol.nao_2c()):
         return slow
@@ -291,7 +293,7 @@ def scf_veff(mf, max_memory=None, coulomb=None):
     else:                                                           # j-adapted spinors
         c2 = np.vstack(mol.sph2spinor_coeff())
         fast = lambda d: c2.conj().T @ coulomb.veff(c2 @ d @ c2.conj().T) @ c2     # noqa: E731
-    ref = slow(dm)
+    ref = slow(dm) if ref is None else ref[1]
     return fast if abs(fast(dm) - ref).max() < 1e-8 * max(1.0, abs(ref).max()) else slow
 
 
