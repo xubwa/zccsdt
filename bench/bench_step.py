@@ -10,7 +10,7 @@ that is already in the file is skipped, and the spinors are those of one
 SCF kept in a file, so that all measurements are the same calculation.
 
 usage: python bench/bench_step.py --geom GEOM --basis BASIS --frozen N --mode dense|blocks
-                                  --what iter|q [--niter 4] [--fraction 0.05] [--real 1|0]
+                                  --what iter|q [--niter 4] [--fraction 0.05] [--real 1|0] [--nvir N]
                                   --out RESULTS.jsonl [--spinors FILE.npz] [--tag TAG]
   iter: NITER iterations; the first, with its setup, is reported apart
   q:    2 iterations, then (Q): --fraction 0 the whole step, else a sample
@@ -65,6 +65,7 @@ def main():
     ap.add_argument('--geom', required=True)
     ap.add_argument('--basis', required=True)
     ap.add_argument('--frozen', type=int, default=0)
+    ap.add_argument('--nvir', type=int, default=0, help='keep only the lowest NVIR virtual spinors (0: all)')
     ap.add_argument('--mode', choices=('dense', 'blocks'), required=True)
     ap.add_argument('--what', choices=('iter', 'q'), required=True)
     ap.add_argument('--niter', type=int, default=4)
@@ -76,14 +77,18 @@ def main():
     a = ap.parse_args()
     nthr = int(os.environ.get('OMP_NUM_THREADS', 0))
     key = '|'.join(str(x) for x in (a.tag, a.geom, a.basis, a.frozen, a.mode, a.what, a.real, nthr,
-                                    a.niter if a.what == 'iter' else a.fraction))
+                                    a.niter if a.what == 'iter' else a.fraction)) + ('|nvir%d' % a.nvir if a.nvir else '')
     if done(a.out, key):
         print('already in %s: %s' % (a.out, key))
         return
     load0 = open('/proc/loadavg').read().split()[:3]
     mol = gto.M(atom=a.geom, basis=a.basis, verbose=0)
     mf = reference(mol, a.spinors)
-    cc = zccsdt.CCSDT(mf, frozen=a.frozen)
+    frozen = a.frozen
+    if a.nvir:          # the lowest occupied and the highest virtual spinors left out
+        order, nocc = np.argsort(mf.mo_energy), int((np.asarray(mf.mo_occ) > 0).sum())
+        frozen = [int(i) for i in order[:a.frozen]] + [int(i) for i in order[nocc + a.nvir:]]
+    cc = zccsdt.CCSDT(mf, frozen=frozen)
     cc.verbose, cc.symmetry, cc.real_spinors = 3, a.mode == 'blocks', bool(a.real)
     cc.conv_tol, cc.conv_tol_normt = 1e-12, 1e-10
     cc.max_cycle = a.niter if a.what == 'iter' else 2

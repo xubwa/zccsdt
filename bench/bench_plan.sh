@@ -10,7 +10,7 @@
 # memory from that socket.
 #
 # usage (in a Slurm job with a whole node): bench/bench_plan.sh OUT.jsonl
-# environment: BP_GEOM, BP_BASIS, BP_FROZEN, BP_MODES="blocks dense", BP_THREADS="48 24 8",
+# environment: BP_GEOM, BP_BASIS, BP_FROZEN, BP_NVIR (keep the lowest N virtual spinors), BP_MODES="blocks dense", BP_THREADS="48 24 8",
 #              BP_NITER=4, BP_FRACTION="0.05" ("" or "none": no (Q)), BP_ITER=1 (0: no iterations), BP_FULLQ="", BP_REAL=1, BP_TAG, BP_DRY=1 (print the list only),
 #              BP_NUMA=interleave, BP_LOGDIR (keep the output of every measurement there)
 set -u
@@ -49,7 +49,7 @@ step() {    # threads mode what extra...
   local log; log=$(mktemp)
   OMP_NUM_THREADS=$n MKL_NUM_THREADS=$n OPENBLAS_NUM_THREADS=$n OMP_PROC_BIND=close OMP_PLACES=cores OMP_WAIT_POLICY=PASSIVE \
     "${bind[@]}" python -u "$root/bench/bench_step.py" --geom "$BP_GEOM" --basis "$BP_BASIS" --frozen "$frozen" \
-    --mode "$mode" --what "$what" --real "$real" --out "$out" --spinors "$spinors" --tag "$tag" "$@" > "$log" 2>&1
+    --mode "$mode" --what "$what" --real "$real" --nvir "${BP_NVIR:-0}" --out "$out" --spinors "$spinors" --tag "$tag" "$@" > "$log" 2>&1
   local rc=$?
   grep -E "^RESULT|already in" "$log" || { echo "!!! no result (exit $rc); the end of the output:"; tail -n 15 "$log"; }
   if [ -n "${BP_LOGDIR:-}" ]; then mkdir -p "$BP_LOGDIR"; cp "$log" "$BP_LOGDIR/${tag}_${what}_${mode}_${n}_$(date +%H%M%S).log"; fi
