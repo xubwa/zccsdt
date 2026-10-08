@@ -25,9 +25,20 @@ for scratch disks that other jobs write to as well.
                     page tables (it stays in the page cache while there is
                     room, and is cheap to take back when there is not)
   advise(a, 'willneed', ...)   the region is needed next: read ahead
+
+Disk space.  A dataset takes its whole space when it is created
+(posix_fallocate), so a disk that is too small fails there, with an OSError
+that has the numbers, and not with a bus error on a later write to the
+mapped array.  Before that, create() compares the size with room(): the free
+space of the file system (statvfs) and, if one is set, the limit of the
+process - limit(), which starts from the environment variable ZCCSDT_MAX_DISK
+(MB) and is set by the solvers from their ``max_disk`` for the time of a run
+- less what the open Scratch objects hold already (allocated()).  The
+solvers plan with these numbers before they create anything (zccsdt.disk).
 '''
 
 import ctypes
+import errno
 import mmap
 import os
 import tempfile
@@ -54,6 +65,58 @@ def hints(on=None):
 # goes when its file is closed or its mapping is released: the address range
 # may then belong to something else.
 _MAPS = []
+
+
+_ALLOCATED = [0]    # bytes of the datasets of the open Scratch objects
+_UNSET = object()
+
+
+def _env_limit():
+    try:
+        mb = float(os.environ.get('ZCCSDT_MAX_DISK', ''))
+    except ValueError:
+        return None
+    return int(mb * 1e6)
+
+
+_LIMIT = [_env_limit()]     # bytes the scratch files of this process may take
+
+
+def allocated():
+    '''Bytes that the datasets of the open Scratch objects of this process
+    take on disk.'''
+    return _ALLOCATED[0]
+
+
+def limit(nbytes=_UNSET):
+    '''Bytes that the scratch files of this process may take together (None:
+    what the disk has).  With an argument: set it and return the previous
+    value (a solver does for the time of its run, from ``max_disk``).'''
+    prev = _LIMIT[0]
+    if nbytes is not _UNSET:
+        _LIMIT[0] = None if nbytes is None else int(nbytes)
+    return prev
+
+
+def disk_free(directory=None):
+    '''Bytes that this user can still write to the file system of
+    ``directory`` (default: scratch_dir()), None if that is not known.'''
+    try:
+        st = os.statvfs(directory or scratch_dir())
+    except (OSError, AttributeError):
+        return None
+    return st.f_bavail * st.f_frsize
+
+
+def room(directory=None):
+    '''Bytes that a new dataset in ``directory`` may take: disk_free(), and
+    not more than limit() leaves next to allocated(); None if neither is
+    known.'''
+    vals = [disk_free(directory)]
+    if _LIMIT[0] is not None:
+        vals.append(max(0, _LIMIT[0] - _ALLOCATED[0]))
+    vals = [x for x in vals if x is not None]
+    return min(vals) if vals else None
 
 
 def scratch_dir():
@@ -88,17 +151,31 @@ class Scratch:
         except TypeError:                                         # h5py < 3.5
             self.h5 = h5py.File(filename, 'w')
         self.raw = open(filename, 'r+b')
+        self.directory = os.path.dirname(os.path.abspath(filename))
+        self.nbytes = 0                 # of its datasets
         if not self.keep:
             os.unlink(filename)
 
     def create(self, key, shape, dtype=np.float64):
         '''New dataset as a numpy.memmap of the given shape (an int for a
-        vector).  The space is allocated at once: a full disk raises here,
-        not as a bus error on a later write.  New space reads as zeros.'''
+        vector).  The space is allocated at once: a disk without room for it
+        (room(): the free space, the limit of the process) raises OSError
+        (ENOSPC) here, before anything is written, not a bus error on a later
+        write.  New space reads as zeros.'''
         import h5py
         dtype = np.dtype(dtype)
         shape = (int(shape),) if np.isscalar(shape) else tuple(int(x) for x in shape)
         n = int(np.prod(shape, dtype=np.int64))
+        left = room(self.directory)
+        if left is not None and n * dtype.itemsize > left:
+            raise OSError(errno.ENOSPC, 'no room for %.3f GB for %s in %s: %.3f GB can be taken there '
+                          '(%.3f GB free on the file system%s; %.3f GB in the scratch files of this run '
+                          'already); choose another scratch directory (ZCCSDT_TMPDIR / PYSCF_TMPDIR)%s'
+                          % (n * dtype.itemsize / 1e9, self.what, self.directory, left / 1e9,
+                             (disk_free(self.directory) or 0) / 1e9,
+                             '' if _LIMIT[0] is None else
+                             ', max_disk / ZCCSDT_MAX_DISK %.3f GB' % (_LIMIT[0] / 1e9),
+                             _ALLOCATED[0] / 1e9, self.hint))
         dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
         dcpl.set_layout(h5py.h5d.CONTIGUOUS)
         dcpl.set_alloc_time(h5py.h5d.ALLOC_TIME_EARLY)
@@ -110,10 +187,18 @@ class Scratch:
         try:
             os.posix_fallocate(self.raw.fileno(), offset, n * dtype.itemsize)
         except OSError as err:
+            # (some file systems keep what they had allocated before they ran
+            # out - XFS does: give it back, the disk is not ours alone)
+            try:
+                os.ftruncate(self.raw.fileno(), offset)
+            except OSError:
+                pass
             raise OSError(err.errno, 'cannot allocate %.1f GB for %s in %s (%s); choose another '
                           'scratch directory (ZCCSDT_TMPDIR / PYSCF_TMPDIR)%s'
                           % (n * dtype.itemsize / 1e9, self.what, self.filename, err.strerror,
                              self.hint)) from err
+        self.nbytes += n * dtype.itemsize
+        _ALLOCATED[0] += n * dtype.itemsize
         a = np.memmap(self.raw, dtype=dtype, mode='r+', offset=offset, shape=shape)
         if a.nbytes:
             lo = a.ctypes.data
@@ -129,6 +214,8 @@ class Scratch:
         if self.h5 is not None:
             fd = self.raw.fileno()
             _MAPS[:] = [m for m in _MAPS if m[2] != fd]
+            _ALLOCATED[0] -= self.nbytes
+            self.nbytes = 0
             try:
                 self.h5.close()
                 self.raw.close()
