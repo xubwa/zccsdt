@@ -790,3 +790,183 @@ void zc_xv_sector_##SFX(int n, const int *kv, int modulus, const int32_t *tri, \
 
 DEFINE_QSEC2(double, d)
 DEFINE_QSEC2(double complex, z)
+
+/*
+ * The first derivatives of (Q) in symmetry sectors
+ * (zccsdt/cc/quadruples_grad_sym.py).
+ *
+ * zc_qg_sector_vectors:  zc_q_sector_energy backwards.  For every virtual
+ * quadruple of the sector, with D = eo - ev,
+ *
+ *     y = (r1 + r2) / D,   w = (z + r1) / D,   c = Re(conj(w) y),
+ *
+ * and the left-hand quadruples are written to the places of the blocks that
+ * the splits of the quadruple were read from, with their signs (every place
+ * belongs to one split of one quadruple; the others - groups that share an
+ * index - are not touched: the caller sets the blocks to zero):
+ *
+ *     e22y = conj(y),  e22w = conj(w)                       on two pairs
+ *     e13w = conj(w),  e13y = y,  e13s = conj(y) + conj(w)  on an index and a triple
+ *
+ * e[0] += sum c D (E(Q) of the sector), e[1] += sum c.
+ *
+ * zc_tn_scatter_cols:  R[r, idx[j]] += sg[j] X[r, j] for nrow rows (threads
+ * take rows; idx may repeat).
+ * zc_rows_cols_get:  out[r, c] = sg[r] M[rows[r], cols[c]].
+ * zc_rows_cols_add:  R[rows[r], cols[c]] += sg[r] X[r, c] (rows may repeat:
+ * threads take columns).
+ * zc_xv_sector_adj:  zc_xv_sector backwards: m3[(pq), e, r] = sgn / 2 *
+ * out[e, t] for the splits of the triples t (the other places untouched).
+ */
+#define DEFINE_QGSEC(T, SFX)                                                   \
+void zc_qg_sector_vectors_##SFX(int n, const int *kv, int modulus, int M,      \
+        const double *ev, double eo, int kmin, int nk, const int *lid_of,      \
+        const int *lstart, const int *lmem, int qmin, int nq,                  \
+        const int64_t *off22, const int64_t *nc22, const int64_t *off13,       \
+        const int64_t *nc13, const int32_t *posV, const int32_t *posQ,         \
+        const int32_t *pos3, const T *b1, const T *b2, const T *b3,            \
+        const T *c1, const T *c2, T *e22y, T *e22w, T *e13w, T *e13y,          \
+        T *e13s, double *e)                                                    \
+{                                                                              \
+    const int64_t nQ = (int64_t)n * (n - 1) / 2;                               \
+    const int64_t nA3 = nQ * (n - 2) / 3;                                      \
+    double e0 = 0, e1 = 0;                                                     \
+    _Pragma("omp parallel for schedule(dynamic, 1) reduction(+:e0, e1)")       \
+    for (int a = 0; a < n - 3; a++)                                            \
+    for (int b = a + 1; b < n - 2; b++)                                        \
+    for (int c = b + 1; c < n - 1; c++) {                                      \
+        int kd = M - kv[a] - kv[b] - kv[c];                                    \
+        if (modulus) kd = ((kd % modulus) + modulus) % modulus;                \
+        if (kd < kmin || kd >= kmin + nk || lid_of[kd - kmin] < 0) continue;   \
+        const int l = lid_of[kd - kmin];                                       \
+        int lo = lstart[l], hi = lstart[l + 1];                                \
+        while (lo < hi) {               /* the first member above c */         \
+            int mid = (lo + hi) / 2;                                           \
+            if (lmem[mid] > c) hi = mid; else lo = mid + 1;                    \
+        }                                                                      \
+        for (int t = lo; t < lstart[l + 1]; t++) {                             \
+            const int v[4] = {a, b, c, lmem[t]};                               \
+            static const int g22[6][4] = {{0,1,2,3}, {0,2,1,3}, {0,3,1,2},     \
+                                          {1,2,0,3}, {1,3,0,2}, {2,3,0,1}};    \
+            static const double s22[6] = {1, -1, 1, 1, -1, 1};                 \
+            int64_t x22[6], x13[4];                                            \
+            T r1 = 0, r2 = 0, z = 0;                                           \
+            for (int s = 0; s < 6; s++) {                                      \
+                const int p = v[g22[s][0]], q = v[g22[s][1]];                  \
+                const int r = v[g22[s][2]], u = v[g22[s][3]];                  \
+                int kq = kv[p] + kv[q];                                        \
+                x22[s] = -1;                                                   \
+                if (modulus) kq = ((kq % modulus) + modulus) % modulus;        \
+                if (kq < qmin || kq >= qmin + nq || off22[kq - qmin] < 0)      \
+                    continue;                                                  \
+                const int64_t rk1 = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q); \
+                const int64_t rk2 = nQ - 1 - (int64_t)(n - 1 - r) * (n - 2 - r) / 2 - (n - 1 - u); \
+                const int64_t x = off22[kq - qmin] + posQ[rk1] * nc22[kq - qmin] + posQ[rk2];      \
+                x22[s] = x;                                                    \
+                r1 += s22[s] * b1[x];                                          \
+                r2 += s22[s] * b2[x];                                          \
+                z += s22[s] * b3[x];                                           \
+            }                                                                  \
+            for (int s = 0; s < 4; s++) {                                      \
+                const int p = v[s];                                            \
+                const int q = v[s == 0], r = v[s <= 1 ? 2 : 1], u = v[s == 3 ? 2 : 3];             \
+                const int lp = lid_of[kv[p] - kmin];                           \
+                x13[s] = -1;                                                   \
+                if (off13[lp] < 0) continue;                                   \
+                const int64_t y1 = n - 1 - q, y2 = n - 1 - r;                  \
+                const int64_t rk = nA3 - 1 - y1 * (y1 - 1) * (y1 - 2) / 6 - y2 * (y2 - 1) / 2 - (n - 1 - u); \
+                const int64_t x = off13[lp] + posV[p] * nc13[lp] + pos3[rk];   \
+                const double sg = (s & 1) ? -1.0 : 1.0;                        \
+                x13[s] = x;                                                    \
+                r1 += sg * c1[x];                                              \
+                r2 += sg * c2[x];                                              \
+            }                                                                  \
+            const double D = eo - ev[v[0]] - ev[v[1]] - ev[v[2]] - ev[v[3]];   \
+            const T y = (r1 + r2) / D, w = (z + r1) / D;                       \
+            const T cy = ZC_CONJ_##SFX(y), cw = ZC_CONJ_##SFX(w);              \
+            const double cc = ZC_RE_##SFX(cw * y);                             \
+            e0 += cc * D;                                                      \
+            e1 += cc;                                                          \
+            for (int s = 0; s < 6; s++) {                                      \
+                if (x22[s] < 0) continue;                                      \
+                e22y[x22[s]] = s22[s] * cy;                                    \
+                e22w[x22[s]] = s22[s] * cw;                                    \
+            }                                                                  \
+            for (int s = 0; s < 4; s++) {                                      \
+                if (x13[s] < 0) continue;                                      \
+                const double sg = (s & 1) ? -1.0 : 1.0;                        \
+                e13w[x13[s]] = sg * cw;                                        \
+                e13y[x13[s]] = sg * y;                                         \
+                e13s[x13[s]] = sg * (cy + cw);                                 \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+    e[0] += e0;                                                                \
+    e[1] += e1;                                                                \
+}                                                                              \
+                                                                               \
+void zc_tn_scatter_cols_##SFX(T *R, int64_t ldR, int64_t nrow,                 \
+        const int64_t *idx, const double *sg, int64_t n, const T *X)           \
+{                                                                              \
+    _Pragma("omp parallel for schedule(static) if(nrow > 1)")                  \
+    for (int64_t r = 0; r < nrow; r++) {                                       \
+        T *o = R + r * ldR;                                                    \
+        const T *x = X + r * n;                                                \
+        for (int64_t j = 0; j < n; j++)                                        \
+            if (sg[j] != 0) o[idx[j]] += sg[j] * x[j];                         \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_rows_cols_get_##SFX(const T *M, int64_t ld, const int64_t *rows,       \
+        const double *sg, int64_t nr, const int64_t *cols, int64_t nc, T *out) \
+{                                                                              \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t r = 0; r < nr; r++) {                                         \
+        const T *m = M + rows[r] * ld;                                         \
+        T *o = out + r * nc;                                                   \
+        for (int64_t c = 0; c < nc; c++) o[c] = sg[r] * m[cols[c]];            \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_rows_cols_add_##SFX(T *R, int64_t ld, const int64_t *rows,             \
+        const double *sg, int64_t nr, const int64_t *cols, int64_t nc,         \
+        const T *X)                                                            \
+{                                                                              \
+    const int64_t blk = 1024, nblk = (nc + blk - 1) / blk;                     \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t b = 0; b < nblk; b++) {                                       \
+        int64_t lo = b * blk, hi = (lo + blk < nc) ? lo + blk : nc;            \
+        for (int64_t r = 0; r < nr; r++) {                                     \
+            T *o = R + rows[r] * ld;                                           \
+            const T *x = X + r * nc;                                           \
+            for (int64_t c = lo; c < hi; c++) o[cols[c]] += sg[r] * x[c];      \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_xv_sector_adj_##SFX(int n, const int *kv, int modulus,                 \
+        const int32_t *tri, int64_t nt, int ne, int qmin, int nq,              \
+        const int64_t *off, const int64_t *nd, const int32_t *posV,            \
+        const int32_t *posQ, T *m3, const T *out)                              \
+{                                                                              \
+    const int64_t nQ = (int64_t)n * (n - 1) / 2;                               \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t t = 0; t < nt; t++) {                                         \
+        const int v[3] = {tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]};         \
+        static const int g[3][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}};          \
+        static const double sg[3] = {0.5, -0.5, 0.5};                          \
+        for (int s = 0; s < 3; s++) {                                          \
+            const int p = v[g[s][0]], q = v[g[s][1]], r = v[g[s][2]];          \
+            int kq = kv[p] + kv[q];                                            \
+            if (modulus) kq = ((kq % modulus) + modulus) % modulus;            \
+            if (kq < qmin || kq >= qmin + nq || off[kq - qmin] < 0) continue;  \
+            const int64_t rk = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q);      \
+            const int64_t d = nd[kq - qmin];                                   \
+            T *m = m3 + off[kq - qmin] + posQ[rk] * ne * d + posV[r];          \
+            for (int e = 0; e < ne; e++) m[e * d] = sg[s] * out[e * nt + t];   \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_QGSEC(double, d)
+DEFINE_QGSEC(double complex, z)

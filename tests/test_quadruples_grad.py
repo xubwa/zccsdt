@@ -65,12 +65,16 @@ def test_pass_equals_reference(no, nv, cplx, use_c, monkeypatch):
         assert _rel(d2, r2) < 1e-12                         # (and nothing elsewhere)
 
 
-@pytest.mark.parametrize('no,nv,cplx', [(5, 20, True), (6, 22, False)])
+@pytest.mark.parametrize('no,nv,cplx', [(5, 20, True), (6, 26, False)])
 def test_memory_plan(no, nv, cplx):
     '''plan(): monotone in the budget, within it, the whole plan when all
-    fits, MemoryError with the numbers below the floor; what a run allocates
-    (tracemalloc follows numpy's allocations) stays within Plan.need, from
-    the smallest batches up, and the plan is not a loose bound.'''
+    fits, MemoryError with the numbers below the floor; s3 and the density
+    of <bc||ef> in a scratch file where the largest batches do not fit, the
+    density alone where s3 fits with them, and the results are those of the
+    arrays in memory; what a run allocates (tracemalloc follows numpy's
+    allocations, not the mapped arrays) stays within Plan.need, from the
+    smallest batches up, and the plan is not a loose bound.'''
+    from zccsdt.scratch import is_mapped
     import tracemalloc
     eris, t2, T3 = _packed_data(no, nv, cplx)
     isz = 16 if cplx else 8
@@ -81,23 +85,31 @@ def test_memory_plan(no, nv, cplx):
     for a, b in zip(key, key[1:]):
         assert all(x <= y for x, y in zip(a, b))
     assert all(p.need <= b for p, b in zip(plans, budgets))
-    # as large as fits: at least nine tenths of every budget below the whole plan are used
-    assert all(p.need > 0.9 * b for p, b in zip(plans, budgets) if b < full.need)
+    # what is mapped: both arrays below the largest batches, then the density, then nothing
+    order = [QG.MAPPED.index(p.mapped) for p in plans]
+    assert order == sorted(order) and order[0] == 0 and order[-1] == 2 and 1 in order
+    top = (full.q.cols22, full.q.cols13, full.q.xv, full.q.rows)
+    assert all(k == top for k, p in zip(key, plans) if p.mapped != QG.MAPPED[0])
+    # as large as fits: at least nine tenths of every budget are used while the batches grow
+    assert all(p.need > 0.9 * b for p, b, k in zip(plans, budgets, key) if k != top)
     assert key[-1] == (full.q.cols22, full.q.cols13, full.q.xv, full.q.rows) and plans[-1].need == full.need
     with pytest.raises(MemoryError, match=r'derivatives of \(Q\) need [0-9.]+ MB .* [0-9.]+ MB are left'):
         QG.plan(no, nv, isz, full.floor - 1)
-    least = QG.explicit_plan(no, nv, isz, *QD._least(nv)[:2], 3, QD._least(nv)[2])
+    least = QG.explicit_plan(no, nv, isz, *QD._least(nv)[:2], 3, QD._least(nv)[2], mapped=QG.MAPPED[0])
     assert least.need == least.floor == plans[0].need < full.need
     g0 = QG.kernel(eris, t2, T3, plan_=full)
+    assert g0.scratch is None and not is_mapped(g0.vvvv) and not is_mapped(g0.s3)
     seen = []
-    for pl in [least, plans[len(plans) // 2], full]:
+    for pl in [least, plans[len(plans) // 4], plans[order.index(1)], full]:
         gc.collect()
         tracemalloc.start()
         base = tracemalloc.get_traced_memory()[0]
         g = QG.kernel(eris, t2, T3, plan_=pl)
         peak = tracemalloc.get_traced_memory()[1] - base
         tracemalloc.stop()
-        for a, b in ((g.s2, g0.s2), (g.s3, g0.s3), (g.vvvv, g0.vvvv), (g.vvvo, g0.vvvo), (g.gamma_vv, g0.gamma_vv)):
+        assert is_mapped(g.vvvv) == ('vvvv' in pl.mapped) and is_mapped(g.s3) == ('s3' in pl.mapped)
+        for a, b in ((g.s2, g0.s2), (g.s3, g0.s3), (g.vvvv, g0.vvvv), (g.vvvo, g0.vvvo), (g.gamma_vv, g0.gamma_vv),
+                     (g.src3[0], g0.src3[0]), (g.src3[1], g0.src3[1])):
             assert _rel(a, b) < 1e-11
         assert peak <= pl.need, (peak, pl)
         seen.append(peak / pl.need)
