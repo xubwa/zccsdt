@@ -15,6 +15,7 @@ amplitudes; nothing here is fast.
 | `tests/fockspace.py` (`Left`) | the exact left-hand state in a small Fock space |
 | `tests/test_lambda_terms.py`, `tests/test_lambda_ref.py` | the checks listed in section 7 |
 | `bench/lambda_ccsdt.py`, `bench/slurm_lambda_refs.sh` | molecules, and the reference runs of MRCC and CFOUR |
+| `src/zccsdt/cc/quadruples_lambda.py`, `quadruples_lambda_sym.py`, `csrc/qlambda.c` | CCSDT(Q)_Lambda on packed amplitudes, per occupied quadruple and in symmetry sectors (section 5.1); `tests/test_quadruples_lambda.py`, `tests/test_quadruples_lambda_sym.py`, `bench/profile_q_lambda.py` |
 | `src/zccsdt/cc/lambda_opt.py`, `csrc/lambda_t3.c` | the Lambda equations on packed Lambda_3 (section 9); `tests/test_lambda_opt.py`, `bench/profile_lambda_ccsdt.py` |
 
 ## 1. Definitions and conventions
@@ -247,6 +248,86 @@ MRCC's CCSDT(Q)/A and CCSDT(Q)/B are different numbers again (in
 `bench/refs/reference_energies.json`). CFOUR with `SYMMETRY=OFF` converges
 the SCF of BH / STO-3G to another state (E = -24.4622854), so there is no
 CFOUR number for BH.
+
+### 5.1 On packed amplitudes (`zccsdt.cc.quadruples_lambda`, `quadruples_lambda_sym`)
+
+`quadruples_lambda.kernel(eris, t2, T3, l2, L3)` returns (E[Q]_L, E(Q)_L)
+from t2, l2 dense and T3, Lambda_3 on the unique block in lexicographic
+order (what `lambda_opt.kernel` returns), for one occupied quadruple at a
+time like `zccsdt.cc.quadruples`; `quadruples_lambda_sym.kernel` is the same
+in the blocks of a symmetry label like `quadruples_sym`.
+
+r4 is formed by the code of (Q), unchanged. The left-hand side is where the
+two differ: (Q) has `z = <Q| V T2 |0>` and takes the T3 part of its left-hand
+side as the conjugate of the `[V,T3]` part of r4, which is there anyway;
+with Lambda_3 that part is a product of its own. Per occupied quadruple,
+with the splits stacked along the summed index and each product followed by
+the antisymmetrizing reduction onto a<b<c<d:
+
+    X[(ab),(cd)]  + l(ij,ab) <kl||cd>                     (ij|kl), 6 splits     z2
+                  + sum_e <ie||ab> l(jkl,cde)             (i|jkl), 4 splits     z3
+    X[a,(bcd)]    + sum_m <ij||ma> l(mkl,bcd)             (ij|kl), 6 splits     z3
+
+These are the two products of `[V,T3]` with l3 in the place of T3 and the
+integrals the other way round: `<ab||ei> = -<ie||ab>*` and
+`<ma||ij> = <ij||ma>*`, so the stacked integral operands of z3 are the
+complex conjugates of those of `[V,T3]`, with the same signs of the splits,
+and `<kl||cd>` is the conjugate of `<cd||kl>` of (Q). Nothing else is
+conjugated: z4 is `<0| Lambda V |Q>` itself and the energy is
+`Re sum z4 r4 / D4` (`zc_ql_energy`, and `zc_ql_sector_energy` for the sum
+over the splits of the virtual quadruples of a sector, in `csrc/qlambda.c`).
+With `l2 = conj(t2)`, `l3 = conj(T3)` the two energies are [Q] and (Q).
+
+Cost: the two products of `[V,T3]` once more, `o^4 v^4 (v + o) / 24`
+multiplications next to the `o^4 v^4 (v + o) / 12` of (Q) and its
+`o^2 v^5 / 4` for the intermediate of T2 with `<vv||vv>`.
+
+Memory: the plan of (Q) (`quadruples.plan`: batches of columns of a product,
+the intermediate for a few occupied indices at a time) for what the arrays
+of the left-hand side leave - l2 and `<oo||vv>` on pairs, the stacked
+operands of the two products of Lambda_3 (`8 v C(v,2) + 6 o (v + C(v,3))`
+elements) and z3 (`C(v,4)`); the products themselves go through the work
+arrays of (Q), one at a time. In sectors one block more of each of the two
+kinds. Lambda_3 is given, like T3. `tests/test_quadruples_lambda.py` and
+`tests/test_quadruples_lambda_sym.py` hold the peak of the allocations
+against the plan (tracemalloc).
+
+Checked: z2 and z3 against the terms `Z4.T2` and `Z4.T3` of the table and
+each product of Lambda_3 through its own integrals, random real and complex
+amplitudes; the energies against `lambda_ref.quadruples_lambda`; (Q) for
+lambda = conj(t); every plan against the plain one; H2O and BH / STO-3G with
+CCSDT and Lambda of the production codes, real and with complex spin
+orbitals, against the dense reference (1e-13) and the numbers of the table
+above (MRCC to 1e-10, CFOUR's two corrections to 2e-11), H2O / 6-31G
+against MRCC (1e-9) and CFOUR (5e-11); HBr / cc-pVDZ-DK with X2C spinors
+(8 + 28, converged Lambda): the sectors against the dense code to 1e-13 with
+the labels 2 m_j, modulo 4 and with one label, and with a phase on every
+spinor (complex amplitudes; Lambda takes the conjugate phases of t).
+
+Timing, 8 cores of a Xeon Gold 6248R (`bench/profile_q_lambda.py`, job
+31739048 on c105, a node that other jobs shared: load 9 to 10 when the steps
+started), the four codes one after the other on the same amplitudes. HBr:
+X2C spinors, 28 frozen, converged CCSDT and Lambda (the integrals of a
+linear molecule on the axis are real), labels 2 m_j; H2O: RHF orbitals as
+spin orbitals, three CCSDT iterations and lambda = conj(t) (the cost does
+not depend on the numbers), labels 2 m_s. Peak memory is the anonymous
+memory of the process, with the amplitudes and integrals that were there
+before (0.50 and 1.05 GB); the plan is what the code counts besides them.
+
+| | o + v | (Q) | (Q)_L | ratio | cores busy | peak memory (plan) of (Q)_L |
+|---|---|---|---|---|---|---|
+| HBr / cc-pVTZ-DK, dense | 8 + 78 | 4.47 s | 6.11 s | 1.37 | 6.9 | 1.45 GB (0.50 + 0.92) |
+| the same, sectors (8 labels) | 8 + 78 | 1.23 s | 1.56 s | 1.27 | 4.1 | 0.80 GB (0.50 + 0.91) |
+| H2O / cc-pVTZ, dense | 10 + 106 | 44.1 s | 62.3 s | 1.41 | 7.5 | 4.43 GB (1.05 + 3.46) |
+| the same, sectors (2 labels) | 10 + 106 | 18.4 s | 24.7 s | 1.35 | 6.4 | 2.47 GB (1.05 + 3.99) |
+
+Sectors and dense code agree to 3e-19 Eh in all four. HBr: E[Q] =
+-2.7035e-05, E(Q) = -2.24571e-04, E[Q]_L = -2.6049e-05, E(Q)_L =
+-2.27608e-04 Eh. Where the time of the dense (Q)_L of H2O goes: the
+products of r 22.1 s and their reductions 8.7 s as in (Q), the two products
+of Lambda_3 14.7 s and their reductions (with that of z2) 7.3 s, the
+intermediate of T2 with `<vv||vv>` 4.0 s, the stacked operands 1.9 + 2.0 s
+at 4 cores.
 
 ## 6. Exact ground truth
 
