@@ -49,7 +49,13 @@ What is kept besides the arrays of (Q): s3 (the size of T3), the density of
 <bc||ef> on pairs (C(v,2)^2, the size of the packed <vv||vv>), the densities
 of the other blocks (the largest: that of <ab||ei>, o v C(v,2)), the adjoint
 of Xv next to Xv, and the work arrays of a quadruple three times.  plan()
-plans all of it within a budget.
+plans all of it within a budget; s3 and the density of <bc||ef> go to a
+scratch file where the largest batches do not fit (Plan.mapped).
+
+The same pass in the sectors of symmetry labels: quadruples_grad_sym, whose
+density of <bc||ef> is in the blocks of the pair labels (PairBlocks).  The
+orbital gradient of E(Q) from a Gradient of either: orbital_gradient,
+FrozenTerms (work arrays: active_bytes, FrozenTerms.own).
 
 Timers (zccsdt.timing): those of (Q) for the forward products, 'qg.expand',
 'qg.gemm', 'qg.reduce', 'qg.gamma', 'qg.scatter', 'qg.xv' (the adjoint of

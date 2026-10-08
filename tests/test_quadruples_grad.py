@@ -115,6 +115,7 @@ def test_memory_plan(no, nv, cplx):
         seen.append(peak / pl.need)
         del g
     assert min(seen) > 0.8
+    gc.collect()                # (the mappings of the scratch files go with their arrays)
 
 
 def _frozen_reference(g, no, G):

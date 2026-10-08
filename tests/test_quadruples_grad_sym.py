@@ -199,3 +199,5 @@ def test_front_end(hbr, monkeypatch):
         assert g.plan.mapped == QG.MAPPED[0] if tight else not getattr(g.plan, 'mapped', ())
         _same(g, ref)
         assert abs(cc.e_q - ref.e_q) < 1e-13
+        del g, cc
+        gc.collect()            # (the mappings of the scratch file go with their arrays)
