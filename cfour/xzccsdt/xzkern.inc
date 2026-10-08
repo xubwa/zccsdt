@@ -45,6 +45,50 @@
       type(c_ptr), value :: io
     end subroutine
 
+    ! ---- the passes of a Lambda iteration (csrc/ccsdt_t3.c) and the kernels of
+    !      csrc/lambda_t3.c
+    subroutine N(zc_l3_pass1w)(l3, t3, nto, nvt, no, nv, npo, nvp, otri, osgn, vtri, vsgn, batch, &
+                               gpd, gmq, ny, l2pp, xacc, yall, dr, d1, stats, bufl, buft) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, ny
+      type(*), dimension(*) :: l3, t3, otri, osgn, vtri, vsgn, gpd, gmq, l2pp, xacc, yall, dr, d1, bufl, buft
+      real(c_double) :: stats(4)
+    end subroutine
+
+    subroutine N(zc_l3_pass2w)(l3, nto, nvt, no, nv, npo, nvp, otri, osgn, ofree, opair, &
+                               vtri, vsgn, vfree, vpair, batch, wl, u, nu, vp, adrv, k, bdrv, r, stats, &
+                               tb, z) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, nu, k
+      type(*), dimension(*) :: l3, otri, osgn, ofree, opair, vtri, vsgn, vfree, vpair
+      type(*), dimension(*) :: wl, u, vp, adrv, bdrv, r, tb, z
+      real(c_double) :: stats(4)
+    end subroutine
+
+    subroutine N(zc_lam_pair_expand)(y, out, ny, nx, n) bind(C)
+      import
+      integer(c_int64_t), value :: ny, nx, n
+      type(*), dimension(*) :: y, out
+    end subroutine
+
+    subroutine N(zc_lam_pair_expand_tab)(y, out, ny, nx, n, nq, pidx) bind(C)
+      import
+      integer(c_int64_t), value :: ny, nx, n, nq
+      type(*), dimension(*) :: y, out, pidx
+    end subroutine
+
+    subroutine N(zc_lam_pair_matvec)(y, w, acc, nx, n) bind(C)
+      import
+      integer(c_int64_t), value :: nx, n
+      type(*), dimension(*) :: y, w, acc
+    end subroutine
+
+    subroutine N(zc_lam_pair_matvec_tab)(y, w, acc, nx, n, nqt, q0, nq, pa, pb) bind(C)
+      import
+      integer(c_int64_t), value :: nx, n, nqt, q0, nq
+      type(*), dimension(*) :: y, w, acc, pa, pb
+    end subroutine
+
     subroutine N(zc_gather_vir_half)(t3, nvt, rows, nb, vtri, vsgn, nv, nvp, out) bind(C)
       import
       integer(c_int64_t), value :: nvt, nb, nv, nvp
@@ -188,6 +232,26 @@
       real(c_double), value :: eo
       type(*), dimension(*) :: kv, ev, lid_of, lstart, lmem, off22, nc22, off13, nc13, posv, posq, pos3
       type(*), dimension(*) :: b1, b2, b3, c1, c2
+      real(c_double) :: e(2)
+    end subroutine
+
+    ! ---- (Q)_Lambda (csrc/qlambda.c)
+    subroutine N(zc_ql_energy)(z2, z3, r1, r2, ev, eo, n, e) bind(C)
+      import
+      integer(c_int64_t), value :: n
+      type(*), dimension(*) :: z2, z3, r1, r2, ev
+      real(c_double), value :: eo
+      real(c_double) :: e(2)
+    end subroutine
+
+    subroutine N(zc_ql_sector_energy)(n, kv, modulus, m, ev, eo, kmin, nk, lid_of, lstart, lmem, qmin, nq, &
+                                      off22, nc22, off13, nc13, posv, posq, pos3, b1, b2, b3, b4, c1, c2, c3, &
+                                      e) bind(C)
+      import
+      integer(c_int), value :: n, modulus, m, kmin, nk, qmin, nq
+      real(c_double), value :: eo
+      type(*), dimension(*) :: kv, ev, lid_of, lstart, lmem, off22, nc22, off13, nc13, posv, posq, pos3
+      type(*), dimension(*) :: b1, b2, b3, b4, c1, c2, c3
       real(c_double) :: e(2)
     end subroutine
 

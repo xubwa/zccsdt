@@ -1,7 +1,7 @@
 # xzccsdt: the native program in CFOUR's two-component chain
 
-`cfour/xzccsdt` is a program without Python for spinor CCSDT and CCSDT(Q)
-energies.  It runs as a member of CFOUR's X2CSO chain, after `xjoda`,
+`cfour/xzccsdt` is a program without Python for spinor CCSDT, CCSDT(Q) and
+CCSDT(Q)_Lambda energies and for lambda of CCSDT.  It runs as a member of CFOUR's X2CSO chain, after `xjoda`,
 `xsox2catm`, `xsox2chf` (and `xx2camf` for X2CAMF) and `xx2cvtran` with
 `ABCDTYPE=STANDARD`, in their directory:
 
@@ -11,14 +11,16 @@ The entry point and the scheduler are Fortran in the manner of CFOUR's x2c
 programs, the kernels are the C kernels of this repository (`csrc/`), and all
 working memory is the work array that CFOUR's `CRAPSI` allocates
 (`MEMORY_SIZE` of the ZMAT).  The algorithms are those of the Python program
-(`src/zccsdt/cc/ccsdt_opt.py`, `quadruples.py`, `t3engine.py`;
-docs/factorization.md), which is the reference of every number below.
+(`src/zccsdt/cc/ccsdt_opt.py`, `quadruples.py`, `t3engine.py`, `lambda_opt.py`,
+`lambda_blk.py`, `quadruples_lambda.py`; docs/factorization.md, docs/lambda.md),
+which is the reference of every number below.
 
-State of this document: the program at the commit that adds it.  What is
-measured says so (job, node); what is not done is listed at the end.  In
-short: CCSDT and (Q) - dense or in the blocks of symmetry labels, complex or
-real, (Q) over MPI ranks with restart - are there and validated against the
-Python program; the Lambda equations and (Q)_Lambda are not.
+State of this document: the program at the commit that adds the Lambda
+equations and (Q)_Lambda (section 11).  What is measured says so (job, node);
+what is not done is listed at the end.  In short: CCSDT, (Q), the Lambda
+equations of CCSDT and (Q)_Lambda - dense or in the blocks of symmetry
+labels, complex or real, (Q) and (Q)_Lambda over MPI ranks with restart - are
+there and validated against the Python program.
 
 ## 1. Build and run
 
@@ -37,7 +39,7 @@ source is copied.  The run-time libraries are found through an rpath: the
 executable runs without the oneAPI environment (the MPI launcher needs it).
 
 The C kernels (`KERNELS` of the Makefile: `ccsdt_t3.c`, `t3pack.c`,
-`tnpack.c`) are compiled from `csrc/` with `-DZC_USE_MKL -DMKL_ILP64`: their
+`tnpack.c`, `lambda_t3.c`, `qlambda.c`) are compiled from `csrc/` with `-DZC_USE_MKL -DMKL_ILP64`: their
 BLAS calls go through `mkl_cblas.h`, whose integer is then 64 bits, as the
 kernels' own `int64_t` arguments.  The program checks at start that the
 kernels were compiled for 8-byte BLAS integers (`sizeof(MKL_INT)`) and stops
@@ -48,12 +50,15 @@ the LP64 Python build.
     xzccsdt [method]
 
 `method`: `ccsdt`, `ccsdt[q]`, `ccsdt(q)`; `(q)` or `[q]` for the correction
-alone from the amplitudes of an earlier run (file `XZAMPS`).  Without the
-argument: `CALC` of the ZMAT as joda stored it (`CALC=CCSDT`, `CCSDT[Q]`,
+alone from the amplitudes of an earlier run (file `XZAMPS`); `lambda` for the
+Lambda equations of CCSDT for the amplitudes of `XZAMPS` (written to
+`XZLAMB`); `(q)_l` or `[q]_l` for CCSDT(Q)_Lambda from `XZAMPS` and `XZLAMB`;
+`ccsdt(q)_l`, `ccsdt[q]_l` for CCSDT, Lambda and the correction in one run
+(section 11).  Without the argument: `CALC` of the ZMAT as joda stored it (`CALC=CCSDT`, `CCSDT[Q]`,
 `CCSDT(Q)`, `CC(n)` with `EXCITATION=3`, `CC(n-1)(n)` with `EXCITATION=4`).
 Thresholds: `CC_CONV=N` - the amplitudes (|dT1| + |dT2| + |dT3| of the full
 tensors) below 10^-N and the energy below 10^-(N+2), as the Python front end
-reads it - and `CC_MAXCYC`.  Frozen and dropped spinors are what CFOUR left
+reads it - and `CC_MAXCYC`; lambda: |dL1| + |dL2| + |dL3| below 10^-N.  Frozen and dropped spinors are what CFOUR left
 (`DROPMO`, `%vircut`): the program takes the active spinors of the integral
 files.
 
@@ -61,7 +66,8 @@ Exit: status 0 and CFOUR's `@CHECKOUT-I` line at the end (the line before:
 `XZCCSDT finished: <method> energy done.`); every error goes through CFOUR's
 `ERREX` (status 1, the `ERROR` banner), with a line `@XZCCSDT-F, ...` that
 says what and, for memory, how many words are needed and how many are there.
-The final energy is written to JOBARC as `TOTENERG`, as `xx2cccsd` does.
+The final energy is written to JOBARC as `TOTENERG`, as `xx2cccsd` does
+(`lambda`: the CCSDT energy again).
 
 Threads: `OMP_NUM_THREADS` (kernels and MKL share Intel's OpenMP runtime).
 
@@ -74,20 +80,22 @@ Threads: `OMP_NUM_THREADS` (kernels and MKL share Intel's OpenMP runtime).
 e.g. `sbatch -N 4 --ntasks-per-node=1 -c 8 --mem-per-cpu=3700M` (one rank
 per node; `-ppn 1`) or `-N 1 --ntasks-per-node=4 -c 8` (`-ppn 4`: the case
 that was run).
-Only (Q) is parallel over ranks; the CCSDT iterations are those of rank 0,
-with its threads.  Rank 0 is the CFOUR program (CRAPSI, JOBARC, the output).
+Only (Q) and (Q)_Lambda are parallel over ranks; the CCSDT iterations and the
+Lambda equations are those of rank 0, with its threads.  Rank 0 is the CFOUR program (CRAPSI, JOBARC, the output).
 The other ranks get joda's flags from it, allocate a work array of the same
 size themselves (`GETMEM`), write their output to `xzccsdt.rNNNN`, wait until
 rank 0 has the amplitudes (a blocking broadcast: with Intel MPI a waiting rank
 spins on one core unless `I_MPI_WAIT_MODE=1`), then read the integral files
 and `XZAMPS` themselves.  The run directory must therefore be on a file system
-that all nodes see.  All ranks read the same files and make the same decisions
+that all nodes see (with lambda on the left: `XZLAMB` too).  All ranks read
+the same files and make the same decisions
 (blocks, real or complex, the task list): nothing but the flags, the sizes of
 JOBARC and the final sums is communicated.
 
-The two steps can be two invocations, as the X2CSO programs are called one
+The steps can be separate invocations, as the X2CSO programs are called one
 after the other: `xzccsdt ccsdt` (serial or one rank), then
-`mpirun ... xzccsdt "(q)"`.
+`mpirun ... xzccsdt "(q)"`; or `xzccsdt ccsdt`, `xzccsdt lambda`,
+`mpirun ... xzccsdt "(q)_l"`.
 
 ## 2. Files
 
@@ -103,7 +111,8 @@ file, complex, the first index fastest, antisymmetrized integrals):
 | `PPPH0001` ... | `<ab||ci>`, one file per occupied spinor |
 | `moinpppp` | `<ab||cd>` on pairs (written only with `ABCDTYPE=STANDARD`) |
 | `xzlabels` | optional, not a file of CFOUR: a symmetry label per spinor (section 6) |
-| `XZAMPS` | the amplitudes of an earlier run, for `(q)` / `[q]` and for the ranks other than 0 |
+| `XZAMPS` | the amplitudes of an earlier run, for `(q)` / `[q]`, `lambda`, `(q)_l` / `[q]_l` and for the ranks other than 0 |
+| `XZLAMB` | lambda of an earlier run, for `(q)_l` / `[q]_l` and for the ranks other than 0 |
 
 `moinpphh` is not read (it is the conjugate of `moinhhpp`; the Python reader
 compares the two).  The numbers of active spinors come from the lengths of
@@ -116,11 +125,12 @@ Written:
 |---|---|
 | `JOBARC` | `TOTENERG`: the energy of the method |
 | `XZAMPS` | after converged CCSDT: unformatted stream; `'XZAMPS01'`, 5 integers of 8 bytes (occupied, virtual, words per element: 1 real / 2 complex, classes of the labels, elements of T3 as stored), the correlation energy (real, 8 bytes), then T1 `[i][a]`, T2 `[i][j][a][b]`, T3 as stored (packed i<j<k, a<b<c; its blocks one after the other), row-major, in the order of the spinors of the run that wrote it |
-| `XZDIIS` | only if the DIIS vectors do not fit in the work array: direct-access file with the T3 parts of the vectors; deleted at the end |
+| `XZLAMB` | after converged Lambda equations: the format of `XZAMPS` with the tag `'XZLAMB01'`; the real number is the CCSDT correlation energy of the amplitudes that lambda belongs to (checked against `XZAMPS` when both are read); then l1 `[i][a]`, l2 `[i][j][a][b]`, l3 as T3 is stored |
+| `XZDIIS` | only if the DIIS vectors do not fit in the work array: direct-access file with the T3 parts of the vectors (of the amplitudes, then of lambda); deleted at the end |
 | `XZQCHK.NNNN` | one per rank during (Q): a line per finished task (task, its two energies, seconds); deleted when (Q) has finished |
 | `xzccsdt.rNNNN` | output of the ranks other than 0 (MPI) |
 
-A file that reads `XZAMPS` must run in the mode of the run that wrote it
+A run that reads `XZAMPS` or `XZLAMB` must run in the mode of the run that wrote it
 (labels used or not, real or complex: both follow from the same integral
 files, so this only matters with `XZ_LABELS` / `XZ_REAL`); the header is
 checked.
@@ -162,7 +172,8 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzstep.inc` | one CCSDT step: the order of the stages, the placement of every array |
 | `xzblk.inc` | the T3 passes in blocks of the labels |
 | `xzdiisg.inc`, `xzcc.inc` | DIIS update, the iterations, `XZAMPS` |
-| `xzq.inc`, `xzqs.inc` | (Q): the task loop and the dense quadruple; the quadruple in sectors of the labels |
+| `xzlam.inc`, `xzlblk.inc` | the Lambda equations: intermediates, an iteration, the residuals of rank 1 and 2, `XZLAMB`; the passes over l3 in blocks of the labels |
+| `xzq.inc`, `xzqs.inc` | (Q) and (Q)_Lambda: the task loop and the dense quadruple; the quadruple in sectors of the labels |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
 Kernels of `csrc/` that are called: `zc_t3_pass1w`, `zc_t3_pass2w`,
@@ -173,13 +184,20 @@ Kernels of `csrc/` that are called: `zc_t3_pass1w`, `zc_t3_pass2w`,
 `zc_vzero_d`, and in blocks `zc_bgather2`, `zc_breduce2`, `zc_bgather_vir`,
 `zc_breduce_ppl_rows` (t3pack.c); `zc_tn_expand`, `zc_tn_reduce`, `zc_tn_rows`,
 `zc_tn_energy2`, `zc_tn_tuple_sums`, `zc_tn_zero`, and in sectors
-`zc_q_sector_energy`, `zc_rows_gemm`, `zc_xv_sector` (tnpack.c).
+`zc_q_sector_energy`, `zc_rows_gemm`, `zc_xv_sector` (tnpack.c); for lambda
+`zc_l3_pass1w`, `zc_l3_pass2w` (ccsdt_t3.c), `zc_lam_pair_expand`,
+`zc_lam_pair_matvec` and their `_tab` forms (lambda_t3.c), `zc_ql_energy`,
+`zc_ql_sector_energy` (qlambda.c).
 
 **One change to a kernel file:** `zc_t3_pass1` and `zc_t3_pass2` of
 `csrc/ccsdt_t3.c` allocated their batch buffers themselves.  The bodies are
 now `zc_t3_pass1w` / `zc_t3_pass2w`, which take the buffers from the caller;
 the old entry points allocate and call them (interfaces and behaviour
-unchanged; the Python program runs on them).  The other kernels work on
+unchanged; the Python program runs on them).  **Two kernels added** to the
+same file for the Lambda equations, `zc_l3_pass1w` and `zc_l3_pass2w`: the
+two passes over the packed l3 that `lambda_opt.DenseL3` does with gathers and
+GEMMs from Python, with the buffers of the caller (the Python program does
+not call them).  The other kernels work on
 arrays of the caller; what they allocate themselves is small (tables of
 binomials, a line per thread).
 
@@ -188,11 +206,11 @@ binomials, a line per thread).
 The kernels are one C source instantiated for `double` and `double complex`
 (`_d`, `_z`).  The Fortran that touches array elements or calls a kernel is
 one source as well: the `.inc` files are compiled twice, by `xzcc_z.F90` and
-`xzcc_d.F90`, with `xztype.h` giving the element type (`ZT`), the words per
+`xzcc_d.F90` (the Lambda equations and (Q)_Lambda as well), with `xztype.h` giving the element type (`ZT`), the words per
 element (`NW`), the suffix (`N(name)`) and the conjugation (`CONJ`).  Nothing
 is written twice.  Everything outside the `.inc` files knows only the number
-of words per element (`nwe`) and dispatches on it in four places (`xzdrv`:
-iterations, XZAMPS, (Q); `xzplan`: the dry runs).
+of words per element (`nwe`) and dispatches on it in six places (`xzdrv`:
+iterations, XZAMPS, the Lambda equations, XZLAMB, (Q); `xzplan`: the dry runs).
 
 Typed Fortran, i.e. the places that are instantiated per type rather than
 type-agnostic: all of `xzimd.inc` (loops over elements for the small
@@ -354,12 +372,13 @@ the balance is that of the cost model.  The output gives the time of every
 rank's part and "sum over ranks / slowest", the speedup that the partition
 allows.
 
-**The left side** of the correction is built in the routine of one
-quadruple (`xzquad`: z from T2 with the conjugated integrals; E(Q) adds the
-[V,T3] vector).  (Q)_Lambda - the same tasks with the left vectors from
-lambda2, lambda3 and their own products - is **not implemented**; the task
+**The left side** of the correction is an argument of the routine of one
+quadruple (`xzquad`, `xzqsquad`): for (Q), z from T2 with the conjugated
+integrals, and E(Q) adds the [V,T3] vector; for (Q)_Lambda, the left vectors
+from lambda2 and lambda3 with their own products (section 11).  The task
 layer, the reader, the reduction, restart, progress and sampling do not
-depend on what is on the left.
+depend on what is on the left; the checkpoint files carry its kind, so a
+checkpoint of (Q) is not taken for (Q)_Lambda.
 
 **Memory per rank:** each rank has its own work array of MAXCOR words and
 its own plan.  A rank holds the integrals (`<vv||vv>` on pairs, `<ov||vv>` on
@@ -680,10 +699,12 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
 
 ## 9. Not done
 
-- **The Lambda equations of CCSDT and (Q)_Lambda**: not started.  The (Q)
-  task layer is ready for another left side (section 5), nothing else of it
-  exists; there is no file for lambda (the hand-over would be a second file
-  in the format of `XZAMPS`).
+- Lambda: the residuals of rank 1 and 2 and the o v^3-sized operands in
+  blocks of the labels (they are dense, as in the Python program: with
+  labels they are most of the memory and of the time of an iteration,
+  section 10); l3, T3 or the residual in a mapped scratch file; the Lambda
+  equations with constant terms (lambda of CCSDT(Q), the equations of the
+  first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); densities.
 - (Q) over ranks on separate nodes was not timed (section 8); a smaller
   duplication of Xv between the ranks (tasks of one l kept on one rank where
   the balance allows it) was not tried.
@@ -699,7 +720,8 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   array, bare, once; the dressed operator is never stored whole).
 - CCSDTQ, (P), properties, the AO-driven CCSD(T); CFOUR's nonrelativistic
   programs.
-- The relaxed density for `xsox2cprop` (`denfinal`): not started.  What
+- The relaxed density for `xsox2cprop` (`denfinal`): not started (lambda is
+  there now: `XZLAMB`).  What
   CFOUR's `xx2czvec` reads was looked up for it (read-only; `x2czvec/`):
   `xfull`, the orbital gradient X[a][i] on (active + dropped virtual) x
   (frozen + active occupied) spinors; `dpoo`, `dpvv`, `dii0`, `daa0`
@@ -1010,3 +1032,238 @@ into y.  `tests/test_cfour.py` (`test_handover_files`,
 identities without a CFOUR binary; the scripts and logs of the measurements
 are in `/home/xwang405/.claude/jobs/7ba4fcf7/tmp/zvec/` (`route.sh`,
 `cmp.py`, `pin.py`, `resid.py`, `ints.py`, `formulas.py`, `logs/`).
+
+## 11. The Lambda equations and (Q)_Lambda
+
+    xzccsdt ccsdt                   # amplitudes -> XZAMPS
+    xzccsdt lambda                  # XZAMPS -> lambda -> XZLAMB
+    mpirun ... xzccsdt "(q)_l"      # XZAMPS, XZLAMB -> E[Q]_L, E(Q)_L   (or serial)
+
+or `xzccsdt "ccsdt(q)_l"` for all three in one run (with MPI: rank 0
+iterates, the other ranks wait and then read both files).  `[q]_l`,
+`ccsdt[q]_l` put the fifth-order energy into `TOTENERG`.
+
+### The Lambda equations (`xzlam.inc`, `xzlblk.inc`)
+
+The equations and their factorization are those of `zccsdt.cc.lambda_opt`
+(docs/lambda.md, section 9; in blocks `lambda_blk`, 9.7): T1-dressed
+integrals, nothing conjugated, l1 and l2 dense, l3 and its residual stored
+as T3 is (the packed block, or the blocks of the labels).  Start from
+conj(t), Jacobi steps with DIIS (`xzdiis.F90`, the code of the amplitudes: 8
+vectors in the work array or their l3 parts in `XZDIIS`), converged when
+|dL1| + |dL2| + |dL3| of the full tensors is below 10^-`CC_CONV`.  The output
+has, per cycle, `1/4 sum <ab||ij> l2[ij][ab]` (the pseudo-energy that the
+Python tests compare), the three norms and the time.
+
+**Once** (`xzlamim`): what an amplitude iteration makes, by its routines
+(`xzimd.inc`, pass 1 over T3) - the dressed integrals, W_vvvo with its T3
+part, W_vooo (plus `f t2`), W_ovvo, F_vv, F_oo, W_oooo, the operator on
+occupied triples (transposed) - and the two contractions of T3, `Xq` and
+`X2`.  **The pp operator of the T3 equation is made in the place of the bare
+`<ab||cd>`** (`~<ab||de> + sum_{m<n} t2[mn][ab] <mn||de> + 1/2 A[F_vv]`, in
+its diagonal pair blocks with labels): the Python program holds it next to
+the bare integrals, a second v^4/4 array; here there is none, and after the
+Lambda equations the work array has no bare `<ab||cd>` any more.  A run that
+goes on to (Q)_Lambda (`ccsdt(q)_l`) reads the integral files and `XZAMPS`
+again (0.5 s for 10 + 106 spinors).
+
+**An iteration** (`xzlamstep`), in the order of `lambda_opt.residuals`:
+
+| step | dense | in blocks of the labels |
+|---|---|---|
+| pass 1: l3 with t2 and the W's (two stacked GEMMs), the density `Dr` of l3 with T3, `D1` of l2 with T3 | `zc_l3_pass1w`: two half-expanded batches of `nbp` occupied pairs | `xzlbpass1`: per batch of pairs of a group and group of virtual pairs, `[P][D][Q]` with D the (d, m) of one difference of classes; the stacked products per class of d and m by the routine of the T3 equation (`xzbp1xy`) |
+| Gram matrix of l3 and T3 | one GEMM of the packed arrays | per group of triples |
+| pass 2: ring with the transposed operator, two outer products, four drive products (K = 2 (o + v)), one reduction | `zc_l3_pass2w` | `xzbpass2`, the pass of the T3 equation, which now takes the number of parts of the summed index and the outer products as arguments |
+| ladder with the transposed pp operator; `Xq`, `X2` on the same gathered batches of `nbt` triples | `zc_gather_vir_half`, GEMM with the transposed flag, `zc_reduce_pair_first_rows` | `xzlbladder`: per group of triples and class of the free index |
+| the transposed operator on occupied triples | `zc_t3_occop` | `xzbocc` |
+| residuals of rank 1 and 2, the Jacobi step | `xzldens`, `xzlr1`, `xzlr2a`, `xzlr2b`, `xzlupd`: loops and GEMMs on dense arrays (the o^2 v^4 product of `Y2` with `~<ej||bg>` and the o^3 v^3 ones are GEMMs); `zc_lam_pair_expand`, `zc_lam_pair_matvec` | the same routines; the pp operator in its pair blocks (`_tab` kernels) |
+
+Nothing of this is written per element type: the `.inc` files are compiled
+for real and complex elements as the rest (section 3).
+
+**Memory.**  The regions, bottom to top: tables and integrals (section 4),
+T1, T2, T3 (from `XZAMPS`), l1, l2, l3, new l1 and l2, the DIIS vectors,
+then what is kept for the iterations - `GmQ` and `GPd` (the operands of pass
+1: t2 with W_vvvo, t2 with W_vooo), `Bdrv` and `Adrv` (2 (o + v) rows and
+columns of the drive products), `~<ej||bg>` (o v^3, both orders of the pair),
+`Xq`, `X2`, W_ovvo twice, the occupied operator - and the arrays of the
+setup or of an iteration, taken and released stage by stage: the batch
+buffers of pass 1 (two), of pass 2 (two), of the ladder (two and a batch of
+`X2`), and after the passes `Y2` on both orders of its pair (o v^3) with
+three (o v)^2 arrays for the residuals of rank 1 and 2.  T3, l3 and the
+residual are three regions of the size of T3 (the residual is a DIIS slot
+when the vectors are in the work array).  The plan is that of section 4: a
+dry run of `xzlam` after the layout (and after the dry run of the
+amplitude iterations in a run that does both), the floor checked before the
+large files are read, then `nbt`, `nbp`, `nba` raised one after the other,
+then the place of the DIIS vectors.  A run prints "the least that Lambda
+takes"; below it:
+
+    @XZCCSDT-F, the work array is too short for this calculation.
+      words needed:          2861968   words there:          2800000
+      Set MEMORY_SIZE to at least          2862032 words (        22.9 MB).
+
+| case | o, v | mode | least for Lambda | default plan, Lambda | least for (Q)_L | T3 = l3 |
+|---|---|---|---|---|---|---|
+| H2O / 6-31G | 10, 16 | complex, dense | 22.9 MB | 62.2 MB | 9.6 MB | 1.1 MB |
+| the same, DROPMO=1>1, %vircut 1.2 | 8, 10 | complex, dense | 4.5 MB | 8.5 MB | | 0.1 MB |
+| HBr / cc-pVDZ-DK, 28 frozen | 8, 28 | complex, dense | 50.7 MB | 158.8 MB | 28.8 MB | 2.9 MB |
+| the same, labelled real spinors | 8, 28 | real, 6 classes | 18.6 MB | 22.1 MB | | 0.25 MB |
+| | | real, dense (`XZ_LABELS=0`) | 25.5 MB | 79.6 MB | | 1.5 MB |
+| | | complex, 6 classes (`XZ_REAL=0`) | 36.8 MB | 43.8 MB | | 0.5 MB |
+
+(the cc-pVTZ cases: under Timings below.)  In blocks the floor is the dense operands,
+not l3: for the labelled HBr case 18.6 MB where the three T3-sized regions
+are 0.8 MB.
+
+### (Q)_Lambda (`xzq.inc`, `xzqs.inc`)
+
+`E[Q]_L = sum z2 r / D`, `E(Q)_L = sum (z2 + z3) r / D` with r of (Q),
+`z2 = <0| Lambda_2 V |Q>` and `z3 = <0| Lambda_3 V |Q>`, nothing conjugated
+(docs/lambda.md, section 5; `quadruples_lambda.py`).  In the routine of one
+occupied quadruple, with `left` set: the operands of z are l2 and
+`<kl||cd>` instead of t2 and its conjugate; after r is there, the stacked
+operands of [V,T3] are filled again with the integrals the other way round
+(not conjugated) and with l3 - the expanded rows of the splits (i|jkl) and
+the rows of the splits (ij|kl) -, and their two products are reduced into
+z3; `zc_ql_energy` (dense) or `zc_ql_sector_energy` (sectors: the blocks of
+z3 on two pairs and on an index and a triple next to those of r) gives the
+two energies.  l3 is read from its blocks in the sectors, as T3 is.  More
+than (Q) takes: l2 and l3 in the work array, l2 on pairs, z3 (C(v,4)
+elements; in sectors a set of blocks of each kind) - the operands and the
+product arrays are those of (Q), used a second time.  The memory plan is the
+plan of (Q) with these regions in its dry run.
+
+### Timings
+
+One job (31779386, node c697, Xeon Gold 6248R, `sbatch -p parallel -c 8
+--mem=30G`, snapshot of commit ca6f489), 8 threads, the Python program first
+and then the native one on the same integral files of the CFOUR chain in the
+node-local `/tmp`; `MEMORY_SIZE=22 GB` for both, `CC_CONV=9`.  Python: one
+process that does CCSDT, (Q), Lambda, (Q)_L in this order (its peak resident
+set is that of the process up to the step); native: four invocations
+(`ccsdt`, `(q)`, `lambda`, `(q)_l`), each with its own peak.  Wall seconds.
+All energies of the two programs agree to the 12 decimals printed:
+
+| | H2O / cc-pVTZ (10 + 106) | HBr / cc-pVTZ-DK, 28 frozen (8 + 78) | the same, labelled real spinors |
+|---|---|---|---|
+| E(CCSDT) | -76.394890322517 | -2605.165534626435 | -2605.165534626450 |
+| E(CCSDT(Q)) | -76.395259065600 | -2605.165759197886 | -2605.165759197901 |
+| E(CCSDT[Q]_L) | -76.395053160857 | -2605.165560675042 | -2605.165560675057 |
+| E(CCSDT(Q)_L) | -76.395261775543 | -2605.165762234866 | -2605.165762234881 |
+| cycles, CCSDT / Lambda (both programs) | 19 / 17 | 19 / 17 | 19 / 17 |
+
+| | H2O / cc-pVTZ, complex, dense | | HBr / cc-pVTZ-DK, complex, dense | | HBr, labelled real spinors (8 classes) | |
+|---|---|---|---|---|---|---|
+| | Python | native | Python | native | Python | native (real, blocks) |
+| amplitude iteration | 15.85 | 13.89 | 2.34 | 1.82 | 0.74 (blocks, complex) | 0.16 |
+| **Lambda iteration** | **19.46** | **18.68** | **2.54** | **2.30** | 2.55 (packed block, complex) | **0.16** |
+| Lambda intermediates, once | 5.62 | 4.24 | 1.08 | 0.69 | 1.07 | 0.13 |
+| Lambda, whole step | 337.2 | 321.9 | 44.4 | 39.7 | 44.5 | 2.91 |
+| (Q) | 160.5 | 153.4 | 12.6 | 11.8 | 2.74 | 0.63 |
+| **(Q)_L** | **226.8** | **214.3** | **17.6** | **16.2** | 3.09 | **0.85** |
+| (Q)_L / (Q) | 1.41 | 1.40 | 1.39 | 1.37 | 1.13 | 1.35 |
+| peak resident set: CCSDT | 10.1 GB | 9.08 GB | 3.40 GB | 2.96 GB | 1.09 GB | 0.32 GB |
+| - Lambda | 10.6 GB | 9.50 GB | 3.59 GB | 3.21 GB | 3.64 GB | 0.40 GB |
+| - (Q)_L | (10.6 GB) | 6.99 GB | (3.59 GB) | 2.19 GB | (3.64 GB) | 0.32 GB |
+| work array used: CCSDT | - | 9125 MB | - | 2812 MB | - | 236 MB |
+| - Lambda (planned = used) | - | 9549 MB | - | 3019 MB | - | 319 MB |
+| - (Q), (Q)_L | - | 6563, 7035 MB | - | 1963, 2061 MB | - | 185, 194 MB |
+| the least that Lambda takes | - | 2947 MB | - | 798 MB | - | 248 MB |
+| the least that CCSDT, (Q), (Q)_L take | - | 2125, 2880, 3352 MB | - | 597, 810, 909 MB | - | 185, 185, 185 MB |
+
+The Python Lambda of the labelled directory ran on the packed block in
+complex arithmetic (`Result.blocks` False, as on the cc-pVDZ-DK files), so
+the last pair of columns compares the native blocks in real arithmetic with
+that, not with the Python block code; the Python (Q) and (Q)_L there ran in
+sectors.  In sectors the floors of the three native steps are the same
+number: the transient of reading `moinpppp` (the record of the file) is above
+what the steps take.
+
+Where a native Lambda iteration goes (17 iterations, seconds; H2O dense, HBr
+dense, HBr blocks): pass 2 95.1, 12.4, 0.79; the ladder GEMM 87.4, 8.8, 0.11;
+the density of l3 with T3 in pass 1 70.3, 8.6, 0.15; the stacked GEMMs of
+pass 1 25.1, 2.9, 0.17; the residuals of rank 1 and 2 20.8, 3.2, 1.14; the
+gathers of pass 1 7.6, 1.3, 0.12; DIIS and update 4.1, 0.8, 0.11.  Against
+the amplitude iteration of the same job (pass 1 36.4, pp ladder GEMM 97.8,
+pass 2 97.3 s in 19 iterations for H2O) the Lambda iteration has the density
+(one more product of the size of the ring) and the dense residuals of rank 1
+and 2, and no dressing of `<ab||cd>`: 18.7 against 13.9 s.  In blocks the
+dense residuals of rank 1 and 2 are 39 % of the iteration - what the labels
+do not touch (section 9).  (Q)_L: the left side with Lambda_3 takes 61.3 of
+214.3 s (H2O), 4.4 of 16.2 s (HBr), 0.14 of 0.85 s (sectors).
+
+Memory: the work array used equals the plan in every run (the last line of
+the plan and "work array used" are the same number of words).  The 8 DIIS
+vectors are in the work array in all of them (5.9 GB of the 9.5 GB of the
+Lambda step of H2O); the resident set of the native Lambda step is 0.4 to 1.1
+GB below that of the Python process.  **Not measured:** the Lambda step under
+a `MEMORY_SIZE` near its floor at this size (the floor and file-DIIS paths ran
+on the small cases only), (Q)_L over MPI ranks at this size, HBr /
+cc-pVQZ-DK.
+
+### Validation
+
+The Python program on the same run directory and integral files (a script
+that does what `zccsdt.cfour.run` does for `ccsdt(q)_l`: `GCCSDT.from_integrals`,
+`kernel()`, `solve_lambda()`, `ccsdt_q_lambda()`; `symmetry` set for the
+labelled directories) against the native one; `CC_CONV=9`; login node.
+Lambda: the largest element of the difference of l1, l2, l3 between the two
+programs, both in CFOUR's order of the spinors on the packed block (the
+native arrays of a run with labels put back from the order of the classes
+and from the blocks); the amplitudes of the two programs agree to 1e-16 as
+well.
+
+| case (o + v) | native mode | cycles (Python / native) | max \|dl1\| | max \|dl2\| | max \|dl3\| | pseudo-energy, both |
+|---|---|---|---|---|---|---|
+| H2O / 6-31G, X2C-1e (10 + 16) | complex, dense | 15 / 15 | 4e-17 | 4e-17 | 4e-18 | -0.13609781981803 |
+| the same, DROPMO=1>1, %vircut 1.2 (8 + 10; 6 dropped) | complex, dense | 15 / 15 | 3e-17 | 5e-17 | 4e-18 | -0.06636667305326 (Python ...325) |
+| HBr / cc-pVDZ-DK, X2C-1e, 28 frozen (8 + 28) | complex, dense | 16 / 16 | 1e-17 | 8e-17 | 2e-18 | -0.13899853036388 |
+| the same, m_j-adapted real spinors with labels | real, 6 classes | 16 / 16 | 1e-17 | 1e-16 | 7e-18 | -0.13899853035651 |
+| | real, dense (`XZ_LABELS=0`) | 16 | 3e-17 | 7e-17 | 6e-18 | |
+| | complex, 6 classes (`XZ_REAL=0`) | 16 | 8e-18 | 7e-17 | 7e-18 | |
+| | complex, dense (both) | 16 | 1e-17 | 7e-17 | 7e-18 | |
+| the same with a phase on every spinor | complex, 6 classes | 16 / 16 | 2e-17 | 7e-17 | 6e-18 | -0.13899853035992 |
+| the labelled spinors in a random order (`--shuffle`, seed 11; Python dense) | real, 6 classes | 16 / 16 | 1e-17 | 7e-17 | 7e-18 | -0.13899853035651 |
+
+(largest elements: l1 0.009 to 0.014, l2 0.054 to 0.066, l3 0.0016 to
+0.0031.)  The Python Lambda of the labelled directories ran on the packed
+block (below `blocks_min` elements), so the native blocks are compared with
+the dense Python code.  Batches and memory: the same agreement with one
+occupied pair and one triple per batch and with 2 and 3 (`XZ_PLAN`), with
+the DIIS vectors in the file (`XZ_DIIS=f8`), with the work array at the floor
+of the plan (H2O / 6-31G: 2861976 words, one pair per batch, 12 triples, DIIS
+in the file) and at 3.5 million words; without DIIS (`XZ_DIIS=m0`) 27 cycles
+instead of 15 and lambda to 1e-10.  The first run of the first case gave
+these numbers; no term had to be found.
+
+(Q)_Lambda, total energies in Hartree, the two programs:
+
+| case | | Python | native |
+|---|---|---|---|
+| H2O / 6-31G (10 + 16) | CCSDT[Q]_L | -76.169658038682 | -76.169658038682 |
+| | CCSDT(Q)_L | -76.169666381377 | -76.169666381377 |
+| the same, DROPMO=1>1, %vircut 1.2 (8 + 10) | CCSDT[Q]_L | -76.099714414588 | -76.099714414588 |
+| | CCSDT(Q)_L | -76.099724741931 | -76.099724741931 |
+| HBr / cc-pVDZ-DK, 28 frozen (8 + 28) | CCSDT[Q]_L | -2604.989481085566 | -2604.989481085566 |
+| | CCSDT(Q)_L | -2604.989509911702 | -2604.989509911702 |
+| the same, labelled real spinors (Python and native in sectors) | CCSDT[Q]_L | -2604.989481085473 | -2604.989481085473 |
+| | CCSDT(Q)_L | -2604.989509911610 | -2604.989509911610 |
+| the same with phases (complex sectors) | CCSDT[Q]_L | -2604.989481085482 | -2604.989481085482 |
+| | CCSDT(Q)_L | -2604.989509911618 | -2604.989509911618 |
+| the labelled spinors in a random order | CCSDT(Q)_L | -2604.989509911610 | -2604.989509911610 |
+
+The native numbers are those of `ccsdt(q)_l` in one run (serial build), and
+the same to all printed digits from: the three invocations `ccsdt`,
+`lambda`, `(q)_l`; the labelled case dense real, in complex sectors and dense
+complex (`XZ_LABELS`, `XZ_REAL`); Xv for 3 of 7 occupied indices with the
+products in batches of 20 and 300 columns, and the work array at the floor of
+(Q)_L (HBr dense: 3594976 words); the MPI build with 1, 2 and 4 ranks from
+the files and with 4 ranks for `ccsdt(q)_l` (H2O, HBr dense, the labelled case
+real and with phases: 5 to 25 tasks); `(q)_l` with 20 tasks asked for,
+stopped by `XZ_QSTOP` after 5 tasks (serial) or 3 (4 ranks) and started again
+(5 and 3 tasks restored; the checkpoint files gone afterwards); `(q)_l` after
+an interrupted `(q)`, whose checkpoint is not taken.  `[q]_l` writes the
+fifth-order energy to `TOTENERG`.  `XZ_QSAMPLE=0.3`: 21 of 70 quadruples
+(HBr), the estimate printed, no `TOTENERG`.  CCSDT, [Q] and (Q) of the six
+cases after the changes: the numbers of section 7.

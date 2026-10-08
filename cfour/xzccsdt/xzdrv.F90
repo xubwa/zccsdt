@@ -29,7 +29,7 @@ subroutine xzdrv(w, maxcor)
   integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2), nmax, status
   logical :: usefile, converged, uselab, tryreal, isreal, there, docc
   real(8) :: sync(2)
-  real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall
+  real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall, tlm
   character(len=32) :: arg
   integer :: larg
 
@@ -95,14 +95,14 @@ subroutine xzdrv(w, maxcor)
     tryreal = .false.
   end if
 
-  ! ---- which ranks do what: the iterations are those of rank 0; the other
-  !      ranks wait for them here and then read the integrals and the
-  !      amplitudes (file XZAMPS) themselves
-  docc = method(1:5) == 'CCSDT'
-  planq = .not. docc .or. myrank > 0
+  ! ---- which ranks do what: the iterations (CCSDT, Lambda) are those of
+  !      rank 0; the other ranks wait for them here and then read the
+  !      integrals, the amplitudes (file XZAMPS) and lambda (XZLAMB) themselves
+  docc = with_cc
+  planq = .not. (with_cc .or. with_lam) .or. myrank > 0
   if (method == 'MP2' .and. myrank > 0) return
   sync = 0d0
-  if (docc .and. myrank > 0) then
+  if ((with_cc .or. with_lam) .and. myrank > 0) then
     call xzmpi_bcast(sync, 16_8)
     if (.not. with_q .or. sync(2) /= 1d0) return
   end if
@@ -154,6 +154,7 @@ subroutine xzdrv(w, maxcor)
 
   ! ---- CCSDT (rank 0), or the amplitudes of an earlier run
   tcc = 0d0
+  tlm = 0d0
   if (docc .and. myrank == 0) then
     t0 = omp_get_wtime()
     if (nwe == 2) then
@@ -181,8 +182,6 @@ subroutine xzdrv(w, maxcor)
     end if
     write(6, '(/,a,f10.1,a,f8.2,a)') '   amplitudes written to the file XZAMPS (', &
       8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
-    sync = [ecorr, 1d0]
-    call xzmpi_bcast(sync, 16_8)
   else
     if (nwe == 2) then
       call xzamps_z(w, 'r', ecorr)
@@ -190,6 +189,61 @@ subroutine xzdrv(w, maxcor)
       call xzamps_d(w, 'r', ecorr)
     end if
     write(6, '(/,a,f20.12)') '   amplitudes read from the file XZAMPS; CCSDT correlation energy ', ecorr
+  end if
+  flush(6)
+
+  ! ---- the Lambda equations (rank 0), or lambda of an earlier run
+  if (with_lam .and. myrank == 0) then
+    t0 = omp_get_wtime()
+    if (nwe == 2) then
+      call xzlam_z(w, nslot, usefile, nch, converged, ncyc)
+    else
+      call xzlam_d(w, nslot, usefile, nch, converged, ncyc)
+    end if
+    tlm = omp_get_wtime() - t0
+    if (.not. converged) then
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-F, the Lambda equations of CCSDT did not converge in ', maxcyc, &
+        ' cycles (CC_MAXCYC).'
+      call xzmpi_bcast(sync, 16_8)
+      call errex
+    end if
+    write(6, '(a,i4,a)') '   The Lambda equations converged in ', ncyc, ' cycles.'
+    call xzltimes(tlm, ncyc)
+    t0 = omp_get_wtime()
+    if (nwe == 2) then
+      call xzlamb_z(w, 'w', ecorr)
+    else
+      call xzlamb_d(w, 'w', ecorr)
+    end if
+    write(6, '(/,a,f10.1,a,f8.2,a)') '   lambda written to the file XZLAMB (', &
+      8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
+    if (with_q) then
+      ! the pp operator took the place of <ab||cd>: the integrals and the
+      ! amplitudes are read again for what follows
+      call xzrel(0_8)
+      call xzlayout(w, status)
+      if (status /= 0) then
+        write(6, '(/,a)') ' @XZCCSDT-F, the integral files changed during the run.'
+        call errex
+      end if
+      if (nwe == 2) then
+        call xzamps_z(w, 'r', ecorr)
+      else
+        call xzamps_d(w, 'r', ecorr)
+      end if
+    end if
+  end if
+  if (q_left .and. with_q) then
+    if (nwe == 2) then
+      call xzlamb_z(w, 'r', ecorr)
+    else
+      call xzlamb_d(w, 'r', ecorr)
+    end if
+    if (.not. (with_lam .and. myrank == 0)) write(6, '(a)') '   lambda read from the file XZLAMB'
+  end if
+  if ((with_cc .or. with_lam) .and. myrank == 0) then
+    sync = [ecorr, 1d0]
+    call xzmpi_bcast(sync, 16_8)
   end if
   flush(6)
 
@@ -218,25 +272,36 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f25.12)') '   CCSDT correlation energy      ', ecorr
   write(6, '(a,f25.12)') '   E(CCSDT)                      ', escf + ecorr
   etot = escf + ecorr
-  if (with_q) then
+  if (with_q .and. .not. q_left) then
     write(6, '(a,f25.12)') '   E[Q] (fifth order)            ', eq5
     write(6, '(a,f25.12)') '   E(Q)                          ', eq6
     write(6, '(a,f25.12)') '   E(CCSDT[Q])                   ', escf + ecorr + eq5
     write(6, '(a,f25.12)') '   E(CCSDT(Q))                   ', escf + ecorr + eq6
     etot = escf + ecorr + eq6
     if (method == 'CCSDT[Q]' .or. method == '[Q]') etot = escf + ecorr + eq5
+  else if (with_q) then
+    write(6, '(a,f25.12)') '   E[Q]_L (fifth order)          ', eq5
+    write(6, '(a,f25.12)') '   E(Q)_L                        ', eq6
+    write(6, '(a,f25.12)') '   E(CCSDT[Q]_L)                 ', escf + ecorr + eq5
+    write(6, '(a,f25.12)') '   E(CCSDT(Q)_L)                 ', escf + ecorr + eq6
+    etot = escf + ecorr + eq6
+    if (method == 'CCSDT[Q]_L' .or. method == '[Q]_L') etot = escf + ecorr + eq5
   end if
   write(6, '(a)') '  ' // repeat('-', 62)
   call putrec(20, 'JOBARC', 'TOTENERG', iintfp, etot)
   write(6, '(a,f25.12)') '   TOTENERG written to JOBARC:   ', etot
   call xz_rss(kb)
-  write(6, '(/,a,f10.2,a,f10.2,a,f10.2,a)') '   wall times: integrals ', tread, ' s   CCSDT ', tcc, &
-    ' s   (Q) ', tq, ' s'
+  write(6, '(/,a,f10.2,a,f10.2,a,f10.2,a,f10.2,a)') '   wall times: integrals ', tread, ' s   CCSDT ', tcc, &
+    ' s   Lambda ', tlm, ' s   (Q) ', tq, ' s'
   write(6, '(a,i14,a,f10.1,a,f8.1,a)') '   work array used: ', xzpeak, ' words = ', 8d-6 * xzpeak, &
     ' MB (', 100d0 * xzpeak / max(xzsize, 1_8), ' % of MAXCOR)'
   write(6, '(a,f10.1,a)') '   peak resident memory of the process: ', 1d-3 * kb(1), ' MB'
   write(6, '(a,f10.2,a)') '   XZCCSDT total wall time: ', omp_get_wtime() - twall, ' s'
-  write(6, '(a)') '   XZCCSDT finished: ' // trim(method) // ' energy done.'
+  if (method == 'LAMBDA') then
+    write(6, '(a)') '   XZCCSDT finished: lambda of CCSDT done.'
+  else
+    write(6, '(a)') '   XZCCSDT finished: ' // trim(method) // ' energy done.'
+  end if
 end subroutine xzdrv
 
 ! ---------------------------------------------------------------------------
@@ -276,13 +341,19 @@ subroutine xzjob()
       call errex
     end if
   end if
-  if (method /= 'CCSDT' .and. method /= 'CCSDT[Q]' .and. method /= 'CCSDT(Q)' .and. method /= '(Q)' &
-      .and. method /= '[Q]' .and. method /= 'MP2') then
+  select case (method)
+  case ('CCSDT', 'CCSDT[Q]', 'CCSDT(Q)', '(Q)', '[Q]', 'MP2', 'LAMBDA', 'CCSDT(Q)_L', 'CCSDT[Q]_L', &
+        '(Q)_L', '[Q]_L')
+  case default
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), &
-      ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], MP2.'
+      ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, MP2.'
     call errex
-  end if
-  with_q = method /= 'CCSDT' .and. method /= 'MP2'
+  end select
+  with_cc = method(1:5) == 'CCSDT'
+  larg = len_trim(method)
+  q_left = method(max(larg - 1, 1):larg) == '_L'
+  with_lam = method == 'LAMBDA' .or. (with_cc .and. q_left)
+  with_q = method /= 'CCSDT' .and. method /= 'MP2' .and. method /= 'LAMBDA'
   conv_t = 10d0 ** (-abs(iflags(4)))
   conv_e = 10d0 ** (-abs(iflags(4)) - 2)
   maxcyc = iflags(7)
@@ -624,3 +695,33 @@ subroutine xztimes(tcc, ncyc)
   write(6, '(5x,a28,f12.2,a)') 'other', tcc - tsum, ' s'
   write(6, '(5x,a28,f12.2,a,f10.2,a)') 'total', tcc, ' s;  per cycle ', tcc / max(ncyc, 1_8), ' s'
 end subroutine xztimes
+
+! ---------------------------------------------------------------------------
+! The wall times of the stages of the Lambda equations.
+subroutine xzltimes(tlm, ncyc)
+  use xzdata
+  implicit none
+  real(8), intent(in) :: tlm
+  integer(8), intent(in) :: ncyc
+  integer :: k
+  real(8) :: tsum
+  write(6, '(/,a,i4,a)') '   Wall times of the Lambda equations (', ncyc, ' cycles)'
+  tsum = 0d0
+  do k = 1, nltime
+    write(6, '(5x,a28,f12.2,a,f6.1,a)') lname(k), tlam(k), ' s', 100d0 * tlam(k) / max(tlm, 1d-9), ' %'
+    tsum = tsum + tlam(k)
+  end do
+  write(6, '(5x,a28,f12.2,a)') 'other', tlm - tsum, ' s'
+  write(6, '(5x,a28,f12.2,a,f10.2,a)') 'total', tlm, ' s;  per cycle ', (tlm - tlam(1)) / max(ncyc, 1_8), ' s'
+end subroutine xzltimes
+
+! n words to the file `name' (comparisons with the Python program)
+subroutine xzdumpw(name, n, x)
+  implicit none
+  character(len=*), intent(in) :: name
+  integer(8), intent(in) :: n
+  real(8), intent(in) :: x(n)
+  open(unit=78, file=name, form='unformatted', access='stream', status='replace')
+  write(78) x
+  close(78)
+end subroutine xzdumpw

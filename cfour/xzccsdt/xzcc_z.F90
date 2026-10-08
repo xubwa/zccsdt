@@ -5,5 +5,7 @@
 #include "xzblk.inc"
 #include "xzdiisg.inc"
 #include "xzcc.inc"
+#include "xzlam.inc"
+#include "xzlblk.inc"
 #include "xzq.inc"
 #include "xzqs.inc"

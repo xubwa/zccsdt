@@ -242,28 +242,35 @@ end subroutine
 ! Pass 2: for a batch of pairs P of group gP and every group gQ of Q with
 ! |gP - gQ| < ncls, on the pairs (a, i) of delta = gP - gQ:
 !   Z[P][(a, i)][Q]  = wd[(a, i)][(d, m)] T[P][(d, m)][Q]
-!   Z[P][c][(i, Q)] -= adrv[P][c][e|m] bd[e|m][(i, Q)]
-! and the reduction onto the blocks of the residual.
-subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd)
+!   Z[P][(a, i)][Q] += u[(a, i)][x] vp[P][x][Q]             (gP = gQ; nu of them)
+!   Z[P][c][(i, Q)] -= adrv[P][c][k] bd[k][(i, Q)]
+! and the reduction onto the blocks of the residual.  The summed index k of
+! the drive terms has npart parts of nv + no values each (virtual, then
+! occupied: one part in the T3 equation, two in the Lambda equations); bd is
+! in blocks (xzbbd, xzbbdk).
+subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
   use xzdata
   use xzmem
   use xzkern
   implicit none
   real(8) :: w(*)
-  integer(8), intent(in) :: kt3, kr3
+  integer(8), intent(in) :: kt3, kr3, npart, nu
   ZT, intent(in) :: wring(*), bd(0:*)
-  ZT, intent(in) :: adrv(0:nv+no-1, 0:nv-1, 0:npo-1)           ! [P][c][e|m]
-  integer(8) :: gp, gq, p0, nb, off, tmax, m0, kwd, kz, kt, kzoff, ktg, k, g, d
+  ZT, intent(in) :: adrv(0:npart*(nv+no)-1, 0:nv-1, 0:npo-1)   ! [P][c][k]
+  ZT, intent(in) :: u(*), vp(*)
+  integer(8) :: gp, gq, p0, nb, off, tmax, m0, kwd, kz, kt, kzoff, ktg, k, g, d, ku0
   integer(8) :: nqg(0:npg-1)
   do g = 0, npg - 1
     nqg(g) = vpoff(g + 1) - vpoff(g)
   end do
   m0 = xzmark()
   kwd = xzget(NW * nwd, 'ring operators of pass 2')
+  ku0 = xzget(NW * ndel(0) * max(nu, 1_8), 'outer products of pass 2')
   if (.not. xzdry) then
     do d = 1 - ncls, ncls - 1
       if (ndel(d) > 0) call N(xzbwd)(d, wring, w(kwd + NW * wdoff(d)))
     end do
+    if (nu > 0) call N(xzbu0)(nu, u, w(ku0))
   end if
   do gp = 0, npg - 1
     do p0 = opoff(gp), opoff(gp + 1) - 1, nbp
@@ -282,7 +289,8 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd)
       kzoff = xzget(nb * npg, 'pass-2 offsets')
       ktg = xzget(4 * 3 * nto, 'pass-2 targets')
       if (.not. xzdry) then
-        call N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, w(kwd), adrv, bd, w(kz), w(kt), w(kzoff), w(ktg))
+        call N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, w(kwd), adrv, bd, npart, nu, w(ku0), vp, &
+                           w(kz), w(kt), w(kzoff), w(ktg))
       end if
       call xzrel(k)
     end do
@@ -290,20 +298,77 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd)
   call xzrel(m0)
 end subroutine
 
+! the rows of u[(a, i)][x] of the pairs (a, i) with s(a) = s(i), in their order
+subroutine N(xzbu0)(nu, u, u0)
+  use xzdata
+  implicit none
+  integer(8), intent(in) :: nu
+  ZT, intent(in) :: u(0:nu-1, 0:no-1, 0:nv-1)                  ! [a][i][x]
+  ZT, intent(out) :: u0(0:nu-1, 0:*)
+  integer(8) :: sa, a, i, n
+  n = 0
+  do sa = 0, ncls - 1
+    do a = vcoff(sa), vcoff(sa + 1) - 1
+      do i = ocoff(sa), ocoff(sa + 1) - 1
+        u0(:, n) = u(:, i, a)
+        n = n + 1
+      end do
+    end do
+  end do
+end subroutine
+
+! The right-hand sides of the drive terms in blocks from the dense array
+! bdrv[k][i][Q], k in npart parts (virtual, occupied): one block per (group
+! gQ of Q, class si of i) with the k of the class gQ - si, part by part.
+subroutine N(xzbbdk)(npart, bdrv, bd)
+  use xzdata
+  implicit none
+  integer(8), intent(in) :: npart
+  ZT, intent(in) :: bdrv(0:nvp-1, 0:no-1, 0:npart*(nv+no)-1)   ! [k][i][Q]
+  ZT :: bd(0:*)
+  integer(8) :: gq, si, se, i, ni, nq, ne, nm, q0, base, part, r, row, k
+  do gq = 0, npg - 1
+    do si = 0, ncls - 1
+      if (bdoff(gq, si) < 0) cycle
+      se = gq - si
+      ni = ocoff(si + 1) - ocoff(si)
+      ne = vcoff(se + 1) - vcoff(se)
+      nm = ocoff(se + 1) - ocoff(se)
+      q0 = vpoff(gq)
+      nq = vpoff(gq + 1) - q0
+      base = npart * bdoff(gq, si)
+      !$omp parallel do collapse(2) private(part, r, row, i, k)
+      do part = 0, npart - 1
+        do r = 0, ne + nm - 1
+          row = part * (nv + no) + vcoff(se) + r
+          if (r >= ne) row = part * (nv + no) + nv + ocoff(se) + (r - ne)
+          do i = 0, ni - 1
+            k = base + ((part * (ne + nm) + r) * ni + i) * nq
+            bd(k:k + nq - 1) = bdrv(q0:q0 + nq - 1, ocoff(si) + i, row)
+          end do
+        end do
+      end do
+    end do
+  end do
+end subroutine
+
 ! one batch of pass 2
-subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, z, t, zoff, tg)
+subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, u0, vp, z, t, zoff, tg)
   use xzdata
   use xzkern
   implicit none
   real(8) :: w(*)
-  integer(8), intent(in) :: kt3, kr3, gp, p0, nb
+  integer(8), intent(in) :: kt3, kr3, gp, p0, nb, npart, nu
   integer(8), intent(in) :: nqg(0:npg-1)
   ZT, intent(in) :: wd(0:*), bd(0:*)
-  ZT, intent(in) :: adrv(0:nv+no-1, 0:nv-1, 0:npo-1)           ! [P][c][e|m]
+  ZT, intent(in) :: adrv(0:npart*(nv+no)-1, 0:nv-1, 0:npo-1)   ! [P][c][k]
+  ZT, intent(in) :: u0(*)
+  ZT, intent(in) :: vp(0:nvp-1, 0:max(nu,1_8)-1, 0:*)          ! [P][x][Q]
   ZT :: z(0:*), t(0:*)
   integer(8) :: zoff(0:npg-1, 0:nb-1)                          ! [P][gQ]
   integer(8) :: tg(0:3*nto-1, 0:3)                             ! targets: base, index, pair, (sign)
   integer(8) :: gq, delta, nr, nq, qlo, off, k, sa, si, sc, se, r0, nd, nm, nc, ni, ne, g, nt, it, r, p
+  integer(8) :: part, ka, kb
   ZT :: one, zero, mone
   one = 1
   zero = 0
@@ -336,10 +401,12 @@ subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, z, t, zoff,
         qlo, nq, nr * nq, t(r0 * nq))
       r0 = r0 + nd * nm
     end do
-    ! the ring term
+    ! the ring term, and the outer products
     do k = 0, nb - 1
       call N(zc_gemm)(0_4, 0_4, nr, nq, nr, one, wd(wdoff(delta)), nr, t(k * nr * nq), nq, zero, &
                       z(zoff(gq, k)), nq)
+      if (delta == 0 .and. nu > 0) call N(zc_gemm)(0_4, 0_4, nr, nq, nu, one, u0, nu, vp(qlo, 0, p0 + k), &
+                                                   nvp, one, z(zoff(gq, k)), nq)
     end do
     ! the drive terms on the classes (sc, si) of the pairs (c, i)
     r0 = 0
@@ -353,13 +420,18 @@ subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, z, t, zoff,
         if (bdoff(gq, si) >= 0) then
           ne = vcoff(se + 1) - vcoff(se)
           nm = ocoff(se + 1) - ocoff(se)
-          do k = 0, nb - 1
-            p = p0 + k
-            if (ne > 0) call N(zc_gemm)(0_4, 0_4, nc, ni * nq, ne, mone, adrv(vcoff(se), vcoff(sc), p), &
-              nv + no, bd(bdoff(gq, si)), ni * nq, one, z(zoff(gq, k) + r0 * nq), ni * nq)
-            if (nm > 0) call N(zc_gemm)(0_4, 0_4, nc, ni * nq, nm, mone, &
-              adrv(nv + ocoff(se), vcoff(sc), p), nv + no, bd(bdoff(gq, si) + ne * ni * nq), ni * nq, &
-              one, z(zoff(gq, k) + r0 * nq), ni * nq)
+          do part = 0, npart - 1
+            ka = part * (nv + no)
+            kb = npart * bdoff(gq, si) + part * (ne + nm) * ni * nq
+            do k = 0, nb - 1
+              p = p0 + k
+              if (ne > 0) call N(zc_gemm)(0_4, 0_4, nc, ni * nq, ne, mone, &
+                adrv(ka + vcoff(se), vcoff(sc), p), npart * (nv + no), bd(kb), ni * nq, one, &
+                z(zoff(gq, k) + r0 * nq), ni * nq)
+              if (nm > 0) call N(zc_gemm)(0_4, 0_4, nc, ni * nq, nm, mone, &
+                adrv(ka + nv + ocoff(se), vcoff(sc), p), npart * (nv + no), bd(kb + ne * ni * nq), &
+                ni * nq, one, z(zoff(gq, k) + r0 * nq), ni * nq)
+            end do
           end do
         end if
       end if
