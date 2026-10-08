@@ -233,10 +233,12 @@ class DenseL3:
         per = 2 * self.vm.npair * self.vm.n * self.dtype.itemsize
         return int(min(max(1, self.mem_mb * 1e6 * 2 / 3 // max(per, 1)), max(self.om.ntri, 1)))
 
-    def vir_batches(self, T3):
-        '''(rows, Tv[Q, I, c]) for batches of occupied triples.'''
+    def vir_batches(self, T3, extra=0):
+        '''(rows, Tv[Q, I, c]) for batches of occupied triples; ``extra``:
+        elements per triple that the caller allocates next to a batch.'''
         T3 = self.view(T3)
-        nbt = self.triple_batch()
+        per = (self.vm.npair * self.vm.n + extra) * self.dtype.itemsize
+        nbt = int(min(max(1, self.mem_mb * 1e6 * 2 / 3 // max(per, 1)), max(self.om.ntri, 1)))
         for i0 in range(0, self.om.ntri, nbt):
             rows = np.arange(i0, min(i0 + nbt, self.om.ntri))
             yield rows, t3pack.gather_vir_half(T3, self.vm, rows)
@@ -306,13 +308,25 @@ def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0):
     goovv_P = np.ascontiguousarray(goovv[:, :, md, ne])         # (m, n, Q)
     goovo_mn = np.ascontiguousarray(ge['oovo'][mm, nn])         # (P, e, j)
 
+    # ---- the drive operands: the rows and columns that do not change, with
+    # <ei||Q> = -<ie||Q> packed over the ket pair
+    K = 2 * (nvir + nocc)
+    with timer('operands'):
+        im.Bdrv = Bdrv = np.zeros((K, nocc, nvp), dtype=dtype)
+        vovvQ = Bdrv[nvir + nocc:2 * nvir + nocc]               # [e, i, Q]
+        t3pack.axpby(vovvQ, ge['ovvv'][:, :, md, ne].transpose(1, 0, 2), -1.0, 0.0)
+        Bdrv[2 * nvir + nocc:] = goovv_P.transpose(1, 0, 2)     # [n, k, Q] = <kn||Q>
+        im.Adrv = Adrv = np.zeros((npo, nvir, K), dtype=dtype)
+        Adrv[:, :, :nvir] = goovv_mn                            # [P, c, f]
+        Adrv[:, :, nvir:nvir + nocc] = goovo_mn                 # [P, c, m]
+
     # ---- pass 1 over T3, as in the amplitude equations: the T3 parts of
     # W_vvvo and W_vooo
     with timer('pass1'):
         G_Pd = np.concatenate((goovv_mn.transpose(1, 0, 2), goovo_mn.transpose(2, 0, 1)), axis=0)
         G_mQ = np.empty((nocc, nvp, nocc + nvir), dtype=dtype)
         t3pack.axpby(G_mQ[:, :, :nocc], goovv_P.transpose(1, 2, 0), 1.0, 0.0)
-        t3pack.axpby(G_mQ[:, :, nocc:], ge['ovvv'][:, :, md, ne].transpose(0, 2, 1), -1.0, 0.0)
+        t3pack.axpby(G_mQ[:, :, nocc:], vovvQ.transpose(1, 2, 0), 1.0, 0.0)
         Xacc, Yall, _, _ = eng.t3.pass1(T3p, G_Pd, G_mQ.reshape(nocc * nvp, nocc + nvir),
                                         goovv_pp, fov)
         del G_mQ, G_Pd
@@ -329,20 +343,10 @@ def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0):
         t3pack.axpby(GmQ[:, :, nocc:], Wv.transpose(2, 0, 1), 1.0, 0.0)
         im.GmQ = GmQ.reshape(nocc * nvp, nocc + nvir)
         del Wv, Bv
-
-    # ---- <ei||Q> = -<ie||Q> packed over the ket pair, and the drive operands
-    K = 2 * (nvir + nocc)
-    with timer('operands'):
-        im.Bdrv = Bdrv = np.zeros((K, nocc, nvp), dtype=dtype)
-        vovvQ = Bdrv[nvir + nocc:2 * nvir + nocc]               # [e, i, Q]
-        t3pack.axpby(vovvQ, ge['ovvv'][:, :, md, ne].transpose(1, 0, 2), -1.0, 0.0)
-        Bdrv[2 * nvir + nocc:] = goovv_P.transpose(1, 0, 2)     # [n, k, Q] = <kn||Q>
-        im.Adrv = Adrv = np.zeros((npo, nvir, K), dtype=dtype)
-        Adrv[:, :, :nvir] = goovv_mn                            # [P, c, f]
-        Adrv[:, :, nvir:nvir + nocc] = goovo_mn                 # [P, c, m]
-        # <ej||bg> as [e, g, j, b]
+        # <ej||bg> = -<je||bg> as [e, g, j, b]; the dressed ovvv block goes
         im.Vx = np.empty((nvir, nvir, nocc, nvir), dtype=dtype)
         t3pack.axpby(im.Vx, ge['ovvv'].transpose(1, 3, 0, 2), -1.0, 0.0)
+        del ge['ovvv']
 
     # ---- W_vooo[j, P(mn), e] = <ej||mn>-bar
     with timer('Wvooo'):
@@ -388,13 +392,17 @@ def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0):
         im.X2 = np.zeros((nvp, om.ntri, nocc), dtype=dtype)
         if eng.size:
             vq = vovvQ.reshape(nvir * nocc, nvp)
-            for rows, Tv in eng.vir_batches(T3p):
+            for rows, Tv in eng.vir_batches(T3p, nocc * nvir * nvir + 2 * nvp * nocc):
                 n = len(rows)
                 Tf = Tv.reshape(nvp, n * nvir)
                 im.Xq[:, rows] = gemm(goovv_pp, Tf).reshape(npo, n, nvir)
                 Z = gemm(vq, Tf).reshape(nvir, nocc, n, nvir)           # [e, i, I, f]
-                im.X2[:, rows] = (Z[md, :, :, ne] - Z[ne, :, :, md]).transpose(0, 2, 1)
-                del Z, Tv, Tf
+                del Tv, Tf
+                A = Z[md, :, :, ne]
+                A -= Z[ne, :, :, md]
+                del Z
+                im.X2[:, rows] = A.transpose(0, 2, 1)
+                del A
     mo_e = np.asarray(eris.mo_energy)
     im.eia = mo_e[:nocc, None] - mo_e[None, nocc:]
     im.eo = mo_e[:nocc][om.triples].sum(axis=1) if om.ntri else np.zeros(0)
@@ -498,7 +506,7 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
         Gvv = 0.5 * einsum('mnef,mnfg->eg', l2, t2) - Gvv3 / 12.0
         Goo = 0.5 * einsum('mnef,noef->mo', l2, t2) - Goo3 / 12.0
         # [j, h]: l2 with T3, and l3 with t2 twice
-        Dov = D1.reshape(nv, no).T - einsum('hmQ,jmQ->jh', Y2, t2P)
+        Dov = D1.reshape(nv, no).T - gemm(Y2.reshape(nv, no * nvp), t2P.reshape(no, no * nvp).T).T
         Y1u = _unpack_occ(Y1, om)                               # [i, m, a, n]
         # Y2 on all virtual pairs, as [i, a, e, g] = Y2[g, i, (a e)]
         Y2x = np.zeros((no, nv, nv, nv), dtype=dtype)
@@ -509,8 +517,9 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
         r1 += l1 @ Fvv - Foo @ l1 + einsum('me,ieam->ia', l1, Wov)
         r1 += gemm(l2P.reshape(no, no * nvp), im.GmQ[:, no:])
         r1 += einsum('Pae,iPe->ia', l2mn, im.GPd[nv:])
-        r1 += einsum('eg,egia->ia', Gvv, Vx) + einsum('jh,ijah->ia', Dov, oovv) \
-            + einsum('mj,ijam->ia', Goo, oovo)
+        # (the products with o v^3-sized arrays as they are stored: no transposed copies)
+        r1 += (Gvv.ravel() @ Vx.reshape(nv * nv, dm)).reshape(no, nv)
+        r1 += einsum('jh,ijah->ia', Dov, oovv) + einsum('mj,ijam->ia', Goo, oovo)
         r1 -= (Goo3 @ fov + fov @ Gvv3.T) / 12.0
         # - sum_{Q,h} Y2[h,i,Q] (~<Q||ah> + t2 <mn||ah>): with the ladder
         # operator, whose folded Fvv is taken out again
@@ -519,8 +528,11 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
             a = np.delete(r, h)
             cols = vm.pidx[np.minimum(a, h), np.maximum(a, h)]
             r1[:, a] -= np.where(a < h, 1.0, -1.0) * gemm(Y2[h], im.Wpp[:, cols])
-        r1 += 0.5 * (np.einsum('iehh->ie', Y2x) @ Fvv + einsum('iafh,fh->ia', Y2x, Fvv))
-        r1 += einsum('eiho,ehoa->ia', Dr4, Vx) + einsum('amgj,ijgm->ia', Dr4, oovo)
+        r1 += 0.5 * (np.einsum('iehh->ie', Y2x) @ Fvv
+                     + (Y2x.reshape(dm, nv * nv) @ Fvv.ravel()).reshape(no, nv))
+        r1 += gemm(np.ascontiguousarray(Dr4.transpose(1, 0, 2, 3)).reshape(no, nv * nv * no),
+                   Vx.reshape(nv * nv * no, nv))
+        r1 += einsum('amgj,ijgm->ia', Dr4, oovo)
         r1 -= einsum('imeo,oeam->ia', Y1u, Wov)
         X = gemm(Do4, im.goovo_mn.reshape(npo, dm)).reshape(npo, nv, no) / 6.0
         P = np.arange(npo)
@@ -528,7 +540,9 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
         np.subtract.at(r1, nn, X[P, :, mm])
         r1 += r1x.T
         r1 -= einsum('Paj,ijP->ia', Y1, im.Woooo_P)
-        r1 -= einsum('mafg,ifgm->ia', Y2x, Wov)
+        for m in range(no):         # - Y2x[m,a,f,g] Wov[i,f,g,m]
+            r1 -= gemm(Y2x[m].reshape(nv, nv * nv),
+                       np.ascontiguousarray(Wov[:, :, :, m]).reshape(no, nv * nv).T).T
 
         Xij += einsum('ie,ejQ->ijQ', l1, vovvQ) - einsum('imQ,jm->ijQ', l2P, Foo) \
             - einsum('io,joQ->ijQ', Goo, im.goovv_P)
@@ -576,84 +590,107 @@ def update_lams(im, l1, l2, L3p, T3p, out=None, level_shift=0.0):
 
 @dataclass
 class LambdaPlan:
-    '''Memory of the Lambda iterations (plan_memory).'''
+    '''Memory of the Lambda equations (plan_memory), in bytes of ordinary
+    memory.'''
     mem_mb: float = 2000.0      # batch buffers of the passes over the packed arrays
-    need: int = 0               # bytes of ordinary memory the plan takes
-    setup: int = 0              # of which while the intermediates are made
-    iteration: int = 0          # and in an iteration (the larger of the two is in ``need``)
+    need: int = 0               # all of it
+    setup: int = 0              # the o v^3-sized and smaller arrays while the intermediates are made
+    iteration: int = 0          # ... and in an iteration (the larger of the two is in ``need``)
+    kept: int = 0               # of which the operands that live through the iterations
+    diis: int = 0               # DIIS vectors that are not in the scratch file
 
 
-def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0):
+def plan_memory(nocc, nvir, itemsize=16, budget=None, mem_mb=2000.0, diis_space=0):
     '''LambdaPlan for ``budget`` bytes of ordinary memory beyond what the
     integral object holds (None: no limit).  With f = o v^3 elements of
-    ``itemsize`` bytes, P = o(o-1)/2 occupied pairs and K = 2 (o + v):
+    ``itemsize`` bytes, s = o^2 v^2 elements and r = 1 + o / v:
 
-      T3-sized  3 C(o,3) C(v,3): T3, l3 and the residual (DIIS vectors of
-                this size are in the scratch file)
+      T3-sized  3 C(o,3) C(v,3): T3, l3 and the residual; the DIIS vectors
+                of this size are in the scratch file unless they are small
+                (diis.INCORE_SIZE): then 2 ``diis_space`` more (``diis``)
       pp        v^4 / 4: the ladder operator, made in the dressed <ab||de>
-      kept      the operands of the passes: (o + v) / (2 v) f for pass 1,
-                K / (2 v) f for the drive products, f for <ej||bg>, o^4 v^2 / 12
-                + o^5 v / 12 for the contractions of T3, P v K for the other
-                drive operand
-      setup     while the intermediates are made, at most 3.5 f next to what
-                has been kept by then, and the transient of dressing the
-                pp operator (as an amplitude iteration)
-      iteration the batch buffers (two thirds of mem_mb, at least one
-                occupied pair: f); when they are gone, 2 f for the residuals
-                of rank 1 and 2
-      small     arrays of o^2 v^2 elements, C(o,3)^2 three times
-      overhead  of the threaded BLAS and the allocator (ccsdt_opt.overhead)
+      kept      the operands of the passes: r f / 2 for pass 1 (t2 and
+                W_vvvo), r f for the drive products, f for <ej||bg>, 7 s,
+                and the contractions of T3 with <ei||gh> and <ij||fg>,
+                o C(o,3) v^2 / 2 + C(o,3) o^2 v / 2 elements
+      setup     the largest of: the dressed <ie||bc> (f) next to the
+                transient of dressing the pp operator (as in an amplitude
+                iteration: at most 2 GB); f (2 + 1.5 r) when <ej||bg> is
+                made; the kept operands and the batch buffers (or the
+                occupied operator while it is made, 6 C(o,3) o^3 elements)
+      iteration the kept operands and 9 s next to the batch buffers (two
+                thirds of mem_mb, at least one occupied pair: f) or, after
+                the passes, next to 1.5 f for the residuals of rank 1 and 2
+      overhead  of the threaded BLAS and the allocator (ccsdt_opt.overhead),
+                and three C(o,3)^2 arrays
 
-    If that exceeds the budget the buffers shrink to one occupied pair;
-    MemoryError if it still does not fit (nothing of the Lambda equations
-    is put into a scratch file).'''
+    If that exceeds the budget the buffers shrink, down to one occupied
+    pair; MemoryError if it still does not fit (nothing of the Lambda
+    equations is put into a scratch file except the DIIS vectors).'''
+    from zccsdt.cc import diis
     o, v = nocc, nvir
     npo, nvp = o * (o - 1) // 2, v * (v - 1) // 2
     nto, nvt = o * (o - 1) * (o - 2) // 6, v * (v - 1) * (v - 2) // 6
     isz = itemsize
     f = o * v ** 3 * isz
-    K = 2 * (o + v)
+    s = o * o * v * v * isz
     t3 = nto * nvt * isz
     pp = nvp * nvp * isz
     gmq = o * nvp * (o + v) * isz
-    bdrv = K * o * nvp * isz
-    kept = gmq + bdrv + f + (nvp * nto * o + npo * nto * v + npo * v * K) * isz
-    small = 16 * o * o * v * v * isz + 3 * nto * nto * isz + ccsdt_opt.overhead()
-    dress = min(2_000_000_000, 2 * pp) + f // 2
+    bdrv = 2 * (o + v) * o * nvp * isz
+    kept = gmq + bdrv + f + (nvp * nto * o + npo * nto * v) * isz + 7 * s
+    fixed = 3 * nto * nto * isz + ccsdt_opt.overhead()
+    dress = min(2_000_000_000, 2 * pp)
+    occ = 6 * nto * o ** 3 * isz            # the occupied operator from the packed basis
+    plan = LambdaPlan(mem_mb=mem_mb, kept=kept)
+    plan.diis = 2 * diis_space * t3 if nto * nvt < diis.INCORE_SIZE else 0
 
     def bufs(mem):
         return int(min(max(mem * 1e6 * 2 / 3, f), max(npo, 1) * f))
 
-    def sizes(mem):
-        setup = max(int(3.5 * f), int(1.75 * f) + bufs(mem), dress) + kept // 2
-        iteration = kept + max(bufs(mem), 2 * f + npo * v * (o + v) * isz)
-        return setup, iteration
+    def fill(mem):
+        plan.mem_mb = mem
+        plan.setup = max(f + dress, gmq + bdrv + 2 * f, kept - 7 * s + max(bufs(mem), occ)) + 7 * s
+        plan.iteration = kept + max(bufs(mem), 3 * f // 2) + 9 * s
+        plan.need = fixed + 3 * t3 + plan.diis + pp + max(plan.setup, plan.iteration)
+        return budget is None or plan.need <= budget
 
-    plan = LambdaPlan(mem_mb=mem_mb)
-    for mem in (mem_mb, 1.5 * f / 1e6):
-        plan.mem_mb = min(mem, mem_mb)
-        plan.setup, plan.iteration = sizes(plan.mem_mb)
-        plan.need = small + 3 * t3 + pp + max(plan.setup, plan.iteration)
-        if budget is None or plan.need <= budget:
-            return plan
+    mem_min = 1.5 * f / 1e6
+    if fill(mem_mb):
+        return plan
+    lo, hi = min(mem_mb, mem_min), mem_mb
+    if fill(lo):
+        # the largest buffers that fit (the need grows with them)
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if fill(mid) else (lo, mid)
+        fill(lo)
+        return plan
     raise MemoryError('the Lambda equations of CCSDT with %d occupied and %d virtual spin '
                       'orbitals need about %.1f GB of memory (T3, Lambda_3 and its residual: '
-                      '%.1f GB; the pp ladder operator: %.1f GB); %.1f GB are available '
-                      '(max_memory, or what the node and the memory limit of the job leave)'
-                      % (o, v, plan.need / 1e9, 3 * t3 / 1e9, pp / 1e9, budget / 1e9))
+                      '%.1f GB; the pp ladder operator: %.1f GB; operands and buffers: %.1f GB); '
+                      '%.1f GB are available (max_memory, or what the node and the memory '
+                      'limit of the job leave)'
+                      % (o, v, plan.need / 1e9, 3 * t3 / 1e9, pp / 1e9,
+                         max(plan.setup, plan.iteration) / 1e9, budget / 1e9))
 
 
 def plan_for(eris, t1, dtype, opts):
     '''LambdaPlan of a run with the solver options ``opts`` (max_memory in
-    MB for the whole process; default: 80% of what is available).'''
+    MB for the whole process; default: 80% of what is available).  T3 is
+    taken to be in memory already, as the caller passes it.'''
     from zccsdt import memory
-    nocc, nvir = t1.shape
+    nocc, nvir = np.shape(t1)
     isz = np.dtype(dtype).itemsize
+    space = 0 if opts.incore_complete else opts.diis_space
     if opts.incore_complete:
-        return plan_memory(nocc, nvir, isz, None, opts.mem_mb)
+        return plan_memory(nocc, nvir, isz, None, opts.mem_mb, space)
     cached = ccsdt_opt.cached_bytes(eris)
+    om, vm = t3pack.triple_map(nocc), t3pack.triple_map(nvir)
     budget = memory.budget(opts.max_memory)
-    return plan_memory(nocc, nvir, isz, None if budget is None else budget + cached, opts.mem_mb)
+    if budget is not None:      # (what is there already: T3, kept arrays of the amplitude step)
+        budget += cached + om.ntri * vm.ntri * isz
+    return plan_memory(nocc, nvir, isz, budget, opts.mem_mb, space)
 
 
 # ------------------------------------------------------------------- solver
