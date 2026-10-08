@@ -697,11 +697,23 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
     return r1, r2, R
 
 
-def update_lams(im, l1, l2, L3p, T3p, out=None, level_shift=0.0):
+def update_lams(im, l1, l2, L3p, T3p, out=None, level_shift=0.0, sources=None):
     '''One Jacobi step l += (dL/dt) / D.  Returns (l1, l2, l3) with the new
-    l3 packed and flat, in ``out`` if given.'''
+    l3 packed and flat, in ``out`` if given.  ``sources``: constant terms of
+    the three residuals in their layouts, (s1[i,a], s2[(i<j), (a<b)], s3 as
+    l3; None for one that has none) - what _sources makes.'''
     om, vm = im.om, im.vm
     r1, r2, R = residuals(im, l1, l2, L3p, T3p, out=out)
+    if sources is not None:
+        s1, s2, s3 = sources
+        if s1 is not None:
+            r1 = r1 + s1
+        if s2 is not None:
+            r2 += s2
+        if s3 is not None and im.eng.size:
+            Rf = R.reshape(-1)
+            assert np.shares_memory(Rf, R)
+            Rf += s3
     eia = im.eia - level_shift
     eijab = eia[:, None, :, None] + eia[None, :, None, :]
     l1n = l1 + r1 / eia
@@ -933,7 +945,28 @@ class Result:
     blocks: bool = False        # l3 in the blocks of the symmetry labels, as T3 was given
 
 
-def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False):
+def _sources(im, eris, sources, blocks):
+    '''``sources`` = (s1[i,a], s2[i,j,a,b], s3 on the unique block [C(no,3),
+    C(nv,3)] in lexicographic order, any of them None) in the layouts of
+    the residuals of update_lams.'''
+    if sources is None:
+        return None
+    s1, s2, s3 = sources
+    om, vm, dtype = im.om, im.vm, im.dtype
+    if s1 is not None:
+        s1 = np.asarray(s1, dtype=dtype)
+    if s2 is not None:
+        mm, nn = om.pairs[:, 0], om.pairs[:, 1]
+        md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+        s2 = np.ascontiguousarray(np.asarray(s2)[mm[:, None], nn[:, None], md[None, :], ne[None, :]], dtype=dtype)
+    if s3 is not None:
+        if blocks:
+            s3 = blocked_l3(eris, s3)
+        s3 = np.ascontiguousarray(np.asarray(s3, dtype=dtype).ravel())
+    return s1, s2, s3
+
+
+def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False, sources=None):
     '''Solve the Lambda equations of CCSDT for converged amplitudes: t1, t2
     dense, t3 packed as solver.kernel returns it.  Jacobi steps with DIIS
     from conj(t) (or from l1, l2, l3), converged when the norm of the change
@@ -948,6 +981,13 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False)
     there, l3 returned on it; with ``blocks`` they are solved in the blocks
     (lambda_blk) and l3 (given and returned) has the layout of t3 -
     packed_l3() puts it on the unique block.
+
+    ``sources`` = (s1[i,a], s2[i,j,a,b], s3 packed [C(no,3), C(nv,3)] in
+    lexicographic order; None for one that is not there): constant terms
+    added to the residuals dL/dt_k - the derivatives of a correction to the
+    energy with respect to the amplitudes, those of (Q) from
+    zccsdt.cc.quadruples_grad.  s3 is one more array of the size of l3
+    (two with ``blocks``, while it is put into the blocks), not in the plan.
 
     T3, l3 and the residual are held in memory (plan_memory,
     plan_memory_blocks raise MemoryError if they do not fit in
@@ -966,6 +1006,7 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False)
         im = make_intermediates(eris, t1, t2, T3p, mem_mb=plan.mem_mb, blocks=blocks)
     setup = time.perf_counter() - t0
     size = im.eng.size
+    sources = _sources(im, eris, sources, blocks)
     l1 = np.conj(t1).astype(dtype) if l1 is None else np.asarray(l1, dtype=dtype)
     l2 = np.conj(t2).astype(dtype) if l2 is None else np.asarray(l2, dtype=dtype)
     # (overwritten by the DIIS extrapolation: not the caller's array)
@@ -982,7 +1023,7 @@ def kernel(eris, t1, t2, t3, opts=None, l1=None, l2=None, l3=None, blocks=False)
                 rbuf = np.empty(size, dtype=dtype)
             with timer('lam.iter'):
                 l1n, l2n, l3n = update_lams(im, l1, l2, l3, T3p, out=rbuf if size else None,
-                                            level_shift=opts.level_shift)
+                                            level_shift=opts.level_shift, sources=sources)
             with timer('lam.diis'):
                 first = adiis.xprev is None
                 if first:

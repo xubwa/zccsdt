@@ -817,6 +817,10 @@ def _frozen_stage(c):
             break
         f0, f1, G = item
         k = f1 - f0
+        xb = xk = None
+        if getattr(c, 'extra', None) is not None:
+            with timer('dens.frozen.extra'):
+                xb, xk = c.extra(G)
         if X is None or X.shape[0] != k:
             X = None
             X = np.empty((k, n, n, n), dtype=dtype)
@@ -916,11 +920,14 @@ def _frozen_stage(c):
         # the densities of the bare integrals: x on the bra index, y on the ket index
         bf[f0:f1, :o], bf[f0:f1, o:] = bi - ba @ t1.T, ba
         kf[f0:f1, :o], kf[f0:f1, o:] = ki, ka + ki @ t1
+        if xb is not None:
+            bf[f0:f1] += xb
+            kf[f0:f1] += xk
     return bf, kf
 
 
 def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=None, frozen=None,
-           blocks=False, plan_only=False):
+           blocks=False, plan_only=False, frozen_extra=None):
     '''The response density and the orbital gradient of CCSDT for the
     integrals ``eris`` (zccsdt.eris.ERIs, spin orbitals or spinors), the
     amplitudes t1[i,a], t2[i,j,a,b], t3 packed [C(o,3), C(v,3)] (as the
@@ -950,7 +957,13 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
     groups, and the l3 t3 part of the block abcd goes through the diagonal
     pair blocks of Gamma); ValueError if these integrals have no such
     blocks.  ``plan_only``: return the Plan (or raise its MemoryError)
-    without doing anything.'''
+    without doing anything.
+
+    ``frozen_extra``: a function of the integrals of a batch of frozen
+    spinors as their source gives them, G[f,v,u,w] with <fu||vw> =
+    G[f,v,u,w] - G[f,w,u,v], that returns two arrays [f, x] added to bf and
+    kf - the terms of another part of the energy, those of (Q) from
+    zccsdt.cc.quadruples_grad.FrozenTerms.'''
     nocc, nvir = t1.shape
     o, v, n = nocc, nvir, nocc + nvir
     if t3 is None or l3 is None:        # CCSD
@@ -1216,7 +1229,7 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
             bf, kf = _frozen_stage(SimpleNamespace(
                 o=o, v=v, om=om, vm=vm, dtype=dtype, t1=t1, source=source, plan=plan, route=route, nfz=nfz,
                 Y4=Y4, Dk=Dk, Z=Z, Rg=Rg, Dab=Dab, Dai=Dai, C3=C3, l2P=l2P, l2mn=l2mn, t2mn=t2mn,
-                t2pp=t2pp, l2pp=l2pp, Gam=Gam, T3p=T3p, L3p=L3p, triples=triples))
+                t2pp=t2pp, l2pp=l2pp, Gam=Gam, T3p=T3p, L3p=L3p, triples=triples, extra=frozen_extra))
     del Gam
 
     # ---- the gradient
@@ -1306,7 +1319,7 @@ class Relaxed:
 
 def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dropped_vir=None,
                  tol=1e-9, max_memory=None, verbose=None, plan=None, kramers=None, blocks=False,
-                 plan_only=False):
+                 plan_only=False, q=None):
     '''The relaxed one-particle density of CCSDT: kernel() for the density
     of t and lambda and the orbital gradient, the Z-vector equations of the
     SCF ``mf`` (zccsd.zvector.solve) and zvector.relaxed_rdm1.
@@ -1331,7 +1344,18 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     as kernel(); ``plan_only``: the Plan of kernel() for these arguments,
     or its MemoryError, and nothing else - given back as ``plan`` with the
     same arguments, what was prepared for the frozen spinors is not made
-    again (Plan.held).'''
+    again (Plan.held).
+
+    ``q``: for CCSDT(Q) - the Gradient of (Q) for these amplitudes
+    (zccsdt.cc.quadruples_grad.kernel), lambda being the solution of the
+    equations with its sources (lambda_opt.kernel(sources=(None, q.s2,
+    q.s3))).  The density then has the derivative of E(Q) with respect to
+    the orbital energies on its diagonal, the orbital gradient the terms of
+    E(Q) and of the sources (quadruples_grad.orbital_gradient, FrozenTerms
+    for the integrals with a frozen index), and the rotations among the
+    occupied and among the virtual spinors, on which E(Q) depends through
+    its denominators, follow from the Fock matrix staying diagonal like
+    those between frozen and active ones (zvector._relax).'''
     from pyscf.lib import logger
     from zccsdt.zccsd import zvector
     log = logger.new_logger(mf, verbose)
@@ -1372,9 +1396,15 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
             source = FrozenIntegrals(mf, cact, cp, real, max_memory, components=True)
             source.kramers = U
             del cp, cact
+    qdens = extra = None
+    if q is not None and not plan_only:
+        from zccsdt.cc import quadruples_grad
+        qdens = quadruples_grad.dense_blocks(q, o)
+        if held_out is not None:
+            extra = quadruples_grad.FrozenTerms(q, o, real, qdens)
     res = kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=max_memory, plan=plan,
                  frozen=None if held_out is None else (nf + nd, source), blocks=blocks,
-                 plan_only=plan_only)
+                 plan_only=plan_only, frozen_extra=extra)
     if plan_only:
         if held_out is not None:
             res.held = (fock, source, rot, vref)
@@ -1384,6 +1414,22 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
     dm1 = res.d1.T
     dm1 = 0.5 * (dm1 + dm1.conj().T)
     mo_e = np.asarray(eris.mo_energy, dtype=np.float64)
+    Ga = None
+    if q is not None:
+        # E(Q): the orbital energies in the density, the gradient among the active spinors
+        with timer('dens.q'):
+            dm1 = dm1 + np.diag(q.de)
+            T3 = ccsdt_opt.packed_t3(eris, t3) if blocks else _packed3(eris, t3, np.result_type(t1, t2))
+            Ga = quadruples_grad.orbital_gradient(eris, q, np.asarray(t1), np.asarray(t2), T3, res.gnh, qdens)
+            del T3, qdens, extra
+    if held_out is None and q is not None:
+        n = mo_coeff.shape[1]
+        none = np.zeros(0, dtype=int)
+        with timer('dens.zvector'):
+            veff = zvector.scf_veff(mf, max_memory)
+            relaxed, z = zvector._relax(mf, mf, mo_coeff, mo_e, o, Ga, dm1, (np.arange(o), none, np.arange(o, n), none),
+                                        True, zvector.DEGENERATE, tol, verbose, veff)
+        return Relaxed(relaxed, dm1, z, mo_coeff, mo_e, o, True, res, Ga)
     if held_out is None:
         with timer('dens.zvector'):
             veff = zvector.scf_veff(mf, max_memory)
@@ -1429,13 +1475,16 @@ def relaxed_rdm1(mf, eris, t1, t2, t3, l1, l2, l3, mo_coeff, frozen_occ=None, dr
         B, K = frozen_terms(res, np.asarray(t1), fock_of)
         V = fock_mo(C @ (full - np.diag(occ)) @ C.conj().T)
         G = np.zeros((na, na), dtype=np.complex128)
-        G[np.ix_(vir, act)] = 0.5 * res.gnh
-        G[np.ix_(act, vir)] = -0.5 * res.gnh.conj().T
+        if Ga is None:
+            G[np.ix_(vir, act)] = 0.5 * res.gnh
+            G[np.ix_(act, vir)] = -0.5 * res.gnh.conj().T
+        else:
+            G[np.ix_(both, both)] = Ga
         Gf = 0.5 * (B + K.conj()) + (occ[both][None, :] - occ[held][:, None]) * V[np.ix_(held, both)]
         G[np.ix_(held, both)], G[np.ix_(both, held)] = Gf, -Gf.conj().T
         Gf = V[np.ix_(fvir, frozen)]
         G[np.ix_(fvir, frozen)], G[np.ix_(frozen, fvir)] = Gf, -Gf.conj().T
-        relaxed, z = zvector._relax(mf, mf, C, mo_e, nf + o, G, full, (act, frozen, vir, fvir), False,
+        relaxed, z = zvector._relax(mf, mf, C, mo_e, nf + o, G, full, (act, frozen, vir, fvir), q is not None,
                                     zvector.DEGENERATE, tol, verbose, veff)
     return Relaxed(relaxed, full, z, C, mo_e, nf + o, True, res, G)
 
