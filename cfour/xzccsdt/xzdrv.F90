@@ -15,9 +15,18 @@ subroutine xzdrv(w, maxcor)
   integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2)
   logical :: usefile, converged
   real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall
+  character(len=32) :: arg
+  integer :: larg
+  integer(8) :: nmax
 
   twall = omp_get_wtime()
   call xzinit(loc(w(1)), maxcor)
+  ! (a test hook: XZ_MAXCOR words of the work array are used)
+  call get_environment_variable('XZ_MAXCOR', arg, larg)
+  if (larg > 0) then
+    read(arg, *) nmax
+    xzsize = min(xzsize, nmax)
+  end if
   call xzjob()
   call xzsizes()
   call xz_blas_info(nthr, ilp64)

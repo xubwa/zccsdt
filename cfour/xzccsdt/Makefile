@@ -27,7 +27,7 @@ LIBS    := -L$(CFOUR)/lib -llibr $(BLAS) -lrt
 # the C kernels that the program calls
 KERNELS := ccsdt_t3 t3pack tnpack
 MODS    := xzkern xzmem xzdata xzdiis
-SRCS    := xzmaps xzread xzplan xzdrv xzcc_z
+SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
 INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzdiisg.inc xzcc.inc xzq.inc
 
 OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil $(KERNELS)))
