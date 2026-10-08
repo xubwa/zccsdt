@@ -233,7 +233,9 @@ def test_gradient_among_occupied_and_among_virtual(name):
     - the part without the densities of e follows from the sources of the
       two equations, s = de/dt with t and q = de/dlambda with lambda: L and
       zeta . W do not change when t, lambda, zeta, lambda' and the integrals
-      are rotated together.'''
+      are rotated together;
+    - with these two blocks and t1, the tables of the dressed basis give
+      the gradient between occupied and virtual spin orbitals.'''
     mol, make_scf, z = _molecule(name, True)
     mf, C = make_scf(0.0)
     rel = QL.relaxed_rdm1(mf, C)
@@ -256,3 +258,12 @@ def test_gradient_among_occupied_and_among_virtual(name):
         assert abs(lag[s, s] - 0.5 * (nh - nh.conj().T)[s, s]).max() < 1e-11
         size = [max(size[0], abs(want[s, s]).max()), max(size[1], abs(lag[s, s]).max())]
     assert size[0] > 1e-9 and size[1] > 1e-8
+    # between occupied and virtual spin orbitals: the table of the dressed basis for lambda', its
+    # derivative along zeta for lambda, and the two blocks above with t1 (section 11.2, identity 2)
+    t, t1 = rel.terms, rel.amps[0]
+    h = fock - np.einsum('piqi->pq', g[:, :o, :, :o])
+    bare = -LR.one_index(h, g, t.d1, t.d2)[:o, o:].T
+    table = LR.orbital_gradient(fock, g, o, rel.amps, t.lams, dressed=True) + QL.directional(
+        lambda a: [LR.orbital_gradient(fock, g, o, a, rel.lams, dressed=True)], rel.amps, t.zeta)[0]
+    full = table + es('ja,ji->ai', t1, nh[:o, :o]) - es('ib,ab->ai', t1, nh[o:, o:])
+    assert abs(bare - full).max() < 1e-13 and abs(bare - table).max() > 1e-9
