@@ -35,7 +35,8 @@ def hbr():
     assert cc.converged and cc.converged_lambda
     eris = cc.ao2mo()
     RUN['cc'] = cc
-    return eris, cc.t2, ccsdt_opt.packed_t3(eris, cc.t3), cc.l2, np.asarray(cc.l3)
+    # (cc.t3 and cc.l3: the blocks of the labels, as the iterations and the Lambda equations ran)
+    return eris, cc.t2, ccsdt_opt.packed_t3(eris, cc.t3), cc.l2, ccsdt_opt.packed_t3(eris, cc.l3)
 
 
 def test_lambda_has_the_labels(hbr):

@@ -975,7 +975,7 @@ class GCCSDT(UCCSDT):
     real_spinors = True
     symmetry = True         # use the symmetry labels of the spinors where the integrals have them
     _block_iterations = True    # ... in the iterations too: T3 in blocks, the spinors in the order of the labels
-    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'rdm1_basis',
+    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis',
                               'e_ql', 'e_ql5', 'e_tot_ql'}
 
     def _axial(self):
@@ -1115,20 +1115,64 @@ class GCCSDT(UCCSDT):
             eris.__dict__.pop('_buffers', None)
         return eris, t3
 
+    def _packed_l3(self):
+        '''self.l3 on the packed block in lexicographic order, for the codes
+        that take it there: self.l3 has the layout of self.t3 - the blocks
+        of the symmetry labels if the iterations ran in them -, and its
+        blocks are put in their places once (kept until self.l3 is another
+        array).'''
+        from math import comb
+        from zccsdt.cc import lambda_opt
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        l3 = self.l3
+        if not getattr(eris, 'use_labels', False):
+            return l3
+        no, nv = eris.nocc, eris.nmo - eris.nocc
+        if np.size(l3) == comb(no, 3) * comb(nv, 3) != np.size(self.t3):
+            return l3               # (given on the packed block)
+        kept = getattr(self, '_l3_packed', None)
+        if kept is None or kept[0] is not l3:
+            kept = self._l3_packed = (l3, lambda_opt.packed_l3(eris, l3).ravel())
+        return kept[1]
+
     def solve_lambda(self):
         '''The Lambda equations of CCSDT for the converged amplitudes
-        (zccsdt.cc.lambda_opt): l1, l2 and l3 on the packed block, kept as
-        self.l1, self.l2, self.l3.'''
+        (zccsdt.cc.lambda_opt), kept as self.l1, self.l2, self.l3: l1 and l2
+        dense, l3 in the layout of self.t3 - the packed block [i<j<k, a<b<c]
+        or, where the iterations ran in the blocks of the symmetry labels,
+        these blocks (zccsdt.cc.lambda_opt.packed_l3 puts them on the packed
+        block).  With ``symmetry`` the equations are solved in the blocks
+        too (zccsdt.cc.lambda_blk); on the packed block otherwise, or if the
+        blocks do not fit in ``max_memory``.'''
         from zccsdt.cc import lambda_opt, solver
         if self.t3 is None:
             raise RuntimeError('%s.solve_lambda(): no amplitudes (kernel() first)' % self.__class__.__name__)
-        eris, t3 = self._dense_view()
-        res = lambda_opt.kernel(eris, self.t1, self.t2, t3, solver.Options(
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        opts = solver.Options(
             conv_tol_normt=self._conv_tol_normt(), max_cycle=self.max_cycle, diis_space=self.diis_space,
-            incore_complete=self.incore_complete, max_memory=self.max_memory))
+            incore_complete=self.incore_complete, max_memory=self.max_memory)
+        labels = bool(getattr(eris, 'use_labels', False))
+        plan = None
+        if self.symmetry and labels:
+            dtype = np.result_type(self.t1, self.t2, self.t3, eris.oovv, eris.fock)
+            if lambda_opt.block_engine(eris, dtype) is not None:
+                try:
+                    plan = lambda_opt.plan_for(eris, self.t1, dtype, opts, blocks=True)
+                except MemoryError:     # (the packed block then, which says what it needs)
+                    pass
+        if plan is not None:
+            opts.plan = plan
+            res = lambda_opt.kernel(eris, self.t1, self.t2, self.t3, opts, blocks=True)
+            l3 = res.l3
+        else:
+            dense, t3 = self._dense_view()
+            res = lambda_opt.kernel(dense, self.t1, self.t2, t3, opts)
+            # (in the layout of self.t3)
+            l3 = lambda_opt.blocked_l3(eris, res.l3) if labels else res.l3
         if not res.converged:
             logger.warn(self, 'the Lambda equations of CCSDT did not converge in %d cycles', res.ncycle)
-        self.l1, self.l2, self.l3, self.converged_lambda = res.l1, res.l2, res.l3, bool(res.converged)
+        self.l1, self.l2, self.l3, self.converged_lambda = res.l1, res.l2, l3, bool(res.converged)
+        self.lambda_blocks = bool(res.blocks)
         return self.l1, self.l2, self.l3
 
     def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-11):
@@ -1153,7 +1197,7 @@ class GCCSDT(UCCSDT):
         axial = self._axial()
         Cs = np.asarray(self.mo_coeff) if axial is None else axial
         rel = density_opt.relaxed_rdm1(
-            self._scf, eris, self.t1, self.t2, t3, self.l1, self.l2, self.l3, Cs[:, np.concatenate((o, v))],
+            self._scf, eris, self.t1, self.t2, t3, self.l1, self.l2, self._packed_l3(), Cs[:, np.concatenate((o, v))],
             frozen_occ=Cs[:, fo] if len(fo) else None, dropped_vir=Cs[:, fv] if len(fv) else None,
             tol=tol, max_memory=self.max_memory)
         dm = rel.relaxed if relaxed else rel.unrelaxed
@@ -1179,7 +1223,8 @@ class GCCSDT(UCCSDT):
         if no < 4 or nv < 4:
             self.e_ql5 = self.e_ql = 0.0
             return 0.0
-        isz = np.dtype(np.result_type(self.t2, t3, self.l2, self.l3, eris.oovv)).itemsize
+        l3 = self._packed_l3()
+        isz = np.dtype(np.result_type(self.t2, t3, self.l2, l3, eris.oovv)).itemsize
         budget = memory.budget(self.max_memory)
         spl = None
         if self.symmetry and quadruples_lambda_sym.available(eris):
@@ -1188,10 +1233,10 @@ class GCCSDT(UCCSDT):
             except MemoryError:
                 pass
         if spl is not None:
-            e5, e = quadruples_lambda_sym.kernel(eris, self.t2, t3, self.l2, self.l3, plan_=spl)
+            e5, e = quadruples_lambda_sym.kernel(eris, self.t2, t3, self.l2, l3, plan_=spl)
         else:
             pl = quadruples_lambda.plan(no, nv, isz, budget)
-            e5, e = quadruples_lambda.kernel(eris, self.t2, t3, self.l2, self.l3, plan_=pl)
+            e5, e = quadruples_lambda.kernel(eris, self.t2, t3, self.l2, l3, plan_=pl)
         self.e_ql5, self.e_ql = float(e5), float(e)
         self.e_tot_ql = self.e_tot + self.e_ql
         return self.e_ql

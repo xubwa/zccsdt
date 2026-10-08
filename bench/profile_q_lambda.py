@@ -74,7 +74,8 @@ def main():
     eris = cc._eris
     t2, t3 = cc.t2, ccsdt_opt.packed_t3(eris, cc.t3)
     ccsdt_opt.release_cached(eris)
-    l2, l3 = (cc.l2, np.asarray(cc.l3)) if solved else (np.conj(t2), np.conj(t3))
+    # (cc.l3 has the layout of cc.t3: the blocks of the labels where the iterations ran in them)
+    l2, l3 = (cc.l2, np.asarray(cc._packed_l3())) if solved else (np.conj(t2), np.conj(t3))
     if getattr(eris, 'labels', None) is None and kind == 'ghf':
         eris = copy.copy(eris)
         eris.labels, eris.modulus = spin_labels(cc, eris), 0
