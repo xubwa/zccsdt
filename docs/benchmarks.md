@@ -3389,10 +3389,20 @@ numbers that matter here:
 | Lambda iteration, HBr / cc-pVTZ-DK, X2C | 8 + 78 | 1.90 s | 2.19 s | 1.15 |
 | densities, orbital gradient, Z-vector; H2O, spin orbitals | 10 + 106 | CCSDT iteration 4.10 s | 4.43 s | 1.08 |
 | the same, X2C | 10 + 106 | 13.42 s | 13.37 s | 1.00 |
+| the same with frozen spinors: H2O, spin orbitals, 2 frozen, 20 dropped | 8 + 86 | 1.15 s | 2.26 s (was 8.04) | 1.96 |
+| H2O, X2C, 2 frozen, 20 dropped | 8 + 86 | 3.31 s | 4.90 s (was 15.64) | 1.48 |
+| HI / dyall.v2z, X2C, 36 frozen, 116 dropped | 18 + 86 | 48.6 s | 64.0 s (was 717.9) | 1.32 |
 | (Q)_Lambda, HBr / cc-pVTZ-DK, dense | 8 + 78 | (Q) 4.47 s | 6.11 s | 1.37 |
 | (Q)_Lambda, the same in sectors | 8 + 78 | (Q) 1.23 s | 1.56 s | 1.27 |
 | (Q)_Lambda, H2O / cc-pVTZ, dense | 10 + 106 | (Q) 44.1 s | 62.3 s | 1.41 |
 | (Q)_Lambda, the same in sectors (2 m_s) | 10 + 106 | (Q) 18.4 s | 24.7 s | 1.35 |
+
+(The three lines with frozen spinors: before and after in one job each,
+31740284, 31740285 and 31740283, on nodes that carried other load; what
+changed is in docs/lambda.md, section 10: one transformation of the
+integrals with a frozen index, GEMMs on batches, the block `abcd` through a
+two-particle density of l3 and t3 that does not grow with the number of
+frozen spinors, Kramers pairs of the frozen spinors.)
 
 These are ratios to zccsdt's own steps on a shared node (c105), not
 comparisons with another program: no other code was timed on these (MRCC

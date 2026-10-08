@@ -269,8 +269,8 @@ e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), 
   operator is the derivative of the CCSDT energy: the densities of t and
   Lambda, the orbital gradient and the Z-vector equations for the response of
   the spinors (`zccsdt.cc.density_opt`), with frozen occupied and left-out
-  virtual spinors.  All of it costs about one CCSDT iteration when every
-  spinor is active (more with frozen ones, docs/lambda.md section 10).
+  virtual spinors.  All of it costs one to two CCSDT iterations (HI with 36 frozen and 116
+  left-out spinors: 1.3; docs/lambda.md section 10).
   `relaxed=False` gives the density of t and Lambda at fixed spinors;
   without `ao_repr` the matrix is in the spinors `mycc.rdm1_basis`.  It
   needs the SCF object (not integrals that were given) and a tightly
