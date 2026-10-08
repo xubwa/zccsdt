@@ -15,6 +15,7 @@ amplitudes; nothing here is fast.
 | `tests/fockspace.py` (`Left`) | the exact left-hand state in a small Fock space |
 | `tests/test_lambda_terms.py`, `tests/test_lambda_ref.py` | the checks listed in section 7 |
 | `bench/lambda_ccsdt.py`, `bench/slurm_lambda_refs.sh` | molecules, and the reference runs of MRCC and CFOUR |
+| `src/zccsdt/cc/lambda_opt.py`, `csrc/lambda_t3.c` | the Lambda equations on packed Lambda_3 (section 9); `tests/test_lambda_opt.py`, `bench/profile_lambda_ccsdt.py` |
 
 ## 1. Definitions and conventions
 
@@ -328,5 +329,224 @@ Reference implementation (`tests/test_lambda_ref.py`, 25 s):
   carry one frozen index (as `zccsd.orbgrad_frozen` does for CCSD).
 - Non-canonical or non-Hartree-Fock orbitals in (Q)_Lambda (terms with
   f[i,a] on the left).
-- Any factorization for packed amplitudes: the tables are flat lists of
-  terms, each a product of at most four tensors.
+- Any factorization for packed amplitudes in the dense reference: its
+  tables are flat lists of terms, each a product of at most four tensors.
+  The Lambda equations on packed Lambda_3 are section 9; densities and
+  the orbital gradient are dense still.
+
+## 9. The equations on packed Lambda_3 (`zccsdt.cc.lambda_opt`)
+
+`lambda_opt.kernel(eris, t1, t2, t3, opts)` solves the Lambda equations with
+l1 and l2 dense and l3 on the unique block `[i<j<k, a<b<c]`, as
+`ccsdt_opt` holds T3 (`docs/factorization.md`): Jacobi steps with DIIS (the
+T3-sized vectors in the scratch file) from conj(t), converged on the norm
+of the change.  No array of o^3 v^3 or v^4 elements is formed.  Notation of
+`docs/factorization.md`: P, Q occupied and virtual pairs, I, A triples,
+`L[P, d, m, Q]` the half-expanded l3 (`l3[m, P, d, Q]`), `Lv[Q, I, c]` the
+one gathered for the ladder.
+
+### 9.1 What is made once
+
+One amplitude iteration's worth of intermediates and two contractions of T3
+(`make_intermediates`, a quarter to a third of a Lambda iteration):
+
+| Intermediate | Is | Elements |
+|---|---|---|
+| `Fvv`, `Foo`, `Wov`, `Woooo` | `Feff_vv`, `Feff_oo`, `Weff_ovvo`, `Weff_oooo` of the T3 equation | o^2 v^2 |
+| `Wpp` | its pp ladder operator `~<ab\|\|de> + sum_{m<n} t2[mn,ab] <mn\|\|de>` with `1/2 A[Fvv]` folded in, made in the dressed packed `<ab\|\|de>` | v^4 / 4 |
+| `O6T` | the transpose of its occupied operator (hh ladder and Foo) | C(o,3)^2 |
+| `W_vvvo[Q, e, i]` | the drive intermediate of the T3 equation with its T3 part: the matrix element `<ab\|\|ei>` of Hbar | o v^3 / 2 |
+| `W_vooo[j, P, e]` | `<ej\|\|mn>` of Hbar: `f[j,f] t2[mn,ef] + ~<ej\|\|mn> + sum_{f<g} ~<ej\|\|fg> t2[mn,fg] + P(mn) ~<jo\|\|fm> t2[no,ef] + sum_{o,f<g} <jo\|\|fg> t3[mno,efg]` (the last from pass 1 over T3) | o^3 v / 2 |
+| `Xq[P, I, e]` | `sum_{f<g} <ij\|\|fg> t3[I, e, fg]` | o^5 v / 12 |
+| `X2[Q, I, i]` | `A(ef) sum_{g<h} ~<ei\|\|gh> t3[I, f, gh]`, Q = (e<f) | o^4 v^2 / 12 |
+| `Vx[g, e, j, b]` | `~<ej\|\|bg>` | o v^3 |
+
+All integrals are the T1-dressed ones (`~` where a bare one could be meant).
+`W_vvvo` with `t2` is the operand of pass 1 (`GmQ`), `W_vooo` with `t2` the
+other one (`GPd`); `~<ei||Q>` and `<kn||Q>` are rows of the drive operand
+`Bdrv`, `<P||cf>` and `<P||cm>` columns of `Adrv`.
+
+### 9.2 A Lambda iteration
+
+Three passes over the packed l3, as an amplitude iteration has them over T3,
+and one product of the two packed arrays:
+
+1. **Pass 1** (`DenseL3.pass1`): batches of occupied pairs of the
+   half-expanded l3, and of T3 next to them.
+   - Two stacked GEMMs, those of pass 1 of the amplitude equations:
+     over (P, d), `Y2[f, i, Q] = sum_{m<n, e} t2[mn, e f] l3[i mn, e Q]` and
+     `sum W_vooo[j, P, e] L[P, e, i, Q]`; over (m, Q),
+     `Y1[P, a, n] = sum_{m, e<f} l3[m P, a ef] t2[mn, ef]` and
+     `sum L[P, a, m, Q] W_vvvo[Q, b, m]`.
+   - One GEMM per occupied pair for the density
+     `Dr[(a,i), (g,o)] = sum_{m<n, e<f} l3[i mn, a ef] t3[o mn, g ef]`
+     (o^4 v^4 / 4: the cost of the ring), and a matrix-vector product for
+     `D1[g, o] = sum_{P,Q} l2[P, Q] T[P, g, o, Q]`.
+2. **Gram matrix** `G[I, J] = sum_A l3[I, A] t3[J, A]`, one GEMM of the packed
+   arrays (C(o,3)^2 C(v,3)); `sum_m` of its elements gives
+   `l3[ijm,efg] t3[nom,efg]` on pairs and `Goo3[i,o] = l3[imn,efg]
+   t3[omn,efg]`.  `Gvv3[a,g] = l3[mno,aef] t3[mno,gef]` is a trace of `Dr`.
+3. **Pass 2** (`DenseL3.pass2`): the half-expanded residual of a batch,
+   `Z[P, (a,i), Q] = WL L[P] + U V[P] - Adrv Bdrv`, reduced once
+   (`P(i/P) P(a/Q)`): ring, the two outer products, four drive products.
+4. **Ladder pass** (`DenseL3.ladder`): `Wpp^T Lv` reduced with `P(c/Q)`, and
+   on the same gathered batch the products of `Lv` with `Xq` and `X2`.
+5. **hh**: `R += O6T l3` on the packed arrays.
+6. The residuals of rank 1 and 2 from the small arrays; `l += R / D`.
+
+`LAMBDA[3]`, term by term (numbering of the table, from 1):
+
+| Terms | | Evaluated as |
+|---|---|---|
+| 1 | `l1[i,a] <jk\|\|bc>` | pass 2, outer product `Z[P,(a,i),Q] += l1[i,a] <P\|\|Q>` |
+| 2 | `l2[ij,ab] f[k,c]` | pass 2, outer product `f[i,a] l2[P,Q]` |
+| 3 | `l2[ij,ae] <ek\|\|bc>` | pass 2, drive: `Adrv = l2[P,e,a]`, `Bdrv = ~<ek\|\|Q>` |
+| 4 | `l2[im,ab] <jk\|\|cm>` | pass 2, drive: `Adrv = <P\|\|cm>`, `Bdrv = l2[m,i,Q]` |
+| 5, 6 | `l3 Fvv` | folded into the ladder operator, as in the T3 equation |
+| 7, 8 | `l3[ijk,aef] W(ef,bc)` | ladder pass with `Wpp^T`: the same operator, GEMM with the transposed flag (no second copy) |
+| 9, 10, 14, 15 | `l3 Foo`, `l3[imn,abc] Woooo[jk,mn]` | `O6T`, the transposed occupied operator |
+| 11, 12 | `l3[ijm,abe] Wov[k,e,c,m]` | pass 2, ring with `WL = WringT^T` |
+| 13 | `-(l3 t2)[ij,a,n] <kn\|\|bc>` | pass 2, drive: `Adrv = Y1[P,a,n]`, `Bdrv = <kn\|\|Q>` |
+| 16 | `-(l3 t2)[i,ab,f] <jk\|\|cf>` | pass 2, drive: `Adrv = <P\|\|cf>`, `Bdrv = Y2[f,i,Q]` |
+
+The operators of the terms linear in l3 are those of the T3 equation,
+transposed - checked term by term, not assumed.  The drive products are not
+the transposes of the drive terms of T3 (`t2 W_vvvo`, `W_vooo t2`): two have
+l2 with bare-shaped integrals, two the intermediates `Y1`, `Y2` of l3 with
+`<mn||ef>`; the drive GEMM has K = 2 (o + v) instead of o + v.
+
+The terms with l3 of `LAMBDA[2]` (19) and `LAMBDA[1]` (17), by what they
+take of l3:
+
+| Of l3 | `LAMBDA[2]` | `LAMBDA[1]` |
+|---|---|---|
+| pass 1 with `W_vvvo` (5 terms: `l3[ijm,aef] <ef\|\|bm>`-bar) | `P(ab)` of it | (l2 with `W_vvvo`) |
+| pass 1 with `W_vooo` (5 terms: `l3[imn,abe] <ej\|\|mn>`-bar) | `P(ij)` of it | (l2 with `W_vooo`) |
+| `Y1[P,a,n]` | with `~<en\|\|ab>`; with `<jo\|\|bm>` (`P(ij) P(ab)`) | with `Wov` (2 terms); with `Woooo` (2 terms) |
+| `Y2[f,i,Q]` | with `<ij\|\|fm>`; with `~<ej\|\|bg>` (`P(ij) P(ab)`, o^2 v^4) | with the columns of the ladder operator (2 terms, `pair_matvec`); with `Wov` (2 terms); with `t2` into the density `Dov` |
+| `Dr` | with `<jo\|\|bg>` (`P(ij) P(ab)`) | with `~<eo\|\|ah>`; with `<ij\|\|gm>` |
+| `G` (Gram) | `l3 t3` on pairs with `<no\|\|ab>`; `Goo3` with `<jo\|\|ab>` | the same with `<jo\|\|am>`; `Goo3` with f and with `<ij\|\|am>` |
+| `Gvv3` | with `<ij\|\|bg>` | with f and with `~<ei\|\|ah>` |
+| ladder pass | `Xq Lv` | `Lv X2` |
+
+and of l2 with T3: `D1` (one term of `LAMBDA[1]`, with `<io||ag>`), and the
+T3 parts of `W_vvvo`, `W_vooo`.  `Goo3`, `Gvv3`, `D1` enter next to the
+CCSD-like `l2 t2` contractions with the same integrals.  The terms of l1
+and l2 alone are the CCSD Lambda equations with the dressed integrals and
+`Fvv`, `Foo`, `Wov`, `Woooo`, `Wpp` (the folded `Fvv` taken out where l2 or
+`Y2` meets the ladder operator).
+
+Cost of an iteration, against the amplitude iteration: the same ring
+(o^4 v^4 / 4), pp ladder (o^3 v^5 / 24) and occupied operator; the drive
+GEMM twice; and **one more product of the size of the ring**, the density
+`Dr` of l3 with T3, which `LAMBDA[2]` needs with four indices free
+(`1/4 l3[imn,aef] <jo||bg> t3[mno,efg]`) and which has no cheaper order of
+contraction.  That, the second gather in pass 1 and the Gram matrix are
+what a Lambda iteration costs more than an amplitude iteration.
+
+### 9.3 Memory
+
+`lambda_opt.plan_memory` (`LambdaPlan`; `Result.plan`), with f = o v^3
+elements, s = o^2 v^2, r = 1 + o / v:
+
+| Part | Elements | |
+|---|---|---|
+| T3, l3, the residual | 3 C(o,3) C(v,3) | in memory, all three |
+| pp operator | v^4 / 4 | next to the bare one of the integral object |
+| kept operands | f (1 + 1.5 r) + 9 s + o^4 v^2 / 12 | `Vx`, `Bdrv`, `GmQ`, small ones, `X2` |
+| setup | at most f (2 + 1.5 r), or the dressing of the pp operator | the dressed `<ie\|\|bc>` goes when `Vx` is made |
+| iteration | the batch buffers (2/3 `mem_mb`, at least f), or 1.5 f after the passes; 8 s | |
+| DIIS | in the scratch file (in memory below `diis.INCORE_SIZE` elements: counted) | |
+
+With `max_memory` the buffers shrink to what is left (bisection: the
+largest that fit), down to one occupied pair; below that `MemoryError`.
+**There is no scratch fallback** for T3, l3, the residual or the pp
+operator in this version (the amplitude solver has one).
+
+### 9.4 Validation (`tests/test_lambda_opt.py`, 30 s)
+
+- Random complex and real amplitudes and Lambda that solve nothing, random
+  Hermitian integrals with a full Fock matrix, 4+5 to 5+6 spin orbitals:
+  each of the six groups of terms of the Lambda_3 residual (the rows of the
+  table above), the three residuals, their parts by the rank of Lambda, and
+  a Jacobi step equal the dense evaluation of the tables to 1e-12 of their
+  size (1e-15 found) - with the C kernels and with the numpy forms, with all
+  occupied pairs in a batch and with one.
+- Converged Lambda against `lambda_ref`: the complex model of section 7
+  (1e-10), H2O / STO-3G with real and with
+  SU(2)-mixed complex spin orbitals (1e-9 asked, 2e-12 found; real orbitals
+  give real Lambda), X2C spinors of HBr / cc-pVDZ-DK turned off the axis,
+  28 frozen, 12 virtual spinors (1e-9).
+- H2O / STO-3G, real and complex: `trace(z d1)` with the densities of
+  `lambda_ref.densities` and this Lambda equals the four-point finite-field
+  derivative of the CCSDT energy at fixed orbitals to 2e-10.
+- Memory: what the intermediates and an iteration allocate (tracemalloc)
+  is within the plan and above 0.8 of it, stage by stage, for 4+36 and 6+30
+  spin orbitals with the largest buffers, the smallest, and a size that
+  leaves a short last batch.
+- No triples (two occupied or two virtual spin orbitals); the kernels of
+  `csrc/lambda_t3.c` against their numpy forms; integrals and amplitudes
+  are not modified.
+
+### 9.5 Timing
+
+`bench/profile_lambda_ccsdt.py`: amplitude iterations and Lambda iterations
+in one process (three of each after a warm-up iteration), 8 cores of a
+Xeon Gold 6248R, MKL, batch buffers 2000 MB; job 31737372 on c105 (a node
+that other jobs were using: the first run of the same script, job 31737112
+on other cores of it, gave the amplitude iterations within 2% and ratios of
+1.26, 1.28 and 1.17 before the outer products were put on the ring GEMM).
+Seconds per iteration:
+
+| | H2O / cc-pVTZ, spin orbitals of RHF | H2O / cc-pVTZ, X2C | HBr / cc-pVTZ-DK, X2C, 28 frozen |
+|---|---|---|---|
+| occupied + virtual, arithmetic | 10 + 106, real | 10 + 106, complex | 8 + 78, complex |
+| amplitude iteration | 4.18 | 13.74 | 1.90 |
+| **Lambda iteration** | **5.05** | **17.28** | **2.19** |
+| **ratio** | **1.21** | **1.26** | **1.15** |
+| intermediates, once | 1.65 | 4.57 | 0.82 |
+| cores busy in a Lambda iteration | 7.6 | 7.7 | 7.6 |
+| Lambda: pass 1 | 1.69 | 5.81 | 0.72 |
+| - of it the density `Dr` | 1.12 | 3.94 | 0.46 |
+| - the two stacked GEMMs | 0.30 | 1.41 | 0.16 |
+| - gathers (l3 and T3) | 0.25 | 0.44 | 0.09 |
+| Lambda: pass 2 | 1.53 | 5.14 | 0.72 |
+| - ring GEMM (with the outer products) | 1.06 | 3.89 | 0.52 |
+| - drive GEMM | 0.23 | 0.86 | 0.12 |
+| - gather, reduction | 0.23 | 0.38 | 0.07 |
+| Lambda: ladder pass | 1.42 | 5.31 | 0.55 |
+| Lambda: residuals of rank 1 and 2 | 0.24 | 0.61 | 0.14 |
+| Lambda: hh, Gram matrix, update | 0.04 | 0.16 | 0.02 |
+| Lambda: DIIS | 0.11 | 0.21 | 0.02 |
+| amplitudes: pass 1 | 0.52 | 1.83 | 0.24 |
+| amplitudes: pass 2 | 1.48 | 5.00 | 0.70 |
+| amplitudes: pp ladder | 1.37 | 5.13 | 0.53 |
+| amplitudes: dressing, intermediates, CCSD part | 0.61 | 1.37 | 0.36 |
+| peak anonymous memory above the start of Lambda | 2.59 GB | 3.86 GB | 2.11 GB |
+| planned (`LambdaPlan.need` less T3, which is there at the start) | 3.11 GB | 4.19 GB | 3.69 GB |
+
+The excess over the amplitude iteration is pass 1: the density of l3 with T3
+(as much as the ring), the second gather and the wider drive GEMM (+0.09,
++0.31, +0.03 s); against it, a Lambda iteration dresses no integrals
+(0.37, 0.76, 0.21 s less than the amplitude iteration's dressing,
+intermediates and CCSD part).  Pass 2 and the ladder are those of the
+amplitudes to 4%.  The first of the two jobs showed 4.77 GB above the start
+for the X2C water run against 4.19 GB planned: a short last batch of the
+ladder gathered in new arrays next to the buffers; fixed, and in the tests
+since (`test_memory_plan` has a buffer size with a short last batch).
+
+### 9.6 Not done
+
+- **Symmetry labels**: the dense layout only.  Integrals with labels in use
+  are taken as they are (T3 is put on the lexicographic unique block,
+  `ccsdt_opt.packed_t3`, and Lambda_3 is returned on it).  Everything that
+  touches the packed arrays is a method of `DenseL3` (`pass1`, `gram`,
+  `pass2`, `ladder`, `occ`, `update`): an engine on the blocks of a label
+  has these to provide, on `t3engine.SpinBlockT3`'s gathers and reductions.
+- **Scratch fallback** (9.3).
+- U / R-form integrals (`eris_spin`): spin orbitals or spinors only.
+- Densities and the orbital gradient from the packed arrays (the next
+  stage; `lambda_ref.densities` takes dense ones), frozen orbitals.
+- A front end: `GCCSDT` has no `solve_lambda` (its file was not to be
+  touched); the hook would be `lambda_opt.kernel(self.ao2mo(), self.t1,
+  self.t2, self.t3, options)`.
