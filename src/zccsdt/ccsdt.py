@@ -975,7 +975,8 @@ class GCCSDT(UCCSDT):
     real_spinors = True
     symmetry = True         # use the symmetry labels of the spinors where the integrals have them
     _block_iterations = True    # ... in the iterations too: T3 in blocks, the spinors in the order of the labels
-    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'rdm1_basis'}
+    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'rdm1_basis',
+                              'e_ql', 'e_ql5', 'e_tot_ql'}
 
     def _axial(self):
         '''The spinors of a linear molecule on the z axis adapted to m_j
@@ -1162,6 +1163,39 @@ class GCCSDT(UCCSDT):
             return C @ dm @ C.conj().T
         return dm
 
+    def ccsdt_q_lambda(self):
+        '''CCSDT(Q)_Lambda: the (Q) correction with Lambda2 and Lambda3 on
+        the left (zccsdt.cc.quadruples_lambda; in the sectors of the
+        symmetry labels where the integrals have them and the blocks fit).
+        Lambda is solved for if it is not there.  Returns E(Q)_L and stores
+        e_ql, e_ql5 (its fifth-order part, [Q]_L) and e_tot_ql.'''
+        from zccsdt.cc import ccsdt_opt, quadruples_lambda, quadruples_lambda_sym
+        if getattr(self, 'l3', None) is None:
+            self.solve_lambda()
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        t3 = ccsdt_opt.packed_t3(eris, self.t3)
+        ccsdt_opt.release_cached(eris)
+        no, nv = eris.nocc, eris.nmo - eris.nocc
+        if no < 4 or nv < 4:
+            self.e_ql5 = self.e_ql = 0.0
+            return 0.0
+        isz = np.dtype(np.result_type(self.t2, t3, self.l2, self.l3, eris.oovv)).itemsize
+        budget = memory.budget(self.max_memory)
+        spl = None
+        if self.symmetry and quadruples_lambda_sym.available(eris):
+            try:
+                spl = quadruples_lambda_sym.plan(eris, isz, budget)
+            except MemoryError:
+                pass
+        if spl is not None:
+            e5, e = quadruples_lambda_sym.kernel(eris, self.t2, t3, self.l2, self.l3, plan_=spl)
+        else:
+            pl = quadruples_lambda.plan(no, nv, isz, budget)
+            e5, e = quadruples_lambda.kernel(eris, self.t2, t3, self.l2, self.l3, plan_=pl)
+        self.e_ql5, self.e_ql = float(e5), float(e)
+        self.e_tot_ql = self.e_tot + self.e_ql
+        return self.e_ql
+
     def ccsdt_q(self, t2=None, t3=None):
         '''(Q) correction of the converged CCSDT amplitudes on spin orbitals
         or spinors (zccsdt.cc.quadruples; canonical orbitals); returns E(Q)
@@ -1271,6 +1305,11 @@ class GCCSDTQ(GCCSDT):
         if self.ccsdt_run is None:
             raise RuntimeError('GCCSDTQ.ccsdt_q(): no CCSDT step has been run (kernel() without amplitudes)')
         return self.ccsdt_run.ccsdt_q(t2, t3)
+
+    def ccsdt_q_lambda(self):
+        if self.ccsdt_run is None:
+            raise RuntimeError('GCCSDTQ.ccsdt_q_lambda(): no CCSDT step has been run (kernel() without amplitudes)')
+        return self.ccsdt_run.ccsdt_q_lambda()
 
     def ccsdtq(self, t1, t2, t3, t4=None):
         import copy

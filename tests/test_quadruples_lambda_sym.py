@@ -16,6 +16,9 @@ from zccsdt.cc import (ccsdt_opt, quadruples as QD, quadruples_lambda as QL, qua
                        quadruples_sym as QS, t4pack as P)
 
 
+RUN = {}
+
+
 @pytest.fixture(scope='module')
 def hbr():
     '''HBr / cc-pVDZ-DK, 8 + 28 active spinors: (eris with labels, t2, T3,
@@ -31,6 +34,7 @@ def hbr():
     cc.solve_lambda()
     assert cc.converged and cc.converged_lambda
     eris = cc.ao2mo()
+    RUN['cc'] = cc
     return eris, cc.t2, ccsdt_opt.packed_t3(eris, cc.t3), cc.l2, np.asarray(cc.l3)
 
 
@@ -67,6 +71,21 @@ def test_sectors_against_dense(hbr):
     # lambda = conj(t): (Q), dense and in sectors
     assert np.allclose(QLS.kernel(eris, t2, t3, t2.conj(), t3.conj()), plain, rtol=0, atol=1e-13)
     assert np.allclose(QLS.kernel(eris, t2, t3, t2.conj(), t3.conj()), QS.kernel(eris, t2, t3), rtol=0, atol=1e-13)
+
+
+def test_front_end(hbr):
+    eris, t2, t3, l2, l3 = hbr
+    cc = RUN['cc']
+    ref = QL.kernel(eris, t2, t3, l2, l3)
+    e = cc.ccsdt_q_lambda()
+    assert abs(e - ref[1]) < 1e-12 and abs(cc.e_ql5 - ref[0]) < 1e-12
+    assert abs(cc.e_tot_ql - cc.e_tot - ref[1]) < 1e-12
+    # without the symmetry the dense kernel, the same number
+    cc.symmetry = False
+    try:
+        assert abs(cc.ccsdt_q_lambda() - ref[1]) < 1e-12
+    finally:
+        cc.symmetry = True
 
 
 def test_complex_amplitudes(hbr):
