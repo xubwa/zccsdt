@@ -978,7 +978,7 @@ class GCCSDT(UCCSDT):
     # Lambda and the densities run in the blocks of the labels where the packed block
     # [C(o,3), C(v,3)] has at least this many elements; below it the many small products of
     # the blocks are slower than the few large ones of the packed block (docs/lambda.md 10.5)
-    blocks_min = 1_000_000
+    blocks_min = 800_000
     _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'rdm1_blocks', 'blocks_min',
                               'e_ql', 'e_ql5', 'e_tot_ql'}
 
@@ -1107,10 +1107,11 @@ class GCCSDT(UCCSDT):
     def _blocks_pay(self, eris):
         '''Lambda and the densities in the blocks of the symmetry labels, or
         on the packed block?  In blocks from ``blocks_min`` elements of the
-        packed block on (measured: HBr, N2, 8 to 10 occupied spinors - a
-        Lambda iteration in blocks takes 3.4 times as long as one on the
-        packed block with 0.18 million elements, 1.5 times with 0.55, and
-        0.86 to 0.72 of it with 1.2 to 1.4 million, a third with 4.3).'''
+        packed block on (measured twice: HBr, N2, HF, 8 to 10 occupied
+        spinors - a Lambda iteration in blocks takes 3 times as long as one
+        on the packed block with 0.18 million elements and 1.2 to 1.5 times
+        with 0.55; 0.9 of it with 0.85 million, 0.6 to 0.9 with 1.2 to 1.4
+        and a third with 4.3 million).'''
         from math import comb
         return comb(eris.nocc, 3) * comb(eris.nmo - eris.nocc, 3) >= self.blocks_min
 

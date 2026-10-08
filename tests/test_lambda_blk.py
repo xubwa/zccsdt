@@ -256,7 +256,7 @@ def test_front_end(hbr, monkeypatch):
     cc = RUN['cc']
     cc.conv_tol_normt = 1e-11
     # 183456 elements on the packed block: below ``blocks_min`` the packed block is taken
-    assert cc.blocks_min == 1_000_000 and not cc._blocks_pay(eris)
+    assert cc.blocks_min == 800_000 and not cc._blocks_pay(eris)
     p1, p2, p3 = cc.solve_lambda()
     assert cc.converged_lambda and not cc.lambda_blocks and p3.size == 31820
     cc.blocks_min = 0

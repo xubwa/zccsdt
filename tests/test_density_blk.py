@@ -338,7 +338,7 @@ def test_front_end(hbr, monkeypatch):
     assert cc.make_rdm1() is not None and cc.rdm1_blocks
     # 183456 elements on the packed block: with the default ``blocks_min`` it is taken
     monkeypatch.setattr(cc, 'blocks_min', type(cc).blocks_min)
-    assert cc.blocks_min == 1_000_000 and not cc._blocks_pay(eris)
+    assert cc.blocks_min == 800_000 and not cc._blocks_pay(eris)
     D4 = cc.make_rdm1()
     assert not cc.rdm1_blocks and abs(D4 - D1).max() < 1e-10
 
