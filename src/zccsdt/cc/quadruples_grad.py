@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from math import comb
 
 import numpy as np
+from pyscf import lib
 
 from zccsdt.blas import gemm
 from zccsdt.cc import quadruples as Q, t4pack as P
@@ -252,21 +253,30 @@ class QuadruplesGradient(Q.Quadruples):
         z, rt3, rtt, y, c = self.z, self.rt3, self.rtt, self.y, self.c
         cplx = np.iscomplexobj(z)
         with timer('qg.vectors'):
-            d = self.eo4[I] - self.ev4
-            np.add(rt3, rtt, out=y)
-            y /= d                                  # y = r / D
-            rt3 += z
-            rt3 /= d                                # w = z / D
-            if cplx:
-                np.conj(rt3, out=rt3)               # conj(w)
-                np.conj(y, out=z)                   # conj(y)
-            else:
-                z[:] = y
-            np.multiply(rt3, y, out=rtt)
-            c[:] = rtt.real                         # Re(conj(w) y)
-            self.de_occ[self.quads[I]] -= c.sum()
-            e = float(c @ d)
-            np.add(z, rt3, out=rtt)                 # conj(y) + conj(w)
+            eo, ev4 = self.eo4[I], self.ev4
+
+            def part(lo, hi):
+                # (slices on threads: numpy does these one core at a time)
+                sl = slice(lo, hi)
+                d = eo - ev4[sl]
+                zz, r3, rr, yy, cc_ = z[sl], rt3[sl], rtt[sl], y[sl], c[sl]
+                np.add(r3, rr, out=yy)
+                yy /= d                             # y = r / D
+                r3 += zz
+                r3 /= d                             # w = z / D
+                if cplx:
+                    np.conj(r3, out=r3)             # conj(w)
+                    np.conj(yy, out=zz)             # conj(y)
+                else:
+                    zz[:] = yy
+                np.multiply(r3, yy, out=rr)
+                cc_[:] = rr.real                    # Re(conj(w) y)
+                np.add(zz, r3, out=rr)              # conj(y) + conj(w)
+                return float(cc_.sum()), float(cc_ @ d)
+            step = max(1 << 16, -(-len(z) // max(1, lib.num_threads())))
+            sums = _threaded(lambda lh: part(*lh), Q._batches(len(z), step))
+            self.de_occ[self.quads[I]] -= sum(x[0] for x in sums)
+            e = sum(x[1] for x in sums)
         Ly, Lw, Lyw = z, rt3, rtt
         Lz = self.t2_pp[p22] * s22[:, None]                                     # [6, (ab)]
         Rz = self.vvoo_t[q22]                                                   # [6, (cd)]
@@ -387,6 +397,16 @@ class QuadruplesGradient(Q.Quadruples):
         s2 = s2 - s2.transpose(0, 1, 3, 2)
         return Gradient(self.e_q, s2, self.S3, self.de_occ, self.gamma, self.Dvvoo, self.Dvvvo,
                         self.Dovoo, Doooo, Dovvo, self.Dvvvv, self.gplan)
+
+
+def _threaded(function, items):
+    '''[function(x) for x in items] on threads.'''
+    from concurrent.futures import ThreadPoolExecutor
+    items = list(items)
+    if len(items) < 2:
+        return [function(x) for x in items]
+    with ThreadPoolExecutor(min(len(items), max(1, lib.num_threads()))) as pool:
+        return list(pool.map(function, items))
 
 
 def _axpy_rows(R, X, rows, sgn, col0):

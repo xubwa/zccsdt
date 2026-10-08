@@ -14,7 +14,9 @@ usage: python bench/qgrad_ccsdt_q.py CASE [nfrozen ndrop] [steps=4e-3,2e-3,1e-3]
 
 The energies in the field are those of the production codes (cc.solver,
 cc.quadruples); the analytic derivative is that of the dense reference for
-the amplitudes of the production solver.  Four-point central differences
+the amplitudes of the production solver, and next to it that of the
+production codes (zccsdt.cc.quadruples_grad, lambda_opt, density_opt).
+Four-point central differences
 (fourth order) at every step, and the Richardson extrapolation of two
 consecutive steps, (16 f(h) - f(2h)) / 15.
 '''
@@ -26,7 +28,8 @@ import numpy as np
 from pyscf import gto, scf, x2c
 
 from zccsdt import eris as E
-from zccsdt.cc import ccsdtq_terms as Q, qgrad_ref as G, quadruples, solver
+from zccsdt.cc import (ccsdtq_terms as Q, density_opt, lambda_opt, qgrad_ref as G, quadruples, quadruples_grad,
+                       solver)
 from zccsdt.genbas import read_genbas
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'refs')
@@ -115,10 +118,25 @@ def main():
         out[with_q] = (np.einsum('pq,qp', zmo, rel.relaxed).real, np.einsum('pq,qp', zmo, rel.unrelaxed).real)
         if with_q:
             assert abs(rel.e_q - e_q) < 1e-12, (rel.e_q, e_q)
-            Go, Gv = rel.gradient[nfrozen:o + nfrozen, nfrozen:o + nfrozen], rel.gradient[o + nfrozen:n + nfrozen, o + nfrozen:n + nfrozen]
+            so, sv = slice(nfrozen, o + nfrozen), slice(o + nfrozen, n + nfrozen)
+            Go, Gv = rel.gradient[so, so], rel.gradient[sv, sv]
             print('orbital gradient among active occupied %.2e, among active virtual %.2e' % (abs(Go).max(), abs(Gv).max()))
         print('%-9s relaxed %.12f  unrelaxed %.12f   (dense reference, %.1f s)'
               % ('CCSDT(Q)' if with_q else 'CCSDT', *out[with_q], time.time() - t0))
+    # the production codes: the pass over the quadruples, Lambda with the sources, the densities
+    t0 = time.time()
+    q = quadruples_grad.kernel(eris, r.t2, r.t3)
+    rl = lambda_opt.kernel(eris, r.t1, r.t2, r.t3, solver.Options(conv_tol_normt=1e-11, incore_complete=True),
+                           sources=(None, q.s2, q.s3))
+    nall = C.shape[1]
+    prod = density_opt.relaxed_rdm1(
+        mf, eris, r.t1, r.t2, r.t3, rl.l1, rl.l2, rl.l3, C[:, nfrozen:nall - ndrop],
+        frozen_occ=C[:, :nfrozen] if nfrozen else None, dropped_vir=C[:, nall - ndrop:] if ndrop else None,
+        tol=1e-11, q=q)
+    pv = np.einsum('pq,qp', zmo, prod.relaxed).real
+    print('CCSDT(Q)  relaxed %.12f  (packed amplitudes, %.1f s): %+.1e off the dense reference; densities %.1e, '
+          'orbital gradient %.1e' % (pv, time.time() - t0, pv - out[True][0], abs(prod.relaxed - rel.relaxed).max(),
+                                     abs(prod.gradient - rel.gradient).max()))
     fd = {}
     for h in steps:
         t0 = time.time()

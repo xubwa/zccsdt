@@ -21,8 +21,8 @@ from pyscf import gto, scf, x2c
 from test_ccsdtq_ref import _scf, _spin_mixed
 from test_quadruples import _container, _packed_data, _random
 from zccsdt import eris as E
-from zccsdt.cc import (ccsdtq_terms as Q, density_opt as D, lambda_opt as LO, lambda_ref as LR, qgrad_ref as GR,
-                       quadruples as QD, quadruples_grad as QG, solver, t4pack as P)
+from zccsdt.cc import (ccsdtq_terms as Q, density_opt as D, lambda_opt as LO, qgrad_ref as GR, quadruples as QD,
+                       quadruples_grad as QG, solver, t4pack as P)
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 

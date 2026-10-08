@@ -17,6 +17,7 @@ amplitudes; nothing here is fast.
 | `bench/lambda_ccsdt.py`, `bench/slurm_lambda_refs.sh` | molecules, and the reference runs of MRCC and CFOUR |
 | `src/zccsdt/cc/quadruples_lambda.py`, `quadruples_lambda_sym.py`, `csrc/qlambda.c` | CCSDT(Q)_Lambda on packed amplitudes, per occupied quadruple and in symmetry sectors (section 5.1); `tests/test_quadruples_lambda.py`, `tests/test_quadruples_lambda_sym.py`, `bench/profile_q_lambda.py` |
 | `src/zccsdt/cc/lambda_opt.py`, `csrc/lambda_t3.c` | the Lambda equations on packed Lambda_3 (section 9); `tests/test_lambda_opt.py`, `bench/profile_lambda_ccsdt.py` |
+| `src/zccsdt/cc/qgrad_ref.py`, `quadruples_grad.py` | the first derivatives of CCSDT(Q): sources of Lambda, densities of (Q), relaxed density (section 11); `tests/test_qgrad_ref.py`, `tests/test_quadruples_grad.py` |
 | `src/zccsdt/cc/density_opt.py`, `density_blk.py` | densities, orbital gradient and relaxed density from packed amplitudes (section 10) and in the blocks of the symmetry labels (10.5); `tests/test_density_opt.py`, `tests/test_density_blk.py`, `bench/density_ccsdt.py`, `bench/profile_density_blocks.py` |
 
 ## 1. Definitions and conventions
@@ -1356,3 +1357,408 @@ spinors (0.08 against 0.04 s per iteration).
   the block engine, U / R-form integrals, a numpy form of the gathers
   (without the C kernels `density_blk.engine` returns None and the front
   end uses the packed block).
+
+## 11. First derivatives of CCSDT(Q)
+
+| File | What |
+|---|---|
+| `src/zccsdt/cc/qgrad_ref.py` | the dense reference: the derivatives of E(Q) from the term table, the relaxed density from full arrays |
+| `src/zccsdt/cc/quadruples_grad.py` | the same from packed amplitudes, one occupied quadruple at a time; the orbital gradient of E(Q); the terms of the frozen spinors |
+| `lambda_ref.kernel(sources=)`, `lambda_opt.kernel(sources=)` | the Lambda equations with constant terms |
+| `density_opt.relaxed_rdm1(q=)` | the density and the Z-vector equations of CCSDT(Q) |
+| `GCCSDT.solve_lambda(with_q=True)`, `make_rdm1(with_q=True)` | the front end (`GCCSDTQ`: through its CCSDT step) |
+| `tests/test_qgrad_ref.py`, `tests/test_quadruples_grad.py` | the checks of 11.5 |
+| `bench/qgrad_ccsdt_q.py`, `bench/profile_q_gradient.py`, `bench/slurm_q_gradient.sh` | finite fields at several steps; timing |
+
+### 11.1 The functional
+
+(Q) is not variational and not holomorphic. With canonical Hartree-Fock
+spin orbitals and bare integrals (`ccsdtq_ref.quadruples`),
+
+    E(Q) = Re sum conj(z) r / D                  (i<j<k<l, a<b<c<d),
+    r = A(g, t3) + B(g, t2, t2),   A = <Q| [V,T3] |0>,   B = <Q| 1/2 [[V,T2],T2] |0>,
+    z = Z(g, t2) + A(g, t3),       Z = <Q| V T2 |0>  (disconnected),
+    D = e_i + e_j + e_k + e_l - e_a - e_b - e_c - e_d:
+
+a real function of t2, t3, of g = `<pq||rs>` and of the orbital energies.
+**t1 does not enter** (no source for Lambda_1), and neither does the
+off-diagonal Fock matrix. The Lagrangian of CCSDT(Q) is the real function
+
+    F = Re L(t, lambda; f, g) + E(Q)(t2, t3; g, e),
+
+L the holomorphic Lagrangian of CCSDT of section 1. **Complex amplitudes**:
+t and conj(t) are taken as independent, as the CCSD(T) code does
+(`zccsd.lam_t`). With y = r / D and w = z / D,
+
+    dE(Q) = Re sum [ conj(y) dz + conj(w) dr ] - sum Re(conj(w) y) dD,
+
+and dz, dr are linear in dt and dg with nothing conjugated, so
+
+    dE(Q) = Re [ sum_(i<j,a<b) s2 dt2 + sum_(i<j<k,a<b<c) s3 dt3 + sum d2[p,q,r,s] dg[p,q,r,s] ]
+            + sum_p de[p] d e_p
+
+with conj(y) and conj(w) as left-hand quadruple amplitudes L(.):
+
+| | made of | goes to |
+|---|---|---|
+| s3 | `<0| L(y+w) [V, tau3] |0>` | the Lambda_3 equation |
+| s2 | `<0| L(y) (V tau2)_disc |0> + <0| L(w) [[V,T2], tau2] |0>` | the Lambda_2 equation |
+| d2 of `<cd||el>`, `<md||kl>` | conj(y+w) t3 | the orbital gradient (o v^3 / 2 and o^3 v / 2 elements) |
+| d2 of `<cd||kl>` | conj(y) t2 | the orbital gradient |
+| d2 of `<bc||ef>`, `<mn||jk>`, `<mb||ek>` | conj(w) t2 t2 | the orbital gradient (the first: v^4 / 4 elements) |
+| de[i], de[a] | -/+ the sum of Re(conj(w) y) over the quadruples with i, with a | the density, and the gradient through the Fock operator |
+
+F is stationary in t when
+
+    dL/dt_k + s_k = 0,   s1 = 0:
+
+**the Lambda equations of CCSDT with s2 and s3 as constant terms of the
+residuals.** For real quantities s is the derivative of E(Q), for complex
+ones twice its Wirtinger derivative; the equations stay holomorphic in
+lambda and the solver is the one of section 9 (`sources=`). This lambda is
+not the one of CCSDT(Q)_Lambda (section 5), which is that of CCSDT.
+
+### 11.2 Densities and the response of the spin orbitals
+
+With that lambda the derivative of F with respect to a perturbation is the
+derivative of its explicit dependence on the integrals:
+
+- the densities of the CCSDT Lagrangian (section 1), made Hermitian - the
+  real part;
+- `de` on the diagonal of the one-particle density (e_p = f[p,p] has the
+  perturbation in it);
+- the spin orbitals follow the perturbation as canonical Hartree-Fock
+  spin orbitals, and F depends on all their rotations:
+  - occupied-virtual: the Z-vector equations with the orbital gradient
+    G[a,i] = (Gnh[a,i] - conj(Gnh[i,a])) / 2. For the CCSDT part Gnh[i,a] is
+    minus the Lambda_1 residual without its source, zero; for E(Q) both
+    halves are there (the function is not holomorphic);
+  - **occupied-occupied and virtual-virtual: not redundant**, as for (T).
+    The canonical condition fixes them, y_pq = G_pq / (e_q - e_p), which
+    goes into the density and, as a Fock matrix, to the right-hand side of
+    the Z-vector equations (`zccsd.zvector._relax`, the code of CCSD(T) and
+    of the frozen spinors); none between degenerate spin orbitals, where
+    G vanishes.
+
+The one-index transformation of E(Q) is that of `zvector.gradient_nh`
+(a bra index y of an integral taking the values of x, a ket index x minus
+those of y, in all four positions of d2; the Fock operator with its
+occupied spin orbitals for `de`).
+
+Three identities carry the implementation, each checked against the dense
+densities (`tests/test_qgrad_ref.py`, `tests/test_quadruples_grad.py`):
+
+1. *The Lagrangian among occupied and among virtual spin orbitals.* L does
+   not change when t, lambda and the integrals are rotated together, and
+   dL/dt = -s now, so (bare and T1-dressed basis alike, s1 = 0)
+
+       Gnh[j,i] = -1/2 sum s2[j,k,a,b] t2[i,k,a,b] - 1/12 sum s3[j,k,l,a,b,c] t3[i,k,l,a,b,c]
+       Gnh[b,a] =  1/2 sum s2[i,j,a,c] t2[i,j,b,c] + 1/12 sum s3[i,j,k,a,c,d] t3[i,j,k,b,c,d].
+
+   (BH and LiH / STO-3G: 1e-13 off the one-index transformation of the
+   dense densities, blocks of 1e-4 and 3e-7.)
+
+2. *The table `GRADIENT` is no longer the bare gradient.* It is the
+   de-excitation one-index transformation in the dressed basis (section 4),
+   equal to the bare one when the other blocks vanish. With sources
+
+       Gnh[a,i] = GRADIENT[a,i] + sum_j t1[j,a] Gnh[j,i] - sum_b t1[i,b] Gnh[a,b]
+
+   (from exp(-T1) a+_i a_a exp(T1); the term with the excitation block has
+   s1 = 0). BH / STO-3G: the table alone is off by 2.8e-6 in a gradient of
+   1.1e-5, the formula by 8e-16.
+
+3. *The whole gradient among occupied and among virtual spin orbitals is a
+   one-particle density of (Q).* Written with y the solution of D y = r for
+   the whole occupied-occupied and virtual-virtual Fock matrix, (Q) needs no
+   canonical orbitals and does not change under these rotations (with t);
+   it differs from E(Q) by the off-diagonal f alone. So
+
+       G[p,q] = (e_q - e_p) (Gamma[q,p] + conj(Gamma[p,q])) / 2,
+       Gamma[a,e] =  sum conj(w[ijkl,abcd]) y[ijkl,ebcd]     (i<j<k<l, b<c<d),
+       Gamma[m,i] = -sum conj(w[ijkl,abcd]) y[mjkl,abcd]     (j<k<l, a<b<c<d),
+
+   Gamma the derivative of that form with respect to f (its diagonal is
+   `de`): the rotation y_pq is the Hermitian part of Gamma, transposed. The
+   production code uses it for the virtual block (one product per
+   quadruple); the occupied block would need two quadruples at a time and
+   is made from identity 1 and the densities instead. (LiH and BH /
+   STO-3G: 3e-15 and 8e-14 off for blocks of 6e-9 and 4e-6.)
+
+Frozen occupied and dropped virtual spinors f: E(Q) is that of the active
+spinors, and the gradient between f and an active spinor x has the
+densities of (Q) with the integrals of one frozen index next to those of
+the Lagrangian (section 10.2): b[f,x] with f in a bra place, k[f,x] in a ket
+place, G[f,x] = (b + conj(k)) / 2, added to `bf` and `kf` of
+`density_opt.kernel` batch by batch (`quadruples_grad.FrozenTerms`; the
+integrals are made once, and the Kramers pairs of the frozen spinors are
+used as before). `de` is in the density whose Fock matrix is the term V of
+10.2.
+
+### 11.3 The dense reference (`zccsdt.cc.qgrad_ref`)
+
+`quadruples_gradient(t2, t3, g, mo_energy, nocc)`: for one occupied
+quadruple at a time, r and z from the term table, then for every term
+`coefficient * A(product)` and every factor of it the product with the
+left-hand quadruple in the place of that factor (the sum of L A(product)
+over the unique quadruples is the sum of L product over all), added to s2,
+s3 or d2. `relaxed_rdm1(mf, mo_coeff, nfrozen, ndrop)`: CCSDT, the
+derivative of E(Q), `lambda_ref.kernel(sources=)`, the densities of the
+Lagrangian over all spin orbitals (the frozen ones occupied),
+`zvector.orbital_gradient` on them, `zvector.gradient_nh` for E(Q),
+`zvector._relax`. None of the identities of 11.2 is used.
+
+### 11.4 From packed amplitudes (`zccsdt.cc.quadruples_grad`)
+
+One pass over the occupied quadruples like (Q) (`QuadruplesGradient` is a
+`Quadruples`): after r and z of a quadruple, conj(y), conj(w) and their sum
+are expanded to the layouts of the five products (`t4pack.tn_expand`, the
+adjoint of the antisymmetrizing reduction), and every product X = A B is
+followed by X_ B^T for the operand A and A^T X_ for the operand B:
+
+| product of (Q) | with | its two adjoints |
+|---|---|---|
+| `t(ij,ab) <cd||kl>` | conj(y) | s2; the density of `<cd||kl>` |
+| `- sum_e <ab||ei> t(jkl,cde)` | conj(y) + conj(w) | the density of `<ab||ei>`; s3 (reduced onto c<d<e) |
+| `sum_m <ma||ij> t(mkl,bcd)` | conj(y) + conj(w) | the density of `<ma||ij>`; s3 (rows) |
+| `sum_m t(im,ab) Xo(m;jkl;cd)` | conj(w) | s2; the adjoint of Xo |
+| `2 sum_e t(ij,ae) Xv(e;kl;bcd)` | conj(w) | s2; the adjoint of Xv |
+
+The adjoint of Xo (o^4 v^2 / 12) is kept for all quadruples and goes back
+through the definition of Xo at the end: s2 and the densities of
+`<mn||jk>`, `<md||el>`. The adjoint of Xv lives next to Xv, for the same
+pairs (x, l), and goes back when Xv of the pair leaves: s2, and the
+density of `<bc||ef>` on pairs, with the packed `<vv||vv>` in the slabs of
+rows that made Xv. Gamma of the virtual spin orbitals is one more product
+per quadruple, on the expanded conj(w) and y.
+
+Then (`orbital_gradient`, `active_terms`): every block of the densities
+with the blocks of integrals that one changed index gives, as matrix
+products of dense blocks - all integrals with an occupied index are kept
+by the amplitude code. Two meet arrays of the size of `<vv||vv>`: the
+density of `<cd||el>` with the packed `<cd||ea>` (slabs of rows), and the
+density of `<bc||ef>` with `<ie||bc>` on pairs. In the virtual block the
+density of `<bc||ef>` would meet `<vv||vv>`; identity 3 replaces that
+block.
+
+Cost: every product of (Q) twice more (three times its products in all:
+o^4 v^4 (v + o) / 4 multiplications), three expansions for two reductions,
+Gamma (o^4 v^5 / 144), Xv twice more (o^2 v^5 / 2); the contractions with
+the integrals are o v^5 / 2 and less.
+
+Memory (`plan`): what is returned - s3 (the size of T3), the density of
+`<bc||ef>` (C(v,2)^2 elements: the size of the packed `<vv||vv>`, in
+memory), that of `<ab||ei>` (o v C(v,2)) and the small ones -, the adjoint
+of Xv next to Xv, three work arrays per batch of columns for one of (Q),
+and the adjoints of the stacked operands. The batches are those of the
+plan of (Q) with the largest budget of its own for which all of this fits
+(bisection: the plan grows with the budget and uses it - at least 0.9 of
+every budget below the full plan in the tests); MemoryError with the
+numbers below the smallest batches. Afterwards `relaxed_rdm1(q=)` holds
+the dense blocks of the densities (that of `<ab||ei>` on all four
+indices, o v^3) and the work of the contractions (o v C(v,2) elements for
+the density of `<bc||ef>`); with frozen spinors arrays of n^3 elements for
+one frozen spinor at a time. These last are not in a plan: `memory.budget`
+sees them as resident when the density kernel plans.
+
+Front end: `GCCSDT.solve_lambda(with_q=True)` makes the pass
+(`_q_terms`, kept for `make_rdm1`) and solves with the sources - in the
+blocks of the symmetry labels or on the packed block by the rule of 10.5;
+`make_rdm1(with_q=True)` solves again if the lambda that is there is the
+other one, and so do `make_rdm1()` and `ccsdt_q_lambda()`.
+
+**Not done**:
+
+- the pass in the sectors of the symmetry labels (`quadruples_sym`): it
+  runs on the packed block, also where Lambda and the densities run in
+  blocks;
+- the densities of (Q) on disk: the density of `<bc||ef>` and s3 are in
+  memory;
+- the dense blocks of the densities in `relaxed_rdm1(q=)` are o v^3
+  elements for `<ab||ei>` where o v^3 / 2 would do, and the contractions
+  with the integrals of a frozen spinor are einsums over n^3 elements, one
+  spinor at a time;
+- the two-particle density of CCSDT(Q) as an array, geometric gradients,
+  non-canonical or non-Hartree-Fock references;
+- the unrelaxed density of CCSDT(Q) is returned but is not the derivative
+  of anything at fixed orbitals;
+- between degenerate spinors no rotation is made (Gamma does not vanish
+  there by itself; a perturbation that couples the spinors of a degenerate
+  level would need it).
+
+### 11.5 Validation
+
+Derivatives of E(Q) (5 + 5 spin orbitals, random amplitudes and integrals,
+four-point differences of the dense E(Q) along random directions, step
+1e-3): t2, t3, the integrals and the orbital energies to 5e-11 of
+derivatives of 10 to 1000, real and complex.
+
+The pass on packed amplitudes against the dense reference (5+6, 6+5, 4+7
+and 7+5 spin orbitals, real and complex, in every plan, with and without
+the C kernels): E(Q), s2, s3, the six blocks of densities, `de` and Gamma
+to 3e-15 of their size.
+
+Relaxed dipole derivative, trace(z D) of the dense reference against
+E(SCF) + E_corr(CCSDT) + E(Q) with the SCF repeated in the field
+(`bench/qgrad_ccsdt_q.py`; energies of the production codes; four-point
+differences at steps 4e-3, 2e-3, 1e-3 and the extrapolation of two
+consecutive steps, (16 f(h) - f(2h)) / 15; SCF converged to 1e-13 and
+1e-10 in the gradient, CCSDT to 1e-13 and 1e-11, Lambda and the Z-vector
+equations to 1e-11). Differences analytic - finite field:
+
+| | o + v | trace(z D), CCSDT(Q) | its (Q) part | step 4e-3 | 2e-3 | 1e-3 | 4e-3, 2e-3 extrapolated | 2e-3, 1e-3 extrapolated |
+|---|---|---|---|---|---|---|---|---|
+| H2O / STO-3G | 10 + 4 | 1.582688302954 | 8.39e-5 | 6.0e-10 | 1.7e-11 | -1.5e-11 | -2.1e-11 | -1.7e-11 |
+| H2O / STO-3G, complex spin orbitals | 10 + 4 | 1.582688302954 | 8.39e-5 | 5.9e-10 | 2.3e-11 | 4.2e-11 | -1.4e-11 | 4.3e-11 |
+| H2O / STO-3G, X2C spinors | 10 + 4 | 1.583200002586 | 8.44e-5 | 5.8e-10 | 4.2e-11 | -1.9e-11 | 6.3e-12 | -2.4e-11 |
+| H2O / STO-3G, X2C, 2 frozen | 8 + 4 | 1.583147291350 | 8.45e-5 | 5.8e-10 | 2.0e-11 | -2.6e-11 | -1.7e-11 | -2.9e-11 |
+| BH / STO-3G | 6 + 6 | 2.087338743535 | 3.26e-4 | -1.9e-8 | -1.2e-9 | -7.0e-11 | -1.2e-12 | 5.2e-12 |
+| BH / STO-3G, complex | 6 + 6 | 2.087338743531 | 3.26e-4 | -1.9e-8 | -1.2e-9 | -8.3e-11 | -3.6e-12 | -9.2e-12 |
+| BH / STO-3G, complex, 2 frozen, 2 dropped | 4 + 4 | 2.094223049398 | 3.08e-5 | -1.7e-8 | -1.1e-9 | -7.7e-11 | 7.0e-12 | -1.1e-11 |
+| LiH / STO-3G | 4 + 8 | 4.833109829421 | -4.83e-6 | -6.4e-5 | -3.9e-6 | -2.4e-7 | 1.3e-7 | 1.9e-9 |
+| H2O / 6-31G | 10 + 16 | 1.227852046041 | 1.43e-4 | 1.2e-8 | 7.6e-10 | 1.1e-11 | 2.8e-11 | -3.9e-11 |
+| H2O / 6-31G, complex | 10 + 16 | 1.227852046041 | 1.43e-4 | 1.2e-8 | 7.3e-10 | 2.9e-11 | -3.8e-12 | -1.7e-11 |
+| HF / 6-31G, X2C | 10 + 12 | 16.451076063601 | -3.12e-4 | -5.8e-9 | -3.5e-10 | -1.5e-11 | 1.1e-11 | 7.7e-12 |
+| H2O / 6-31G, X2C, 2 frozen, 4 dropped | 8 + 12 | 1.265709070026 | 5.88e-4 | 1.6e-8 | 1.0e-9 | 1.1e-10 | -6.8e-12 | 4.9e-11 |
+
+(STO-3G rows but LiH: on the login node; LiH and 6-31G: job 31764120, c105;
+the dense derivative of E(Q) takes 15 minutes for 10 + 16 spin orbitals.)
+CCSDT alone has the same differences in every row, to 5e-12 where they are
+small: what is left is the error of the differences (energies to 1e-13 over
+steps of 1e-3), not of the (Q) terms. LiH: the stencil has a truncation
+error of 2.4e-7 at step 1e-3; its test extrapolates steps 1e-3 and 5e-4
+(3e-11). With STO-3G the gradient among the virtual spin orbitals of H2O
+and BH vanishes by symmetry; it is 6e-9 for LiH and 1e-5 to 2e-5 in the
+6-31G rows, 4e-6 to 1e-5 among the occupied ones.
+
+CFOUR (`CALC=CCSDT(Q)`, `CC_PROG=NCC`, `PROPS=FIRST_ORDER`; RHF, all
+electrons, `SYMMETRY=OFF`, the bohr geometry and the basis of
+`bench/refs`; inputs `bench/refs/cfour/*/ZMAT.qprops.bohr`, run on the
+login node, 2 s each): the dipole moment of the relaxed density,
+sum Z_A z_A - trace(z D), ten decimals printed:
+
+| | CFOUR ncc | zccsdt (dense reference) |
+|---|---|---|
+| H2O / STO-3G, CCSDT | 0.6359340712 | 0.635934071198 |
+| H2O / STO-3G, CCSDT(Q) | 0.6358501673 | 0.635850167285 |
+| H2O / 6-31G, CCSDT | 0.9908298365 | 0.990829836453 |
+| H2O / 6-31G, CCSDT(Q) | 0.9906864242 | 0.990686424198 |
+
+CFOUR gave it with the first input that was tried; MRCC was not run.
+
+Production against the dense reference (converged CCSDT, the pass,
+`lambda_opt.kernel(sources=)`, `relaxed_rdm1(q=)`): lambda, the density
+without the response, the orbital gradient between all pairs of spinors
+and the relaxed density, largest differences.
+
+| | lambda | density | gradient (its size) | relaxed density |
+|---|---|---|---|---|
+| BH / STO-3G | 3e-13 | 9e-14 | 1e-13 (2e-5) | 2e-13 |
+| BH / STO-3G, complex | 2e-13 | 7e-14 | 8e-14 (1e-5) | 2e-13 |
+| LiH / STO-3G, complex | 8e-14 | 4e-14 | 2e-14 (4e-7) | 3e-14 |
+| H2O / STO-3G, X2C | 2e-13 | 3e-14 | 3e-14 (7e-6) | 4e-14 |
+| H2O / STO-3G, X2C, 2 frozen | 3e-13 | 1e-13 | 6e-14 (9e-4) | 7e-14 |
+| BH / STO-3G, complex, 2 frozen, 2 dropped | 4e-16 | 1e-16 | 1e-13 (8e-3) | 2e-13 |
+| BH / STO-3G, X2C, 2 frozen, 2 dropped | 2e-12 | 6e-13 | 2e-12 (7e-3) | 3e-12 |
+| H2O / 6-31G, X2C, 2 frozen, 4 dropped | 3e-13 | 7e-14 | 5e-12 (1e-2) | 3e-12 |
+
+(BH, LiH and the rows with frozen spinors but the last are in
+`tests/test_quadruples_grad.py`, with 1e-10 asked; all rows on the login
+node, the last: 0.8 s for the production codes, 100 s for the dense
+reference.) With the frozen spinors of the X2C rows the integrals with a
+frozen index are made for the Kramers pairs.
+
+At the size of the timings below: H2O / cc-pVTZ, RHF orbitals as spin
+orbitals (10 + 106), through the front end, against CFOUR's ncc with the
+primitives and the bohr geometry of PySCF (`bench/cfour/genbas.py`;
+`SYMMETRY=ON`; job 31765428, input and output kept with the logs of the
+job). E(SCF) -76.057114083120 and -76.057114083117, E(Q) -3.676439958e-4
+and -3.67643995767e-4, and the dipole moment of the relaxed density:
+
+| | CFOUR ncc | zccsdt (`GCCSDT.make_rdm1`) |
+|---|---|---|
+| H2O / cc-pVTZ, CCSDT(Q) | 0.7492563653 | 0.7492563653 |
+
+(CCSDT alone: 0.7498653312 here; CFOUR's run printed the SCF and the
+CCSDT(Q) density only.)
+
+Front end: HF / 6-31G with X2C spinors, two frozen (real spinors adapted
+to m_j): `make_rdm1(with_q=True)` against the finite field of
+`e_tot + ccsdt_q()`, 1.4e-10 off (0.874002176879); Lambda and the
+densities in the blocks of the labels give the density of the packed block
+(5e-9 asked, the convergence of lambda).
+
+Memory (`tests/test_quadruples_grad.py::test_memory_plan`, tracemalloc):
+5 + 20 complex and 6 + 22 real spin orbitals, the smallest batches, a plan
+in between and everything at once: the peak of the allocations is 0.83 to
+0.97 of `Plan.need`.
+
+### 11.6 Timing
+
+`bench/profile_q_gradient.py` through the front end with its defaults, 8
+cores of a Xeon Gold 6248R, `max_memory` 26 GB, the steps one after the
+other on the same amplitudes (`bench/slurm_q_gradient.sh`). Two jobs: 31765428
+on c105 (commit bd2c483; the node shared, load 2 to 10 while it ran - two
+other jobs of this work among it) and 31766046 on c320 (the tree of this
+commit: the arithmetic on the vectors of a quadruple on threads; load 29
+at the start, 7 to 12 at the end). H2O / cc-pVTZ: RHF orbitals as spin
+orbitals, 10 + 106, no labels - everything on the packed block. HBr /
+cc-pVTZ-DK: X2C spinors, 28 frozen, 8 + 78, real spinors with the labels
+2 m_j - (Q) in sectors, Lambda and the densities in blocks, the pass over
+the quadruples on the packed block. CCSDT converged to 1e-11 in the energy
+and 1e-9 in the amplitudes, Lambda to 1e-9.
+
+| | H2O, 31765428 | H2O, 31766046 | HBr, 31765428 | HBr, 31766046 |
+|---|---|---|---|---|
+| CCSDT iteration | 4.41 s | 5.06 s | 0.30 s | 0.36 s |
+| (Q), front end | 46.2 s | 50.4 s | 1.49 s (sectors) | 1.83 s (sectors) |
+| (Q), dense code | 45.4 s | 50.1 s | 4.41 s | 5.23 s |
+| (Q) gradient pass | 162.3 s | 170.5 s | 15.3 s | 18.0 s |
+| ... over (Q) dense | 3.58 | 3.41 | 3.47 | 3.43 |
+| ... over (Q) of the front end | 3.51 | 3.38 | 10.3 | 9.8 |
+| Lambda iteration, CCSDT | 5.23 s (17) | 5.99 s (17) | 0.24 s (17) | 0.28 s (17) |
+| Lambda iteration, with the sources | 5.25 s (17) | 6.08 s (17) | 0.24 s (16) | 0.28 s (16) |
+| relaxed density after Lambda, CCSDT | 10.8 s | 6.3 s | 1.74 s | 1.95 s |
+| relaxed density after Lambda, CCSDT(Q) | 5.7 s | 6.8 s | 3.40 s | 4.23 s |
+| all after the CCSDT energy, CCSDT | 101.7 s | 110.5 s | 6.0 s | 7.0 s |
+| all after the CCSDT energy, CCSDT(Q) | 259.2 s | 283.0 s | 22.8 s | 27.0 s |
+| ... over (Q) dense | 5.7 | 5.7 | 5.2 | 5.2 |
+| ... over (Q) of the front end | 5.6 | 5.6 | 15.3 | 14.8 |
+
+(In 31765428 the CCSDT density came first and has the setup of the Coulomb
+operator of the Z-vector equations in it; 6.3 against 6.8 s is the pair
+to compare.) The sources cost nothing in a Lambda iteration and do not
+change the number of iterations. The pass is 3.4 to 3.6 times the dense
+(Q); where (Q) runs in sectors (HBr: three times faster than dense) the
+pass, which does not, is ten times (Q) and three quarters of the whole
+property. With frozen spinors the (Q) terms double the time of the
+density (HBr: the contractions with the integrals of 28 frozen spinors,
+einsums one spinor at a time).
+
+Where the pass of H2O goes (31766046): the adjoint products 71.8 s at 6.5
+cores (three times the 24.2 s of the products of (Q), for twice their
+multiplications: the two of the T2 Xv product write into blocks of columns
+of the adjoint of Xv, and one result array per quadruple is allocated),
+the expansions 19.7 s, the products and reductions of (Q) itself 24.2 and
+9 s, the adjoint of Xv 12 s, the vectors of a quadruple 7.1 s (20.9 s on
+one core in 31765428), Gamma 2.9 s.
+
+Memory: the plan of the pass and the peak of the anonymous memory of the
+process, with what was there before (amplitudes, integrals, DIIS released):
+
+| | plan of the pass | of it the derivatives | before | peak |
+|---|---|---|---|---|
+| H2O / cc-pVTZ | 6.86 GB | 0.50 GB | 0.95 GB (1.05) | 7.67 GB (7.84) |
+| HBr / cc-pVTZ-DK | 1.79 GB | 0.13 GB | 0.55 GB | 2.20 GB (2.31) |
+
+(in brackets job 31766046; (Q) itself plans 3.29 and 0.87 GB.) Everything
+fits here: one batch of columns, Xv for all occupied indices. The density
+step with the (Q) terms peaks at 6.6 and 1.6 GB.
+
+CFOUR's ncc for the same H2O calculation (job 31765428, same node, after
+the runs above; RHF, spin-adapted, `SYMMETRY=ON`, 8 threads): 66 s for all
+of it - CCSDT 9.0 s (22 iterations), (Q) as it does it for a density
+39.1 s, Lambda 15.5 s (21 iterations), the densities 0.7 s.
+zccsdt has no spin adaptation and no point group on this path (GCCSDT on
+116 spin orbitals: 84 s for CCSDT, 46 s for (Q), 259 s for the property):
+the numbers agree, the times are not a comparison of like with like.
