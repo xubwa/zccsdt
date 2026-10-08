@@ -1131,7 +1131,7 @@ class GCCSDT(UCCSDT):
         self.l1, self.l2, self.l3, self.converged_lambda = res.l1, res.l2, res.l3, bool(res.converged)
         return self.l1, self.l2, self.l3
 
-    def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-9):
+    def make_rdm1(self, relaxed=True, ao_repr=False, tol=1e-11):
         '''The one-particle density of CCSDT, D[p,q] = <q+ p>, in the basis
         of all spinors of the SCF in the order [frozen occupied, active
         occupied, active virtual, dropped virtual] (``ao_repr``: in the AO

@@ -266,7 +266,11 @@ e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), 
   `relaxed=False` gives the density of t and Lambda at fixed spinors;
   without `ao_repr` the matrix is in the spinors `mycc.rdm1_basis`.  It
   needs the SCF object (not integrals that were given) and a tightly
-  converged SCF (`mf.conv_tol_grad` 1e-8 or below).
+  converged SCF (`mf.conv_tol_grad` 1e-8 or below).  `tol` (1e-11) is the
+  threshold of the Z-vector equations, whose error enters the property to
+  first order: with 1e-9 the dipole moment of HF / 6-31G was off by 7e-10
+  (five-point finite fields at three step sizes, extrapolated, against the
+  analytic value at 1e-12: 1e-11).
 - `ccsdt_q_lambda()` is (Q) with Lambda_2 and Lambda_3 on the left
   (`zccsdt.cc.quadruples_lambda`; in the sectors of the labels,
   `quadruples_lambda_sym`, where the integrals have them): 1.3 to 1.4 times
