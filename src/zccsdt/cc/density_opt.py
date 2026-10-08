@@ -122,14 +122,14 @@ def pair_bytes(nocc, nvir, itemsize=16):
     lambda3 half-expanded, Y and the product with t2.'''
     o, v = nocc, nvir
     nvp, npo = v * (v - 1) // 2, o * (o - 1) // 2
-    return (2 * v * o * nvp + v * o * (v * o + npo) + 2 * nvp * o * o) * itemsize
+    return (2 * v * o * nvp + v * o * (v * o + npo)) * itemsize
 
 
 def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False):
     '''Plan for ``budget`` bytes of ordinary memory beyond the amplitudes,
     lambda and what the integral object holds (None: no limit).  The batches
-    of the passes take what is left of the budget up to BATCH_BYTES, the
-    dressed <ab||de> is kept whole if it fits next to them and is else
+    of the passes take what is left of the budget, up to BATCH_BYTES; the
+    dressed <ab||de> is kept whole if it fits next to them, and is else
     dressed twice in slabs of rows, as thick as fit (the slab and the
     batches are not alive together).  MemoryError below one occupied pair
     per batch and the rows of one first virtual index.  ``pp_mapped``: the
@@ -149,10 +149,9 @@ def plan_memory(nocc, nvir, itemsize=16, budget=None, pp_mapped=False):
                           'about %.1f GB of memory for their o v^3 arrays and work buffers; %.1f GB '
                           'are available (max_memory, or what the node and the memory limit of the '
                           'job leave)' % (o, v, (fixed + max(unit, row_min)) / 1e9, budget / 1e9))
-    if left >= pp + unit:
-        nb = int(min(nb_most, (left - pp) // unit))
-        return Plan(nb=nb, slab_bytes=None, need=fixed + pp + nb * unit)
     nb = int(min(nb_most, left // unit))
+    if left >= pp + nb * unit:
+        return Plan(nb=nb, slab_bytes=None, need=fixed + pp + nb * unit)
     slab = int(min(pp, left // row * row))
     return Plan(nb=nb, slab_bytes=slab, need=fixed + max(nb * unit, slab))
 
@@ -355,6 +354,7 @@ def kernel(eris, t1, t2, t3, l1, l2, l3, gradient=True, max_memory=None, plan=No
                         Tm = Tr[j * v * o:(j + 1) * v * o]
                         B1 += Tm @ l2pp[p0 + j]
                         A1[p0 + j] = l1v @ Tm
+                    del Tm                  # (a view: it would keep the batch alive)
                 with timer('dens.pass_tl.ring'):
                     for j in range(k):
                         gemm(Lr[j * v * o:(j + 1) * v * o], Tr[j * v * o:(j + 1) * v * o].T, R3,

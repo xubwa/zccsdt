@@ -268,3 +268,66 @@ def test_ccsd_limit_is_the_spinor_ccsd_code():
     assert abs(rel.unrelaxed - plain).max() < 1e-10
     assert abs(rel.relaxed - want).max() < 1e-9
     assert abs(want - plain).max() > 1e-4
+
+
+# --------------------------------------------------------------------- memory
+
+def test_plan_memory():
+    '''No limit: everything at once.  A budget: the batches of the passes
+    and the slab of dressed <ab||de> take what is left, more with more
+    (never less), and MemoryError below one occupied pair and the rows of
+    one first index.'''
+    o, v = 10, 106
+    nvp, npo = v * (v - 1) // 2, o * (o - 1) // 2
+    free = D.plan_memory(o, v)
+    assert free.slab_bytes is None and free.nb == min(npo, D.BATCH_BYTES // D.pair_bytes(o, v))
+    fixed, unit, pp = D.fixed_bytes(o, v), D.pair_bytes(o, v), 16 * nvp * nvp
+    assert D.plan_memory(o, v, budget=free.need) == free
+    with pytest.raises(MemoryError, match='densities of CCSDT'):
+        D.plan_memory(o, v, budget=fixed + unit - 1)
+    least = D.plan_memory(o, v, budget=fixed + unit)
+    assert least.nb == 1 and least.slab_bytes == unit // (16 * nvp) * 16 * nvp >= 16 * v * nvp
+    last = least
+    for gb in np.arange(1.0, 12.0, 0.25):
+        budget = int(gb * 1e9)
+        if budget < fixed + unit:
+            continue
+        p = D.plan_memory(o, v, budget=budget)
+        assert p.need <= budget and p.nb >= last.nb
+        assert (p.slab_bytes or pp) >= (last.slab_bytes or pp) or last.slab_bytes is None
+        if p.slab_bytes is not None:        # nothing more would fit
+            assert p.nb == free.nb or fixed + (p.nb + 1) * unit > budget
+            assert p.slab_bytes == pp or fixed + p.slab_bytes + 16 * nvp > budget
+        last = p
+    assert last == free
+
+
+@pytest.mark.parametrize('tight', [True, False])
+def test_allocations_stay_within_the_plan(tight):
+    '''What kernel() allocates (tracemalloc follows numpy's allocations) is
+    within the plan, for the smallest plan - one occupied pair per batch,
+    the rows of one first index of <ab||de> per slab - and for everything
+    at once; and the plan is not far above it.  5 + 40 spin orbitals.'''
+    import tracemalloc
+    from zccsdt.cc import ccsdt_opt
+    no, nv = 5, 40
+    nvp = nv * (nv - 1) // 2
+    f, v, amps, lams = random_case(no, nv, 21)
+    er = container(f, v, no)
+    args = (er, amps[0], amps[1], packed(amps[2]), lams[0], lams[1], packed(lams[2]))
+    del amps, lams, f, v
+    ccsdt_opt.vvvv_packed(er, t3pack.triple_map(nv))        # (the packed integrals: of the container)
+    fixed, unit = D.fixed_bytes(no, nv), D.pair_bytes(no, nv)
+    budget = fixed + max(unit, 16 * nv * nvp) if tight else None
+    plan = D.plan_memory(no, nv, budget=budget)
+    assert (plan.nb, plan.slab_bytes is None) == ((1, False) if tight else (10, True))
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    r = D.kernel(*args, plan=plan)
+    peak = tracemalloc.get_traced_memory()[1] - base
+    tracemalloc.stop()
+    need = plan.need - ccsdt_opt.overhead()
+    print('%s: allocated %.1f MB, planned %.1f MB (%.2f)' % ('one pair, one slab' if tight else 'everything at once',
+                                                             peak / 1e6, need / 1e6, peak / need))
+    assert 0.6 * need < peak < need
+    assert abs(np.trace(r.d1) - no) < 1e-10
