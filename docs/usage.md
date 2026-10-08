@@ -256,7 +256,15 @@ e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), 
 - `solve_lambda()` solves the left-hand equations of CCSDT on packed
   amplitudes (`zccsdt.cc.lambda_opt`): Lambda_3 is stored like T3, an
   iteration takes 1.15 to 1.26 times an amplitude iteration, and the memory
-  follows `max_memory` like the amplitude equations.
+  follows `max_memory` like the amplitude equations.  Where the iterations
+  ran in the blocks of the symmetry labels (a linear molecule on the z
+  axis, `symmetry`), Lambda is solved in the blocks too
+  (`zccsdt.cc.lambda_blk`; `mycc.lambda_blocks`): 3.3 and 8.5 times faster
+  per iteration than on the packed block for HBr with 8 + 78 and 8 + 160
+  spinors (docs/lambda.md section 9.7).  `mycc.l3` has the layout of
+  `mycc.t3` - the blocks then;
+  `zccsdt.cc.lambda_opt.packed_l3(mycc._eris, mycc.l3)` puts it on the
+  packed block `[i<j<k, a<b<c]`.
 - `make_rdm1(relaxed=True)` is the density whose trace with a one-electron
   operator is the derivative of the CCSDT energy: the densities of t and
   Lambda, the orbital gradient and the Z-vector equations for the response of
@@ -275,9 +283,9 @@ e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), 
   (`zccsdt.cc.quadruples_lambda`; in the sectors of the labels,
   `quadruples_lambda_sym`, where the integrals have them): 1.3 to 1.4 times
   the time of (Q).  `zccsdt.CCSDTQ` passes it on to its CCSDT step.
-- Lambda and the densities work on T3 packed in lexicographic order: after
-  iterations in the blocks of the labels the amplitudes are expanded once.
-  Only (Q)_Lambda uses the labels.
+- The densities and (Q)_Lambda work on T3 and Lambda_3 packed in
+  lexicographic order: after iterations in the blocks of the labels both
+  are expanded once.  The Lambda equations and (Q)_Lambda use the labels.
 - An RHF reference makes `zccsdt.CCSDT` the closed-shell class, which has
   none of this: `zccsdt.CCSDT(mf.to_ghf())` for these methods.
 

@@ -618,12 +618,10 @@ since (`test_memory_plan` has a buffer size with a short last batch).
 
 ### 9.6 Not done
 
-- **Symmetry labels**: the dense layout only.  Integrals with labels in use
-  are taken as they are (T3 is put on the lexicographic unique block,
-  `ccsdt_opt.packed_t3`, and Lambda_3 is returned on it).  Everything that
-  touches the packed arrays is a method of `DenseL3` (`pass1`, `gram`,
-  `pass2`, `ladder`, `occ`, `update`): an engine on the blocks of a label
-  has these to provide, on `t3engine.SpinBlockT3`'s gathers and reductions.
+- **Symmetry labels**: done since, section 9.7 (`kernel(..., blocks=True)`).
+  Without `blocks`, integrals with labels in use are taken as they are (T3
+  is put on the lexicographic unique block, `ccsdt_opt.packed_t3`, and
+  Lambda_3 is returned on it).
 - **Scratch fallback** (9.3).
 - U / R-form integrals (`eris_spin`): spin orbitals or spinors only.
 - Densities and the orbital gradient from the packed arrays (the next
@@ -634,6 +632,158 @@ since (`test_memory_plan` has a buffer size with a short last batch).
 
 - Any factorization for packed amplitudes: the tables are flat lists of
   terms, each a product of at most four tensors.
+
+### 9.7 In the blocks of the symmetry labels (`zccsdt.cc.lambda_blk`)
+
+`lambda_opt.kernel(eris, t1, t2, t3, opts, blocks=True)` takes T3 as the
+amplitude equations leave it for integrals with labels in use - the blocks
+of `t3engine.T3Layout`, block g the triples whose classes add up to g - and
+returns l3 in the same layout (`Result.blocks`); `lambda_opt.packed_l3(eris,
+l3)` puts it on the unique block in lexicographic order, `blocked_l3` is the
+inverse (`ccsdt_opt.packed_t3`, `blocked_t3`).  l3 has the labels of T3, so
+nothing else is stored.  The equations, the intermediates and the code of
+the residuals of rank 1 and 2 are those of 9.1 and 9.2; the engine is
+`lambda_blk.BlockL3` instead of `DenseL3`, with the same methods, on the
+gathers and reductions of the block engine of the T3 equation
+(`t3engine.SpinBlockT3`, `csrc/t3pack.c`: `zc_bgather2`, `zc_breduce2`,
+`zc_bgather_vir`, `zc_breduce_ppl`).  One class of labels is no symmetry:
+the blocks are then the packed block.
+
+Classes: the labels shifted and divided by their step (`t3pack.classes_of`),
+pairs in groups gP, gQ = the sum of two classes, triples in groups of three.
+
+| Step | In blocks |
+|---|---|
+| pass 1 | per batch of occupied pairs of a group gP and per group gQ of virtual pairs: l3 and T3 gathered as `[P, D, Q]`, D the (d, m) with class(d) - class(m) = gP - gQ.  The density `Dr` is block diagonal in this difference: one GEMM per pair into its block.  The two stacked GEMMs run per class of d and of m, on the whole batch (`[(P,d), (m,Q)]`; a copy of the gathered block where D has more than one block of classes); x and y of the operands `[x, P, d]`, `[(m,Q), y]` are of the class gP - class(d).  `D1` where gP = gQ |
+| Gram matrix | per group of triples; put into the C(o,3)^2 array that `LAMBDA[1,2]` read |
+| pass 2 | as pass 2 of the T3 equation in blocks: ring with the blocks `[D, D]` of the transposed operator, the outer products where gP = gQ, the drive products per class of the summed index (the four parts of K, each a range per class; the rows of `Bdrv` of a class copied next to each other once per iteration), one reduction per batch (`zc_breduce2`) |
+| ladder | per group of triples and class of the free index c: `Wpp[h]^T Lv` with the diagonal pair block h = g - class(c) of the operator (GEMM with the transposed flag), `zc_breduce_ppl`; `Xq` and `X2` on the same gathered batches (P of group h, i of the class of c) |
+| hh, update | per group of triples, with the diagonal blocks of `O6T` |
+| once: `Xq`, `X2` | `BlockL3.contract_x`: per group of triples and class of the free index; the T3 parts of `W_vvvo`, `W_vooo` from pass 1 of the block engine of the T3 equation, as an amplitude iteration |
+
+**What stays dense**: l1, l2, every operand (`GmQ`, `GPd`, `Adrv`, `Bdrv`,
+`Vx`, `Xq`, `X2`; pairs in the order of their groups) and the residuals of
+rank 1 and 2 - o v^3-sized arrays and products that do not use the labels.
+`Wpp` is the list of its diagonal pair blocks (`pair_matvec` and the ladder
+of l2 take the list; `csrc/lambda_t3.c` has `zc_lam_pair_expand_tab`,
+`zc_lam_pair_matvec_tab` for pairs in any order).
+
+**Memory** (`plan_memory_blocks`, `LambdaPlan.blocks`): three times the
+blocks of T3, the pair blocks of the operator, the dense operands of 9.3
+and the blocks of the ring operator, the work array of the block engine
+(kept: `SpinBlockT3.buffer_bytes(mem_mb)`; pass 1 here takes two gathered
+blocks of a batch, less than pass 2), and per iteration the copies in blocks
+of `Bdrv` and `GmQ` (the elements whose labels add up).  With `max_memory`
+the buffers shrink (bisection on a need that grows with `mem_mb`: the
+largest that fit) to one occupied pair and one triple per batch;
+`MemoryError` with the numbers below that.  `plan_for` (both layouts) adds
+the bare `<my||Q>`, `<mn||Q>` on pairs and, for the blocks, the pair blocks
+of the bare `<ab||de>` where the integral object does not hold them for
+these maps: the packed block had 4.39 GB above the start against 4.27 GB of
+planned arrays for 8 + 160 spinors without it (job 31740301), inside the
+0.7 GB that the plan allows for the BLAS and the allocator.
+
+**Front end**: `GCCSDT.solve_lambda()` solves in blocks when `symmetry` is
+set and the iterations ran in blocks, on the packed block otherwise or when
+the blocks do not fit in `max_memory` (`lambda_blocks` says which).
+`self.l3` has the layout of `self.t3` in every case (after the packed block
+its blocks are taken out); `make_rdm1` and `ccsdt_q_lambda` read
+`_packed_l3()`, which puts the blocks on the packed block once.
+
+**Validation** (`tests/test_lambda_blk.py`, 45 s), against the equations on
+the packed block:
+
+- Random integrals that conserve the labels, amplitudes and Lambda with the
+  labels that solve nothing, 5 + 7 spin orbitals with one label and with
+  four (an occupied class empty), real and complex, with whole batches and
+  with one occupied pair and one triple per batch: each of the six groups
+  of terms of the Lambda_3 residual, the three residuals, their parts by
+  the rank of Lambda and a Jacobi step to 1e-12 of their size.
+- HBr / cc-pVDZ-DK, X2C, 8 + 28 spinors, labels 2 m_j (six of the virtual
+  spinors; 31820 of 183456 elements of l3): converged l1, l2, l3 and the
+  pseudo-energy `sum f[a,i] l1[i,a] + 1/4 sum <ab||ij> l2[ij,ab]` to 1e-10
+  (2e-11, 1e-11, 3e-12 found; the same number of cycles), also with the
+  smallest buffers; with one label; with a phase on every spinor (complex
+  integrals and amplitudes: against the packed block with these integrals,
+  and against the real Lambda with the conjugate phases of t - the Fock
+  matrix takes the phases too: without them its 4e-10 between spinors of
+  one label left 1.5e-9 in l1).
+- The front end: l3 in the layout of T3, the same Lambda without
+  `symmetry` and when the plan of the blocks raises.
+- Memory: the allocations of the intermediates and of an iteration
+  (tracemalloc) within the plan, those of the iteration above 0.85 of it,
+  the work array as planned, for 6 + 30 spin orbitals with one label
+  (complex) and with six (real and complex); budgets from the floor to all
+  buffers: within the budget,
+  growing with it, never below a buffer size that fits; `plan_for` with and
+  without the bare integrals on the integral object.
+
+**Timing**: `bench/profile_lambda_blocks.py`, HBr on the z axis, X2C, 28
+frozen, real integrals (spinors adapted to m_j): amplitudes converged in
+blocks, then three amplitude iterations after a warm-up iteration and the
+Lambda equations to convergence (17 cycles in both layouts), the packed
+block first and the blocks after it in the same process on the same
+integrals and amplitudes.  Job 31741024 on c659 (not the login node;
+commit df267f3), 8 cores of a Xeon Gold 6248R, MKL, `mem_mb` 2000.
+Seconds per iteration (cores busy):
+
+| | cc-pVTZ-DK | cc-pVQZ-DK |
+|---|---|---|
+| occupied + virtual spinors | 8 + 78 | 8 + 160 |
+| labels of the virtual spinors | 8 | 10 |
+| elements of l3: packed block, blocks | 4 260 256, 622 138 (14.6%) | 37 515 520, 4 699 202 (12.5%) |
+| amplitude iteration, packed block | 0.843 (6.2) | 16.19 (6.5) |
+| amplitude iteration, blocks | 0.407 (2.7) | 3.545 (4.4) |
+| - ratio | 2.07 | 4.57 |
+| **Lambda iteration, packed block** | **0.991** (7.2) | **17.35** (7.7) |
+| **Lambda iteration, blocks** | **0.297** (3.2) | **2.040** (5.1) |
+| **- ratio** | **3.34** | **8.50** |
+| Lambda intermediates, once: packed block, blocks | 0.561, 0.291 | 6.92, 3.13 |
+| blocks: pass 1 (density, stacked GEMMs, gathers) | 0.107 (0.020, 0.059, 0.022) | 0.546 (0.129, 0.207, 0.162) |
+| blocks: pass 2 | 0.066 | 0.396 |
+| blocks: ladder pass | 0.026 | 0.249 |
+| blocks: residuals of rank 1 and 2 (dense) | 0.075 | 0.697 |
+| blocks: DIIS | 0.011 | 0.082 |
+| packed block: pass 1, pass 2, ladder, rank 1 and 2 | 0.345, 0.296, 0.184, 0.109 | 4.61, 4.31, 6.13, 1.66 |
+| peak anonymous memory above the start of Lambda: packed block | 1.75 GB | 4.39 GB |
+| - planned (`need` less T3) | 2.40 GB | 5.11 GB |
+| peak above the start: blocks | 0.34 GB | 2.36 GB |
+| - planned | 1.04 GB | 3.11 GB |
+| blocks under a budget a quarter of the way from the floor of the plan to all buffers: s per iteration, peak, planned | 0.408, 0.24 GB, 1.00 GB | 2.33, 1.79 GB, 2.91 GB |
+| blocks against the packed block: max \|dl1\|, \|dl2\|, \|dl3\| | 4.8e-11, 3.0e-11, 5.0e-12 | 2.0e-11, 7.5e-12, 2.8e-12 |
+
+(The plans contain 0.7 GB for the BLAS threads and the allocator, and for
+the blocks the DIIS vectors in memory, 0.08 and 0.60 GB: the blocks are
+below `diis.INCORE_SIZE`, the packed block of cc-pVQZ-DK is not.)  The
+first run of the script, job 31740301 on the same node with commit 6c6c581
+- before `plan_for` counted the bare integrals and before the copies of the
+block passes were threaded - gave 0.827, 0.374, 0.892, 0.270 s for
+cc-pVTZ-DK and 16.33, 3.516, 17.13, 1.937 s for cc-pVQZ-DK (ratios of the
+Lambda iteration 3.31 and 8.84): the two jobs differ by up to 10% in either
+direction, in the packed-block numbers too, so the threaded copies bought
+nothing that this measurement resolves.
+
+In blocks the three passes over l3 take 0.2 and 1.2 s where the packed
+block takes 0.8 and 15 s (the ladder of cc-pVQZ-DK: 25 times less), and
+what the labels do not touch is what is left: the residuals of rank 1 and
+2 are a quarter and a third of the iteration (0.075 and 0.70 s; 0.109 and
+1.66 s on the packed block, where l2 and `Y2` meet the whole pp operator
+instead of its diagonal blocks - their parts were not timed one by one).
+The cores are less busy than on the packed block (3.2 and 5.1 of 8): many
+small products.  A Lambda iteration in blocks costs 0.73 and 0.58 of an
+amplitude iteration in blocks, which dresses the integrals and makes the
+intermediates with dense operands every time (2.3 of its 3.5 s for
+cc-pVQZ-DK).
+
+**Not done**: the residuals of rank 1 and 2 and the o v^3-sized operands in
+blocks (the next third of the iteration, and most of its memory: the
+dense operands and transients of an iteration are 1.3 GB for 8 + 160
+spinors, `LambdaPlan.iteration`, where the blocks of l3 are 38 MB);
+labels that add modulo something (`t3pack.classes_of` gives no classes for
+them: the packed block); the closed-shell flip of the block engine and
+U / R-form integrals; a numpy form of the reductions (without the C kernels
+`block_engine` returns None and the front end uses the packed block); a
+scratch fallback.
 
 ## 10. Densities, orbital gradient and relaxed density from packed amplitudes
 
