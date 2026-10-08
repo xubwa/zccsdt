@@ -905,7 +905,7 @@ def xx2czvec_sound(nocc, nvir, nspinors):
     -1.1246 against -0.8609 from differences of CFOUR's own energies).
 
     The rule (it separates the seven combinations of sizes run for
-    docs/native.md, two of them within 41 and 23 words of it, and the six
+    docs/native.md, two of them within 41 and 23 words of it, and the eight
     of docs/benchmarks.md, "Frozen virtual spinors"; the cause from reading
     the source, not verified in a debugger): x2czvec/x2cccdendrv.f90 passes work(tmp2) to
     frmfck2c3 as a scratch matrix of 2 nspinors^2 words, tmp2 is never

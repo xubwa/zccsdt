@@ -720,3 +720,293 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
 - No input section of the ZMAT is read (`%zccsdt` of the Python front end):
   method by argument or CALC, thresholds by CC_CONV / CC_MAXCYC, everything
   else by the environment variables named above (test hooks and overrides).
+
+## 10. Relaxed density through xx2czvec
+
+The specification of the hand-over of a coupled-cluster density to CFOUR's
+own Z-vector program, so that `xsox2cprop` gets its `denfinal` without the
+orbital response being solved here.  Pinned with the Python program
+(`zccsdt.cfour`: `handover_files`, `write_handover`, `handover`,
+`handover_density`, `xx2czvec_sound`; `python -m zccsdt.cfour --properties
+--zvector cfour RUNDIR`) on the files that CFOUR's `xx2cccdenocbp` writes
+for CCSD and CCSD(T).  Every statement below that is not marked "from
+reading" is a measurement of 2026-10-08: H2O and HF / 6-31G, X2C-1e,
+SYM=OFF, geometry in bohr, SCF_CONV=11, CC_CONV=12; the binaries of
+`~/apps/cfour-x2cso/bin`; login node, 4 threads.  The native program does
+not write these files yet.
+
+### 10.1 What xx2czvec does
+
+`xx2czvec` (sources `x2czvec/`) runs after `xjoda`, `xsox2catm`, `xsox2chf` -
+`xx2cvtran` is not needed - and reads, besides the seven files below (from
+reading): `ZMAT` (for a section `%vircut` only), `JOBARC` (NUMDROPA,
+NUMVIRTA, IFLAGS, the spinors `scf2ccmo`, the Fock matrix `scf2cfck`,
+`scf2ceig`), `nmototal`, `dgcosym`, the AO integrals (`IIII`, or its own
+`ao2enum`, `ao2efil` of an earlier run) and the property integrals of
+`xsox2catm`.  It makes the response integrals `<ab||ij>` and `<aj||ib>` over
+**all** occupied and **all** virtual spinors from the AO integrals itself
+(files `intpphh2`, `intphhp2`), solves
+
+    R(d) = -x,     R(d)_ai = (e_a - e_i) d_ai + sum_bj ( <aj||ib> d_bj + <ab||ij> conj(d_bj) )
+
+for d[a,i] (a: all virtual, i: all occupied spinors; x: the file `xfull`;
+R: the orbital Hessian of the SCF, `zccsd.zvector.response`; `<pq||rs> =
+(pr|qs) - (ps|qr)` as everywhere here) in a Krylov space preconditioned
+with 1 / (e_a - e_i) - at most IFLAGS(31) vectors, until the new one is
+below 10^-IFLAGS(30); 64 and 16 in these runs -, and assembles `denfinal`
+(N spinors in CFOUR's order [frozen occupied, active occupied, active
+virtual, dropped virtual]; `D[p,q] = <q+ p>`, the convention of
+`bench/cfour/write_density.py`):
+
+| block of `denfinal` | from |
+|---|---|
+| D[a,i], all virtual by all occupied | d (also written as `dpvofull`) |
+| D[i,a] | conj(d[a,i]) |
+| active occupied, D[i,j] | `dpoo`[i,j] + conj(`dpoo`[j,i]) + delta_ij (`dii0`[i,i] + 1) |
+| active virtual, D[a,b] | `dpvv`[a,b] + conj(`dpvv`[b,a]) + delta_ab `daa0`[a,a] |
+| D[frozen f, active occupied i] | `dpopo`[f,i]; D[i,f] its conjugate |
+| D[dropped d, active virtual a] | `dpvpv`[d,a]; D[a,d] its conjugate |
+| frozen by frozen | the unit matrix |
+| dropped by dropped | zero |
+
+(`cfour.handover_density` is this table; xx2czvec's `denfinal` equals it to
+rounding in every run below.)  Nothing else enters: `xfull` is the whole
+right-hand side - xx2czvec adds no term from the other files to it - and of
+`dii0`, `daa0` only the diagonals are read.  It also writes `denfina2` (a
+copy), `dennoscf` (without the 1 on the occupied diagonal) and `denpcorr`.
+No two-particle density crosses the interface.
+
+### 10.2 The files
+
+Each of the seven is one record of a Fortran sequential unformatted file
+(4-byte length, data, 4-byte length; `cfour._write_complex`), complex
+numbers as (re, im) of 8 bytes, the first index fastest, in the basis of
+CFOUR's spinors (`scf2ccmo`) and in its order.  A block without elements is
+a record of length zero (a file of 8 bytes), and the file must be there.
+With no = active occupied, nv = active virtual, nf = frozen occupied, nd =
+dropped virtual spinors:
+
+| file | shape | content |
+|---|---|---|
+| `xfull` | (nv + nd, nf + no): rows active virtual then dropped, columns frozen then active | x[a,i] below |
+| `dpoo` | (no, no) | (D - 1) / 2 on the active occupied spinors |
+| `dpvv` | (nv, nv) | D / 2 on the active virtual spinors |
+| `dii0` | (no, no) | zeros |
+| `daa0` | (nv, nv) | zeros |
+| `dpopo` | (nf, no) | D[frozen, active occupied] |
+| `dpvpv` | (nd, nv) | D[dropped, active virtual] |
+
+D is the Hermitian one-particle density **without** the response of the
+virtual-occupied rotations, in the names of `zccsd/zvector.py` (`_relax`)
+and `cc/density_opt.py` (`relaxed_rdm1`):
+
+    D = D0 + y
+
+- D0: the unrelaxed density, reference included, Hermitized - `dm1 = (d1^T
+  + conj(d1)) / 2` of `density_opt.kernel` in the active block, 1 on the
+  frozen diagonal; for (T) with the terms of E(T) on its diagonals
+  (`zvector.kernel`), for CCSDT(Q) plus `diag(q.de)`, the derivative of
+  E(Q) with respect to the orbital energies (docs/lambda.md 11.2).
+- y: the rotations that follow from the Fock matrix staying diagonal,
+  `y[p,q] = G[p,q] / (e_q - e_p)` with the orbital gradient G[y,x] of
+  `zccsd/zvector.py` (anti-Hermitian), zero between spinors closer than
+  `zvector.DEGENERATE`: for the pairs (active occupied, frozen), (active
+  virtual, dropped) and their transposes - the frozen-index blocks of
+  `orbgrad_frozen` / `density_opt` (`frozen_terms`) plus the Fock matrix of
+  the correlation density - and, for (T) and (Q) only, among the active
+  occupied and among the active virtual spinors.  y is Hermitian and has no
+  virtual-occupied block.  For CCSD and CCSDT without frozen or dropped
+  spinors y = 0.
+
+So `dpopo` and `dpvpv` are y alone (D0 vanishes there), and the oo and vv
+rotations of (T) and (Q) (the Fock-density route of docs/lambda.md 11) ride
+in `dpoo` and `dpvv`.  The right-hand side is
+
+    x[a,i] = G[a,i] + F[y][a,i] - R(D0_vo)[a,i]          (all virtual a, all occupied i)
+           = -( gvo + R(D_vo) ),       F[M][p,q] = sum_rs <ps||qr> M[r,s],
+
+with `gvo = -G_vo - F[y]_vo` the right-hand side of the Z-vector equations
+`R(z) = gvo` of `zvector._relax` (for CCSDT without frozen spinors `gvo =
+-gnh / 2`, `Result.gnh`), and D0_vo = D_vo the virtual-occupied block of the
+unrelaxed density (non-zero between active spinors only).  xx2czvec's
+solution is then the whole block of the relaxed density, d = D0_vo + z:
+the unrelaxed virtual-occupied block is **not** added by xx2czvec, it has
+to be inside x through R(D0_vo) - one contraction of D0_vo with `<aj||ib>`
+and `<ab||ij>` (a, i over all spinors of their kind, b, j active), or one AO
+Fock build, which is what the Python program does.  Sign and conjugation
+as written: `xfull` is minus R of the final D_vo, not conjugated (factor
+-1.0000000000 in a fit of CFOUR's file, deviation 5e-13).  The two formulas
+with MO integrals, R and F, agree with the AO-direct ones of `zvector` to
+rounding, and x made with them with `xx2cccdenocbp`'s `xfull` to 1e-13
+(CCSD(T) with a frozen core, CCSD with dropped spinors).
+
+The split between `dpoo` and `dii0` is free.  `xx2cccdenocbp` writes a
+`dpoo` that is not Hermitian and puts the diagonal into `dii0` (likewise
+`dpvv`, `daa0`); only `dpoo + dpoo^+ + diag(dii0)` and `dpvv + dpvv^+ +
+diag(daa0)` are comparable with it, and they are what was compared.
+
+The spinors.  Each of CFOUR's SCF runs leaves its own mixture within a
+Kramers pair, and the amplitudes of the Python program may live on another
+one (`DirectZCCSD`: adapted pairs).  With U = C(CFOUR)^+ S C(ours), which
+mixes only degenerate spinors: D -> U D U^+, x -> U_v x U_o^+ before
+writing (`cfour.handover`).  The native program runs on CFOUR's spinors and
+needs no such step.
+
+### 10.3 Validation
+
+Our files against those of `xx2cccdenocbp` in the same run directory (its
+CCSD / Lambda chain first), element by element, max |difference|; then
+`xx2czvec` on our files against its solution (`dpvofull`) and `denfinal` on
+CFOUR's own files:
+
+| H2O / 6-31G, 26 spinors | nf, nd | `xfull` | `dpopo` | `dpvpv` | oo combination | vv combination | `dpvofull` | `denfinal` |
+|---|---|---|---|---|---|---|---|---|
+| CCSD | 0, 0 | 5.3e-13 | - | - | 1.2e-13 | 2.7e-13 | 2.6e-13 | 2.7e-13 |
+| CCSD, DROPMO=1>1 | 2, 0 | 1.2e-13 | 8.2e-15 | - | 1.2e-13 | 2.9e-13 | 2.8e-13 | 2.9e-13 |
+| CCSD(T) | 0, 0 | 5.3e-13 | - | - | 2.3e-13 | 2.8e-13 | 2.9e-13 | 2.9e-13 |
+| CCSD(T), DROPMO=1>1 | 2, 0 | 1.1e-13 | 8.7e-15 | - | 2.4e-13 | 2.8e-13 | 3.0e-13 | 3.0e-13 |
+| CCSD, DROPMO=1>1, %vircut 1.5 | 2, 2 | 1.2e-13 | 7.7e-15 | 8.6e-15 | 1.9e-13 | 1.7e-13 | 2.8e-13 | 2.8e-13 |
+| CCSD(T), DROPMO=1>1, %vircut 1.5 | 2, 2 | 1.5e-13 | 8.7e-15 | 8.9e-15 | 1.9e-13 | 1.6e-13 | 3.3e-13 | 3.3e-13 |
+
+(sizes of the entries: `xfull` 1e-2, `dpopo` 3e-5, `dpvpv` 1e-2, the oo and
+vv combinations 1e-2.)  The frozen columns and dropped rows of `xfull`, and
+`dpopo`, `dpvpv`, of CFOUR are therefore the frozen-index quantities of the
+Python route as they are.
+
+The three routes - CFOUR's own chain, the Z-vector solver of the Python
+program (`--zvector python`), the hand-over (`--zvector cfour`) - in one run
+directory (the same spinors): the relaxed electronic dipole moment (z) that
+`xsox2cprop` prints, the largest difference between `denfinal` of the
+hand-over and of the Python solver, and between the 48 numbers of
+`xsox2cprop` with the two (dipole, field gradients, contact and effective
+densities, ...):
+
+| | CFOUR's chain | Python Z-vector | xx2czvec on our files | `denfinal` | properties |
+|---|---|---|---|---|---|
+| CCSD | 0.01580313752031 | 0.01580313752061 | 0.01580313752035 | 4.2e-12 | 9.0e-12 |
+| CCSD, frozen core | 0.01567701616479 | 0.01567701616334 | 0.01567701616502 | 4.2e-12 | 5.0e-12 |
+| CCSD(T) | 0.01227486493558 | 0.01227486493506 | 0.01227486493588 | 1.6e-11 | 1.3e-10 |
+| CCSD(T), frozen core | 0.01215439608933 | 0.01215439608680 | 0.01215439608968 | 9.1e-12 | 4.3e-11 |
+| CCSD, frozen core, %vircut 1.5 | 0.02620131976691 | 0.02620131976469 | 0.02620131976709 | 1.3e-11 | 5.1e-11 |
+| CCSD(T), frozen core, %vircut 1.5 | 0.02358891376170 | 0.02358891376432 | 0.02358891376219 | 1.3e-11 | 9.9e-11 |
+| CCSDT | - | 0.01207714055096 | 0.01207714054634 | 4.9e-12 | 2.8e-11 |
+| CCSDT, frozen core | - | 0.01195694144941 | 0.01195694144947 | 2.9e-12 | 1.1e-11 |
+| CCSDT, frozen core, %vircut 1.5 | - | 0.02344559047768 | 0.02344559047585 | 9.5e-12 | 1.0e-10 |
+| CCSDT(Q) | - | 0.01193066698001 | 0.01193066697872 | 3.7e-12 | 1.4e-11 |
+| CCSDT(Q), frozen core | - | 0.01181130358927 | 0.01181130358956 | 2.1e-12 | 1.4e-11 |
+| CCSDT(Q), frozen core, %vircut 1.5 | - | 0.02324580802959 | 0.02324580802765 | 7.9e-12 | 1.0e-10 |
+
+The differences are of the size of the threshold of the Python solver (a
+residual of 1e-11); against CFOUR's own `denfinal` the hand-over is at
+3e-13.  xx2czvec converged in 15 cycles and took 0.14 to 0.19 s in these
+runs.  So the oo and vv rotations of (T) and of (Q), the diagonal `q.de`,
+the frozen core and the dropped virtual spinors all pass through the seven
+files, and CFOUR's Z-vector solve reproduces the Python relaxed density to
+1e-11.  CFOUR has no CCSDT or CCSDT(Q) density of its own to compare with.
+
+### 10.4 Where xx2czvec is wrong: few active virtual spinors
+
+With 4 of the 16 virtual spinors dropped (`%vircut 1.3`) the same comparison
+gives files that agree with CFOUR's as before (`xfull` 1.4e-13, `dpvpv`
+3.8e-14, the hand-over against CFOUR's own `denfinal` 2.3e-13) and a
+density that is wrong in both: xx2czvec's solution is not the solution of
+the equations.  Its residual in R (with integrals made here, `resid.py`)
+is 5.5e-3 for a right-hand side of 1.6e-2, and its files `intpphh2`,
+`intphhp2` differ from the integrals of CFOUR's spinors made here by 0.1 to
+0.9, the block of the active virtual spinors included (with all virtual
+spinors active: 2e-15, 8e-15).  The defect is not one of dropped spinors:
+HF / 6-31G, all electrons, nothing dropped, has it too.
+
+| run | no, nv, N | 1 + 3 C(nv,3) + nv(nv+1) + no(no+1) | 2 N^2 | relaxed dipole z, CFOUR's chain | Python Z-vector | residual of xx2czvec's solution |
+|---|---|---|---|---|---|---|
+| H2O CCSD | 10, 16, 26 | 2063 | 1352 | 0.01580313752 | 0.01580313752 | 3e-14 |
+| H2O CCSD, DROPMO=1>1 | 8, 16, 26 | 2025 | 1352 | 0.01567701616 | 0.01567701616 | 2e-14 |
+| H2O CCSD, DROPMO=1>1, %vircut 1.5 | 8, 14, 26 | 1375 | 1352 | 0.02620131977 | 0.02620131976 | 4e-13 |
+| H2O CCSD, DROPMO=1>1, %vircut 1.3 | 8, 12, 26 | 889 | 1352 | 0.00462113289 | -0.02252083884 | 5.5e-3 |
+| H2O CCSD, %vircut 1.3 | 10, 12, 26 | 927 | 1352 | 0.00418314407 | -0.02236195666 | 6.0e-3 |
+| H2O CCSD, DROPMO=1>1, %vircut 1.19 | 8, 10, 26 | 543 | 1352 | 0.42621843425 | 0.20560900178 | 6.5e-2 |
+| HF CCSD, nothing frozen or dropped | 10, 12, 22 | 927 | 968 | -0.26473249072 | -0.00099017762 | 4.2e-2 |
+
+For HF the total dipole moment of `xsox2cprop` is -1.12462471501 with
+CFOUR's own density and -0.86088240191 with the one of the Python solver;
+the difference of CFOUR's own CCSD energies in fields of +-1e-4
+(ZFIELD=+-1000, `xx2cccsd`) is -0.86088237 (for the SCF -0.90178027, against
+the -0.90178030 that `xsox2cprop` prints).  CFOUR's relaxed CCSD properties
+are thus wrong, without a message, in a plain small calculation; its
+energies are not affected.  The Python values of the three `%vircut 1.3`
+and `1.19` rows were not checked against finite differences here (their
+kind was, in docs/benchmarks.md, "Frozen virtual spinors").
+
+The rule of the table - sound if and only if the third column is at least
+the fourth (`cfour.xx2czvec_sound`) - separates these seven runs, two of
+them by 23 and 41 words, and agrees with the eight of docs/benchmarks.md
+(H2O, N = 80, with 42, 24, 8 active virtual spinors: right, wrong, wrong;
+HI, N = 256, with 130, 94, 78, 68, 58: right down to 68, wrong at 58 - the
+rule puts the border at 64).  Its
+cause, from reading the source and not verified in a debugger:
+`x2czvec/x2cccdendrv.f90` hands `work1(tmp2)` to `frmfck2c3` as a scratch
+matrix of N x N complex numbers; `tmp2` is never set in
+`x2czvec/zvecini.f90` (the assignment is commented out), so the matrix lies
+at the start of the work array, where the offset tables of the triples
+(3 C(nv,3) + nv(nv+1) + no(no+1) words) are followed by the list of AO
+integrals, read before.  Where the tables are shorter than 2 N^2 words,
+the first AO integrals are overwritten.  One assignment in `zvecini.f90`
+would remove it; the tree is read-only for this work and was not changed.
+Until then the hand-over is exact where the rule holds, and the Python
+program checks it in any case: `cfour.handover` computes `R(d) + x` for
+xx2czvec's solution with one more Fock build, and with a residual above
+1e-6 of the right-hand side it moves the file to `denfinal.wrong` and stops
+(exit status 1, the reason named).  A native program without a Fock build
+of its own has to apply the rule before it calls xx2czvec.
+
+### 10.5 What does not go through this interface
+
+- A density with elements between two frozen spinors other than the unit
+  matrix, or between two dropped ones: xx2czvec sets these blocks itself
+  (`handover_files` raises).  None of the present methods has them.
+- A reference whose orbital Hessian is not the R above: xx2czvec builds it
+  from the Coulomb integrals of the AO basis and the orbital energies (from
+  reading).  A two-electron operator beyond that in the SCF, an SCF that
+  is not converged (the relaxed density then carries its gradient in first
+  order, `zvector.SCF_GRADIENT`) and non-canonical spinors are not covered.
+  X2CAMF, whose mean field is a one-electron operator, should be: not run.
+- Large cases, as far as the memory of xx2czvec goes (from reading, not
+  measured): it holds the AO integrals in core and at least two arrays of
+  (occupied x virtual spinors)^2 complex numbers, frozen and dropped ones
+  included, without symmetry.
+- A failed solve gives no signal: when the Krylov iteration does not
+  converge the program goes on with what it has (from reading); the line
+  "Z-vector equation converged in n cycles" of its output is the only sign
+  (`handover` reports the solve as not converged without it, and its
+  residual check catches a wrong solution).
+- CCSDT(Q)_Lambda, CCSDTQ, (P): the Python front end writes relaxed
+  densities for CCSD, CCSD(T), CCSDT and CCSDT(Q) only.  The density of
+  CCSDT(Q)_Lambda goes through the same `solver` hook of `relaxed_rdm1`;
+  not run through xx2czvec.
+- Everything two-particle: the orbital gradient G (its virtual-occupied
+  block, its frozen-index blocks, for (T) and (Q) its oo and vv blocks) and
+  the Fock matrices F[y], R(D0_vo) have to be made before the hand-over.
+  xx2czvec replaces the iterations of the Z-vector equations and the
+  assembly of `denfinal`, nothing else.
+
+### 10.6 For the Fortran port
+
+In the order of the work.  (1) D0 and `gnh` (the virtual-occupied orbital
+gradient, G_vo = gnh / 2) from the Lambda and density passes; without frozen
+or dropped spinors and without (Q) that is all: `dpoo = (D0_oo - 1) / 2`,
+`dpvv = D0_vv / 2`, `xfull = gnh / 2 - R(D0_vo)` with R from `<aj||ib>` and
+`<ab||ij>` of the active spinors (in the integral files of `xx2cvtran`:
+`moinphhp`, `moinpphh`), empty `dpopo`, `dpvpv`, zero `dii0`, `daa0`.  The
+CCSD limit of exactly this is the first row of the tables above, and
+`xx2cccdenocbp`'s files in the same directory are the element-wise
+reference (the combinations of 10.2, not `dpoo` itself).  (2) With frozen
+or dropped spinors: the frozen-index blocks of G, then y, F[y] and the rows
+and columns of R(D0_vo) with a frozen index need integrals with one frozen
+index and, for the block [dropped, frozen], the Fock matrix of the
+correlation density (`relaxed_rdm1`: `V`); these are not in the files of
+`xx2cvtran`.  (3) (Q): `q.de` on the diagonal, the oo and vv blocks of G
+into y.  `tests/test_cfour.py` (`test_handover_files`,
+`test_handover_to_a_stand_in_for_xx2czvec`) fix the formats and the
+identities without a CFOUR binary; the scripts and logs of the measurements
+are in `/home/xwang405/.claude/jobs/7ba4fcf7/tmp/zvec/` (`route.sh`,
+`cmp.py`, `pin.py`, `resid.py`, `ints.py`, `formulas.py`, `logs/`).

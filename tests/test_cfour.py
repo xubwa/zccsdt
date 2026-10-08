@@ -354,7 +354,10 @@ def test_handover_files(tmp_path):
     # where xx2czvec is wrong (measured: docs/native.md): active occupied, active virtual, all spinors
     for sizes, sound in (((10, 16, 26), True), ((8, 16, 26), True), ((8, 14, 26), True), ((8, 12, 26), False),
                          ((10, 12, 26), False), ((8, 10, 26), False), ((10, 12, 22), False),
-                         ((8, 42, 80), True), ((8, 24, 80), False), ((18, 94, 378), True), ((18, 58, 378), False)):
+                         # docs/benchmarks.md, "Frozen virtual spinors": H2O, HI
+                         ((8, 42, 80), True), ((8, 24, 80), False), ((8, 8, 80), False),
+                         ((18, 130, 256), True), ((18, 94, 256), True), ((18, 78, 256), True),
+                         ((18, 68, 256), True), ((18, 58, 256), False)):
         assert cfour.xx2czvec_sound(*sizes) is sound
 
 

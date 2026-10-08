@@ -575,6 +575,20 @@ CFOUR's to all digits printed, the densities differ by at most 4.3e-12 and
 it; with most virtual spinors dropped CFOUR's own relaxed density is not
 the derivative of its energy, see below).
 
+`--zvector cfour` leaves the Z-vector equations to CFOUR: the program
+writes the right-hand side and the blocks of the density as the files
+`xfull`, `dpoo`, `dpvv`, `dii0`, `daa0`, `dpopo`, `dpvpv` that CFOUR's
+`xx2czvec` reads, runs it, and `xx2czvec` writes `denfinal` (docs/native.md
+10 has the definition of each file and the validation: CCSD, CCSD(T), CCSDT
+and CCSDT(Q), with a frozen core and dropped virtual spinors, equal to the
+default route to 1e-11 in the density).  The default, `--zvector python`,
+is unchanged.  `xx2czvec` is wrong when few virtual spinors are active -
+then CFOUR's own relaxed properties are wrong as well, e.g. for HF / 6-31G
+with nothing dropped (docs/native.md 10.4; `cfour.xx2czvec_sound(active
+occupied, active virtual, all spinors)` is the rule): the program checks
+the solution of `xx2czvec` in the equations with one Fock build, and stops
+instead of handing a wrong density to `xsox2cprop`.
+
 **Conventions.**  The spinors are those of CFOUR's list `scf2ceig` without
 the frozen and the dropped ones, in its order (occupied first, each set by
 energy); `eris.spinors` are their numbers in that list.  The files hold
