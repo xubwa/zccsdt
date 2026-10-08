@@ -61,12 +61,18 @@ def _arrays(fock, g, nocc, amps, lams=None):
     return arrays
 
 
-def residuals(lams, amps, fock, g, nocc, arrays=None):
-    '''The residuals of the three Lambda equations, dL/dt_k: dense.'''
+def residuals(lams, amps, fock, g, nocc, arrays=None, sources=None):
+    '''The residuals of the three Lambda equations, dL/dt_k: dense.
+    ``sources`` = [s1, s2, s3]: constant terms added to them (the
+    derivatives of a correction to the energy with respect to t_k: those of
+    (Q) in zccsdt.cc.qgrad_ref).'''
     if arrays is None:
         arrays = _arrays(fock, g, nocc, amps)
     arrays = dict(arrays, l1=lams[0], l2=lams[1], l3=lams[2])
-    return [L.residual(k, arrays, nocc) for k in (1, 2, 3)]
+    res = [L.residual(k, arrays, nocc) for k in (1, 2, 3)]
+    if sources is not None:
+        res = [r + s for r, s in zip(res, sources)]
+    return res
 
 
 @dataclass
@@ -77,9 +83,10 @@ class Result:
 
 
 def kernel(fock, g, mo_energy, nocc, amps, conv_tol_normt=1e-9, max_cycle=200, diis_space=8,
-           verbose=False):
+           verbose=False, sources=None):
     '''The Lambda equations of CCSDT for the converged amplitudes
-    ``amps`` = [t1, t2, t3], by Jacobi steps with DIIS from conj(t).'''
+    ``amps`` = [t1, t2, t3], by Jacobi steps with DIIS from conj(t).
+    ``sources``: see residuals.'''
     nvir = g.shape[0] - nocc
     arrays = _arrays(fock, g, nocc, amps)
     den = [R.denominator(mo_energy, nocc, k) for k in (1, 2, 3)]
@@ -90,7 +97,7 @@ def kernel(fock, g, mo_energy, nocc, amps, conv_tol_normt=1e-9, max_cycle=200, d
     def parts(a):
         return [a[0].ravel()] + [Q.unique(x, k + 1).ravel() for k, x in enumerate(a) if k]
     for cycle in range(max_cycle):
-        res = residuals(lams, amps, fock, g, nocc, arrays)
+        res = residuals(lams, amps, fock, g, nocc, arrays, sources)
         new = [x + r / d for x, r, d in zip(lams, res, den)]
         norm = sum(np.linalg.norm(a - b) for a, b in zip(new, lams))
         if verbose:
@@ -103,7 +110,8 @@ def kernel(fock, g, mo_energy, nocc, amps, conv_tol_normt=1e-9, max_cycle=200, d
             Q.expand(p.reshape(len(Q.tuples(nocc, k + 1)), -1), nocc, nvir, k + 1)
             for k, p in enumerate(ps) if k]
     adiis.close()
-    if not (np.iscomplexobj(fock) or np.iscomplexobj(g) or any(np.iscomplexobj(t) for t in amps)):
+    if not (np.iscomplexobj(fock) or np.iscomplexobj(g) or any(np.iscomplexobj(t) for t in amps)
+            or (sources is not None and any(np.iscomplexobj(s) and abs(np.imag(s)).max() > 0 for s in sources))):
         lams = [x.real.copy() for x in lams]
     return Result(conv, cycle + 1, lams)
 
