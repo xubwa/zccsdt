@@ -586,6 +586,37 @@ def test_lambda_in_each_case(water_sto, monkeypatch, tmp_path):
     assert scratch.allocated() == 0 and scratch.limit() is None
 
 
+def test_spinor_ccsd_keeps_fewer_vectors(monkeypatch, tmp_path):
+    '''DirectZCCSD and its Lambda equations: with the DIIS vectors in the
+    scratch file (the memory plan of the step) diis_space is a maximum for
+    max_disk; T2 cannot be left out of DIIS, so below three vectors the run
+    stops.  Vectors in memory are not touched.'''
+    from types import SimpleNamespace as NS
+    from zccsdt.zccsd import amps
+    from zccsdt.zccsd.zccsd_direct import DirectZCCSD
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    assert DirectZCCSD.max_disk is None and 'max_disk' in DirectZCCSD._keys
+    size = 4 * amps.DIIS_SMALL
+    pair = 2 * 16 * size
+    notes = []
+    log = NS(note=lambda fmt, *a: notes.append(fmt % a))
+    file, incore = NS(diis_incore=False), NS(diis_incore=True)
+
+    def cc(**kw):
+        return NS(diis_space=6, diis_file=None, **kw)
+    assert amps.diis_space(cc(), file, size, log) == 6 and notes == []
+    assert amps.diis_space(cc(max_disk=4.5 * pair / 1e6), file, size, log) == 4
+    assert 'reduced from the 6 asked for' in notes[0] and '4 vectors with T2' in notes[0]
+    assert amps.diis_space(cc(max_disk=3.0 * pair / 1e6), file, size) == 3
+    with pytest.raises(disk.DiskFullError, match='DIIS with lambda2 needs .* 3 of them at least') as info:
+        amps.diis_space(cc(max_disk=2.5 * pair / 1e6), file, size, log, 'lambda2')
+    assert 'diis_t3' not in str(info.value)
+    assert amps.diis_space(cc(max_disk=0.0), incore, size, log) == 6
+    assert amps.diis_space(cc(max_disk=0.0), file, amps.DIIS_SMALL - 1, log) == 6     # (small: in memory)
+    with disk.limit(4.5 * pair / 1e6):                  # ZCCSDT_MAX_DISK, or a run that is under way
+        assert amps.diis_space(cc(), file, size) == 4
+
+
 # ------------------------------------------------------- report and dry run
 
 def test_front_end_reports_the_placement(hf, monkeypatch, tmp_path):

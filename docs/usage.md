@@ -96,10 +96,19 @@ memory.
 
 All file-backed DIIS vectors are created in the first iteration that stores
 one, so a disk that another job has filled since the plan was made shows
-then.  Not planned this way: the scratch files of `DirectZCCSD` and of the
-perturbative corrections ((Q), (P), their gradients) - those are checked
-when they are created (free space, `max_disk` of the run or
-`ZCCSDT_MAX_DISK`), with the same kind of message.
+then.  `DirectZCCSD` (CCSD and its Lambda equations) has `max_disk` too, in
+a smaller form: where its memory plan has the DIIS vectors in the scratch
+file, as many of `diis_space` are kept as the disk holds, at least 3 (T2
+cannot be left out; below that the run stops before the iterations).  Not
+planned ahead: its other scratch files (integrals, intermediates, (T)) and
+those of the perturbative corrections (Q), (P) and their gradients - they
+are checked when they are created (free space, `ZCCSDT_MAX_DISK`, the
+`max_disk` of a CCSDT or CCSDTQ run that is under way), with the same kind
+of message.  The integral files that PySCF writes (`lib.H5TmpFile` of an
+out-of-core transformation) are neither counted nor preallocated; a full
+disk is an error of HDF5 there, not a bus error.  A scratch directory on
+tmpfs (`/dev/shm`) takes memory, not disk: its pages count against the
+memory limit of the job, which this plan does not know.
 
 `zccsdt.disk.dry_run(nocc, nvir, dtype, max_memory, max_disk)` gives the two
 plans of a spin-orbital or spinor CCSDT calculation without integrals (T3 on

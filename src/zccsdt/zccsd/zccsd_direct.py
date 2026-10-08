@@ -388,6 +388,15 @@ class DirectZCCSD(_zccsd.ZCCSD):
         equations and the iterations of zccsdt.zccsd.amps (packed T2, sliced
         within max_memory).  True: update_amps of this module, as copied
         from socutils (einsums on the full arrays), on PySCF's driver.
+    max_disk : float or None
+        MB for the scratch files of the process.  Default None: the
+        environment variable ZCCSDT_MAX_DISK, else the free space of the
+        scratch directory less a reserve.  ``diis_space`` is a maximum:
+        where the memory plan has the DIIS vectors in the scratch file and
+        the disk does not hold them, fewer are kept (at least 3, stated in
+        the log; DiskFullError before the iterations below that).  The
+        other scratch files are checked against the free space when they
+        are created (zccsdt.scratch, zccsdt.disk).
     three_m : bool or None
         Three real GEMMs for a complex product instead of four.  None (the
         default): in zccsdt.zccsd.amps for the two o^3 v^3 products when
@@ -420,8 +429,9 @@ class DirectZCCSD(_zccsd.ZCCSD):
     three_m = None
     kramers = None
     ao_ladder = None
+    max_disk = None
 
-    _keys = {'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
+    _keys = {'max_disk', 'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
              'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density', 'e_t',
              '_l_with_t', '_t_gradient'}
 

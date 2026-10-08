@@ -163,8 +163,9 @@ def file_bytes(sizes, itemsize, incore_size=None):
 
 
 def _option(what):
-    '''The option that keeps the large part ``what`` in or out of DIIS.'''
-    return 'diis_t4' if what == 'T4' else 'diis_t3'
+    '''The option that keeps the large part ``what`` in or out of DIIS
+    (None: there is none, DIIS is not done without that part).'''
+    return {'T4': 'diis_t4', 'T3': 'diis_t3', 'l3': 'diis_t3'}.get(what)
 
 
 @dataclass
@@ -263,13 +264,15 @@ def plan_diis(big, space=8, memory=None, disk=None, floor=FLOOR, with_big=None, 
         return DiisPlan(n, n_file=n_file, n_memory=n_mem, case=case, **kw)
     if with_big is None:
         return DiisPlan(space, with_big=False, case='d', **kw)
+    opt = _option(what)
     raise DiskFullError(
-        'DIIS with %s (%s = True) needs %s per stored vector and its error vector, and %d of them at '
+        'DIIS with %s%s needs %s per stored vector and its error vector, and %d of them at '
         'least (%d asked for): %s; the scratch location %s has %s for them and the memory %s.  More disk '
-        '(max_disk, another scratch directory: ZCCSDT_TMPDIR / PYSCF_TMPDIR, diis_file), more memory '
-        '(max_memory), or DIIS without %s (%s = None or False)'
-        % (what, _option(what), _gb(pair), min(int(floor), space), space, _gb(min(int(floor), space) * pair),
-           where or '', _gb(disk), _gb(memory), what, _option(what)))
+        '(max_disk, another scratch directory: ZCCSDT_TMPDIR / PYSCF_TMPDIR, diis_file) or more memory '
+        '(max_memory)%s'
+        % (what, ' (%s = True)' % opt if opt else '', _gb(pair), min(int(floor), space), space,
+           _gb(min(int(floor), space) * pair), where or '', _gb(disk), _gb(memory),
+           ', or DIIS without %s (%s = None or False)' % (what, opt) if opt else ''))
 
 
 def diis_plan(big, space, max_disk=None, diis_file=None, mapped=0, spare=None, with_big=None,
