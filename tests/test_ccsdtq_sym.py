@@ -287,3 +287,27 @@ def test_no_blocks_without_labels(hbr):
         assert not QS.available(e)
         with pytest.raises(ValueError, match='no blocks'):
             QS.kernel(e, None, cc.t1, cc.t2, cc.t3)
+
+
+def test_disk_plan(hbr, monkeypatch, tmp_path):
+    '''The DIIS vectors of the blocks follow the disk (zccsdt.disk): with
+    room for four of the eight pairs the subspace is four, with room for
+    one T4 is left out of DIIS and takes its Jacobi step - the converged
+    energy either way, and nothing left in the scratch directory.'''
+    from zccsdt import scratch
+    eris, cc, res = hbr
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    lay = S.layout_for(eris)
+    least = QS.plan(lay, 8, QS.plan(lay, 8).floor)
+    assert least.diis_file and least.spare == 0 and least.disk == 0
+    kw = dict(conv_tol=1e-11, conv_tol_normt=1e-9, plan=least)
+    p = QS.diis_plan_of(eris, np.float64, ccsdtq.Options(**kw), least)
+    assert (p.case, p.n_file, p.what) == ('a', 8, 'T4') and p.pair >= 16 * lay.size
+    for factor, case, space in ((4.5, 'c', 4), (1.5, 'd', 8)):
+        r = QS.kernel(eris, ccsdtq.Options(max_disk=factor * p.pair / 1e6, **kw), cc.t1, cc.t2, cc.t3)
+        q = r.diis_plan
+        assert (q.case, q.space, q.with_big) == (case, space, case == 'c') and q.disk <= q.disk_budget
+        assert r.converged and abs(r.e_corr - res.e_corr) < 1e-9 and abs(r.t4 - res.t4).max() < 1e-7
+        assert scratch.allocated() == 0 and list(tmp_path.iterdir()) == []
+    with pytest.raises(OSError, match='diis_t4 = True'):
+        QS.kernel(eris, ccsdtq.Options(max_disk=1.5 * p.pair / 1e6, diis_t4=True, **kw), cc.t1, cc.t2, cc.t3)

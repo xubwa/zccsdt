@@ -162,6 +162,11 @@ def file_bytes(sizes, itemsize, incore_size=None):
     return sum(int(n) for n in sizes if n >= least) * int(itemsize)
 
 
+def _option(what):
+    '''The option that keeps the large part ``what`` in or out of DIIS.'''
+    return 'diis_t4' if what == 'T4' else 'diis_t3'
+
+
 @dataclass
 class DiisPlan:
     '''Where the DIIS vectors of a run are (plan_diis).'''
@@ -200,7 +205,7 @@ class DiisPlan:
                     'memory %s' % (self.space, self.what, min(FLOOR, self.requested), _gb(self.pair),
                                    _gb(self.disk_budget), _gb(self.memory_budget)))
         if not self.with_big:
-            return '%d vectors without %s (diis_t3 = False), in memory' % (self.space, self.what)
+            return '%d vectors without %s (%s = False), in memory' % (self.space, self.what, _option(self.what))
         if not self.pair:
             return '%d vectors, in memory' % self.space
         parts = []
@@ -259,12 +264,12 @@ def plan_diis(big, space=8, memory=None, disk=None, floor=FLOOR, with_big=None, 
     if with_big is None:
         return DiisPlan(space, with_big=False, case='d', **kw)
     raise DiskFullError(
-        'DIIS with %s (diis_t3 = True) needs %s per stored vector and its error vector, and %d of them at '
+        'DIIS with %s (%s = True) needs %s per stored vector and its error vector, and %d of them at '
         'least (%d asked for): %s; the scratch location %s has %s for them and the memory %s.  More disk '
         '(max_disk, another scratch directory: ZCCSDT_TMPDIR / PYSCF_TMPDIR, diis_file), more memory '
-        '(max_memory), or DIIS without %s (diis_t3 = None or False)'
-        % (what, _gb(pair), min(int(floor), space), space, _gb(min(int(floor), space) * pair),
-           where or '', _gb(disk), _gb(memory), what))
+        '(max_memory), or DIIS without %s (%s = None or False)'
+        % (what, _option(what), _gb(pair), min(int(floor), space), space, _gb(min(int(floor), space) * pair),
+           where or '', _gb(disk), _gb(memory), what, _option(what)))
 
 
 def diis_plan(big, space, max_disk=None, diis_file=None, mapped=0, spare=None, with_big=None,
