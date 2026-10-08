@@ -343,6 +343,18 @@ def kernel(eris, t1, t2, t3, q2, q3, opts=None, stencil='central', delta=DELTA):
 
 # ------------------------------------------------------- the second equation
 
+def lambda_plan(eris, t1, dtype, opts, blocks=False):
+    '''The lambda_opt.LambdaPlan of lambda_sources() and of the Lambda
+    equations with its sources for the solver options ``opts`` (two arrays
+    of the size of T3 more than the Lambda equations of CCSDT have); its
+    MemoryError if that does not fit.'''
+    eng = lambda_opt.block_engine(eris, dtype) if blocks else None
+    nocc, nvir = np.shape(t1)
+    size = eng.size if eng is not None else t3pack.triple_map(nocc).ntri * t3pack.triple_map(nvir).ntri
+    return lambda_opt._plan_for(eris, t1, dtype, opts, blocks, 2 * size * np.dtype(dtype).itemsize)
+
+
+
 def lambda_sources(eris, t1, t2, t3, l1, l2, l3, zeta, s2, s3, opts=None, blocks=False, stencil='exact',
                    delta=DELTA):
     '''The constant terms of the Lambda equations for lambda' of
