@@ -242,6 +242,41 @@ symmetry).
   of the products at their smallest) it stops with a MemoryError that says
   how much is missing.
 
+### Lambda, relaxed densities, CCSDT(Q)_Lambda
+
+```python
+mycc = zccsdt.CCSDT(mf, frozen=28)      # GCCSDT, as above
+mycc.kernel()
+mycc.solve_lambda()                     # mycc.l1, l2, l3; mycc.converged_lambda
+dm = mycc.make_rdm1(ao_repr=True)       # relaxed density, <q+ p>, frozen spinors included
+dip = -numpy.einsum('xpq,qp->x', mol.intor('int1e_r_spinor'), dm).real
+e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), e_tot_ql
+```
+
+- `solve_lambda()` solves the left-hand equations of CCSDT on packed
+  amplitudes (`zccsdt.cc.lambda_opt`): Lambda_3 is stored like T3, an
+  iteration takes 1.15 to 1.26 times an amplitude iteration, and the memory
+  follows `max_memory` like the amplitude equations.
+- `make_rdm1(relaxed=True)` is the density whose trace with a one-electron
+  operator is the derivative of the CCSDT energy: the densities of t and
+  Lambda, the orbital gradient and the Z-vector equations for the response of
+  the spinors (`zccsdt.cc.density_opt`), with frozen occupied and left-out
+  virtual spinors.  All of it costs about one CCSDT iteration when every
+  spinor is active (more with frozen ones, docs/lambda.md section 10).
+  `relaxed=False` gives the density of t and Lambda at fixed spinors;
+  without `ao_repr` the matrix is in the spinors `mycc.rdm1_basis`.  It
+  needs the SCF object (not integrals that were given) and a tightly
+  converged SCF (`mf.conv_tol_grad` 1e-8 or below).
+- `ccsdt_q_lambda()` is (Q) with Lambda_2 and Lambda_3 on the left
+  (`zccsdt.cc.quadruples_lambda`; in the sectors of the labels,
+  `quadruples_lambda_sym`, where the integrals have them): 1.3 to 1.4 times
+  the time of (Q).  `zccsdt.CCSDTQ` passes it on to its CCSDT step.
+- Lambda and the densities work on T3 packed in lexicographic order: after
+  iterations in the blocks of the labels the amplitudes are expanded once.
+  Only (Q)_Lambda uses the labels.
+- An RHF reference makes `zccsdt.CCSDT` the closed-shell class, which has
+  none of this: `zccsdt.CCSDT(mf.to_ghf())` for these methods.
+
 ### Integrals from another program, and for another program
 
 The classes for spin orbitals and spinors also run on an integral container
@@ -377,6 +412,44 @@ max_memory=20000
 command line override both.  `--jobarc` writes the final total energy into
 `JOBARC` as `TOTENERG`, the record that CFOUR's own `xx2cccsd` leaves
 there for joda.
+
+**CCSD, CCSD(T) and properties on CFOUR's spinors.**  CCSD and CCSD(T) do
+not read the integral files: where the directory has `scf2ccmo`, `MOL`,
+`GENBAS` and `ZMAT` (after `xsox2chf`) the AO-driven code of
+`zccsdt.zccsd` runs on CFOUR's spinors, so that `xx2cvtran` is not needed:
+
+```
+python -m zccsdt.cfour --chain --programs "xjoda xsox2catm xsox2chf" RUNDIR
+```
+
+(`--mo-integrals`: CCSD on the files of `xx2cvtran` instead).  Everything
+is CFOUR's - geometry, basis, spinors, their energies, occupation, frozen
+and dropped spinors - except the two-electron AO integrals, which libcint
+makes for the same basis; the one-electron Hamiltonian is taken back from
+CFOUR's Fock matrix and spinors (h = S C e C^+ S - G(D)), so that X2C-1e and
+X2CAMF both come out as CFOUR has them.  No SCF is done here.
+
+With `--properties` (or `--density`, or `PROPS` in the ZMAT) the Lambda
+equations and the Z-vector equations follow, the relaxed density is written
+in CFOUR's spinors as the file `denfinal` - the full density, the SCF part
+included, `D[p,q] = <q+ p>` - and `xsox2cprop` evaluates all its operators
+with it:
+
+```
+python -m zccsdt.cfour --chain --programs "xjoda xsox2catm xsox2chf" --properties RUNDIR
+```
+
+for `CALC=CCSD`, `CCSD(T)` and `CCSDT` (the last one through
+`zccsdt.CCSDT` on integrals transformed here).  H2O / 6-31G, X2C-1e, against
+CFOUR's own chain (`xx2cccsd`, `xx2cccdenocbp`, `xx2czvec`, `xsox2cprop`):
+the density differs from CFOUR's `denfinal` by at most 1.7e-10 for CCSD and
+1.6e-11 for CCSD(T), the dipole moment that `xsox2cprop` prints is
+0.01580313752067 against 0.01580313752033 (CCSD) and 0.01227486493503
+against 0.01227486493556 (CCSD(T)).  CFOUR has no CCSDT density to compare
+with: that one (0.012077140) rests on finite fields.  Not checked through
+this route: frozen core and `%vircut` (the density code has both; with
+most virtual spinors dropped CFOUR's own relaxed density is not the
+derivative of its energy, see below).
 
 **Conventions.**  The spinors are those of CFOUR's list `scf2ceig` without
 the frozen and the dropped ones, in its order (occupied first, each set by

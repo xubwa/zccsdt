@@ -3359,6 +3359,46 @@ first or second in the same job.
   the front end takes the dense solver with its scratch files; (P) reads T4
   packed, so that the blocks are expanded once for it.
 
+### The whole calculation, with the labels and without
+
+`bench/sym_all.py`: `zccsdt.CCSDTQ` from the SCF spinors to E(CCSDTQ(P)) -
+integral transformation, CCSDT, (Q), CCSDTQ, (P) - once with `symmetry`
+(the default) and once without, in one process.  HBr / cc-pVTZ-DK, X2C,
+28 frozen (8 + 78 spinors, T4 of 99.8 M elements without the labels),
+8 cores, job 31732555 on c167:
+
+| | wall time |
+|---|---|
+| in the blocks of the labels | 67.4 s |
+| dense | 657.3 s |
+
+A factor of 9.8.  Blocks minus dense: E(CCSDT) 0, E(CCSDTQ) -7e-16,
+E(Q) -6e-18, E(P) -9e-20 Eh (both runs converged to the same thresholds
+from the same spinors).  The dense run is 29.8 s per CCSDTQ iteration
+there.
+
+### Lambda, densities and (Q)_Lambda of CCSDT
+
+Measured in docs/lambda.md (sections 5.1, 9.5 and 10), 8 cores; the
+numbers that matter here:
+
+| | o + v | reference step | this step | ratio |
+|---|---|---|---|---|
+| Lambda iteration, H2O / cc-pVTZ, spin orbitals | 10 + 106 | CCSDT iteration 4.18 s | 5.05 s | 1.21 |
+| Lambda iteration, H2O / cc-pVTZ, X2C | 10 + 106 | 13.74 s | 17.28 s | 1.26 |
+| Lambda iteration, HBr / cc-pVTZ-DK, X2C | 8 + 78 | 1.90 s | 2.19 s | 1.15 |
+| densities, orbital gradient, Z-vector; H2O, spin orbitals | 10 + 106 | CCSDT iteration 4.10 s | 4.43 s | 1.08 |
+| the same, X2C | 10 + 106 | 13.42 s | 13.37 s | 1.00 |
+| (Q)_Lambda, HBr / cc-pVTZ-DK, dense | 8 + 78 | (Q) 4.47 s | 6.11 s | 1.37 |
+| (Q)_Lambda, the same in sectors | 8 + 78 | (Q) 1.23 s | 1.56 s | 1.27 |
+| (Q)_Lambda, H2O / cc-pVTZ, dense | 10 + 106 | (Q) 44.1 s | 62.3 s | 1.41 |
+| (Q)_Lambda, the same in sectors (2 m_s) | 10 + 106 | (Q) 18.4 s | 24.7 s | 1.35 |
+
+These are ratios to zccsdt's own steps on a shared node (c105), not
+comparisons with another program: no other code was timed on these (MRCC
+has CCSDT(Q)_Lambda and CCSDT gradients; its numbers were used for the
+values only).  Lambda and the densities do not use the labels yet.
+
 ### Complex spinors, larger cases, less memory
 
 zccsdt alone, the same node and batch (jobs 31703734 and 31703874), 8
