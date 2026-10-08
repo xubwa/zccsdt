@@ -3397,7 +3397,24 @@ numbers that matter here:
 These are ratios to zccsdt's own steps on a shared node (c105), not
 comparisons with another program: no other code was timed on these (MRCC
 has CCSDT(Q)_Lambda and CCSDT gradients; its numbers were used for the
-values only).  Lambda and the densities do not use the labels yet.
+values only).
+
+The Lambda equations in the blocks of the labels (`zccsdt.cc.lambda_blk`;
+docs/lambda.md section 9.7), HBr, X2C, 28 frozen, 8 cores, job 31741024 on
+c659, the packed block first and the blocks after it in one process on the
+same amplitudes; seconds per iteration:
+
+| | 8 + 78 (cc-pVTZ-DK) | 8 + 160 (cc-pVQZ-DK) |
+|---|---|---|
+| amplitude iteration: packed, blocks | 0.843, 0.407 | 16.19, 3.545 |
+| Lambda iteration: packed, blocks | 0.991, 0.297 | 17.35, 2.040 |
+| ratio of the Lambda iterations | 3.3 | 8.5 |
+| peak memory above the start of Lambda: packed, blocks | 1.75 GB, 0.34 GB | 4.39 GB, 2.36 GB |
+
+Lambda of the two solvers agrees to 5e-11 (l1), 3e-11 (l2), 5e-12 (l3).
+With 8 + 28 spinors the blocks are slower than the packed block (small
+products; seen on the login node only).  The densities and the orbital
+gradient do not use the labels yet: l3 and T3 are expanded for them.
 
 ### Complex spinors, larger cases, less memory
 

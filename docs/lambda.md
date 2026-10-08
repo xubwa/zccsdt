@@ -626,9 +626,7 @@ since (`test_memory_plan` has a buffer size with a short last batch).
 - U / R-form integrals (`eris_spin`): spin orbitals or spinors only.
 - Densities and the orbital gradient from the packed arrays (the next
   stage; `lambda_ref.densities` takes dense ones), frozen orbitals.
-- A front end: `GCCSDT` has no `solve_lambda` (its file was not to be
-  touched); the hook would be `lambda_opt.kernel(self.ao2mo(), self.t1,
-  self.t2, self.t3, options)`.
+- (the front end came later: `GCCSDT.solve_lambda()`, section 9.7)
 
 - Any factorization for packed amplitudes: the tables are flat lists of
   terms, each a product of at most four tensors.
