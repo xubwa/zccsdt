@@ -1253,9 +1253,12 @@ class GCCSDT(UCCSDT):
         q = None
         self.ql_info = {}
         if no >= 4 and nv >= 4:
-            t3 = ccsdt_opt.packed_t3(eris, self.t3)     # (the blocks of the labels, as the pass reads them)
+            from math import comb
+            t3, l3 = self.t3, self.l3
+            if np.size(t3) != comb(no, 3) * comb(nv, 3):
+                t3 = ccsdt_opt.packed_t3(eris, t3)  # (the blocks of the labels, as the pass reads them)
+                l3 = self._packed_l3()
             ccsdt_opt.release_cached(eris)
-            l3 = self._packed_l3()
             isz = np.dtype(np.result_type(self.t2, t3, self.l2, l3, eris.oovv)).itemsize
             budget = memory.budget(self.max_memory)
             spl = None
