@@ -18,7 +18,8 @@ usage: python bench/density_ccsdt.py validate MOLECULE BASIS KIND [NDROP]
   MOLECULE: h2o | hf | n2 | hbr      KIND: ghf (RHF orbitals as spin orbitals)
   | ghfc (the same, every pair mixed by its own SU(2) matrix: complex) | x2c
 environment: ZC_MAXMEM: max_memory in MB (default: 80% of what is available);
-             ZC_DENS_MAXMEM: that of the densities alone (time)
+             ZC_DENS_PLAN: 'NB,MB' - the plan of the densities given (time):
+             NB occupied pairs per batch, slabs of MB megabytes of dressed <ab||de>
 '''
 import os
 import sys
@@ -28,7 +29,7 @@ import time
 import numpy as np
 from pyscf import gto, scf, x2c
 
-from zccsdt import eris as E, timing
+from zccsdt import eris as E, memory, timing
 from zccsdt.cc import ccsdtq_ref as R, ccsdtq_terms as Q, density_opt as D, lambda_ref as LR, solver
 
 GEOM = {
@@ -186,10 +187,16 @@ def profile(mol, kind, niter):
     t1, t2, t3 = r.t1, r.t2, np.asarray(r.t3)
     l1, l2, l3 = t1.conj(), t2.conj(), t3.conj()
     print('T3 and Lambda3: %.2f GB each' % (t3.nbytes / 1e9))
-    dmem = {'max_memory': float(os.environ['ZC_DENS_MAXMEM'])} if os.environ.get('ZC_DENS_MAXMEM') else mem
+    dmem = dict(mem)
+    if os.environ.get('ZC_DENS_PLAN'):      # 'pairs per batch, MB of dressed rows per slab'
+        nb, slab = os.environ['ZC_DENS_PLAN'].split(',')
+        isz, nvp = t3.dtype.itemsize, nvir * (nvir - 1) // 2
+        slab = max(1, int(float(slab) * 1e6) // (isz * nvp)) * isz * nvp
+        dmem = {'plan': D.Plan(nb=int(nb), slab_bytes=slab, need=D.fixed_bytes(nocc, nvir, isz) + max(
+            int(nb) * D.pair_bytes(nocc, nvir, isz), slab))}
     for attempt in range(2):
         timing.reset()
-        base = int(open('/proc/self/statm').read().split()[1]) * 4096
+        base = memory.resident()
         watch = MemWatch()
         watch.start()
         t0, c0 = time.perf_counter(), time.process_time()
