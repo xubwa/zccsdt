@@ -17,6 +17,8 @@ and A^T X_ for the operand B:
 
     product of (Q)                             its two adjoints go to
     t(ij,ab) <cd||kl>                          s2;                the density of <cd||kl>
+                                               (six rows under the operands of the next
+                                               and of the fourth: the differences of theirs)
     - sum_e <ab||ei> t(jkl,cde)                the density of <ab||ei>;       s3
     sum_m <ma||ij> t(mkl,bcd)                  the density of <ma||ij>;       s3
     sum_m t(im,ab) Xo(m;jkl;cd)                s2;                the adjoint of Xo
@@ -61,7 +63,7 @@ import numpy as np
 from pyscf import lib
 
 from zccsdt.blas import gemm
-from zccsdt.cc import quadruples as Q, t4pack as P
+from zccsdt.cc import quadruples as Q, t3pack, t4pack as P
 from zccsdt.timing import timer
 
 
@@ -113,7 +115,7 @@ def _own(no, nv, isz, mapped=()):
             + nP * no * nv + no * no * nP + no * nv * nv * no)
     kept += (0 if 's3' in mapped else nI3 * nA3) + (0 if 'vvvv' in mapped else nQ * nQ)
     acc = nP * nQ + no * no * nQ + nP * nv * nv + no * no * nv * nv + nI3 * no * nQ
-    work = nA + (4 * nv + 8 * no) * nQ + 6 * no * nv + 24 * nQ
+    work = nA + (4 * nv + 8 * no) * nQ + 6 * no * nv + 60 * nQ
     return isz * kept, isz * (acc + work) + 8 * nA
 
 
@@ -123,7 +125,7 @@ def _need(no, nv, isz, qp, mapped=()):
     base, work, xo = Q._fixed(no, nv, isz)
     kept, own = _own(no, nv, isz, mapped)
     nslot = max(3, min(qp.xv, no - 1))
-    var = isz * (3 * nQ * qp.cols22 + 3 * nv * qp.cols13 + (4 * nv * qp.cols22 if 4 * nv > nQ else 0)
+    var = isz * (3 * nQ * qp.cols22 + 3 * nv * qp.cols13 + ((4 * nv + 6) * qp.cols22 if 4 * nv + 6 > nQ else 0)
                  + 6 * no * qp.cols13 + 2 * nv * nslot * nA3 + nv * nv * (2 * nslot + 3 * qp.rows))
     # the adjoint of Xo at the end: its arrays for one m, with the accumulators still there;
     # the parts of the orbital gradient with s3 and t3
@@ -215,10 +217,15 @@ class QuadruplesGradient(Q.Quadruples):
         self.c = np.empty(nA)
         self.e22 = [np.empty(nQ * self.plan.cols22, dtype=dtype) for _ in range(2)]
         self.e13 = [np.empty(nv * self.plan.cols13, dtype=dtype) for _ in range(2)]
-        self.LAb, self.LBb = z(4 * nv, nQ), z(4 * no, nQ)
+        self.xc = np.empty(6 * no * self.plan.cols13, dtype=dtype)
+        # the operands of z as six more rows of the stacked ones of the two other products on
+        # pairs: its adjoints come out of theirs (conj(y) = (conj(y) + conj(w)) - conj(w))
+        self.LAz, self.RAz = (np.empty((4 * nv + 6, nQ), dtype=dtype) for _ in range(2))
+        self.LBz, self.RBz = (np.empty((4 * no + 6, nQ), dtype=dtype) for _ in range(2))
+        self.LA, self.RA, self.LB, self.RB = self.LAz[:4 * nv], self.RAz[:4 * nv], self.LBz[:4 * no], self.RBz[:4 * no]
+        self.LAb, self.LBb, self.RBb = z(4 * nv + 6, nQ), z(4 * no + 6, nQ), z(4 * no + 6, nQ)
         self.LCb = z(6 * no, nv)
-        self.Lzb, self.Rzb = z(6, nQ), z(6, nQ)
-        self.RBb = z(4 * no, nQ)
+        self.Rzb = z(6, nQ)
         self.Xvbar = None
 
     # ---- Xv and its adjoint
@@ -302,37 +309,37 @@ class QuadruplesGradient(Q.Quadruples):
             sums = _threaded(lambda lh: part(*lh), Q._batches(len(z), step))
             self.de_occ[self.quads[I]] -= sum(x[0] for x in sums)
             e = sum(x[1] for x in sums)
-        Ly, Lw, Lyw = z, rt3, rtt
-        Lz = self.t2_pp[p22] * s22[:, None]                                     # [6, (ab)]
-        Rz = self.vvoo_t[q22]                                                   # [6, (cd)]
-        for a in (self.LAb, self.LBb, self.LCb, self.Lzb):
+        Lw, Lyw = rt3, rtt
+        # z: t(ij,ab) <cd||kl>, with conj(y) - its operands under those of the two other products
+        self.LAz[4 * nv:] = self.LBz[4 * no:] = self.t2_pp[p22] * s22[:, None]  # [6, (ab)]
+        self.RAz[4 * nv:] = self.RBz[4 * no:] = self.vvoo_t[q22]                # [6, (cd)]
+        for a in (self.LAb, self.LBb, self.LCb):
             P.zero(a)
+        na = 4 * nv + 6
         for cc in Q._batches(nQ, self.plan.cols22):
             nc = cc[1] - cc[0]
-            Ey, Ew = (b[:nQ * nc].reshape(nQ, nc) for b in self.e22)
+            Ew, Es = (b[:nQ * nc].reshape(nQ, nc) for b in self.e22)
             X = self._x22(cc)
             with timer('qg.expand'):
-                P.tn_expand(Ey, Ly, nv, 2, 2, cols=cc)
                 P.tn_expand(Ew, Lw, nv, 2, 2, cols=cc)
+                P.tn_expand(Es, Lyw, nv, 2, 2, cols=cc)
             with timer('qg.gemm'):
-                # z: t(ij,ab) <cd||kl>, with conj(y)
-                gemm(Rz[:, cc[0]:cc[1]], Ey.T, self.Lzb, beta=1.0)
-                gemm(Lz, Ey, self.Rzb[:, cc[0]:cc[1]])
                 # t(im,ab) Xo(m;jkl;cd), with conj(w)
-                gemm(self.RB[:, cc[0]:cc[1]], Ew.T, self.LBb, beta=1.0)
-                gemm(self.LB, Ew, self.RBb[:, cc[0]:cc[1]])
+                gemm(self.RBz[:, cc[0]:cc[1]], Ew.T, self.LBb, beta=1.0)
+                gemm(self.LBz, Ew, self.RBb[:, cc[0]:cc[1]])
                 # <ab||ei> t(jkl,cde), with both
-                Ey += Ew
-                gemm(self.RA[:, cc[0]:cc[1]], Ey.T, self.LAb, beta=1.0)
-                Xa = gemm(self.LA, Ey, X.reshape(-1)[:4 * nv * nc].reshape(4 * nv, nc)) \
-                    if 4 * nv <= nQ else gemm(self.LA, Ey)
+                gemm(self.RAz[:, cc[0]:cc[1]], Es.T, self.LAb, beta=1.0)
+                Xa = gemm(self.LAz, Es, X.reshape(-1)[:na * nc].reshape(na, nc)) if na <= nQ else gemm(self.LAz, Es)
+                self.Rzb[:, cc[0]:cc[1]] = Xa[4 * nv:]
             with timer('qg.reduce'):
                 for k in range(4):
                     P.tn_reduce(self.S3[J13[k]], np.ascontiguousarray(Xa[k * nv:(k + 1) * nv]), nv, 1, 2, cols=cc)
         with timer('qg.scatter'):
+            Lzb = self.LAb[4 * nv:] - self.LBb[4 * no:]
+            Rzb = self.Rzb - self.RBb[4 * no:]
             for k in range(6):
-                self.b_pp[p22[k]] += int(s22[k]) * self.Lzb[k]
-                self.Dvvoo[q22[k]] += self.Rzb[k]
+                self.b_pp[p22[k]] += int(s22[k]) * Lzb[k]
+                self.Dvvoo[q22[k]] += Rzb[k]
             for k in range(4):
                 x, J, s = x13[k], J13[k], int(s13[k])
                 self.b_xp[x] += s * self.LBb[k * no:(k + 1) * no]
@@ -354,7 +361,7 @@ class QuadruplesGradient(Q.Quadruples):
             with timer('qg.gemm'):
                 # <ma||ij> t(mkl,bcd), with both
                 gemm(self.RC[:, cc[0]:cc[1]], Eyw.T, self.LCb, beta=1.0)
-                Xc = gemm(self.LC, Eyw)                                         # [(split, m), (bcd)]
+                Xc = gemm(self.LC, Eyw, self.xc[:6 * no * nc].reshape(6 * no, nc))     # [(split, m), (bcd)]
                 # 2 t(ij,ae) Xv(e;kl;bcd), with conj(w)
                 for p, n, alpha in last:
                     gemm(Xv[n][:, cc[0]:cc[1]], Ew.T, self.b_px[p], alpha=alpha, beta=1.0)
@@ -535,6 +542,7 @@ def dense_d2(g, nocc):
 PATTERNS = ('vvoo', 'vvvo', 'ovoo', 'oooo', 'ovvo')
 SMALL = ('vvoo', 'ovoo', 'oooo', 'ovvo')        # (at most two virtual indices)
 SLAB_BYTES = 128 << 20                          # rows of an array of the size of <vv||vv> at a time
+SMALL_BYTES = 1 << 16                           # Python objects and small arrays
 
 
 def dense_blocks(g, nocc, patterns=PATTERNS):
@@ -655,15 +663,20 @@ def _vvvv_terms(Dpp, S, nv, slab_bytes=None):
 
 def active_bytes(nocc, nvir, isz):
     '''Bytes of the work arrays of orbital_gradient() (active_terms,
-    source_terms) besides the Gradient: two blocks of integrals with three
-    virtual indices in the layout of a product (the blocks of the densities
-    with at most two virtual indices meet them), <ab||ei> and <ie||bc> on
-    pairs with the two arrays of their size of _vvvv_terms, the dense blocks
-    of the small densities with their copies, a slab of <vv||vv>.'''
+    source_terms) besides the Gradient - the largest of its three stages
+    and the small arrays: (1) the densities with at most two virtual indices
+    as dense blocks, each with two blocks of integrals with three virtual
+    indices in the layout of a product; (2) the density of <ab||ei> on pairs
+    with <ie||ab> on pairs, one of its occupied indices unpacked and a slab
+    of <vv||vv>; (3) <ie||bc> on pairs with the two arrays of its size and
+    the two of a slab of _vvvv_terms.'''
     o, v = nocc, nvir
     nQ = comb(v, 2)
-    return isz * (2 * o * v ** 3 + 4 * o * v * nQ + 12 * o * o * v * v + 4 * o ** 3 * v + 2 * o ** 4
-                  + 3 * v ** 3) + 4 * min(SLAB_BYTES, isz * nQ * max(nQ, o * v))
+    small = isz * (4 * o * o * v * v + 4 * o ** 3 * v + 2 * o ** 4 + 4 * (o + v) ** 2)
+    one = isz * (2 * o * v ** 3 + 8 * o * o * v * v)
+    two = isz * (2 * o * v * nQ + v ** 3 + v * nQ + o * o * nQ) + min(SLAB_BYTES, isz * nQ * (v * v + o * v))
+    three = isz * 2 * o * v * nQ + 2 * min(SLAB_BYTES, isz * nQ * o * v)
+    return small + max(one, two, three) + SMALL_BYTES
 
 
 def active_terms(eris, g):
@@ -677,7 +690,6 @@ def active_terms(eris, g):
     density of <ab||ei> on its pairs - with <kb||ei>, <ab||ki> and <ab||ek>,
     and with the packed <vv||vv> in slabs of rows -; that of <bc||ef> with
     the integrals <ie||bc> on pairs (_vvvv_terms).'''
-    from zccsdt.cc import t3pack
     from zccsdt.cc.ccsdt_opt import vvvv_packed
     o = eris.nocc
     v = g.gamma_vv.shape[0]
@@ -867,12 +879,16 @@ class FrozenTerms:
         return sum(x[4].nbytes for x in self.lay) + (0 if self.D3 is self.g.vvvo else self.D3.nbytes)
 
     def own(self, nk):
-        '''Bytes of the work arrays of a call for ``nk`` frozen spinors.'''
+        '''Bytes of the work arrays of a call for ``nk`` frozen spinors: the
+        integrals <fu||vw> of the batch with one block cut from them, an
+        index of the density of <ab||ei> unpacked, or <fe||ab> on pairs;
+        then these with the arrays of _vvvv_terms.'''
         o, v = self.o, self.v
         n, nQ = o + v, comb(v, 2)
         isz = self.dtype.itemsize
-        return (isz * (nk * (n ** 3 + n * n * v + 4 * v * nQ + 2 * o * nQ) + 2 * v ** 3)
-                + 4 * min(SLAB_BYTES, isz * nQ * max(nQ, nk * v)))
+        one = isz * (nk * n ** 3 + max(nk * n * v * v, v ** 3 + v * nQ + nk * v * v, nk * v * nQ))
+        two = isz * 3 * nk * v * nQ + 2 * min(SLAB_BYTES, isz * nQ * nk * v)
+        return max(one, two) + isz * 4 * nk * n + SMALL_BYTES
 
     def __call__(self, G):
         o, v, dtype = self.o, self.v, self.dtype

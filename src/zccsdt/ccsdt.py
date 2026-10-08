@@ -1228,7 +1228,7 @@ class GCCSDT(UCCSDT):
             dtype = np.result_type(self.t1, self.t2, self.t3, eris.oovv, eris.fock)
             if lambda_opt.block_engine(eris, dtype) is not None:
                 try:
-                    plan = lambda_opt.plan_for(eris, self.t1, dtype, opts, blocks=True)
+                    plan = lambda_opt.plan_for(eris, self.t1, dtype, opts, blocks=True, sources=sources)
                 except MemoryError:     # (the packed block then, which says what it needs)
                     pass
         if plan is not None:

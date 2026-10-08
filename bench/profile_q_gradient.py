@@ -3,8 +3,10 @@ to the properties of CCSDT, through the front end (zccsdt.CCSDT):
 
   (Q)                     ccsdt_q(): in the sectors of the symmetry labels where
                           there are any, and the dense code (cc.quadruples)
-  (Q) gradient pass       the sources of Lambda and the densities of (Q)
-                          (cc.quadruples_grad, on the packed block)
+  (Q) gradient pass       the sources of Lambda and the densities of (Q): in
+                          the sectors of the symmetry labels where there are
+                          any (cc.quadruples_grad_sym), and the pass on the
+                          packed block (cc.quadruples_grad)
   Lambda                  solve_lambda() and solve_lambda(with_q=True): time per
                           iteration and number of iterations
   relaxed density         make_rdm1() and make_rdm1(with_q=True), Lambda and the
@@ -33,6 +35,7 @@ from profile_sa import MemWatch                                         # noqa: 
 import zccsdt                                                           # noqa: E402
 from zccsdt import memory, timing                                       # noqa: E402
 from zccsdt.cc import ccsdt_opt, lambda_opt, quadruples as QD, quadruples_grad as QG      # noqa: E402
+from zccsdt.cc import quadruples_grad_sym as GS                         # noqa: E402
 
 
 def anon():
@@ -40,18 +43,20 @@ def anon():
         return {l.split(':')[0]: int(l.split()[1]) for l in f if l.startswith('Rss')}['RssAnon'] / 1e6
 
 
-def timed(tag, fn, prefixes=()):
+def timed(tag, fn, prefixes=(), depth=2):
     '''fn() with its wall time, the cores busy and the peak of the anonymous memory.'''
     snap = timing.snapshot()
+    before = anon()
     watch = MemWatch()
     watch.start()
     t0, c0 = time.perf_counter(), time.process_time()
     out = fn()
     dt, cpu = time.perf_counter() - t0, time.process_time() - c0
     watch.stop()
-    print('%-34s %9.2f s  %5.2f cores busy  peak anonymous %.2f GB' % (tag, dt, cpu / dt, watch.anon / 1e6), flush=True)
+    print('%-34s %9.2f s  %5.2f cores busy  peak anonymous %.2f GB (%.2f GB before)'
+          % (tag, dt, cpu / dt, watch.anon / 1e6, before), flush=True)
     for path, (w, c, k) in sorted(timing.since(snap).items(), key=lambda x: -x[1][0]):
-        if path[-1].split('.')[0] in prefixes and len(path) <= 2 and w > 0.01 * dt:
+        if path[-1].split('.')[0] in prefixes and len(path) <= depth and w > 0.01 * dt:
             print('    %-22s %9.2f s  %5.1f cores  %7d calls' % (path[-1], w, c / w if w else 0, k))
     return out, dt
 
@@ -114,16 +119,33 @@ def main():
     print('    in blocks: %s; trace(z D) = %.12f, dipole moment %.10f' % (cc.rdm1_blocks, v0, nuc - v0), flush=True)
 
     # ---- CCSDT(Q): the pass, Lambda with the sources, relaxed density
-    gp = QG.plan(no, nv, isz, memory.budget(max_memory))
-    q, t_g = timed('(Q) gradient pass', cc._q_terms, ('q', 'qg'))
-    print('    plan %.2f GB besides T3 and the integrals (%.2f GB of it the derivatives; batches of %d / %d and '
-          '%d / %d columns, Xv for %d occupied indices); E(Q) %.12e'
-          % (gp.need / 1e9, gp.kept / 1e9, gp.q.cols22, comb(nv, 2), gp.q.cols13, comb(nv, 3), gp.q.xv, q.e_q))
+    def dense_pass():
+        t3 = ccsdt_opt.packed_t3(eris, cc.t3)
+        pl = QG.plan(no, nv, isz, memory.budget(max_memory))
+        return QG.kernel(eris, cc.t2, t3, plan_=pl)
+
+    def describe(gp):
+        if isinstance(gp, GS.Plan):
+            return ('plan %.2f GB besides T3 and the integrals (%.2f GB of it the derivatives; the density of '
+                    '<bc||ef> in blocks: %.3f GB of %.3f)'
+                    % (gp.need / 1e9, gp.kept / 1e9, GS.pair_block_elems(gp.sectors) * isz / 1e9,
+                       comb(nv, 2) ** 2 * isz / 1e9))
+        return ('plan %.2f GB besides T3 and the integrals (%.2f GB of it the derivatives in memory, in a scratch '
+                'file: %s; batches of %d / %d and %d / %d columns, Xv for %d occupied indices)'
+                % (gp.need / 1e9, gp.kept / 1e9, ', '.join(gp.mapped) or 'nothing', gp.q.cols22, comb(nv, 2),
+                   gp.q.cols13, comb(nv, 3), gp.q.xv))
+    t_gd = None
+    if os.environ.get('ZC_DENSE_PASS', '1') != '0' and GS.available(eris) and cc.symmetry:
+        qd, t_gd = timed('(Q) gradient pass, dense code', dense_pass, ('q', 'qg'))
+        print('    %s; E(Q) %.12e' % (describe(qd.plan), qd.e_q))
+        del qd
+    q, t_g = timed('(Q) gradient pass', cc._q_terms, ('q', 'qg', 'qgs'))
+    print('    in sectors: %s; %s; E(Q) %.12e' % (cc.q_gradient_sectors, describe(q.plan), q.e_q))
     _, t_l1 = timed('Lambda of CCSDT(Q)', lambda: cc.solve_lambda(with_q=True))
     r1 = results[-1]
     print('    %d iterations (converged %s, in blocks: %s), %.2f s per iteration, setup %.2f s'
           % (r1.ncycle, r1.converged, r1.blocks, float(np.mean(r1.timings[1:])), r1.setup))
-    D1, t_d1 = timed('relaxed density of CCSDT(Q)', lambda: cc.make_rdm1(ao_repr=True, with_q=True), ('dens',))
+    D1, t_d1 = timed('relaxed density of CCSDT(Q)', lambda: cc.make_rdm1(ao_repr=True, with_q=True), ('dens',), 3)
     v1 = np.einsum('pq,qp', z, D1).real
     print('    in blocks: %s; trace(z D) = %.12f, dipole moment %.10f' % (cc.rdm1_blocks, v1, nuc - v1), flush=True)
     lambda_opt.kernel = kernel
@@ -132,6 +154,8 @@ def main():
     print('\nsummary %s/%s %s, %d + %d, %d frozen' % (name, basis, kind, no, nv, frozen))
     print('  (Q) energy: front end %.2f s, dense code %.2f s' % (t_q, t_qd))
     print('  (Q) gradient pass %.2f s = %.2f x (Q) dense = %.2f x (Q) front end' % (t_g, t_g / t_qd, t_g / t_q))
+    if t_gd is not None:
+        print('  (Q) gradient pass, dense code %.2f s = %.2f x (Q) dense' % (t_gd, t_gd / t_qd))
     print('  Lambda iteration: %.2f s without, %.2f s with the sources (%.3f); %d and %d iterations'
           % (it0, it1, it1 / it0, r0.ncycle, r1.ncycle))
     print('  relaxed density (after Lambda): %.2f s CCSDT, %.2f s CCSDT(Q) (%.2f)' % (t_d0, t_d1, t_d1 / t_d0))
