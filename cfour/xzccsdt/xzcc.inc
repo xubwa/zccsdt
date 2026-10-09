@@ -18,7 +18,8 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   real(8), intent(out) :: ecorr
   logical, intent(out) :: converged
   integer(8), intent(out) :: ncyc
-  integer(8) :: kt1n, kt2n, kr3, icyc, m0, n
+  integer(8) :: kt1n, kt2n, kr3, icyc, m0, n, kb1, kb2
+  logical :: fromccsd
   integer(8), external :: N(xzdiis_target)
   real(8) :: norms(3), eold, enew, de, normt, t0, t1w
   ZT :: e
@@ -32,13 +33,25 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   kt1n = xzget(NW * no * nv, 'new T1')
   kt2n = xzget(NW * no * no * nv * nv, 'new T2')
   call N(xzdiis_alloc)(nslot, usefile, nch)
+  ! XZ_START=ccsd: T1 and T2 of CFOUR's xx2cccsd as the start (its files
+  ! t1guess, t2guess of the run directory)
+  call get_environment_variable('XZ_START', dbg, ldbg)
+  fromccsd = ldbg > 0 .and. (dbg(1:1) == 'c' .or. dbg(1:1) == 'C')
+  if (fromccsd) then
+    n = xzmark()
+    kb1 = xzget(2 * no * nv, 't1guess')
+    kb2 = xzget(2 * (no * (no + 1) / 2) * (nv * (nv + 1) / 2), 't2guess')
+    if (.not. xzdry) call N(xzguess)(no, nv, w(jeps), w(joovv), w(jt1), w(jt2))
+    if (.not. xzdry) call N(xzccsdstart)(no, nv, w(kb1), w(kb2), w(jt1), w(jt2))
+    call xzrel(n)
+  end if
   if (xzdry) then
     call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, jt3)
     call xzrel(m0)
     return
   end if
 
-  call N(xzguess)(no, nv, w(jeps), w(joovv), w(jt1), w(jt2))
+  if (.not. fromccsd) call N(xzguess)(no, nv, w(jeps), w(joovv), w(jt1), w(jt2))
   call zc_vzero_d(NW * n3, w(jt3))
   call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
   eold = dble(e)
@@ -65,7 +78,11 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     return
   end if
 
-  write(6, '(/,a,f20.12)') '  Second-order correlation energy:', eold
+  if (fromccsd) then
+    write(6, '(/,a,f20.12)') '  Correlation energy of the start (T1, T2 of t1guess, t2guess):', eold
+  else
+    write(6, '(/,a,f20.12)') '  Second-order correlation energy:', eold
+  end if
   write(6, '(/,a)') '  CCSDT iterations'
   write(6, '(a)') '  ' // repeat('-', 98)
   write(6, '(a)') '   cycle     correlation energy      energy change      |dT1|      |dT2|' // &
@@ -99,6 +116,74 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   ecorr = eold
   call N(xzdiis_close)()
   call xzrel(m0)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! T1 and T2 of a CCSD calculation of CFOUR's xx2cccsd on the same integral
+! files as the start: its files t1guess (t1(a, i), one record, complex) and
+! t2guess (t2(ab, ij) on a <= b, i <= j, ab = a + b (b - 1) / 2 from 1; the
+! diagonals zero), in CFOUR's order of the active spinors (operm, vperm give
+! it for the order here).  Without the files, with files of other sizes or -
+! in real arithmetic - with amplitudes that are not real, t1 and t2 are left
+! as they are (the second-order start) and a warning says so.
+subroutine N(xzccsdstart)(no, nv, b1, b2, t1, t2)
+  use xzdata, only: operm, vperm
+  implicit none
+  integer(8), intent(in) :: no, nv
+  complex(8) :: b1(0:nv-1, 0:no-1)
+  complex(8) :: b2(0:nv*(nv+1)/2-1, 0:no*(no+1)/2-1)
+  ZT, intent(inout) :: t1(0:nv-1, 0:no-1)
+  ZT, intent(inout) :: t2(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)      ! [i][j][a][b]
+  integer(8) :: i, j, a, b, fi, fj, fa, fb, pij, pab, n1, n2, s1, s2
+  integer(8), external :: xzrecbytes
+  real(8) :: sij, sab, big
+  logical :: e1, e2
+  n1 = 2 * no * nv
+  n2 = 2 * (no * (no + 1) / 2) * (nv * (nv + 1) / 2)
+  inquire(file='t1guess', exist=e1, size=s1)
+  inquire(file='t2guess', exist=e2, size=s2)
+  if (.not. (e1 .and. e2)) then
+    write(6, '(/,a)') ' @XZCCSDT-W, XZ_START=ccsd: no files t1guess, t2guess (xx2cccsd writes them); second-order start.'
+    return
+  end if
+  if (xzrecbytes(s1) /= 8 * n1 .or. xzrecbytes(s2) /= 8 * n2) then
+    write(6, '(/,a)') ' @XZCCSDT-W, XZ_START=ccsd: t1guess, t2guess are not of this calculation (sizes); second-order start.'
+    return
+  end if
+  call xzrfile('t1guess', b1, n1)
+  call xzrfile('t2guess', b2, n2)
+#ifdef XZ_REAL
+  big = max(maxval(abs(aimag(b1))), maxval(abs(aimag(b2))))
+  if (big > 1d-8) then
+    write(6, '(/,a,es10.2,a)') ' @XZCCSDT-W, XZ_START=ccsd: the amplitudes of t1guess, t2guess are not real (', big, &
+      '); second-order start.'
+    return
+  end if
+#endif
+  !$omp parallel do private(i, j, a, b, fi, fj, fa, fb, pij, pab, sij, sab)
+  do i = 0, no - 1
+    fi = operm(i)
+    do a = 0, nv - 1
+      t1(a, i) = b1(vperm(a), fi)
+    end do
+    do j = 0, no - 1
+      fj = operm(j)
+      pij = min(fi, fj) + max(fi, fj) * (max(fi, fj) + 1) / 2
+      sij = merge(1d0, -1d0, fi < fj)
+      if (i == j) sij = 0d0
+      do a = 0, nv - 1
+        fa = vperm(a)
+        do b = 0, nv - 1
+          fb = vperm(b)
+          pab = min(fa, fb) + max(fa, fb) * (max(fa, fb) + 1) / 2
+          sab = merge(1d0, -1d0, fa < fb)
+          if (a == b) sab = 0d0
+          t2(b, a, j, i) = (sij * sab) * b2(pab, pij)
+        end do
+      end do
+    end do
+  end do
+  write(6, '(/,a)') '   start: T1 and T2 of CFOUR''s CCSD (files t1guess, t2guess)'
 end subroutine
 
 ! ---------------------------------------------------------------------------
