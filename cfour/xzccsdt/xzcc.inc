@@ -144,7 +144,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       ! the slices of the new T3 to every rank
       tsg = omp_get_wtime()
       call xzmpi_slices_put(w(jt3), swoff)
-      call xztoc(1, 'MPI: slices of T3 to the ranks')
+      call xztoc(1, 'MPI: T3 slices to the ranks')
       dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
     end if
     call xztic()
@@ -223,7 +223,7 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
       dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
       tsg = omp_get_wtime()
       call xzmpi_slices_put(w(jt3), swoff)
-      call xztoc(1, 'MPI: slices of T3 to the ranks')
+      call xztoc(1, 'MPI: T3 slices to the ranks')
       dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
       dwords(1) = dwords(1) + dble(NW * (n3 - (soff(myrank + 1) - soff(myrank))))
     end if

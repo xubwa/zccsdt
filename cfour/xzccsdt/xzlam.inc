@@ -151,7 +151,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     if (slices) then
       tsg = omp_get_wtime()
       call xzmpi_slices_put(w(jl3), swoff)
-      call xztoc(2, 'MPI: slices of l3 to the ranks')
+      call xztoc(2, 'MPI: l3 slices to the ranks')
       dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
     end if
     call N(xzlpseudo)(no, nv, w(jl2), w(joovv), pe)
@@ -219,7 +219,7 @@ subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
       dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
       tsg = omp_get_wtime()
       call xzmpi_slices_put(w(jl3), swoff)
-      call xztoc(2, 'MPI: slices of l3 to the ranks')
+      call xztoc(2, 'MPI: l3 slices to the ranks')
       dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
       dwords(2) = dwords(2) + dble(NW * (n3 - (soff(myrank + 1) - soff(myrank))))
     end if
