@@ -6,6 +6,10 @@
 #   make -C ../xzccsdt        (the native objects and modules: build/xzccsdt)
 #   make                      -> build/x2ccc_probe/x2cprobe
 #
+# Against a native program whose xzimd.inc has the argument lists after
+# commit 6d73752 (xzvvoo, xzwo, xzwpair):
+#   make NATIVE=<its build directory> BUILD=<another> PDEFS=-DXZ_NEWIMD
+#
 # CFOUR is linked, never written to and never copied: hbarso.o and the
 # program-directory objects it needs from $(CFOUR)/x2cccsd, the libraries
 # libx2ccc.a, libx2cint.a, liblibr.a from $(CFOUR)/lib, the module files of
@@ -16,6 +20,7 @@ NATIVE  ?= ../../build/xzccsdt
 BUILD   ?= ../../build/x2ccc_probe
 MKLROOT ?= /data/lcheng24/intel/oneapi/mkl/2022.1.0
 MKLLIB  ?= $(MKLROOT)/lib/intel64
+PDEFS   ?=
 
 FC      := ifort
 # the flags of the native program for what is compiled here
@@ -46,7 +51,7 @@ $(BUILD)/x2cprobe: $(OBJS) $(NOBJ)
 	$(FC) $(FCFLAGS) -o $@ $(OBJS) $(NOBJ) $(COBJ) $(CLIBS) $(BLAS) -lrt $(RPATH)
 
 $(BUILD)/probe.o: probe.F90 | $(BUILD)
-	$(FC) $(FCFLAGS) -module $(BUILD) -I$(NATIVE) -c $< -o $@
+	$(FC) $(FCFLAGS) $(PDEFS) -module $(BUILD) -I$(NATIVE) -c $< -o $@
 
 $(BUILD)/cfside.o: cfside.F90 | $(BUILD)
 	$(FC) $(FCFLAGS) -module $(BUILD) -I$(CFOUR)/x2cccsd -I$(CFOUR)/libx2ccc -I$(CFOUR)/libx2c -c $< -o $@

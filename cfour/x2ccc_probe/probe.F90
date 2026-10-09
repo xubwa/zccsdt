@@ -40,10 +40,10 @@ subroutine probedrv(w, maxcor)
   character(len=32) :: arg
   integer :: larg
   character(len=28), parameter :: names(nt) = [character(len=28) :: &
-    'T1 dressing', 'R1 operand (<ak||cd> t2)', 'dressed <ab||ij> (with Bv)', 'W_ovvo, F_vv, F_oo', &
+    'T1 dressing', 'R1 operand (<ak||cd> t2)', 'dressed <ab||ij> from Bv', 'W_ovvo, F_vv, F_oo', &
     'dressed <ab||cd> rows', 'pp ladder GEMM', 'CCSD part (xzccsd)', &
     'T3 only: W_vvvo terms', 'T3 only: W_vooo, pass-2 ops', 'T3 only: occupied operator', &
-    'T3 only: pp operator', ' ']
+    'T3 only: pp operator', 'bra-dressed <ab||ei> (Bv)']
 
   call xzinit(loc(w(1)), maxcor)
   call xzsizes()
@@ -58,6 +58,9 @@ subroutine probedrv(w, maxcor)
   call get_environment_variable('PROBE_T3OPS', arg, larg)
   if (larg > 0) t3ops = arg(1:1) /= '0'
   write(6, '(/,a)') '  X2CPROBE: hbarso of xx2cccsd (libx2ccc) against the CCSD part of xzccsdt'
+#ifdef XZ_NEWIMD
+  write(6, '(a)') '   native routines: xzimd.inc with the argument lists after 6d73752 (XZ_NEWIMD)'
+#endif
   write(6, '(a,i5,a,i5,a,i5,a,i5)') '   active spinors: occupied ', no, '   virtual ', nv, '   frozen ', nfrozen, &
     '   dropped ', ndropped
   write(6, '(a,i4,a,i3,a,i3)') '   threads: ', nthr, '   warm-up steps ', nwarm, '   repetitions ', nrep
@@ -145,7 +148,7 @@ subroutine probedrv(w, maxcor)
     tmin = min(tmin, tn)
     tcfsum = tcfsum + tcf
     tcfmin = min(tcfmin, tcf)
-    tnat = sum(tn(1:7))
+    tnat = sum(tn(1:7)) + tn(12)
     tnatsum = tnatsum + tnat
     tnatmin = min(tnatmin, tnat)
     write(6, '(a,i3,a,f10.4,a,f10.4,a,f10.4)') ' PROBE-TIME rep ', irep, '  hbarso ', tcf, &
@@ -155,8 +158,12 @@ subroutine probedrv(w, maxcor)
     write(6, '(/,a,i3,a,i4,a)') '   WALL TIMES, seconds (', nrep, ' repetitions, ', nthr, ' threads): mean, least'
     write(6, '(5x,a28,2f11.4)') 'CFOUR hbarso (whole)', tcfsum / nrep, tcfmin
     write(6, '(5x,a28,2f11.4)') 'native CCSD part (sum)', tnatsum / nrep, tnatmin
-    do k = 1, 11
+    do k = 1, 12
+      if (k == 8) cycle
       write(6, '(8x,a28,2f11.4)') names(k), tsum(k) / nrep, tmin(k)
+      if (k == 2) write(6, '(8x,a28,2f11.4)') names(12), tsum(12) / nrep, tmin(12)
+      if (k == 7) write(6, '(8x,a28,2f11.4)') names(8), tsum(8) / nrep, tmin(8)
+      if (k == 11) exit
     end do
     write(6, '(a,f8.2)') '   PROBE-RATIO hbarso / native CCSD part (means): ', tcfsum / max(tnatsum, 1d-12)
   end if
@@ -184,7 +191,9 @@ end subroutine
 ! the same kernels in the same order; the passes over T3 left out).  With
 ! t3ops the intermediates that only the T3 equation needs are formed as well
 ! (timers 8 to 11); they do not change the result.
-!   tn(1:7)   stages of the CCSD part; tn(8:11) the T3-only intermediates
+!   tn(1:7), tn(12)   stages of the CCSD part; tn(8:11) the T3-only intermediates
+! XZ_NEWIMD: the argument lists of xzimd.inc after commit 6d73752 (the
+! o^4 v^2 / o^2 v^3 loops as GEMMs), for a build against that native program.
 subroutine nccstep(w, kt1, kt2, kt1n, kt2n, t3ops, tn)
   use xzdata
   use xzmem
@@ -197,7 +206,7 @@ subroutine nccstep(w, kt1, kt2, kt1n, kt2n, t3ops, tn)
   real(8), intent(out) :: tn(12)
   integer(8) :: m0, ov, ov2
   integer(8) :: kfoo, kfov, kfvo, kfvv, kpvv, kfevv, kfeoo, kft
-  integer(8) :: kooovd, kooood, kovvod, kovood, kk, ktmp
+  integer(8) :: kooovd, kooood, kovvod, kovood, kk, ktmp, ktmp2
   integer(8) :: kt2p, kt2pp, ktau, ktt
   integer(8) :: kgpd, kgmq, kyall, kr1c, kr1v, kra, kr2, klad, kwkl, kweff, kwo, kadrv, ko6, kwring
   integer(8) :: ka2, kb2, kx2, kd, kwv, kg2, kyb, ku, kxb, kslab
@@ -225,6 +234,7 @@ subroutine nccstep(w, kt1, kt2, kt1n, kt2n, t3ops, tn)
   kovood = xzget(2 * no * no * ov, 'dressed <ov||oo>')
   kk = xzget(2 * ov2, 'work of the dressing')
   ktmp = xzget(2 * no * no * ov, 'work of W_vooo')
+  ktmp2 = xzget(2 * no * no * ov, 'work of W_vooo 2')
   kt2p = xzget(2 * no * no * nvp, 'T2 [i][j][Q]')
   kt2pp = xzget(2 * npo * nvp, 'T2 [P][Q]')
   ktau = xzget(2 * npo * nvp, 'tau1')
@@ -279,8 +289,15 @@ subroutine nccstep(w, kt1, kt2, kt1n, kt2n, t3ops, tn)
   t0 = omp_get_wtime()
   call xzbv_z(no, nv, npo, nvp, nba, w(kt1), w(ktau), w(jovvq), w(jooov), w(jovvo), &
               w(jopa), w(jopb), w(jvpa), w(jvpb), w(kwv), w(kg2), w(kyb))
+  tn(12) = omp_get_wtime() - t0
+  t0 = omp_get_wtime()
+#ifdef XZ_NEWIMD
+  call xzvvoo_z(no, nv, npo, nvp, w(kt1), w(ktau), w(jgpp), w(jooov), w(joooo), w(kwv), &
+                w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2), w(kwkl))
+#else
   call xzvvoo_z(no, nv, npo, nvp, w(kt1), w(ktau), w(jgpp), w(jooov), w(joooo), w(kwv), &
                 w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2))
+#endif
   tn(3) = omp_get_wtime() - t0
 
   if (t3ops) then
@@ -291,8 +308,13 @@ subroutine nccstep(w, kt1, kt2, kt1n, kt2n, t3ops, tn)
     tn(8) = omp_get_wtime() - t0
     t0 = omp_get_wtime()
     call zc_vzero_d(2 * npo * nv * ny, w(kyall))
+#ifdef XZ_NEWIMD
+    call xzwo_z(no, nv, npo, nvp, w(kt2), w(kt2pp), w(kooovd), w(kovood), w(kd), w(kyall), &
+                w(jopa), w(jopb), w(kwo), w(ktmp), w(ktmp2), w(kb2))
+#else
     call xzwo_z(no, nv, npo, nvp, w(kt2), w(kt2pp), w(kooovd), w(kovood), w(kd), w(kyall), &
                 w(jopa), w(jopb), w(kwo), w(ktmp))
+#endif
     tn(9) = omp_get_wtime() - t0
   end if
 
@@ -344,7 +366,12 @@ subroutine nccstep(w, kt1, kt2, kt1n, kt2n, t3ops, tn)
   tn(7) = omp_get_wtime() - t0
   if (t3ops) then
     t0 = omp_get_wtime()
+#ifdef XZ_NEWIMD
+    ! (the newer native program applies the hh ladder through occupied pairs)
+    call xzwpair_z(no, npo, w(jopa), w(jopb), w(kwkl), w(kfeoo), w(ko6))
+#else
     call xzo6_z(no, npo, nto, w(jofree), w(jopair), w(kwkl), w(kfeoo), w(ko6))
+#endif
     tn(10) = omp_get_wtime() - t0
   end if
   call xzrel(m0)
