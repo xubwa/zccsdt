@@ -226,7 +226,7 @@ subroutine N(xzamps)(w, rw, ecorr)
   end if
   jt1 = xzget(n1, 'T1')
   jt2 = xzget(n2, 'T2')
-  jt3 = xzget(NW * n3, 'T3')
+  if (.not. t3shared) jt3 = xzget(NW * n3, 'T3')
   if (xzdry) return
   inquire(file='XZAMPS', exist=there)
   if (.not. there) then
@@ -249,12 +249,14 @@ subroutine N(xzamps)(w, rw, ecorr)
   end if
   read(77, iostat=ios) w(jt1:jt1 + n1 - 1)
   if (ios == 0) read(77, iostat=ios) w(jt2:jt2 + n2 - 1)
-  if (ios == 0) read(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
+  if (ios == 0 .and. .not. t3shared) read(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
   close(77)
   if (ios /= 0) then
     write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZAMPS failed, iostat ', ios
     call errex
   end if
+  ! T3 where the file is mapped (stored there as the program uses it, in every mode)
+  if (t3shared) call xzmapt3(w, 'XZAMPS', n1 + n2, NW * n3, jt3)
 end subroutine
 
 ! ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ module xzpland
   integer(8) :: pslot = 0, pchunk = 0
   logical :: pfile = .true.
   logical :: planq = .false.          ! only (Q) is planned (a rank that does no iterations)
+  integer(8) :: pneedq = 0            ! words of the work array that (Q) takes with the plan
 contains
   subroutine setpar(k, v)
     use xzdata
@@ -122,10 +123,11 @@ integer(8) function xzpeak_q(w)
   call xzlayout(w, status)
   k = xzget(nwe * no * nv, 'T1')
   k = xzget(nwe * no * no * nv * nv, 'T2')
-  if (method /= 'MP2') k = xzget(nwe * n3, 'T3')
+  ! (T3 and Lambda3 of (Q): mapped files, not in the work array, unless XZ_QMAP=0)
+  if (method /= 'MP2' .and. .not. t3shared) k = xzget(nwe * n3, 'T3')
   if (with_q .and. q_left) then
     k = xzget(nwe * no * no * nv * nv, 'Lambda2')
-    k = xzget(nwe * n3, 'Lambda3')
+    if (.not. t3shared) k = xzget(nwe * n3, 'Lambda3')
   end if
   if (with_q) then
     if (nwe == 2) then
@@ -278,11 +280,24 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   nslot = pslot
   usefile = pfile
   nch = pchunk
+  pneedq = need_q
   if (.not. planq) then
   write(6, '(a,a51,i16,a,f10.1,a)') '     ', trim(what) // ' with this plan:', need_cc, '  = ', 8d-6 * need_cc, ' MB'
   end if
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with this plan:             ', need_q, '  = ', &
     8d-6 * need_q, ' MB'
+  if (with_q .and. t3shared) then
+    if (q_left) then
+      write(6, '(a)') '       (private to a rank.  Not in the work array: T3 and Lambda3, read where the files XZAMPS'
+      write(6, '(a,f10.1,a)') '        and XZLAMB are mapped - one copy in the page cache of a node for all its ranks: ', &
+        16d-6 * nwe * n3, ' MB)'
+    else
+      write(6, '(a)') '       (private to a rank.  Not in the work array: T3, read where the file XZAMPS is mapped -'
+      write(6, '(a,f10.1,a)') '        one copy in the page cache of a node for all its ranks: ', 8d-6 * nwe * n3, ' MB)'
+    end if
+  else if (with_q) then
+    write(6, '(a)') '       (private to a rank, T3 included: XZ_QMAP=0)'
+  end if
   if (.not. planq) then
   write(6, '(a,i8,a,i8)') '     rows of a slab of the dressed <ab||cd>:      ', nqs, '  of ', nqmax
   write(6, '(a,i8,a,i8)') '     occupied triples of a pp-ladder batch:       ', nbt, '  of ', nto

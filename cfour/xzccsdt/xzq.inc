@@ -64,7 +64,9 @@ subroutine N(xzq)(w, eq5, eq6)
   logical :: need(0:no-1), first
   real(8) :: e(2), e1(2), t0, tq(7), tstart, costmine, costleft, costdone, tloop, ttask, txv
   real(8) :: estimate, part(6), tot(6), tmx(2), tq0(7), qcm(0:4 * maxcls), xcm(0:2 * maxcls), xvextra, worst
-  integer(8) :: nxvs(2), nseen, nrk(16)
+  integer(8) :: nxvs(2), nseen, nrk(16), kb4(4)
+  real(8) :: rk(8)
+  real(8), allocatable :: rkall(:, :)
   integer :: ios
   logical :: qcost
   integer(8), external :: N(xzqslot)
@@ -379,6 +381,8 @@ subroutine N(xzq)(w, eq5, eq6)
       t0 * (costleft - costdone) / max(costdone, 1d-30), ' s'
     flush(6)
   end do
+  ! (the memory of the process while the arrays of (Q) are still in use)
+  call xz_rss4(kb4)
   call xzrel(m0)
   if (qcost) close(78)
 
@@ -408,7 +412,20 @@ subroutine N(xzq)(w, eq5, eq6)
   write(6, '(5x,a28,f12.2,a)') 'reductions', tq(5), ' s'
   write(6, '(5x,a28,f12.2,a)') 'energy', tq(6), ' s'
   write(6, '(5x,a28,f12.2,a)') 'total of this rank', part(4), ' s'
+  ! what every rank did and holds: its own (anonymous) memory and the pages
+  ! of mapped files that it has touched (shared with the ranks of its node)
+  rk = [part(4), tq(2), tq(1), dble(nmine), part(6), 1d-3 * kb4(2), 1d-3 * kb4(3), 1d-3 * kb4(1)]
+  allocate(rkall(8, 0:nrank - 1))
+  call xzmpi_gather(rk, rkall, 8_8)
   if (myrank == 0) then
+    write(6, '(/,a)') '    rank   tasks  quadruples     total/s      Xv/s      Xo/s   own memory/MB' // &
+      '   mapped files/MB   peak resident/MB'
+    do n = 0, nrank - 1
+      write(6, '(i8,i8,i12,f12.2,2f10.2,f16.1,f18.1,f19.1)') n, nint(rkall(4, n), 8), nint(rkall(5, n), 8), &
+        rkall(1, n), rkall(2, n), rkall(3, n), rkall(6, n), rkall(7, n), rkall(8, n)
+    end do
+    if (nrank > 1) write(6, '(a,f10.2,a,f12.1,a)') '    all ranks: Xv ', sum(rkall(2, :)), ' s;  own memory ', &
+      sum(rkall(6, :)), ' MB'
     if (nrank > 1) write(6, '(5x,a28,f12.2,a,f8.2)') 'slowest rank', tmx(1), ' s;  sum over ranks / slowest ', &
       tot(4) / max(tmx(1), 1d-30)
     if (qsampled) then

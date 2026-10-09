@@ -164,7 +164,7 @@ subroutine N(xzlamb)(w, rw, ecorr)
   end if
   if (with_den) jl1 = xzget(n1, 'Lambda1')
   jl2 = xzget(n2, 'Lambda2')
-  jl3 = xzget(NW * n3, 'Lambda3')
+  if (.not. t3shared) jl3 = xzget(NW * n3, 'Lambda3')
   if (xzdry) return
   inquire(file='XZLAMB', exist=there)
   if (.not. there) then
@@ -192,12 +192,13 @@ subroutine N(xzlamb)(w, rw, ecorr)
   end if
   if (with_den) read(77, iostat=ios) w(jl1:jl1 + n1 - 1)
   if (ios == 0) read(77, pos=57 + 8 * n1, iostat=ios) w(jl2:jl2 + n2 - 1)
-  if (ios == 0) read(77, iostat=ios) w(jl3:jl3 + NW * n3 - 1)
+  if (ios == 0 .and. .not. t3shared) read(77, iostat=ios) w(jl3:jl3 + NW * n3 - 1)
   close(77)
   if (ios /= 0) then
     write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZLAMB failed, iostat ', ios
     call errex
   end if
+  if (t3shared) call xzmapt3(w, 'XZLAMB', n1 + n2, NW * n3, jl3)
 end subroutine
 
 ! ---------------------------------------------------------------------------
