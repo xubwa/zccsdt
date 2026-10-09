@@ -63,6 +63,8 @@ def ncc(d, first, last):
     r['it_cpu'] = mean(cpu[first - 1:last])
     r['n_window'] = len(wall[first - 1:last])
     r['converged'] = lastof(r'iterations converged in (\d+) cycles', int)
+    m = re.search(r'CC_CONV=(\d+)', read(os.path.join(d, 'ZMAT')))
+    r['loose'] = bool(m) and int(m.group(1)) < 10      # converged for (Q) to run, not for its energy
     m = re.search(r'calculation of CCSDT\(Q\) took (\S+) cpu seconds and (\S+) walltime', text)
     if m:
         r['q_cpu'], r['q'] = float(m.group(1)), float(m.group(2))
@@ -112,7 +114,7 @@ def ratio(a, b, fmt='%.2f'):
 
 
 def table(head, rows):
-    print('| ' + ' | '.join(head) + ' |')
+    print('| ' + ' | '.join(str(x) for x in head) + ' |')
     print('|' + '---|' * len(head))
     for row in rows:
         print('| ' + ' | '.join(str(x) for x in row) + ' |')
@@ -152,7 +154,8 @@ def main():
             f(r.get('q')), ratio(r.get('q_cpu'), r.get('q')), f(r['wall'], '%.0f'), ratio(r['cpu'], r['wall']),
             f(r['rss']),
             '; '.join(x for x in (
-                'converged in %d' % r['converged'] if r['converged'] else '',
+                'converged in %d%s' % (r['converged'], ' (CC_CONV=3)' if r.get('loose') else '')
+                if r['converged'] else '',
                 'MKL threads %d' % r['mkl'] if r['mkl'] != r['threads'] else '',
                 'OMP_WAIT_POLICY=%s' % r['wait'] if r['wait'] != 'default' else '',
                 'threads seen %s' % r['nlwp'] if r.get('nlwp') else '',
@@ -189,7 +192,7 @@ def main():
             table(['threads', 'ncc, symmetry', 'ncc, no symmetry', 'zccsdt', 'ncc (symmetry) / zccsdt',
                    'ncc (no symmetry) / zccsdt'], rows)
 
-    conv = [r for r in runs if r['converged'] and r.get('e_ccsdt') is not None]
+    conv = [r for r in runs if r['converged'] and r.get('e_ccsdt') is not None and not r.get('loose')]
     if conv:
         print('Energies of the converged runs:\n')
         table(['run', 'E(SCF)', 'E(CCSDT)', 'E(Q)', 'E(CCSDT(Q))'],
