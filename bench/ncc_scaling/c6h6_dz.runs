@@ -1,0 +1,63 @@
+# c6h6_dz: runs of bench/ncc_scaling/slurm_scaling.sh (written by mkruns.py)
+# window 2 3
+# ncc, SYMMETRY=ON: CCSDT, 3 iterations
+ncc ncc_on_t1 c6h6.bohr cc-pvdz ON ON T 10 3 70 1 socket n
+ncc ncc_on_t2 c6h6.bohr cc-pvdz ON ON T 10 3 70 2 socket n
+ncc ncc_on_t4 c6h6.bohr cc-pvdz ON ON T 10 3 70 4 socket n
+ncc ncc_on_t7 c6h6.bohr cc-pvdz ON ON T 10 3 70 7 socket n
+ncc ncc_on_t8 c6h6.bohr cc-pvdz ON ON T 10 3 70 8 socket n
+ncc ncc_on_t16 c6h6.bohr cc-pvdz ON ON T 10 3 70 16 socket n
+ncc ncc_on_t23 c6h6.bohr cc-pvdz ON ON T 10 3 70 23 socket n
+ncc ncc_on_t24 c6h6.bohr cc-pvdz ON ON T 10 3 70 24 socket n
+ncc ncc_on_t47 c6h6.bohr cc-pvdz ON ON T 10 3 70 47 both n
+ncc ncc_on_t48 c6h6.bohr cc-pvdz ON ON T 10 3 70 48 both n
+ncc ncc_on_inter_t48 c6h6.bohr cc-pvdz ON ON T 10 3 70 48 inter n
+ncc ncc_on_mkl1_t8 c6h6.bohr cc-pvdz ON ON T 10 3 70 8 socket 1
+ncc ncc_on_mkl1_t24 c6h6.bohr cc-pvdz ON ON T 10 3 70 24 socket 1
+ncc ncc_on_passive_t8 c6h6.bohr cc-pvdz ON ON T 10 3 70 8 socket n PASSIVE
+ncc ncc_on_passive_t24 c6h6.bohr cc-pvdz ON ON T 10 3 70 24 socket n PASSIVE
+ncc ncc_on_active_t24 c6h6.bohr cc-pvdz ON ON T 10 3 70 24 socket n ACTIVE
+# ncc, SYMMETRY=ON: CCSDT(Q) (CC_CONV=3: (Q) needs converged iterations; 24 threads: CC_CONV=10, the energies)
+ncc ncc_onq_t8 c6h6.bohr cc-pvdz ON ON Q 3 200 70 8 socket n
+ncc ncc_onq_t16 c6h6.bohr cc-pvdz ON ON Q 3 200 70 16 socket n
+ncc ncc_onq_t24 c6h6.bohr cc-pvdz ON ON Q 10 200 70 24 socket n
+ncc ncc_onq_t48 c6h6.bohr cc-pvdz ON ON Q 3 200 70 48 both n
+ncc ncc_onq_mem150_t48 c6h6.bohr cc-pvdz ON ON Q 3 200 150 48 both n
+# ncc, SYMMETRY=OFF: CCSDT, 3 iterations
+ncc ncc_off_t1 c6h6.bohr cc-pvdz ON OFF T 10 3 70 1 socket n
+ncc ncc_off_t2 c6h6.bohr cc-pvdz ON OFF T 10 3 70 2 socket n
+ncc ncc_off_t4 c6h6.bohr cc-pvdz ON OFF T 10 3 70 4 socket n
+ncc ncc_off_t7 c6h6.bohr cc-pvdz ON OFF T 10 3 70 7 socket n
+ncc ncc_off_t8 c6h6.bohr cc-pvdz ON OFF T 10 3 70 8 socket n
+ncc ncc_off_t16 c6h6.bohr cc-pvdz ON OFF T 10 3 70 16 socket n
+ncc ncc_off_t23 c6h6.bohr cc-pvdz ON OFF T 10 3 70 23 socket n
+ncc ncc_off_t24 c6h6.bohr cc-pvdz ON OFF T 10 3 70 24 socket n
+ncc ncc_off_t47 c6h6.bohr cc-pvdz ON OFF T 10 3 70 47 both n
+ncc ncc_off_t48 c6h6.bohr cc-pvdz ON OFF T 10 3 70 48 both n
+ncc ncc_off_inter_t48 c6h6.bohr cc-pvdz ON OFF T 10 3 70 48 inter n
+ncc ncc_off_mkl1_t8 c6h6.bohr cc-pvdz ON OFF T 10 3 70 8 socket 1
+ncc ncc_off_mkl1_t24 c6h6.bohr cc-pvdz ON OFF T 10 3 70 24 socket 1
+ncc ncc_off_passive_t8 c6h6.bohr cc-pvdz ON OFF T 10 3 70 8 socket n PASSIVE
+ncc ncc_off_passive_t24 c6h6.bohr cc-pvdz ON OFF T 10 3 70 24 socket n PASSIVE
+ncc ncc_off_active_t24 c6h6.bohr cc-pvdz ON OFF T 10 3 70 24 socket n ACTIVE
+# zccsdt RCCSDT: 3 iterations
+zc zc_rhf_t1 rhf c6h6.bohr cc-pvdz 6 3 0 70000 1 socket
+zc zc_rhf_t2 rhf c6h6.bohr cc-pvdz 6 3 0 70000 2 socket
+zc zc_rhf_t4 rhf c6h6.bohr cc-pvdz 6 3 0 70000 4 socket
+zc zc_rhf_t8 rhf c6h6.bohr cc-pvdz 6 3 0 70000 8 socket
+zc zc_rhf_t16 rhf c6h6.bohr cc-pvdz 6 3 0 70000 16 socket
+zc zc_rhf_t24 rhf c6h6.bohr cc-pvdz 6 3 0 70000 24 socket
+zc zc_rhf_t48 rhf c6h6.bohr cc-pvdz 6 3 0 70000 48 both
+zc zc_rhf_inter_t48 rhf c6h6.bohr cc-pvdz 6 3 0 70000 48 inter
+zc zc_rhf_passive_t8 rhf c6h6.bohr cc-pvdz 6 3 0 70000 8 socket PASSIVE
+zc zc_rhf_passive_t24 rhf c6h6.bohr cc-pvdz 6 3 0 70000 24 socket PASSIVE
+zc zc_rhf_active_t24 rhf c6h6.bohr cc-pvdz 6 3 0 70000 24 socket ACTIVE
+# zccsdt RCCSDT: 2 iterations and (Q) (24 threads: converged, the energies)
+zc zc_rhfq_t8 rhf c6h6.bohr cc-pvdz 6 2 1 70000 8 socket
+zc zc_rhfq_t16 rhf c6h6.bohr cc-pvdz 6 2 1 70000 16 socket
+zc zc_rhfq_t24 rhf c6h6.bohr cc-pvdz 6 0 1 70000 24 pref
+zc zc_rhfq_t48 rhf c6h6.bohr cc-pvdz 6 2 1 70000 48 both
+# runs of the start once more: drift of the node over the job
+ncc ncc_on_again_t24 c6h6.bohr cc-pvdz ON ON T 10 3 70 24 socket n
+ncc ncc_off_again_t24 c6h6.bohr cc-pvdz ON OFF T 10 3 70 24 socket n
+zc zc_rhf_again_t24 rhf c6h6.bohr cc-pvdz 6 3 0 70000 24 socket
