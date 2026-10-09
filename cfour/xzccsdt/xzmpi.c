@@ -148,6 +148,71 @@ void xzmpi_allsum_w(double *buf, int64_t n)
     }
 }
 
+/* ---- Slices: the array buf is cut into one range of words per rank,
+ * off[r] <= word < off[r + 1] the slice of rank r.  Both exchanges go in
+ * nrank - 1 rounds; in round d every rank sends to rank + d and receives
+ * from rank - d (MPI_Sendrecv, chunk by chunk, every rank the same number
+ * of chunks per round: the longest slice), so all ranks transfer at once
+ * and no rank relays what belongs to another.
+ *
+ * xzmpi_slices_add: every rank has added its own contributions to all of
+ * buf; on return the slice of this rank is the sum over the ranks (the rest
+ * of buf is left as it is).  tmp: work, at least min(chunk, longest slice)
+ * words. */
+void xzmpi_slices_add(double *buf, const int64_t *off, double *tmp)
+{
+    int me, np;
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    MPI_Comm_size(MPI_COMM_WORLD, &np);
+    int64_t longest = 0;
+    for (int r = 0; r < np; r++)
+        if (off[r + 1] - off[r] > longest) longest = off[r + 1] - off[r];
+    const int64_t mine = off[me + 1] - off[me];
+    for (int d = 1; d < np; d++) {
+        const int to = (me + d) % np, from = (me + np - d) % np;
+        const int64_t ns = off[to + 1] - off[to];
+        for (int64_t o = 0; o < longest; o += xz_chunk) {
+            int64_t s = ns - o, r = mine - o;
+            if (s > xz_chunk) s = xz_chunk;
+            if (r > xz_chunk) r = xz_chunk;
+            if (s < 0) s = 0;
+            if (r < 0) r = 0;
+            MPI_Sendrecv(buf + off[to] + (s ? o : 0), (int)s, MPI_DOUBLE, to, 21,
+                         tmp, (int)r, MPI_DOUBLE, from, 21, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            double *x = buf + off[me] + o;
+            #pragma omp parallel for schedule(static)
+            for (int64_t i = 0; i < r; i++) x[i] += tmp[i];
+        }
+    }
+}
+
+/* xzmpi_slices_put: every rank has its own slice of buf; on return every
+ * rank has all of buf. */
+void xzmpi_slices_put(double *buf, const int64_t *off)
+{
+    int me, np;
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    MPI_Comm_size(MPI_COMM_WORLD, &np);
+    int64_t longest = 0;
+    for (int r = 0; r < np; r++)
+        if (off[r + 1] - off[r] > longest) longest = off[r + 1] - off[r];
+    const int64_t mine = off[me + 1] - off[me];
+    for (int d = 1; d < np; d++) {
+        const int to = (me + d) % np, from = (me + np - d) % np;
+        const int64_t nr = off[from + 1] - off[from];
+        for (int64_t o = 0; o < longest; o += xz_chunk) {
+            int64_t s = mine - o, r = nr - o;
+            if (s > xz_chunk) s = xz_chunk;
+            if (r > xz_chunk) r = xz_chunk;
+            if (s < 0) s = 0;
+            if (r < 0) r = 0;
+            MPI_Sendrecv(buf + off[me] + (s ? o : 0), (int)s, MPI_DOUBLE, to, 22,
+                         buf + off[from] + (r ? o : 0), (int)r, MPI_DOUBLE, from, 22,
+                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+    }
+}
+
 /* The name of the node of this rank (for the output), at most len - 1 characters. */
 void xzmpi_node(char *name, int64_t len)
 {
@@ -180,6 +245,8 @@ void xzmpi_recv_w(double *buf, int64_t n, int64_t src, int64_t tag) { (void)buf;
 void xzmpi_sum0_w(double *buf, int64_t n) { (void)buf; (void)n; }
 void xzmpi_allsum_w(double *buf, int64_t n) { (void)buf; (void)n; }
 void xzmpi_node(char *name, int64_t len) { if (len > 0) name[0] = 0; }
+void xzmpi_slices_add(double *buf, const int64_t *off, double *tmp) { (void)buf; (void)off; (void)tmp; }
+void xzmpi_slices_put(double *buf, const int64_t *off) { (void)buf; (void)off; }
 void xzmpi_finalize(void) {}
 void xzmpi_abort(int64_t code) { exit((int)code); }
 
@@ -226,6 +293,32 @@ int64_t xzmpi_selftest(int64_t n)
     for (int64_t i = 0; i < n; i++) a[i] = (double)(me + 1) * (double)(i % 1013);
     xzmpi_allsum_w(a, n);
     for (int64_t i = 0; i < n; i++) bad += a[i] != 0.5 * (double)(np * (np + 1)) * (double)(i % 1013);
+    /* slices of unequal lengths (one of them empty with three or more ranks):
+     * the sum of the contributions on the slice of the owner, then the
+     * slices of the owners on every rank */
+    if (np > 1) {
+        int64_t *off = malloc(sizeof(int64_t) * (size_t)(np + 1));
+        off[0] = 0;
+        for (int64_t r = 0; r < np; r++) {
+            int64_t len = (2 * (r + 1) * n) / (np * (np + 1));
+            if (np > 2 && r == 1) len = 0;
+            off[r + 1] = off[r] + len;
+        }
+        off[np] = n;
+        for (int64_t i = 0; i < n; i++) a[i] = (double)(me + 1) * (double)(i % 991);
+        xzmpi_slices_add(a, off, b);
+        for (int64_t i = off[me]; i < off[me + 1]; i++)
+            bad += a[i] != 0.5 * (double)(np * (np + 1)) * (double)(i % 991);
+        for (int64_t i = 0; i < n; i++)
+            if (i < off[me] || i >= off[me + 1]) bad += a[i] != (double)(me + 1) * (double)(i % 991);
+        for (int64_t i = 0; i < n; i++)
+            a[i] = (i >= off[me] && i < off[me + 1]) ? (double)(me + 3) + (double)(i % 983) : -7.0;
+        xzmpi_slices_put(a, off);
+        for (int64_t r = 0; r < np; r++)
+            for (int64_t i = off[r]; i < off[r + 1]; i++)
+                bad += a[i] != (double)(r + 3) + (double)(i % 983);
+        free(off);
+    }
     free(a);
     return bad;
 }

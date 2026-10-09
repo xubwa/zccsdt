@@ -95,6 +95,19 @@ module xzpar
       type(*), dimension(*) :: buf
       integer(c_int64_t), value :: n
     end subroutine
+    ! slices of an array (off: the first word of the slice of every rank, and
+    ! the end): the contributions of all ranks summed on the slice of its
+    ! owner; the slices of the owners to every rank
+    subroutine xzmpi_slices_add(buf, off, tmp) bind(C)
+      import
+      type(*), dimension(*) :: buf, tmp
+      integer(c_int64_t) :: off(*)
+    end subroutine
+    subroutine xzmpi_slices_put(buf, off) bind(C)
+      import
+      type(*), dimension(*) :: buf
+      integer(c_int64_t) :: off(*)
+    end subroutine
     subroutine xzmpi_set_chunk(n) bind(C)
       import
       integer(c_int64_t), value :: n

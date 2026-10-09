@@ -132,6 +132,7 @@ subroutine xzdrv(w, maxcor)
   do
     call xzsetmode(uselab)
     nwe = merge(1_8, 2_8, isreal)
+    call xzslices()
     call xzplan(w, nslot, usefile, nch, .true.)
     call xzrel(0_8)
     call xzlayout(w, status)
@@ -177,6 +178,7 @@ subroutine xzdrv(w, maxcor)
     rplan = 0d0
     rplan(1) = dble(pneedw)
     rplan(2:9) = dble([nqs, nbt, nbp, nba, qxv, qc22, qc13, qrows])
+    rplan(10:12) = dble([nslot, merge(1_8, 0_8, usefile), nch])
     call xzmpi_bcast(rplan, 128_8)
   end if
   ! the batches of the iterations, dealt to the ranks
@@ -978,6 +980,7 @@ subroutine xzmpistart()
   call xzmpi_max(a, b, 2_8)
   call xzmpi_bcast(b, 16_8)
   maxthr = nint(b(1), 8)
+  call xznodes()
   if (myrank == 0 .and. b(1) /= -b(2)) write(6, '(a,i4,a,i4,a)') ' @XZCCSDT-W, the ranks have between ', &
     nint(-b(2)), ' and ', nint(b(1)), ' threads: the memory of every rank is planned for the largest number.'
   call get_environment_variable('XZ_MPITEST', arg, larg)

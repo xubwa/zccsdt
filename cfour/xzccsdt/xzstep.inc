@@ -36,7 +36,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: kt1, kt2, kt3, kt1n, kt2n, kr3
-  integer(8) :: p0
+  integer(8) :: p0, kex
   real(8) :: tst, tsg
   integer(8) :: m0, m1, m2, md, ov, ov2
   integer(8) :: kfoo, kfov, kfvo, kfvv, kpvv, kfevv, kfeoo, kft
@@ -263,7 +263,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
         call xztoc(1, 'dressed <ab||cd> rows')
         call xztic()
         ! the CCSD ladder: lad[P][q] = sum_Q ~<q||Q> (t2 + tau1)[P][Q]
-        if (npo > 0 .and. myrank == 0) call N(zc_gemm)(0_4, 1_4, npo, nq, nqh, one, w(ktt + NW * lo), nvp, &
+        if (npo > 0 .and. (myrank == 0 .or. slices)) call N(zc_gemm)(0_4, 1_4, npo, nq, nqh, one, w(ktt + NW * lo), nvp, &
                                      w(kslab), nqh, zero, w(klad + NW * (lo + q0)), nvp)
         call xztoc(1, 'CCSD pp ladder (GEMM)')
         call xztic()
@@ -302,8 +302,9 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   if (.not. xzdry) dsec(2, 1) = dsec(2, 1) + omp_get_wtime() - tsg
   call xzrel(m2)
 
-  ! ---- the CCSD part and the operator on the occupied triples (rank 0)
-  if (.not. xzdry .and. myrank == 0) then
+  ! ---- the CCSD part and the operator on the occupied triples (rank 0; with
+  !      slices every rank, for the operator on its rows)
+  if (.not. xzdry .and. (myrank == 0 .or. slices)) then
     tsg = omp_get_wtime()
     call xztic()
     call N(xzccsd)(no, nv, npo, nvp, w(jeps), w(kt1), w(kt2), w(kt2p), w(kt2pp), w(jgpp), w(kooovd), &
@@ -368,7 +369,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   if (.not. xzdry) then
     call xztoc(1, 'pass 2')
     dsec(3, 1) = dsec(3, 1) + omp_get_wtime() - tsg
-    if (nrank > 1) then
+    if (nrank > 1 .and. .not. slices) then
       ! the parts of the residual of T3, summed onto rank 0
       tsg = omp_get_wtime()
       call xzmpi_sum0_w(w(kr3), NW * n3)
@@ -376,7 +377,26 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
       dsec(5, 1) = dsec(5, 1) + omp_get_wtime() - tsg
     end if
   end if
-  if (.not. xzdry .and. myrank == 0) then
+  if (slices) then
+    ! the rows of this rank: the operator on occupied triples, the parts of
+    ! the residual of all ranks, the Jacobi step
+    kex = xzget(min(xzmpi_chunk(), NW * max(smax, 1_8)), 'chunk of the exchange')
+    if (.not. xzdry) then
+      tsg = omp_get_wtime()
+      call xztic()
+      call N(xzslocc)(w, kt3, kr3, w(ko6))
+      call xztoc(1, 'hh ladder, F_oo')
+      dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call xzmpi_slices_add(w(kr3), swoff, w(kex))
+      call xztoc(1, 'MPI: residual to its rows')
+      dsec(5, 1) = dsec(5, 1) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call N(xzslupd)(w, kt3, kr3)
+      call xztoc(1, 'T3 update')
+      dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
+    end if
+  else if (.not. xzdry .and. myrank == 0) then
     tsg = omp_get_wtime()
     call xztic()
     if (pairhh) then
@@ -424,6 +444,51 @@ subroutine N(xzdrrows)(no, nv, npo, nvp, nqh, nq, t1, tau, vv, gq, gh, pa, pb, s
   tm = -t1
   call N(zc_vvvv_dress)(slab, vv, nq, nqh, pa, pb, tm, nv, gq, no, nv, t1, nv, gq, no, nv, tm, tm, 0_8)
   if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nqh, npo, one, tau, nvp, gh, nqh, one, slab, nqh)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! With slices (xzdist.F90): the operator on the occupied triples for the
+! rows of this rank, r[I][A] += sum_J o6[I][J] t3[J][A], and the Jacobi step
+! on them (r <- t3 + r / D), block by block.
+subroutine N(xzslocc)(w, kt3, kr3, o6)
+  use xzdata
+  use xzkern
+  use xzdist
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kt3, kr3
+  ZT, intent(in) :: o6(0:nto-1, 0:nto-1)                       ! [I][J]
+  integer(8) :: g, ni, na, a, b
+  ZT :: one
+  one = 1
+  do g = 0, ntg - 1
+    ni = otoff(g + 1) - otoff(g)
+    na = vtoff(g + 1) - vtoff(g)
+    if (ni == 0 .or. na == 0) cycle
+    call xzslrows(g, a, b)
+    if (b <= a) cycle
+    call N(zc_gemm)(0_4, 0_4, b - a, na, ni, one, o6(otoff(g), otoff(g) + a), nto, w(kt3 + NW * boff(g)), na, &
+                    one, w(kr3 + NW * (boff(g) + a * na)), na)
+  end do
+end subroutine
+
+subroutine N(xzslupd)(w, kt3, kr3)
+  use xzdata
+  use xzkern
+  use xzdist
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kt3, kr3
+  integer(8) :: g, ni, na, a, b
+  do g = 0, ntg - 1
+    ni = otoff(g + 1) - otoff(g)
+    na = vtoff(g + 1) - vtoff(g)
+    if (ni == 0 .or. na == 0) cycle
+    call xzslrows(g, a, b)
+    if (b <= a) cycle
+    call N(zc_t3_update)(w(kt3 + NW * (boff(g) + a * na)), w(kr3 + NW * (boff(g) + a * na)), b - a, na, &
+                         w(jeo3 + otoff(g) + a), w(jev3 + vtoff(g)), c_null_ptr)
+  end do
 end subroutine
 
 ! ---------------------------------------------------------------------------

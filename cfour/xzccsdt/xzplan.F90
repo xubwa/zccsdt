@@ -242,11 +242,17 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     end do
     pslot = 0
     pfile = .false.
+    if (slices) then
+      ! (its slices of the DIIS vectors, where rank 0 has its own)
+      pslot = int(rplan(10), 8)
+      pfile = rplan(11) == 1d0
+      pchunk = int(rplan(12), 8)
+    end if
     need_cc = 0
     if (.not. planq) need_cc = xzpeak_cc(w)
     need_q = xzpeak_q(w)
-    nslot = 0
-    usefile = .false.
+    nslot = pslot
+    usefile = pfile
     nch = pchunk
     pneedq = need_q
     if (.not. planq) write(6, '(a,a43,i16,a,f10.1,a)') '     this rank, ', trim(what) // ' with the plan of rank 0:', &
@@ -275,6 +281,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   else if (xzpeak_cc(w) > xzsize) then
     pfile = .true.
     per_vec = 2 * 8 * nwe * n3
+    if (slices) per_vec = 2 * 8 * nwe * smax
     free_bytes = xz_free_disk('.' // c_null_char)
     if (free_bytes >= 0 .and. per_vec * pslot > free_bytes - 1073741824_8) then
       nfit = max(0_8, (free_bytes - 1073741824_8) / max(per_vec, 1_8))
@@ -345,8 +352,11 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     8d-6 * need_q, ' MB'
   if (nrank > 1 .and. (.not. planq .or. with_q)) then
     write(6, '(a,i16,a,f10.1,a)') '     a rank other than 0 takes:      ', pneedw, '  = ', 8d-6 * pneedw, ' MB'
-    if (.not. planq) write(6, '(a)') '       (its own work array: the integrals, the amplitudes, its part of the residual,' // &
-      ' the batches; no DIIS vectors)'
+    if (.not. planq .and. .not. slices) write(6, '(a)') '       (its own work array: the integrals, the amplitudes, ' // &
+      'its part of the residual, the batches; no DIIS vectors)'
+    if (.not. planq .and. slices) write(6, '(a,f10.1,a)') '       (its own work array: the integrals, the amplitudes, ' // &
+      'the residual, the batches, its slice of every DIIS vector: at most ', 8d-6 * nwe * smax, ' MB of T3)'
+    call xznodemem(max(need_cc, need_q), pneedw + 4096)
   end if
   if (with_q .and. t3shared) then
     if (q_left) then
@@ -371,8 +381,10 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   else if (pfile) then
     write(6, '(a,i3,a,f10.1,a)') '     DIIS: ', pslot, ' vectors, T3 parts in the file XZDIIS (', &
       16d-6 * nwe * n3 * pslot, ' MB)'
+    if (slices) write(6, '(a)') '       (every rank the slice of its rows, in its own file XZDIIS.<rank>)'
   else
     write(6, '(a,i3,a)') '     DIIS: ', pslot, ' vectors in the work array'
+    if (slices) write(6, '(a)') '       (every rank the slice of its rows, in its own work array)'
   end if
   end if
   if (with_q) then

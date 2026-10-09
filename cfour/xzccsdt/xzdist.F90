@@ -29,7 +29,8 @@
 !
 module xzdist
   use xzpar, only: myrank, nrank, xzmpi_bcast, xzmpi_bcast_w, xzmpi_send_w, xzmpi_recv_w, &
-                   xzmpi_sum0_w, xzmpi_allsum_w, xzmpi_gather, xzmpi_max, xzmpi_sum, xzmpi_chunk
+                   xzmpi_sum0_w, xzmpi_allsum_w, xzmpi_gather, xzmpi_max, xzmpi_sum, xzmpi_chunk, &
+                   xzmpi_slices_add, xzmpi_slices_put
   implicit none
   integer, parameter :: ndk = 6
   character(len=10), parameter :: dkname(ndk) = [character(len=10) :: 'pass 1', 'pass 2', 'pp ladder', &
@@ -43,6 +44,18 @@ module xzdist
   logical :: distk(ndk) = .true.              ! XZ_DIST: which kinds are dealt out (else all to rank 0)
   real(8) :: rplan(16) = 0d0                  ! the plan of rank 0: words of a worker, the 8 batch sizes
   integer(8) :: maxthr = 0                    ! the largest number of threads of a rank
+  ! ---- slices (XZ_SLICES=1, more than one rank): every rank owns a range of
+  !      rows of T3 - the elements soff(r) <= e < soff(r + 1) of the stored
+  !      array, cut at rows -, gets the residual of its rows from all ranks,
+  !      does the operator on occupied triples, the Jacobi step and DIIS on
+  !      them (its slice of every DIIS vector in its own work array or file)
+  !      and sends its slice of the new T3 to every rank
+  logical :: slices = .false.
+  integer(8), allocatable :: soff(:)          ! (0:nrank), elements
+  integer(8), allocatable :: swoff(:)         ! the same in words
+  integer(8) :: smax = 0                      ! elements of the longest slice
+  real(8), allocatable :: rnode(:, :)         ! (2, rank) on rank 0: a number that names the node of the rank,
+                                              ! the MB that the node could give when the program started
   real(8) :: r0extra(2) = 0d0                 ! XZ_R0LOAD: what rank 0 does alone, as a fraction of the
                                               ! distributed work of an iteration (T3 equation, Lambda)
   ! seconds of this rank, (stage, 1 T3 equation / 2 Lambda): 1 pass 1, 2 the
@@ -251,6 +264,120 @@ contains
       end if
     end do
     deallocate(lst, load)
+  end subroutine
+
+  ! The slices of the stored T3 for the mode that xzsetmode has set: equal
+  ! numbers of elements as far as whole rows allow.
+  subroutine xzslices()
+    use xzdata
+    integer(8) :: r, g, na, ni, t, a
+    character(len=8) :: arg
+    integer :: larg
+    slices = .false.
+    if (nrank == 1) return
+    call get_environment_variable('XZ_SLICES', arg, larg)
+    if (larg > 0) slices = arg(1:1) /= '0'
+    if (.not. slices) return
+    ! (the rows of a rank take the operator on occupied triples: not its pair form)
+    hhset = 1
+    if (allocated(soff)) deallocate(soff, swoff)
+    allocate(soff(0:nrank), swoff(0:nrank))
+    soff(0) = 0
+    do r = 1, nrank - 1
+      t = (r * n3) / nrank
+      soff(r) = n3
+      do g = 0, ntg - 1
+        ni = otoff(g + 1) - otoff(g)
+        na = vtoff(g + 1) - vtoff(g)
+        if (ni == 0 .or. na == 0) cycle
+        if (t < boff(g) + ni * na) then
+          a = max(0_8, (t - boff(g) + na - 1) / na)
+          soff(r) = boff(g) + a * na
+          exit
+        end if
+      end do
+      soff(r) = max(soff(r), soff(r - 1))
+    end do
+    soff(nrank) = n3
+    smax = 0
+    do r = 0, nrank - 1
+      smax = max(smax, soff(r + 1) - soff(r))
+    end do
+    swoff = nwe * soff
+  end subroutine
+
+  ! the rows a <= row < b of the block of the group g that are in the slice
+  ! of this rank (all rows without slices)
+  subroutine xzslrows(g, a, b)
+    use xzdata
+    integer(8), intent(in) :: g
+    integer(8), intent(out) :: a, b
+    integer(8) :: na, ni
+    ni = otoff(g + 1) - otoff(g)
+    na = vtoff(g + 1) - vtoff(g)
+    a = 0
+    b = ni
+    if (.not. slices .or. na == 0) return
+    a = min(ni, max(0_8, (soff(myrank) - boff(g) + na - 1) / na))
+    b = min(ni, max(0_8, (soff(myrank + 1) - boff(g)) / na))
+    if (soff(myrank + 1) <= boff(g)) b = 0
+    if (b < a) b = a
+  end subroutine
+
+  ! Every rank tells rank 0 its node and what the node can give (called once,
+  ! by all ranks).
+  subroutine xznodes()
+    use iso_c_binding
+    use xzkern, only: xz_mem_avail
+    use xzpar, only: xzmpi_node
+    character(kind=c_char) :: name(64)
+    real(8) :: mine(2)
+    integer :: k
+    name = c_null_char
+    call xzmpi_node(name, 64_8)
+    mine = 0d0
+    do k = 1, 64
+      if (name(k) == c_null_char) exit
+      mine(1) = mine(1) * 131d0 + dble(iachar(name(k)))
+      mine(1) = mod(mine(1), 9007199254740881d0 / 256d0)
+    end do
+    mine(2) = 1d-3 * xz_mem_avail()
+    if (allocated(rnode)) deallocate(rnode)
+    allocate(rnode(2, 0:nrank - 1))
+    rnode = 0d0
+    call xzmpi_gather(mine, rnode, 2_8)
+  end subroutine
+
+  ! rank 0: the work arrays of the ranks of every node (w0 words for rank 0,
+  ! ww for each other rank) against what the node could give at the start
+  subroutine xznodemem(w0, ww)
+    integer(8), intent(in) :: w0, ww
+    integer(8) :: r, q, nr
+    real(8) :: need
+    logical :: first
+    if (nrank == 1 .or. .not. allocated(rnode)) return
+    write(6, '(a)') '     the work arrays of the ranks, node by node (MB; rank 0 has MEMORY_SIZE):'
+    do r = 0, nrank - 1
+      first = .true.
+      do q = 0, r - 1
+        if (rnode(1, q) == rnode(1, r)) first = .false.
+      end do
+      if (.not. first) cycle
+      need = 0d0
+      nr = 0
+      do q = r, nrank - 1
+        if (rnode(1, q) /= rnode(1, r)) cycle
+        nr = nr + 1
+        need = need + 8d-6 * merge(w0, ww, q == 0)
+      end do
+      write(6, '(a,i5,a,i4,a,f12.1,a,f12.1)') '       node of rank ', r, ': ', nr, ' ranks, work arrays ', need, &
+        '   memory available at the start ', rnode(2, r)
+      if (rnode(2, r) > 0d0 .and. need > rnode(2, r)) then
+        write(6, '(a)') ' @XZCCSDT-W, the work arrays of the ranks of this node are larger than the memory that the node'
+        write(6, '(a)') '             had available: lower MEMORY_SIZE (rank 0 then puts the DIIS vectors into the file'
+        write(6, '(a)') '             XZDIIS) or use fewer ranks per node.'
+      end if
+    end do
   end subroutine
 
   ! XZ_BCOST=file: the batches of this rank, their model cost and their

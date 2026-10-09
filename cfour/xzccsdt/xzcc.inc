@@ -39,8 +39,13 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   kt1n = xzget(NW * no * nv, 'new T1')
   kt2n = xzget(NW * no * no * nv * nv, 'new T2')
   if (xzworker()) then
-    ! a rank other than 0: no DIIS vectors, one region for its part of the residual
-    call N(xzdiis_alloc)(0_8, .false., nch)
+    ! a rank other than 0: no DIIS vectors, one region for its part of the
+    ! residual (with slices: its slices of the DIIS vectors, as on rank 0)
+    if (slices) then
+      call N(xzdiis_alloc)(nslot, usefile, nch)
+    else
+      call N(xzdiis_alloc)(0_8, .false., nch)
+    end if
     if (.not. xzdry) then
       call N(xzccwork)(w, kt1n, kt2n, ncyc)
       call N(xzdiis_close)()
@@ -123,7 +128,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       call xzmpi_bcast(ctl, 16_8)
       call xzmpi_bcast_w(w(jt1), NW * no * nv)
       call xzmpi_bcast_w(w(jt2), NW * no * no * nv * nv)
-      if (icyc > 1) call xzmpi_bcast_w(w(jt3), NW * n3)
+      if (icyc > 1 .and. .not. slices) call xzmpi_bcast_w(w(jt3), NW * n3)
       call xztoc(1, 'MPI: amplitudes to the ranks')
       dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
     end if
@@ -134,6 +139,13 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms)
     call xztoc(1, 'DIIS')
     dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
+    if (slices) then
+      ! the slices of the new T3 to every rank
+      tsg = omp_get_wtime()
+      call xzmpi_slices_put(w(jt3), swoff)
+      call xztoc(1, 'MPI: slices of T3 to the ranks')
+      dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
+    end if
     call xztic()
     call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
     call xztoc(1, 'energy')
@@ -176,9 +188,10 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
   integer(8), intent(out) :: icyc
   integer(8), external :: N(xzdiis_target)
   integer(8) :: kr3
-  real(8) :: ctl(2), tsg, t0
+  real(8) :: ctl(2), tsg, t0, norms(3)
   icyc = 0
   write(6, '(/,a)') '  CCSDT iterations: the batches of this rank'
+  if (slices) call zc_vzero_d(NW * n3, w(jt3))
   do
     call xzmpi_bcast(ctl, 16_8)
     if (ctl(1) /= 1d0) exit
@@ -187,7 +200,9 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
     call xztic()
     call xzmpi_bcast_w(w(jt1), NW * no * nv)
     call xzmpi_bcast_w(w(jt2), NW * no * no * nv * nv)
-    if (ctl(2) == 1d0) then
+    if (slices) then
+      ! (T3 is here: the slices of the ranks came at the end of the iteration before)
+    else if (ctl(2) == 1d0) then
       call xzmpi_bcast_w(w(jt3), NW * n3)
       dwords(1) = dwords(1) + dble(NW * n3)
     else
@@ -197,6 +212,19 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
     dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
     kr3 = N(xzdiis_target)()
     call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    if (slices) then
+      ! DIIS on the slice of this rank, then the slices of the new T3 of all ranks
+      tsg = omp_get_wtime()
+      call xztic()
+      call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms)
+      call xztoc(1, 'DIIS')
+      dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call xzmpi_slices_put(w(jt3), swoff)
+      call xztoc(1, 'MPI: slices of T3 to the ranks')
+      dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
+      dwords(1) = dwords(1) + dble(NW * (n3 - (soff(myrank + 1) - soff(myrank))))
+    end if
     icyc = icyc + 1
     write(6, '(a,i5,f12.2,a)') '   cycle ', icyc, omp_get_wtime() - t0, ' s'
     flush(6)
