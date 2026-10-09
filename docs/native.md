@@ -1,7 +1,9 @@
 # xzccsdt: the native program in CFOUR's two-component chain
 
 `cfour/xzccsdt` is a program without Python for spinor CCSDT, CCSDT(Q) and
-CCSDT(Q)_Lambda energies and for lambda of CCSDT.  It runs as a member of CFOUR's X2CSO chain, after `xjoda`,
+CCSDT(Q)_Lambda energies, for lambda of CCSDT and for the one-particle density
+and orbital gradient of CCSDT that CFOUR's `xx2czvec` turns into the relaxed
+density.  It runs as a member of CFOUR's X2CSO chain, after `xjoda`,
 `xsox2catm`, `xsox2chf` (and `xx2camf` for X2CAMF) and `xx2cvtran` with
 `ABCDTYPE=STANDARD`, in their directory:
 
@@ -15,13 +17,16 @@ working memory is the work array that CFOUR's `CRAPSI` allocates
 `lambda_blk.py`, `quadruples_lambda.py`; docs/factorization.md, docs/lambda.md),
 which is the reference of every number below.
 
-State of this document: the program at the commit that reworks the threading
-of the iterations (section 12; the Lambda equations and (Q)_Lambda: section
-11).  What is measured says so (job, node);
+State of this document: the program at the commit that adds the density
+stage (section 13; the threading of the iterations: section 12; the Lambda
+equations and (Q)_Lambda: section 11).  What is measured says so (job, node);
 what is not done is listed at the end.  In short: CCSDT, (Q), the Lambda
 equations of CCSDT and (Q)_Lambda - dense or in the blocks of symmetry
 labels, complex or real, (Q) and (Q)_Lambda over MPI ranks with restart - are
-there and validated against the Python program.
+there and validated against the Python program; so is the density stage of
+CCSDT with the files for `xx2czvec`, frozen and dropped spinors included
+(section 13), validated against the Python hand-over of section 10 and
+through `xx2czvec` and `xsox2cprop`.
 
 ## 1. Build and run
 
@@ -35,8 +40,11 @@ Compilers and flags are those of the CFOUR build (`ifort`, `icc`, `-i8`,
 `liblibr.a` of that build (`CRAPSI`, `GETREC`, `PUTREC`, `GETMEM`, `ERREX`,
 `CRAPSO`), MKL with 8-byte integers (`-lmkl_intel_ilp64 -lmkl_intel_thread
 -lmkl_core -liomp5`, the link line of CFOUR), and for `MPI=1` Intel MPI through
-`mpiifort` / `mpiicc`.  Nothing is written to the CFOUR tree and no CFOUR
-source is copied.  The run-time libraries are found through an rpath: the
+`mpiifort` / `mpiicc`; and for the density with frozen or dropped spinors
+`libx2cint.a` (`int_mintv2e`, the module `cvwint_module` of `libx2c`) and
+three objects of the program directory `x2czvec` (`vtranpsog.o`,
+`vtran1sparse.o`, `expnd2p.o`; `FRZOBJ` of the Makefile; section 13).  Nothing
+is written to the CFOUR tree and no CFOUR source is copied.  The run-time libraries are found through an rpath: the
 executable runs without the oneAPI environment (the MPI launcher needs it).
 
 The C kernels (`KERNELS` of the Makefile: `ccsdt_t3.c`, `t3pack.c`,
@@ -55,7 +63,9 @@ alone from the amplitudes of an earlier run (file `XZAMPS`); `lambda` for the
 Lambda equations of CCSDT for the amplitudes of `XZAMPS` (written to
 `XZLAMB`); `(q)_l` or `[q]_l` for CCSDT(Q)_Lambda from `XZAMPS` and `XZLAMB`;
 `ccsdt(q)_l`, `ccsdt[q]_l` for CCSDT, Lambda and the correction in one run
-(section 11).  Without the argument: `CALC` of the ZMAT as joda stored it (`CALC=CCSDT`, `CCSDT[Q]`,
+(section 11); `density` for the unrelaxed density and the orbital gradient of
+CCSDT from `XZAMPS` and `XZLAMB`, written as the files of `xx2czvec`;
+`ccsdt_density` for CCSDT, Lambda and the density in one run (section 13).  Without the argument: `CALC` of the ZMAT as joda stored it (`CALC=CCSDT`, `CCSDT[Q]`,
 `CCSDT(Q)`, `CC(n)` with `EXCITATION=3`, `CC(n-1)(n)` with `EXCITATION=4`).
 Thresholds: `CC_CONV=N` - the amplitudes (|dT1| + |dT2| + |dT3| of the full
 tensors) below 10^-N and the energy below 10^-(N+2), as the Python front end
@@ -113,7 +123,8 @@ file, complex, the first index fastest, antisymmetrized integrals):
 | `moinpppp` | `<ab||cd>` on pairs (written only with `ABCDTYPE=STANDARD`) |
 | `xzlabels` | optional, not a file of CFOUR: a symmetry label per spinor (section 6) |
 | `XZAMPS` | the amplitudes of an earlier run, for `(q)` / `[q]`, `lambda`, `(q)_l` / `[q]_l` and for the ranks other than 0 |
-| `XZLAMB` | lambda of an earlier run, for `(q)_l` / `[q]_l` and for the ranks other than 0 |
+| `XZLAMB` | lambda of an earlier run, for `(q)_l` / `[q]_l`, `density` and for the ranks other than 0 |
+| `IIII`; `JOBARC`: `scf2ccmo` | only for the density with frozen or dropped spinors: the AO integrals of `xsox2catm` (read by CFOUR's `int_mintv2e`) and the spinors of the SCF |
 
 `moinpphh` is not read (it is the conjugate of `moinhhpp`; the Python reader
 compares the two).  The numbers of active spinors come from the lengths of
@@ -129,6 +140,7 @@ Written:
 | `XZLAMB` | after converged Lambda equations: the format of `XZAMPS` with the tag `'XZLAMB01'`; the real number is the CCSDT correlation energy of the amplitudes that lambda belongs to (checked against `XZAMPS` when both are read); then l1 `[i][a]`, l2 `[i][j][a][b]`, l3 as T3 is stored |
 | `XZDIIS` | only if the DIIS vectors do not fit in the work array: direct-access file with the T3 parts of the vectors (of the amplitudes, then of lambda); deleted at the end |
 | `XZQCHK.NNNN` | one per rank during (Q): a line per finished task (task, its two energies, seconds); deleted when (Q) has finished |
+| `xfull`, `dpoo`, `dpvv`, `dii0`, `daa0`, `dpopo`, `dpvpv` | `density`, `ccsdt_density`: the input of CFOUR's `xx2czvec` (section 10.2: one record each, complex, CFOUR's order of the spinors) |
 | `xzccsdt.rNNNN` | output of the ranks other than 0 (MPI) |
 
 A run that reads `XZAMPS` or `XZLAMB` must run in the mode of the run that wrote it
@@ -174,6 +186,8 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzblk.inc` | the T3 passes in blocks of the labels |
 | `xzdiisg.inc`, `xzcc.inc` | DIIS update, the iterations, `XZAMPS` |
 | `xzlam.inc`, `xzlblk.inc` | the Lambda equations: intermediates, an iteration, the residuals of rank 1 and 2, `XZLAMB`; the passes over l3 in blocks of the labels |
+| `xzden.inc` | the density stage: the passes over l3 and T3, the blocks of the two-particle density, the orbital gradient, the files of `xx2czvec`; its pass C in blocks |
+| `xzdfrz.inc`, `xzfrz.F90` | frozen and dropped spinors in the density stage: the contractions with integrals of one such index, the rotations, the rows and columns of `xfull`; the integrals through CFOUR's `int_mintv2e` and `vtranpsog` |
 | `xzq.inc`, `xzqs.inc` | (Q) and (Q)_Lambda: the task loop and the dense quadruple; the quadruple in sectors of the labels |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
@@ -211,7 +225,8 @@ one source as well: the `.inc` files are compiled twice, by `xzcc_z.F90` and
 element (`NW`), the suffix (`N(name)`) and the conjugation (`CONJ`).  Nothing
 is written twice.  Everything outside the `.inc` files knows only the number
 of words per element (`nwe`) and dispatches on it in six places (`xzdrv`:
-iterations, XZAMPS, the Lambda equations, XZLAMB, (Q); `xzplan`: the dry runs).
+iterations, XZAMPS, the Lambda equations, XZLAMB, (Q); `xzplan`: the dry runs;
+and the density stage in both).
 
 Typed Fortran, i.e. the places that are instantiated per type rather than
 type-agnostic: all of `xzimd.inc` (loops over elements for the small
@@ -706,7 +721,8 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   time before their loops became GEMMs - section 12: now a sixth at 26 +
   120); l3, T3 or the residual in a mapped scratch file; the Lambda
   equations with constant terms (lambda of CCSDT(Q), the equations of the
-  first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); densities.
+  first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); the densities of
+  (Q) and (Q)_Lambda (the density of CCSDT is there: section 13).
 - (Q) over ranks on separate nodes was not timed (section 8); a smaller
   duplication of Xv between the ranks (tasks of one l kept on one rank where
   the balance allows it) was not tried.
@@ -722,23 +738,13 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   array, bare, once; the dressed operator is never stored whole).
 - CCSDTQ, (P), properties, the AO-driven CCSD(T); CFOUR's nonrelativistic
   programs.
-- The relaxed density for `xsox2cprop` (`denfinal`): not started (lambda is
-  there now: `XZLAMB`).  What
-  CFOUR's `xx2czvec` reads was looked up for it (read-only; `x2czvec/`):
-  `xfull`, the orbital gradient X[a][i] on (active + dropped virtual) x
-  (frozen + active occupied) spinors; `dpoo`, `dpvv`, `dii0`, `daa0`
-  (occupied-occupied and virtual-virtual blocks of the one-particle density;
-  the final density has dpoo + dpoo^+ and the diagonals of dii0, daa0);
-  `dpopo`, `dpvpv` (frozen-active and dropped-active blocks); all one record
-  each, complex, written by `xx2cccdenocbp` (`xmatfull.f90`, `wrtdp.f90`).
-  It solves the Z-vector equations with integrals that it transforms itself
-  from the AO integrals (`genintzvec.f90`: `intpphh2`, `intphhp2` over all
-  occupied and all virtual spinors) and writes `denfinal` (`denmatg2.f90`:
-  D[i][a] from the solution, the blocks above, 1 on the occupied diagonal).
-  No two-particle density crosses this interface: a native CCSDT density
-  code can feed it.  Not yet pinned: the factors and conjugations of each
-  block (to be fixed on CFOUR's own CCSD numbers), and how `xx2cccdenocbp`
-  makes the parts of `xfull`, `dpopo`, `dpvpv` with a frozen index.
+- The relaxed density for `xsox2cprop` (`denfinal`): the density stage and
+  the files of `xx2czvec` are there for CCSDT, with frozen and dropped
+  spinors (section 13).  Not done there: the contributions of (Q); the held
+  stage in blocks and in real arithmetic (not validated) and its timing at
+  production size; a relaxed density for labelled real spinors (`xx2czvec`
+  needs the spinors of CFOUR's SCF, which have no labels); a Z-vector solver
+  of our own where `xx2czvec` is wrong (section 10.4).
 - The one-rank-per-node timing of (Q), a smaller duplication of Xv between
   ranks, labels with a modulus: as before.
 - No input section of the ZMAT is read (`%zccsdt` of the Python front end):
@@ -756,8 +762,9 @@ orbital response being solved here.  Pinned with the Python program
 for CCSD and CCSD(T).  Every statement below that is not marked "from
 reading" is a measurement of 2026-10-08: H2O and HF / 6-31G, X2C-1e,
 SYM=OFF, geometry in bohr, SCF_CONV=11, CC_CONV=12; the binaries of
-`~/apps/cfour-x2cso/bin`; login node, 4 threads.  The native program does
-not write these files yet.
+`~/apps/cfour-x2cso/bin`; login node, 4 threads.  The native program writes
+these files since section 13 (`xzccsdt density`), which also has the answer
+to how `xx2cccdenocbp` makes the parts with a frozen index.
 
 ### 10.1 What xx2czvec does
 
@@ -1034,6 +1041,14 @@ into y.  `tests/test_cfour.py` (`test_handover_files`,
 identities without a CFOUR binary; the scripts and logs of the measurements
 are in `/home/xwang405/.claude/jobs/7ba4fcf7/tmp/zvec/` (`route.sh`,
 `cmp.py`, `pin.py`, `resid.py`, `ints.py`, `formulas.py`, `logs/`).
+
+**Done in the native program** (section 13): steps (1) and (2).  For (2)
+the integrals with a frozen index are not taken from new files: they are
+transformed in the program by the routines CFOUR's own density program
+uses (`int_mintv2e`, `vtranpsog`), one frozen or dropped spinor against all
+spinors, and that one class also gives the Fock matrices with two and three
+such indices, so no Fock build in the AO basis is needed.  Step (3) is not
+done.
 
 ## 11. The Lambda equations and (Q)_Lambda
 
@@ -1420,7 +1435,8 @@ tasks of one GEMM each that add their product under one lock.  DIIS (0.28 ->
 0.17 s): sums over vectors of the size of T3, bound by the memory.  The
 gathers and reductions of the pp ladder and of pass 2 gain 2.4 to 2.6, the
 GEMMs of the pp ladder 2.4.  **Not done:** pass 1 with its large tasks split
-over the pairs of the batch; the densities without the lock.
+over the pairs of the batch.  The densities without the lock were tried
+later and are slower: the lock is not what limits that stage (section 13).
 
 **Dense mode** is the kernels of `csrc/ccsdt_t3.c` and was not changed: 26
 + 78, 48 threads, 11.8 s per cycle before and 12.1 s after (job 31780679,
@@ -1488,3 +1504,364 @@ Measured (login node): the correlation energy of the start is the CCSD
 energy that `xx2cccsd` prints (H2O / 6-31G: -0.135423693022), and CCSDT then
 takes 17, 15 and 17 cycles instead of 17, 17 and 18 (H2O, the frozen +
 vircut case, HBr / cc-pVDZ-DK), to the same energy within the threshold.
+
+## 13. The relaxed density: the density stage and the hand-over
+
+    xzccsdt ccsdt; xzccsdt lambda        # XZAMPS, XZLAMB
+    xzccsdt density                      # -> xfull dpoo dpvv dii0 daa0 dpopo dpvpv
+    xx2czvec; xsox2cprop                 # CFOUR: Z-vector equations, denfinal, properties
+
+or `xzccsdt ccsdt_density` for CCSDT, the Lambda equations and the density
+in one run.  The stage makes the unrelaxed one-particle density D0 and the
+orbital gradient of CCSDT and writes the seven files of section 10.2;
+CFOUR's `xx2czvec` then solves the Z-vector equations and writes `denfinal`
+for `xsox2cprop`.  Nothing of the Z-vector equations is here.  With frozen
+occupied or dropped virtual spinors the stage also makes the gradient
+between them and the active spinors (below).  Rank 0 only; no energy changes
+(`TOTENERG` is the CCSDT energy).  Sources: `xzden.inc`, `xzdfrz.inc`
+(type-generic), `xzfrz.F90`; the reference is `zccsdt.cc.density_opt`
+(`kernel`, `_frozen_stage`, `frozen_terms`, `relaxed_rdm1`; docs/lambda.md,
+section 10) and `zccsdt.cfour.handover_files`.
+
+### What is computed (`xzden.inc`)
+
+The equations are those of `density_opt.kernel`: T1-dressed integrals,
+nothing conjugated, every block of the two-particle density g2 made and
+contracted with its dressed integrals, except the block with four virtual
+indices.  After the Lambda equations the integral files, `XZAMPS` and
+`XZLAMB` (now with l1) are read again, as for (Q)_Lambda.
+
+| step | what | by |
+|---|---|---|
+| dressing | Fock matrix, `~<mn||ie>`, `~<mn||ij>`, `~<mb||ej>`, `~<mb||ij>`, `~<mb||Q>`, the bra-dressed `<ab||ei>` and `<ab||ij>` | the routines of the amplitude step (`xzimd.inc`) |
+| `~<ab||de>` | made **in the place of the bare `<ab||de>`**, block by block; its parts of `~<ab||ei>` and `~<ab||ij>` | `xzdrrows`, `zc_pair_t1_contract`, one GEMM with tau1 |
+| pass A | l3 with t2 on both sides (`C3`, `Z` of density_opt), l3 with T3 (the ring density `R3`), l2 with T3 | pass 1 of a Lambda iteration (`zc_l3_pass1w`, `xzlbpass1`) with operands that have only their t2 rows and columns |
+| pass B | T3 with (l2, Z) and with (l2, C3), stacked; T3 with l1 and with l2 | pass 1 of an amplitude iteration (`zc_t3_pass1w`, `xzbpass1`) with other operands |
+| pass C | `(t2 . Lv) Tv^T` (the term l3 t2 t3 of the block ijab) and `(~<ef||gi> . Lv) Tv^T` (the l3 t3 part of the block abcd), `Lv[Q][I][d] = l3[I, d, Q]` | two gathered batches of `nbt` triples, four GEMMs (`xzden`, `xzdbpassc`) |
+| Gram matrix | the l3 t3 part of the block ijkl | as in a Lambda iteration (`xzlgramd`) |
+| blocks of g2 | ijkl, ijak, ijab, iabj, aibc on dense arrays with pairs in the order of their groups | `xzdg1`, `xzdblk`: GEMMs for the o^3 v^3 and o^2 v^4 products, loops with OpenMP for the rest |
+| gradient | `gnh[a][i]`, the 81 terms of the table GRADIENT in the order of `density_opt.kernel` | `xzdgrad`; the two products with `~<ae||gj>` and the one with `~<ab||de>` as GEMMs onto an o v^3 / 2 array, folded |
+| hand-over | `D0 = (d1^T + conj(d1)) / 2`, `xfull = gnh / 2 - R(D0_vo)` with R from `<ia||bj>` and `<ij||ab>` in the work array | `xzdxact`, `xzdwrite` |
+
+**Pass C replaces Gamma.**  The Python program has two routes for the l3 t3
+part of the block abcd: `Y` (lambda3 with the integrals first, o^4 v^4 / 4)
+and `gamma` (`Gamma[(e<f)][(g<h)] = 3 sum l3 t3`, a v^4 / 4 array; always
+in blocks).  Here neither: the two places where Gamma is needed between the
+active spinors are a product with an operand on its left, so the operand is
+multiplied with the gathered batch of l3 first and the result with the batch
+of T3 - `2 (C(o,2) + o v) v^2 / 2 . C(o,3) v` multiply-adds, less than the
+`v^4 / 4 . C(o,3) v` of Gamma whenever `C(o,2) + o v < v^2 / 4`, and no array
+beyond `o v^3 / 2`.  It is the way the ladder of the Lambda equations treats
+`Xq` and `X2` (section 11).  With frozen or dropped spinors Gamma is made as
+well (below).
+
+In blocks of the labels only the three passes and the Gram matrix differ;
+everything after them is the same code on the same dense arrays.  Real and
+complex: the two instances of the `.inc` files, as everywhere.
+
+### Frozen occupied and dropped virtual spinors (`xzdfrz.inc`, `xzfrz.F90`)
+
+**How CFOUR's own chain does it** (from reading `x2cccdenocbp/` and
+`x2czvec/` of `~/apps/cfour-x2cso-rebuild`; the format of the files measured
+in section 10).  `xx2czvec` does not make anything with a frozen index out
+of active quantities.  It reads `xfull` with (nu + ndropvir) (no + ndrop)
+elements (`x2cccdendrv.f90`) and `dpopo`, `dpvpv` (`rddp.f90`) as they are,
+and what it builds from the AO integrals is the matrix of the Z-vector
+equations: `genintzvec.f90` calls the transformation `vtranpsog` three times
+for `<ab||ij>` and `<aj||ib>` over all occupied and all virtual spinors
+(files `intpphh2`, `intphhp2`).  There is no Fock build of a trial vector
+in the AO basis.  The frozen rows and columns come from the density program:
+`xx2cccdenocbp` holds the AO integrals in core (the file `IIII` through
+`int_mintv2e`), transforms the integrals with one index in a small range
+and three over **all** spinors itself (`giintccsdp4.f90`: `vtranpsog(nao,
+imo, ntot, ntot, ntot)`), contracts them with its densities to
+intermediates with a primed (frozen or dropped) index (`iopo`, `ivpv`,
+`ivop`, `ivpo`, ...; `giintccsdp3` ... `giintccsdp5`), turns those into
+`dpopo`, `dpvpv` with the orbital energies (`ipp2dp1`) and assembles `xfull`
+from four blocks (`xmatfull.f90`).  The files of `xx2cvtran` have no
+integral with a frozen index.
+
+**What the native program does.**  The same integrals by the same routines:
+`xzfrz.F90` reads the AO integrals of `IIII` into the work array with
+`int_mintv2e` (libx2cint), takes the spinors from `JOBARC` (`scf2ccmo`) and
+their energies from `scf2ceig`, and calls `vtranpsog` for one frozen or
+dropped ("held") spinor h at a time: `(h q|r s)`, q, r, s over all N spinors.
+`vtranpsog`, `vtran1sparse` and `expnd2p` exist only as objects of CFOUR's
+program directories; the Makefile links `x2czvec/vtranpsog.o`,
+`vtran1sparse.o`, `expnd2p.o` and `-lx2cint` (nothing is copied; a rebuilt
+CFOUR tree must have these objects).  CFOUR's routine returns `conj((h q|r
+s))` as `v(s, r, q)` in its order of the spinors (measured against integrals
+made with PySCF on CFOUR's spinors: 1.4e-14).  Its debug lines are kept out
+of the output (`xz_stdout`).
+
+From these, per held spinor (the integrals are transformed twice and never
+stored):
+
+- sweep 1: `bf`, `kf` of `density_opt._frozen_stage` - the blocks of g2
+  with the active part of `(h q|r s)`, T1-dressed (`'yxy'`) and, conjugated,
+  dressed the other way (`'xyx'`), antisymmetrized to `~<h a||b c>`: about
+  thirty contractions as loops (`xzdfrzb`, `xzdfrzk`).  The l3 t3 part of
+  the block abcd needs Gamma on both of its sides here, so with held spinors
+  pass C also accumulates `sum Lv Tv^T` (the size of `<ab||de>`: its diagonal
+  pair blocks);
+  and the Fock matrices `F[M][h][q] = sum_rs <h s||q r> M[r][s]` of five
+  densities (tau^T, conj(tau), A^T, conj(A) of `frozen_terms`, and D0 - n);
+- then `G[h][x] = (B + conj(K)) / 2 + (n_x - n_h) V[h][x]` between a held
+  and an active spinor, `G[dropped][frozen] = V`, and the rotations `y[h][x] =
+  -G[h][x] / (e_h - e_x)` with the active spinors of the kind of h (none
+  between spinors closer than 1e-9 Hartree; a warning if the gradient there
+  is above 1e-8);
+- sweep 2: the Fock matrix of `y - (D0_vo + D0_ov)` in the rows and columns
+  of a held spinor, and of y between the active spinors;
+- `xfull[a][i] += F[y][a][i]`; `xfull[dropped][i] = G + F`, `xfull[a][frozen]
+  = -conj(G[frozen][a]) + conj(F[frozen][a])`, `xfull[dropped][frozen] = V +
+  F`; `dpopo = y[frozen][active occupied]`, `dpvpv = y[dropped][active
+  virtual]`.
+
+Integrals with two or three held indices (the block [dropped, frozen], the
+Fock matrix of y in a held row) come out of the same `(h q|r s)` because q,
+r, s run over all spinors: no Fock build in the AO basis is needed, unlike
+in the Python program.
+
+**Where it applies.**  The held stage needs the spinors of CFOUR's SCF, and
+those are complex and carry no symmetry labels today: every run through
+`xx2czvec` is the complex dense instance.  The labelled real directories of
+the timings (made from a PySCF SCF, `bench/cfour/labelled_run.py`) have no
+`scf2ccmo` of their spinors, so their relaxed density cannot be completed
+by `xx2czvec`; for them the files of the active spinors alone can be
+written (`XZ_DEN_ACTIVE=1`, a test hook: xfull, dpoo, dpvv of the active
+space, the records with a frozen index empty), which is what the block and
+real code paths were validated with.  **Not validated:** the held stage in
+blocks of the labels and in real arithmetic (the code is the same typed
+source; no run directory has both labels and CFOUR's spinors).
+
+### Memory
+
+All of it in the work array, in the plan (`xzpeak_cc` runs `xzden` dry after
+the iterations; "the least that ... density takes", `work array used` =
+plan to the word in every run below, also at the floor).  Regions: the
+integrals, T1, T2, T3, l1, l2, l3 (two arrays of the size of T3, no
+residual, no DIIS vectors), then
+
+- to the end of the stage: the dressed small blocks, t2 and l2 on pairs,
+  `~<mb||Q>`, `~<Q||gi>`, `C3`, the result X of pass B whose first rows
+  become the block aibc (four arrays of about o v^3 / 2), the ring density
+  and its relatives ((o v)^2 each), the pass operands;
+- per pass: the half-expanded batches of `nbp` occupied pairs (two in pass
+  A, one in pass B), the two gathered batches and a product of `nbt`
+  triples in pass C, the Gram matrix C(o,3)^2;
+- at the end: an o v^3 / 2 array for the folded products, and 2 o v^2
+  elements per thread for the block aibc.
+
+With held spinors, in addition: `sum Lv Tv^T` (the size of `<ab||de>`), the
+list of AO integrals (2 words per integral; the region is planned for
+`ntri (ntri + 1)` words, ntri = n (n + 1) / 2 for n AO functions = N / 2),
+the spinors, per held spinor `(h q|r s)` twice (CFOUR's complex array and
+the typed one in the order of the program: 2 N^3 + NW N^3 words), the
+half-transformed integrals (8 n ntri words), two arrays of (o + v)^3 for
+the dressed active part, and six N^2 matrices.  For HBr / cc-pVQZ-DK with 10
+frozen spinors (N = 196, n = 98, ntri = 4851): the AO list at most 188 MB
+(the file `IIII` of that run is 35 MB), `(h q|r s)` 120 MB + 120 MB, the
+dressed parts 2 x 103 MB (26 + 160 active, complex) - computed from the
+sizes, not run at this size.
+
+| case | mode | least for the density alone | default plan | T3 = l3 |
+|---|---|---|---|---|
+| H2O / 6-31G (10 + 16) | complex, dense | 12.4 MB | 37.8 MB | 1.1 MB |
+| HBr / cc-pVDZ-DK, 28 frozen (8 + 28), active part | complex, dense | 29.2 MB | 102.3 MB | 2.9 MB |
+| the same, labelled real spinors, active part | real, 6 classes | 11.4 MB | 14.5 MB | 0.25 MB |
+| HBr / cc-pVQZ-DK, 10 frozen, 26 + 120, labelled real, active part | real, 10 classes | 3.64 GB (8 threads) | 5.67 GB | 655 MB |
+
+In a run that also iterates (`ccsdt_density`) the floor is that of the
+Lambda equations (H2O 23.2 MB, the labelled HBr case 18.7 MB): the density
+stage is below it.  Run at the floor: H2O `density` (1549104 words), the
+labelled HBr case `ccsdt_density` (2339488), H2O with DROPMO and `%vircut`
+`ccsdt_density` with the held stage (1184944): the same files to 1e-16,
+and 100 words below the error of section 4 with its numbers.  Batches of
+1, 2 and 3 pairs and triples (`XZ_PLAN`): the same files.
+
+### Validation
+
+**The files against the Python program**, element by element (max
+|difference|; `density_opt.kernel` on the same integral files with the
+amplitudes and lambda of the Python program on the packed block, R from the
+MO integrals, `cfour.handover_files`; login node unless a job is named):
+
+| case | native mode | `xfull` | `dpoo` | `dpvv` |
+|---|---|---|---|---|
+| H2O / 6-31G (10 + 16) | complex, dense | 5.8e-17 | 1.7e-16 | 5.2e-18 |
+| HBr / cc-pVDZ-DK, 28 frozen (8 + 28), active part | complex, dense | 6.8e-17 | 2.2e-16 | 5.2e-18 |
+| the same, labelled real spinors, active part | real, 6 classes | 2.4e-17 | 5.6e-17 | 9.5e-18 |
+| | real, dense (`XZ_LABELS=0`) | 2.0e-17 | 5.6e-17 | 2.2e-18 |
+| | complex, 6 classes (`XZ_REAL=0`) | 1.9e-17 | 5.6e-17 | 6.9e-18 |
+| the same with a phase on every spinor | complex, 6 classes | 2.5e-17 | 5.6e-17 | 1.1e-17 |
+| HBr / cc-pVTZ-DK, 28 frozen (8 + 78), labelled real, active part (job 31789129) | real, 8 classes | 6.8e-17 | 5.6e-17 | 8.7e-18 |
+| | real, dense | 6.6e-17 | 1.6e-19 | 4.3e-18 |
+| | complex, 8 classes | 7.1e-17 | 5.6e-17 | 6.9e-18 |
+| | complex, dense | 6.6e-17 | 5.6e-17 | 9.5e-18 |
+
+(largest elements: `xfull` 0.009 to 0.014, `dpoo` 0.008 to 0.014, `dpvv`
+0.004 to 0.006.)  The response density d1 itself agreed with the first run
+of the first case (3e-16); the gradient needed one correction (the block
+ijak was first assembled through an array of the wrong shape).
+
+**The chain**: CFOUR's SCF and `xx2cvtran`, then in the same directory (the
+same spinors) the Python Z-vector solver (`--zvector python`), the Python
+hand-over (`--zvector cfour`) and the native program followed by `xx2czvec`
+and `xsox2cprop`.  The seven native files against those of the Python
+hand-over, `denfinal` of the two, the relaxed electronic dipole moment (z)
+that `xsox2cprop` prints, the largest difference between its numbers:
+
+| case | nf, nd | `xfull` | `dpopo` | `dpvpv` | `denfinal` | dipole z: Python Z-vector | Python hand-over | native + xx2czvec | properties |
+|---|---|---|---|---|---|---|---|---|---|
+| H2O / 6-31G, CCSDT | 0, 0 | 1.4e-13 | - | - | 5.3e-14 | 0.01207714055097 | 0.01207714054634 | 0.01207714054635 | 7.0e-12 |
+| the same, DROPMO=1>1 | 2, 0 | 2.4e-14 | 8.2e-15 | - | 1.9e-14 | 0.01195694144940 | 0.01195694144946 | 0.01195694144946 | 1.0e-12 |
+| the same, DROPMO=1>1, %vircut 1.5 | 2, 2 | 2.5e-14 | 8.1e-15 | 1.6e-15 | 3.5e-14 | 0.02344559047767 | 0.02344559047584 | 0.02344559047586 | 2.1e-12 |
+| HBr / cc-pVDZ-DK, DROPMO=1>14 (8 + 28) | 28, 0 | 7.4e-14 | 1.2e-14 | - | 9.3e-14 | 1.07735527333876 | 1.07735527334354 | 1.07735527334354 | 5.7e-12 |
+| the same, %vircut 2.0 (8 + 26) | 28, 2 | 7.3e-14 | 1.1e-14 | 5.5e-16 | 9.2e-14 | 1.07451246361978 | 1.07451246362169 | 1.07451246362162 | 5.3e-12 |
+| HBr / cc-pVDZ-DK, all electrons (36 + 28; job 31789129, 24 threads, `CC_CONV=10`) | 0, 0 | 2.5e-12 | - | - | 9.2e-14 | 1.07498654471431 | 1.07498654470426 | 1.07498654470416 | 1.0e-10 |
+
+(`CC_CONV=12` for H2O, 11 for HBr with frozen spinors; sizes of the entries: `xfull`
+1e-2, `dpopo` 3e-5 to 2e-4, `dpvpv` 1e-2.)  The native route and the Python
+hand-over differ by rounding; both differ from the Python solver by its
+threshold, as in section 10.3, whose numbers these reproduce.  The first
+run with frozen spinors gave these numbers.  `xx2czvec` converged in 15
+cycles in all of them.  All these cases are in the range where `xx2czvec`
+is right (section 10.4).
+
+**Outside that range the program warns.**  The rule of section 10.4 is
+applied to every run of the stage, e.g. for 26 + 20 active spinors of 56:
+
+     @XZCCSDT-W, xx2czvec will NOT give the relaxed density of these files: with so few
+                 active virtual spinors its response integrals are wrong (an unset work
+                 offset in its source; CFOUR's own relaxed CC densities have the defect too).
+                 1 + 3 C(nv,3) + nv (nv+1) + no (no+1) =  ...   is below   2 N^2 =  ...
+
+The files are right in that case too (they do not depend on `xx2czvec`); it
+is `xx2czvec` that cannot be used.  CFOUR's source was not changed.
+
+Scripts and logs: `/home/xwang405/.claude/jobs/7ba4fcf7/tmp/natden/`
+(`pyden.py`: the Python files and the comparison; `nroute.sh`, `jroute.sh`,
+`ncmp.py`: the chain; `modes.sh`, `floor.sh`, `floor2.sh`, `batches.sh`,
+`regr2.sh`; `den.sbatch` and `job_31789129/`; `vt/`: CFOUR's transformation
+called from a test program, against PySCF).
+
+**The existing methods**: CCSDT, [Q], (Q), [Q]_L, (Q)_L and the pseudo-energy
+of the twelve runs of sections 7 and 11 (H2O, the frozen + vircut case, HBr
+dense, the labelled case in four modes, with phases, shuffled) with the
+binary before this work and the final one: identical to the 12 decimals
+printed.
+
+### The lock of the Lambda pass 1 (section 12): not the limit
+
+Section 12 named the lock under which the density products of pass 1 are
+added as the reason why that stage does not gain beyond 16 threads.  It was
+replaced by tasks that own a range of rows of a density block and add to
+it alone (no lock, no buffer per thread; commit e38fdeb) and measured
+against the binary before, alternating in one job (31789129, c142, HBr 26 +
+120 in blocks, three cycles; "pass 1: density", seconds for the three
+cycles; the second repetition agrees within 2 %):
+
+| threads | 8 | 16 | 24 | 48 |
+|---|---|---|---|---|
+| with the lock (before) | 4.72 | 2.66 | 2.19 | 2.33 |
+| tasks on ranges of rows, no lock | 8.02 | 5.72 | 5.04 | 4.30 |
+| Lambda iteration, with the lock | 10.40 | 6.35 | 5.42 | 4.56 |
+| Lambda iteration, without | 11.52 | 7.32 | 6.32 | 5.35 |
+
+Slower by 1.7 to 2.3: a task of the new kind is a sequence of thin products
+(a few rows of l3 with the whole batch of T3 of one pair), and every task
+reads that batch again.  The lock was not the limit - the stage is bound by
+the memory traffic of the products.  **The locked loop was restored**
+(commit 9fe25c8); the energies were identical with both.  **Not measured:**
+accumulators per thread merged at the end (the other form of the same
+idea; it keeps the square products and would remove only the lock, which
+these numbers say costs little).
+
+### Timings
+
+One job (31789129, node c142, two sockets of Xeon Gold 6248R, `sbatch -p
+parallel -N 1 -n 1 -c 48 --mem=180G`, snapshot of commit e38fdeb, run
+directories in the node-local `/tmp`).  HBr / cc-pVQZ-DK, 10 frozen spinors,
+26 + 120 active, m_j-adapted real spinors with labels (10 classes; T3 655
+MB, 11 % of the dense array), `MEMORY_SIZE=150 GB`; the iterations three
+cycles each (`XZ_NCYC=3`), the density stage on the amplitudes and lambda
+of those cycles, active part (`XZ_DEN_ACTIVE=1`: the directory has no
+spinors of CFOUR).  Wall seconds; the two repetitions agree within 3 %:
+
+| | 8 threads | 16 | 24 | 48 |
+|---|---|---|---|---|
+| CCSDT iteration | 7.6 | | 3.7 | |
+| Lambda iteration | 10.4 | 6.4 | 5.4 | 4.6 |
+| Lambda intermediates, once | 4.6 | | 2.6 | |
+| **density and gradient stage** | **10.5** | 6.9 | **5.8** | 4.8 |
+| - of it: writing the seven files | 0.01 | | 0.01 | |
+| density stage, whole invocation (reading integrals, XZAMPS, XZLAMB) | 12.3 | 8.8 | 7.6 | 6.8 |
+
+(CCSDT and Lambda iterations: the binary before this work, which the final
+one equals in these routines.  The density stage was run with the binary of
+the snapshot, whose pass A used the slower density tasks of the table
+above: 2.71 s of the 10.5 s on 8 threads and 1.66 s of the 5.8 s on 24.
+With the restored loop that part is 1.57 s and 0.73 s in a Lambda
+iteration of the same job, so the stage of the final binary should be about
+1 s shorter; **not measured.**)  Where the stage goes on 8 / 24 threads:
+pass A 4.25 / 2.84 s (gather 0.73 / 0.60, ring density 2.71 / 1.66, stacked
+products 0.81 / 0.58), pass B 0.92 / 0.69, pass C 2.17 / 0.94, the blocks of
+g2 1.01 / 0.40, the gradient 0.98 / 0.39, dressing 0.53 / 0.27, Gram matrix
+0.24 / 0.08.  The stage costs one Lambda iteration.  Work array used 5.67
+GB = plan; peak resident set 6.0 GB.
+
+`xx2czvec` at this size: CFOUR's own CCSD chain of HBr / cc-pVQZ-DK with 10
+frozen spinors (26 + 160 active, 196 spinors, its own complex spinors;
+`xx2cccsd` 77 s, `xx2chbar` 28 s, `xx2clcc` 62 s, `xx2cccdenocbp` 68 s on
+48 threads), then `xx2czvec` alone on the files of `xx2cccdenocbp`:
+
+| threads | 8 | 24 | 48 |
+|---|---|---|---|
+| `xx2czvec`, wall s | 11.2 | 10.9 | 14.0 |
+
+(15 cycles; 2.1 GB resident; its integral files `intpphh2`, `intphhp2` 137
+and 531 MB.)  Its time does not depend on who wrote `xfull`.
+
+The price of CFOUR's spinors, same job: the chain of HBr / cc-pVDZ-DK with
+all electrons (36 + 28, 24 threads) took 216 s in the native program
+(`ccsdt_density`: CCSDT 3.91 s per cycle, 21 cycles; Lambda 6.66 s, 19
+cycles; the density stage 4.86 s; 14.6 GB of the work array) - dense complex
+arithmetic, because CFOUR's spinors have no labels - against 50 s for the
+whole Python route, which runs on its own j_z-adapted spinors in blocks and
+rotates the result to CFOUR's (section 10.2).  `xx2czvec` 1.6 s.
+
+**Not measured:** the held stage at production size.  The one timing job
+was submitted before the held stage existed, and a run through it needs
+CFOUR's complex spinors without labels, i.e. the dense complex CCSDT of 26
++ 120 or more (66 s per cycle on 24 threads, section 12).  Small cases
+(login node, 4 threads): H2O with 2 frozen and 2 dropped spinors 0.02 s for
+the whole stage; HBr / cc-pVDZ-DK with 28 frozen spinors (64 spinors, 8 + 28
+active) 0.90 s for the stage, most of it the 2 x 28 transformations and the
+contractions per held spinor, against 0.07 s for the stage of the active
+part.  The loops of `xzdfrzb` / `xzdfrzk` are (o + v)^4-like per held
+spinor with OpenMP, not GEMMs; their cost at 26 + 160 with 10 frozen
+spinors is not known.
+
+### Not done
+
+- (Q): `q.de` on the diagonal of the density and the oo and vv blocks of
+  the gradient (section 10.6, step 3); the density of CCSDT(Q)_Lambda.
+- The held stage in blocks of the labels and in real arithmetic: not
+  validated (no directory with labels and CFOUR's spinors); its timing at
+  production size; its contractions as GEMMs; batches of several held
+  spinors per transformation (one at a time today, twice).
+- The relaxed density of a labelled real calculation: needs an SCF of CFOUR
+  in j_z-adapted (real) spinors, or a Z-vector solver of our own.
+- `xx2czvec` is called by the user (or the front end) after the stage, not
+  by the program; where the rule of section 10.4 fails the program warns
+  and there is no native Z-vector solver to fall back on.
+- The link to three objects of CFOUR's program directory `x2czvec` is by
+  path (`FRZOBJ` of the Makefile): a CFOUR tree without them (a clean
+  install of binaries and libraries only) does not link; they would have
+  to move into a library of CFOUR at the final merge.
+- The AO integrals in core (2 words per integral, as `xx2czvec` holds them)
+  bound the held stage in memory for large basis sets; the stage of the
+  active spinors has no such array.
+- T3 or l3 in a mapped file; the pages of the work array touched in
+  parallel (section 12).
