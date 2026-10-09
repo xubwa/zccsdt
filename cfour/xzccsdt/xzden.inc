@@ -26,7 +26,7 @@
 !
 ! Batch sizes: nbp (the half-expanded batches of the passes A and B), nbt
 ! (the two gathered batches of pass C), nba (the bra-dressed <ab||ei>).
-! Timers: set 4.
+! Timers: set 4.  Frozen and dropped spinors: xzdfrz.inc, xzfrz.F90.
 !
 subroutine N(xzden)(w)
   use xzdata
@@ -41,8 +41,8 @@ subroutine N(xzden)(w)
   integer(8) :: kdr, kb1, kr1c, ka1, kkg, ks13, ko4, kgoo3, kl1t, kg2, kyb, kwkl, kgq, kgh, kpib, ka2
   integer(8) :: kbl, kbt, klv, ktv, ka, knn, kgr, kgab, kgij, kgia, ktr, kla, krl, ky4, kdk, kzu, kt4
   integer(8) :: kdab, kzai, ksa, kw3, ku, kmq, kg1, kh
-  integer(8) :: h, lo, nqh, i0, nb, g, ni, na
-  logical :: dense
+  integer(8) :: h, lo, nqh, i0, nb, g, ni, na, kgam, kdh, kxa, kxall, kym, nf, nd
+  logical :: dense, held
   real(8) :: stats(4)
   character(len=256) :: dbg
   integer :: ldbg
@@ -55,6 +55,9 @@ subroutine N(xzden)(w)
   dense = ncls == 1
   nth = omp_get_max_threads()
   tcur = 4
+  held = nfrozen + ndropped > 0 .and. .not. den_active
+  nf = merge(nfrozen, 0_8, held)
+  nd = merge(ndropped, 0_8, held)
   m0 = xzmark()
   ! ---- what stays to the end of the stage
   kden = xzget(NW * ny * ny, 'response density')
@@ -87,6 +90,9 @@ subroutine N(xzden)(w)
   ko4 = xzget(NW * npo * npo, 'Gram matrix on pairs')
   kgoo3 = xzget(NW * no * no, 'G_oo of L3')
   kgpd = xzget(NW * ny * npo * nv, 'pass operand')
+  ! with held spinors: gam[Q][Q'] = sum_{I,d} l3[I, d, Q] t3[I, d, Q'] in its diagonal pair blocks
+  kgam = 0
+  if (held) kgam = xzget(NW * nvv, 'L3 with T3 on virtual pairs')
 
   ! ---- T1 dressing; the bra-dressed <ab||ei> and <ab||ij>
   m1 = xzmark()
@@ -209,6 +215,7 @@ subroutine N(xzden)(w)
     call xztic()
     call zc_vzero_d(NW * npo * nvp, w(kkg))
     call zc_vzero_d(NW * ov * nvp, w(knn))
+    if (held) call zc_vzero_d(NW * nvv, w(kgam))
   end if
   if (dense) then
     klv = xzget(NW * nvp * nbt * nv, 'pass-C batch of L3')
@@ -228,11 +235,13 @@ subroutine N(xzden)(w)
         end if
         call N(zc_gemm)(1_4, 0_4, ov, nb * nv, nvp, one, w(kvvo), ov, w(klv), nb * nv, zero, w(ka), nb * nv)
         call N(zc_gemm)(0_4, 1_4, ov, nvp, nb * nv, one, w(ka), nb * nv, w(ktv), nb * nv, one, w(knn), nvp)
+        if (held) call N(zc_gemm)(0_4, 1_4, nvp, nvp, nb * nv, one, w(klv), nb * nv, w(ktv), nb * nv, one, &
+                                  w(kgam), nvp)
         call xztoc(4, 'pass C: GEMMs')
       end do
     end if
   else
-    call N(xzdbpassc)(w, jl3, jt3, w(kt2pp), w(kvvo), w(kkg), w(knn))
+    call N(xzdbpassc)(w, jl3, jt3, w(kt2pp), w(kvvo), w(kkg), w(knn), held, w(max(kgam, 1_8)))
   end if
   if (.not. xzdry) then
     call N(xzdfold)(no, nv, nvp, w(jvpa), w(jvpb), w(knn), w(ks13))
@@ -320,18 +329,141 @@ subroutine N(xzden)(w)
       call xzdumpw(dbg(1:ldbg) // '.gnh', NW * ov, w(kgnh))
     end if
   end if
-  call xzrel(m1)
 
-  ! ---- the files of xx2czvec
-  kg1 = xzget(NW * ny * ny, 'Hermitian density')
-  kh = xzget(NW * ov, 'right-hand side of the Z-vector equations')
-  ka = xzget(2 * max(ny * ny, (nv + ndropped) * (no + nfrozen)), 'record of a file')
+  ! ---- the Hermitian unrelaxed density and the right-hand side of the
+  !      Z-vector equations between the active spinors
+  kdh = xzget(NW * ny * ny, 'Hermitian density')
+  kxa = xzget(NW * ov, 'right-hand side of the Z-vector equations')
+  kxall = xzget(NW * ntot * ntot, 'right-hand side, rows and columns of held spinors')
+  kym = xzget(NW * ntot * ntot, 'rotations with held spinors')
   if (.not. xzdry) then
-    call N(xzdhand)(no, nv, nfrozen, ndropped, w(jeps), w(joovv), w(jovvo), w(kden), w(kgnh), operm, vperm, &
-                    w(kg1), w(kh), w(ka))
+    call N(xzdxact)(no, nv, w(jeps), w(joovv), w(jovvo), w(kden), w(kgnh), w(kdh), w(kxa))
+    call xztoc(4, 'files of xx2czvec')
+  end if
+  ! ---- frozen and dropped spinors
+  if (held) call N(xzdfrz)(w, kden, kdh, kxa, kxall, kym, kl2pp, kl2p, kt2pp, kc3, kz, kxacc, krl, ky4, kdk, &
+                           kdab, kgam)
+  ka = xzget(2 * max(ny * ny, (nv + nd) * (no + nf)), 'record of a file')
+  if (.not. xzdry) then
+    call xztic()
+    call N(xzdwrite)(no, nv, nf, nd, ntot, w(kdh), w(kxa), w(kxall), w(kym), operm, vperm, w(ka))
     call xztoc(4, 'files of xx2czvec')
   end if
   call xzrel(m0)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! The stage of the held spinors (xzdfrz.inc): sweep 1, the gradient and the
+! rotations, sweep 2; on return x of the active spinors has the Fock matrix
+! of the rotations, xall(p, q) the elements of the right-hand side with a
+! held index (full order of xzfrz.F90) and ym(p, q) the rotations y[p][q].
+subroutine N(xzdfrz)(w, kden, kdh, kxa, kxall, kym, kl2pp, kl2p, kt2pp, kc3, kz, kdai, krl, ky4, kdk, kdab, kgam)
+  use xzdata
+  use xzmem
+  use xzkern
+  use xzfrzd
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kden, kdh, kxa, kxall, kym, kl2pp, kl2p, kt2pp, kc3, kz, kdai, krl, ky4, kdk, kdab, kgam
+  integer(8) :: m0, kxx, kxd, ktt, ktqo, ktqv, kus, kmm, km1, kbf, kkf, kgf, kfo, kfm, kfy, h, k, n2, hp, j0, j1
+  integer :: ldbg
+  m0 = xzmark()
+  call xzfrzinit(w)
+  n2 = nall * nall
+  kxx = xzget(NW * nall ** 3, 'integrals of a held spinor')
+  kxd = xzget(NW * ny ** 3, 'dressed integrals of a held spinor')
+  ktt = xzget(NW * ny ** 3, 'dressed <h a||b c>')
+  ktqo = xzget(NW * nvp * no, '<h m||Q>')
+  ktqv = xzget(NW * nvp * nv, '<h e||Q>')
+  kus = xzget(NW * npo * nv, 'work [P][e]')
+  kmm = xzget(NW * 5 * n2, 'densities of the Fock matrices')
+  km1 = xzget(NW * n2, 'density of sweep 2')
+  kbf = xzget(NW * ny * nheld, 'bf')
+  kkf = xzget(NW * ny * nheld, 'kf')
+  kgf = xzget(NW * ny * nheld, 'gradient between held and active spinors')
+  kfo = xzget(NW * 5 * nall * nheld, 'Fock matrices, rows of held spinors')
+  kfm = xzget(NW * nall * nheld, 'Fock matrix of sweep 2')
+  kfy = xzget(NW * no * nv, 'Fock matrix of the rotations')
+  if (.not. xzdry) then
+    call xztic()
+    call N(xzdfrzm)(nall, no, nv, w(jt1), w(kden), w(kdh), w(kmm))
+    do h = 0, nheld - 1
+      call xzfrzone(w, h)
+      call N(xzdfrzx)(nall, w(jfcf), w(jfwb), w(kxx))
+      call xztoc(4, 'held: integrals')
+      do k = 0, 4
+        call N(xzdfockh)(nall, w(kxx), w(kmm + NW * k * n2), w(kfo + NW * (h * 5 + k) * nall))
+      end do
+      call N(xzdfrzdress)(nall, no, nv, .false., w(kxx), w(jt1), w(kxd), w(ktt))
+      call N(xzdfrzq)(no, nv, nvp, w(jvpa), w(jvpb), w(ktt), w(ktqo), w(ktqv))
+      call N(xzdfrzb)(no, nv, npo, nvp, w(ktt), w(ktqo), w(ktqv), w(jt1), w(jl2), w(kt2pp), w(kc3), w(kz), &
+                      w(kdai), w(krl), w(ky4), w(kdk), w(kdab), w(kgam), w(jopa), w(jopb), w(jopidx), &
+                      w(jvpa), w(jvpb), w(jvpidx), w(kus), w(kbf + NW * h * ny))
+      call N(xzdfrzdress)(nall, no, nv, .true., w(kxx), w(jt1), w(kxd), w(ktt))
+      call N(xzdfrzq)(no, nv, nvp, w(jvpa), w(jvpb), w(ktt), w(ktqo), w(ktqv))
+      call N(xzdfrzk)(no, nv, npo, nvp, w(ktt), w(ktqo), w(ktqv), w(jt1), w(jt2), w(kl2pp), w(kl2p), w(kc3), &
+                      w(kz), w(kdai), w(krl), w(ky4), w(kdk), w(kdab), w(kgam), w(jopa), w(jopb), w(jopidx), &
+                      w(jvpa), w(jvpb), w(jvpidx), w(kus), w(kkf + NW * h * ny))
+      call xztoc(4, 'held: sweep 1')
+    end do
+    call get_environment_variable('XZ_DDEBUG', length=ldbg)
+    if (ldbg > 0) then
+      call xzdumpw('xd.bf', NW * ny * nheld, w(kbf))
+      call xzdumpw('xd.kf', NW * ny * nheld, w(kkf))
+    end if
+    call N(xzdfrzg)(nall, no, nv, nfrozen, ndropped, w(jfe), w(jt1), w(kden), w(kdh), w(kbf), w(kkf), w(kfo), &
+                    w(kgf), w(kym), w(km1))
+    call zc_vzero_d(NW * no * nv, w(kfy))
+    do h = 0, nheld - 1
+      call xzfrzone(w, h)
+      call N(xzdfrzx)(nall, w(jfcf), w(jfwb), w(kxx))
+      call xztoc(4, 'held: integrals')
+      call N(xzdfockh)(nall, w(kxx), w(km1), w(kfm + NW * h * nall))
+      hp = ny + h
+      j0 = 0
+      j1 = no - 1
+      if (h >= nfrozen) then
+        j0 = no
+        j1 = ny - 1
+      end if
+      call N(xzdfrzy)(nall, no, nv, hp, j0, j1, w(kxx), w(kym), w(kfy))
+      call xztoc(4, 'held: sweep 2')
+    end do
+    call N(xzdfrzfin)(nall, no, nv, nfrozen, ndropped, w(kgf), w(kfo), w(kfm), w(kfy), w(kxa), w(kxall))
+  end if
+  call xzrel(m0)
+end subroutine
+
+! x between the active spinors gains the Fock matrix of the rotations; the
+! elements with a held index (p: active virtual or dropped, q: active
+! occupied or frozen; full order):
+!   x[d][i] = Gf[d][i] + F[m1][d][i]            x[d][f] = V[d][f] + F[m1][d][f]
+!   x[a][f] = - conj(Gf[f][a]) + conj(F[m1][f][a])
+subroutine N(xzdfrzfin)(nall, no, nv, nf, nd, gf, fo, fm, fy, xa, xall)
+  implicit none
+  integer(8), intent(in) :: nall, no, nv, nf, nd
+  ZT, intent(in) :: gf(0:no+nv-1, 0:nf+nd-1), fo(0:nall-1, 5, 0:nf+nd-1), fm(0:nall-1, 0:nf+nd-1)
+  ZT, intent(in) :: fy(0:nv-1, 0:no-1)
+  ZT, intent(inout) :: xa(0:nv-1, 0:no-1)
+  ZT, intent(out) :: xall(0:nall-1, 0:nall-1)
+  integer(8) :: n, d, f, i, a, hd
+  n = no + nv
+  xa = xa + fy
+  xall = 0
+  do d = 0, nd - 1
+    hd = nf + d
+    do i = 0, no - 1
+      xall(n + hd, i) = gf(i, hd) + fm(i, hd)
+    end do
+    do f = 0, nf - 1
+      xall(n + hd, n + f) = fo(n + f, 5, hd) + fm(n + f, hd)
+    end do
+  end do
+  do f = 0, nf - 1
+    do a = 0, nv - 1
+      xall(no + a, n + f) = -CONJ(gf(no + a, f)) + CONJ(fm(no + a, f))
+    end do
+  end do
 end subroutine
 
 ! ---------------------------------------------------------------------------
@@ -340,7 +472,7 @@ end subroutine
 ! with Lv[Q][I][d] = l3[I, d, Q] and Tv likewise:
 !   kg[P][Q']      += sum_{Q,I,d} t2pp[P][Q] Lv[Q][I][d] Tv[Q'][I][d]     (P of the group h)
 !   nn[(a,i)][Q']  += sum_{Q,I,d} vvo[Q][a][i] Lv[Q][I][d] Tv[Q'][I][d]   (s(a) + s(i) = h)
-subroutine N(xzdbpassc)(w, kl3, kt3, t2pp, vvo, kg, nn)
+subroutine N(xzdbpassc)(w, kl3, kt3, t2pp, vvo, kg, nn, held, gam)
   use xzdata
   use xzmem
   use xzkern
@@ -350,6 +482,8 @@ subroutine N(xzdbpassc)(w, kl3, kt3, t2pp, vvo, kg, nn)
   ZT, intent(in) :: t2pp(0:nvp-1, 0:npo-1)
   ZT, intent(in) :: vvo(0:no-1, 0:nv-1, 0:nvp-1)               ! [Q][a][i]
   ZT :: kg(0:nvp-1, 0:npo-1), nn(0:nvp-1, 0:no-1, 0:nv-1)      ! [P][Q], [a][i][Q]
+  logical, intent(in) :: held
+  ZT :: gam(0:*)                                               ! with held spinors: sum Lv Tv^T per block
   integer(8) :: g, sc, h, nc, nqh, qlo, i0, nb, mk, ms, klv, ktv, ka, kv, kx, plo, np, se, si, ne, nj
   ZT :: one, zero
   one = 1
@@ -377,6 +511,8 @@ subroutine N(xzdbpassc)(w, kl3, kt3, t2pp, vvo, kg, nn)
           call N(zc_bgather_vir)(w(kt3), w(jobase), w(jvcol), w(josig), w(jvsig), w(jvtri), w(jvsgn), nvp, &
                                  nb, w(jrows + i0), qlo, nqh, vcoff(sc), nc, w(ktv))
           call xztoc(4, 'pass C: gather')
+          if (held) call N(zc_gemm)(0_4, 1_4, nqh, nqh, nb * nc, one, w(klv), nb * nc, w(ktv), nb * nc, one, &
+                                    gam(vvoff(h)), nqh)
           if (np > 0) then
             call N(zc_gemm)(0_4, 0_4, np, nb * nc, nqh, one, t2pp(qlo, plo), nvp, w(klv), nb * nc, zero, &
                             w(ka), nb * nc)
@@ -1071,26 +1207,21 @@ subroutine N(xzdgrad)(no, nv, npo, nvp, t2, l1, foo, fov, fvo, fvv, ooovd, ooood
 end subroutine
 
 ! ---------------------------------------------------------------------------
-! The hand-over to CFOUR's xx2czvec (docs/native.md, section 10.2): from the
-! response density den(q, p) = d1[p][q] and the gradient gnh[a][i], with
-!   D[p][q] = (d1[q][p] + conj(d1[p][q])) / 2          the unrelaxed density
+! The hand-over to CFOUR's xx2czvec (docs/native.md, section 10.2), between
+! the active spinors: from the response density den(q, p) = d1[p][q] and the
+! gradient gnh[a][i],
+!   D[p][q] = (d1[q][p] + conj(d1[p][q])) / 2          the unrelaxed density, dh(p, q)
 !   R(d)[a][i] = (e_a - e_i) d[a][i] + sum_{b,j} (<aj||ib> d[b][j] + <ab||ij> conj(d[b][j]))
 !   x = gnh / 2 - R(D_vo)
-! the files xfull (x), dpoo ((D - 1) / 2), dpvv (D / 2), dii0, daa0 (zeros),
-! dpopo, dpvpv (records without elements), one record each, complex, the
-! first index fastest, in CFOUR's order of the spinors (operm, vperm: CFOUR's
-! number of the spinor in the order here).  Without frozen or dropped spinors.
-subroutine N(xzdhand)(no, nv, nf, nd, eps, oovv, ovvo, den, gnh, operm, vperm, dh, x, rec)
+subroutine N(xzdxact)(no, nv, eps, oovv, ovvo, den, gnh, dh, x)
   implicit none
-  integer(8), intent(in) :: no, nv, nf, nd
+  integer(8), intent(in) :: no, nv
   real(8), intent(in) :: eps(0:no+nv-1)
   ZT, intent(in) :: oovv(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)       ! <mn||ef> [m][n][e][f]
   ZT, intent(in) :: ovvo(0:no-1, 0:nv-1, 0:nv-1, 0:no-1)       ! <mb||ej>
   ZT, intent(in) :: den(0:no+nv-1, 0:no+nv-1), gnh(0:no-1, 0:nv-1)
-  integer(8), intent(in) :: operm(0:no-1), vperm(0:nv-1)
-  ZT :: dh(0:no+nv-1, 0:no+nv-1)                               ! (p, q) = D[p][q]
-  ZT :: x(0:nv-1, 0:no-1)                                      ! (a, i)
-  complex(8) :: rec(*)
+  ZT, intent(out) :: dh(0:no+nv-1, 0:no+nv-1)                  ! (p, q) = D[p][q]
+  ZT, intent(out) :: x(0:nv-1, 0:no-1)                         ! (a, i)
   integer(8) :: p, q, a, b, i, j, n
   ZT :: s
   n = no + nv
@@ -1111,13 +1242,42 @@ subroutine N(xzdhand)(no, nv, nf, nd, eps, oovv, ovvo, den, gnh, operm, vperm, d
       x(a, i) = 0.5d0 * gnh(i, a) - s
     end do
   end do
-  ! xfull[a][i], a fastest
+end subroutine
+
+! The seven files: xfull (x; rows active virtual then dropped, columns frozen
+! then active occupied), dpoo ((D - 1) / 2), dpvv (D / 2), dii0, daa0 (zeros),
+! dpopo (y[frozen][active occupied]), dpvpv (y[dropped][active virtual]); one
+! record each, complex, the first index fastest, in CFOUR's order of the
+! spinors (operm, vperm: CFOUR's number of the spinor in the order here).
+! nf = nd = 0: the files of the active spinors alone; xall and ym are then
+! not read.
+subroutine N(xzdwrite)(no, nv, nf, nd, nall, dh, x, xall, ym, operm, vperm, rec)
+  implicit none
+  integer(8), intent(in) :: no, nv, nf, nd, nall
+  ZT, intent(in) :: dh(0:no+nv-1, 0:no+nv-1), x(0:nv-1, 0:no-1)
+  ZT, intent(in) :: xall(0:nall-1, 0:nall-1), ym(0:nall-1, 0:nall-1)
+  integer(8), intent(in) :: operm(0:no-1), vperm(0:nv-1)
+  complex(8) :: rec(*)
+  integer(8) :: a, b, i, j, n, nr, f, d
+  n = no + nv
+  nr = nv + nd
   do i = 0, no - 1
     do a = 0, nv - 1
-      rec(1 + vperm(a) + nv * operm(i)) = x(a, i)
+      rec(1 + vperm(a) + nr * (nf + operm(i))) = x(a, i)
+    end do
+    do d = 0, nd - 1
+      rec(1 + nv + d + nr * (nf + operm(i))) = xall(n + nf + d, i)
     end do
   end do
-  call xzwrec('xfull', nv * no, rec)
+  do f = 0, nf - 1
+    do a = 0, nv - 1
+      rec(1 + vperm(a) + nr * f) = xall(no + a, n + f)
+    end do
+    do d = 0, nd - 1
+      rec(1 + nv + d + nr * f) = xall(n + nf + d, n + f)
+    end do
+  end do
+  call xzwrec('xfull', nr * (no + nf), rec)
   do j = 0, no - 1
     do i = 0, no - 1
       rec(1 + operm(i) + no * operm(j)) = 0.5d0 * dh(i, j)
@@ -1134,6 +1294,16 @@ subroutine N(xzdhand)(no, nv, nf, nd, eps, oovv, ovvo, den, gnh, operm, vperm, d
   rec(1:max(no * no, nv * nv)) = 0
   call xzwrec('dii0', no * no, rec)
   call xzwrec('daa0', nv * nv, rec)
-  call xzwrec('dpopo', 0_8, rec)
-  call xzwrec('dpvpv', 0_8, rec)
+  do i = 0, no - 1
+    do f = 0, nf - 1
+      rec(1 + f + nf * operm(i)) = ym(n + f, i)
+    end do
+  end do
+  call xzwrec('dpopo', nf * no, rec)
+  do a = 0, nv - 1
+    do d = 0, nd - 1
+      rec(1 + d + nd * vperm(a)) = ym(n + nf + d, no + a)
+    end do
+  end do
+  call xzwrec('dpvpv', nd * nv, rec)
 end subroutine

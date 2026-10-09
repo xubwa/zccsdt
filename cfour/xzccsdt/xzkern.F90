@@ -52,6 +52,11 @@ module xzkern
       import
       real(c_double), intent(out) :: wall, cpu
     end subroutine
+    ! the standard output to /dev/null (1) and back (0)
+    subroutine xz_stdout(quiet) bind(C)
+      import
+      integer(c_int64_t) :: quiet
+    end subroutine
     subroutine xz_blas_info(nthreads, ilp64) bind(C)
       import
       integer(c_int64_t) :: nthreads, ilp64

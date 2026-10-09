@@ -103,12 +103,7 @@ subroutine xzdrv(w, maxcor)
   if (with_den .and. myrank > 0) return
   ! (a test hook: XZ_DEN_ACTIVE=1 writes the files of the active spinors alone)
   call get_environment_variable('XZ_DEN_ACTIVE', arg, larg)
-  if (with_den .and. nfrozen + ndropped > 0 .and. larg == 0) then
-    write(6, '(/,a)') ' @XZCCSDT-F, the density with frozen or dropped spinors is not in this program:'
-    write(6, '(a)') '   the orbital gradient between frozen and active spinors needs integrals with one'
-    write(6, '(a)') '   frozen index, which are not in the files of xx2cvtran (docs/native.md, section 13).'
-    call errex
-  end if
+  den_active = larg > 0
   if (method == 'MP2' .and. myrank > 0) return
   sync = 0d0
   if ((with_cc .or. with_lam) .and. myrank > 0) then

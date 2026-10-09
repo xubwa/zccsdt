@@ -8,5 +8,6 @@
 #include "xzlam.inc"
 #include "xzlblk.inc"
 #include "xzden.inc"
+#include "xzdfrz.inc"
 #include "xzq.inc"
 #include "xzqs.inc"
