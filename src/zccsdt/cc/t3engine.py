@@ -848,7 +848,8 @@ def _spin_block_c_methods():
                         Tf = T.reshape(len(pb) * nd, nm * nQ)
                         t_.__exit__(None, None, None)
                         sy = gP - sd
-                        if 0 <= sy < self.nc:
+                        # (a class without spinors - the labels need not be contiguous - has no rows)
+                        if 0 <= sy < self.nc and (vr[sy][1] > vr[sy][0] or orr[sy][1] > orr[sy][0]):
                             e0, e1 = vr[sy]
                             j0, j1 = orr[sy]
                             G = np.concatenate((G_Pd[e0:e1, p0:p1, vr[sd][0]:vr[sd][1]],
@@ -986,6 +987,8 @@ def _spin_block_c_methods():
                 if not 0 <= se < self.nc or Qhi == Qlo:
                     continue
                 (e0, e1), (i0, i1), (m0, m1) = vr[se], orr[si], orr[se]
+                if e1 == e0 and m1 == m0:       # (a class without spinors)
+                    continue
                 B1 = Wv[Qlo:Qhi, e0:e1, i0:i1].transpose(1, 2, 0)          # [e, i, Q]
                 B2 = t2P[m0:m1, i0:i1, Qlo:Qhi]                            # [m, i, Q]
                 Bd[gQ, si] = np.ascontiguousarray(np.concatenate((B1, B2), axis=0),

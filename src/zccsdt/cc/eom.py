@@ -455,6 +455,7 @@ class Result:
     ground: object = None
     timings: dict = None
     shift: object = None        # the label shift in classes of the maps (None: totally symmetric, layout of t3)
+    short: object = None        # IP / EA with short vectors: the Short of the problem (strip() takes the ghost out)
     label_shift: object = None  # the same in units of the labels (set by the front end)
     partner_of: object = None   # these are the time-reversed states of that label shift (no vectors)
 
@@ -646,6 +647,99 @@ def ghost(eris, t1, t2, t3=None, kind='ip'):
 def _triples(n):
     from itertools import combinations
     return combinations(range(n), 3)
+
+
+@dataclass
+class Short:
+    '''The IP or EA problem with short vectors (ghost_short).'''
+    kind: str
+    eris: object                # the integrals with the ghost spinor and its label
+    t1: np.ndarray              # the amplitudes there: t1, t2 padded, t3 as it was
+    t2: np.ndarray
+    t3: np.ndarray
+    ghost_label: int
+    step: int
+    labelled: bool              # the spinors had symmetry labels in use
+
+    def class_shift(self, label=None):
+        '''The shift (classes of the maps of self.eris) of the vectors
+        with the ghost index once and the label ``label`` of the electron
+        that is removed (IP: minus the label of its spinor) or attached
+        (EA) - the change of the sum of the labels; None without labels.'''
+        if not self.labelled:
+            if label not in (None, 0):
+                raise ValueError('a label for the %s states needs the symmetry labels in use: a calculation in '
+                                 'the blocks of the labels' % self.kind.upper())
+            return 1
+        if label is None:
+            raise ValueError('with symmetry labels in use the %s states are asked for by the label of the '
+                             'electron (shift=)' % self.kind.upper())
+        try:
+            return class_shift(self.eris, self.ghost_label + label if self.kind == 'ip' else label - self.ghost_label)
+        except ValueError:
+            raise ValueError('no %s state changes the labels by %d (the labels of the electrons: %s)'
+                             % (self.kind.upper(), label, self.labels())) from None
+
+    def labels(self):
+        '''The labels an electron removed (IP: minus the labels of the
+        occupied spinors) or attached (EA: the labels of the virtual ones)
+        can carry, sorted.'''
+        if not self.labelled:
+            return [0]
+        lab = np.asarray(self.eris.labels)
+        no = self.eris.nocc
+        return sorted({-int(x) for x in lab[:no]} if self.kind == 'ip' else {int(x) for x in lab[no:]})
+
+    def strip(self, res, k=0):
+        '''Root k of a Result without the ghost index: (r[i], r[(i<j), a],
+        r3) for IP, (r[a], r[i, (a<b)], r3) for EA; the pairs in the order
+        of the maps of self.eris, r3 flat in the blocks of the shift -
+        [(i<j<k), (a<b)] (EA: [(i<j), (a<b<c)]) in the order of the maps
+        without labels.'''
+        om, vm = t3pack.maps_for(self.eris)
+        r1, r2 = res.r1[k], res.r2[k]
+        r3 = res.r3[k] if res.r3 else None
+        if self.kind == 'ip':
+            x = vm.n - 1
+            return r1[:, x].copy(), np.ascontiguousarray(r2[:, vm.pidx[np.arange(x), x]]), r3
+        return r1[0].copy(), np.ascontiguousarray(r2[om.pidx[0, np.arange(1, om.n)]]), r3
+
+
+def ghost_short(eris, t1, t2, t3=None, kind='ip'):
+    """The IP or EA problem as an EE problem with a ghost spinor (ghost())
+    whose vectors are short: the ghost carries a symmetry label of its own,
+    far from the labels of the others, so the vectors with the ghost index
+    once are the vectors of one label shift, and their rank-3 part is
+    stored and passed over in the blocks of that shift
+    (t3shift.ShiftLayout) - r[(i<j<k), (a<b)] (IP), r[(i<j), (a<b<c)]
+    (EA) and nothing else.  The passes of a sigma vector then lose a
+    virtual (occupied) index wherever the ghost takes its place.
+
+    Without symmetry labels in use the spinors get one label and the ghost
+    another: the short vectors on the packed layout, all states.  With
+    labels (n classes, the blocks of a linear molecule) the ghost is
+    3 (n - 1) + 1 classes beyond the last (IP) or before the first (EA)
+    of them: no element without the ghost has the shifts of the elements
+    with it, and the label of the electron that is removed or attached
+    selects the states (Short.class_shift).  t3: flat, in the layout of
+    the engine of ``eris``; it is the T3 of the new integrals as it is.
+    Returns a Short."""
+    if getattr(eris, 'spin_occ', None) is not None:
+        raise ValueError('IP and EA with short vectors: spin orbitals without spin blocks, or spinors')
+    labelled = t3pack.classes_of(eris) is not None
+    n = np.asarray(eris.fock).shape[0]
+    if labelled:
+        lab = np.asarray(eris.labels, dtype=np.int64)
+        u = np.unique(lab)
+        step = int(np.gcd.reduce(np.diff(u))) if len(u) > 1 else 1
+        gap = step * (3 * int((u[-1] - u[0]) // step) + 1)
+    else:
+        lab, step, gap = np.zeros(n, dtype=np.int64), 1, 1
+    glab = int(lab.max() + gap) if kind == 'ip' else int(lab.min() - gap)
+    e2, t1p, t2p, _, _ = ghost(eris, t1, t2, None, kind)
+    e2.labels = np.concatenate((lab, [glab])) if kind == 'ip' else np.concatenate(([glab], lab))
+    e2.modulus, e2.use_labels = 0, True
+    return Short(kind, e2, t1p, t2p, t3, glab, step, labelled)
 
 
 def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None,
