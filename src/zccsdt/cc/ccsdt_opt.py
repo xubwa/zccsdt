@@ -760,7 +760,7 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
     # P(ab) F_bc t_ijac on the packed occupied pairs: Y[P, a, b] = t[P, a, c] F[b, c]
     Y = gemm(np.ascontiguousarray(t2mn, dtype=R2.dtype).reshape(-1, nvir),
              np.asarray(Feff_vv, dtype=R2.dtype).T)
-    t3pack.add_asym_last2(R2, Y, vm)
+    t3pack.add_asym_last2(R2, Y.reshape(-1, nvir, nvir), vm)
     del Y
     # P(ij) P(ab) W_kbcj t_ikac: X[(i,a), (j,b)] = t[i,k,a,c] W2[k,b,c,j],
     # antisymmetrized into the packed residual by the kernel
@@ -1284,7 +1284,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
                 t3pack.axpby(G_mQ[m0:m1, lo:hi, nocc + a0:nocc + a1],
                              np.asarray(blk, dtype=dtype).transpose(0, 2, 1), -1.0, 0.0)
         else:        # [m, R, a] = ~<am||R> = -~<ma||R>
-            t3pack.axpby(G_mQ[:, :, nocc:], ge['ovvv'][:, :, md, ne].transpose(0, 2, 1),
+            t3pack.axpby(G_mQ[:, :, nocc:], t3pack.pack_last2(ge['ovvv'], vm).transpose(0, 2, 1),
                          -1.0, 0.0)
         G_mQ = G_mQ.reshape(nocc * vm.npair, nocc + nvir)
     with timer('pass1'):

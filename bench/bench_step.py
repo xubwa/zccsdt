@@ -102,7 +102,8 @@ def main():
     cc.kernel()
     watch.stop()
     stages = {'/'.join(str(x) for x in path): [round(w, 3), round(c, 3), int(k)]
-              for path, (w, c, k) in timing.since(snap).items() if len(path) <= 2}
+              for path, (w, c, k) in timing.since(snap).items()
+              if len(path) <= int(os.environ.get('BP_DEPTH', 2))}        # (BP_DEPTH=3: the parts of the stages too)
     wall, cpu = np.diff([m[0] for m in marks]), np.diff([m[1] for m in marks])
     rest = slice(1, None) if len(wall) > 1 else slice(0, None)
     eris = cc._eris

@@ -118,7 +118,7 @@ def occ_operator(O6, T3p, R, cols=0, io=None):
 
 # The hh ladder and F_oo: from this many occupied spinors on, pair-driven
 # (measured, docs/factorization.md 2.3); below, the matrix on packed triples.
-HH_PAIR_MIN_OCC = int(os.environ.get('ZCCSDT_HH_PAIR_MIN_OCC', 14))
+HH_PAIR_MIN_OCC = int(os.environ.get('ZCCSDT_HH_PAIR_MIN_OCC', 16))
 HH_PAIR_COLS = int(os.environ.get('ZCCSDT_HH_PAIR_COLS', 96))
 
 

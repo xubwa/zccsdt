@@ -142,6 +142,58 @@ void zc_gemm_z(int ta, int tb, int64_t m, int64_t n, int64_t k,
     gemm_z(ta, tb, m, n, k, *alpha, a, lda, b, ldb, *beta, c, ldc);
 }
 
+/* A list of products in one parallel region (the passes over the blocks of a
+ * symmetry label make thousands of products of a millisecond each, which a
+ * threaded BLAS does not run at its rate, least of all on many cores):
+ *   C_t = alpha A_t B_t + beta C_t,  t < ntask,
+ * with tasks[t] = (m, n, k, offset of A_t in a, lda, offset of B_t in b, ldb,
+ * offset of C_t in c, ldc), offsets in elements, all matrices row-major.
+ * Every product is split over its columns into pieces of about ``cols``
+ * columns; a piece is one sequential GEMM, and the threads take the pieces
+ * of all tasks from one queue. */
+#define DEFINE_GEMM_TASKS(T, SFX)                                              \
+void zc_gemm_tasks_##SFX(int64_t ntask, const int64_t *tasks, const T *a,      \
+                         const T *b, T *c, const T *alpha, const T *beta,      \
+                         int64_t cols)                                         \
+{                                                                              \
+    if (cols <= 0) cols = 96;                                                  \
+    int64_t total = 0;                                                         \
+    for (int64_t t = 0; t < ntask; t++) {                                      \
+        const int64_t *q = tasks + 9 * t;                                      \
+        if (q[0] > 0 && q[1] > 0) total += (q[1] + cols - 1) / cols;           \
+    }                                                                          \
+    if (total == 0) return;                                                    \
+    int64_t *piece = malloc(sizeof(int64_t) * 2 * total);                      \
+    int64_t np = 0;                                                            \
+    for (int64_t t = 0; t < ntask; t++) {                                      \
+        const int64_t *q = tasks + 9 * t;                                      \
+        if (q[0] <= 0 || q[1] <= 0) continue;                                  \
+        const int64_t n = (q[1] + cols - 1) / cols;                            \
+        for (int64_t j = 0; j < n; j++) {                                      \
+            piece[2 * np] = t;                                                 \
+            piece[2 * np + 1] = j * q[1] / n;                                  \
+            np++;                                                              \
+        }                                                                      \
+    }                                                                          \
+    _Pragma("omp parallel for schedule(dynamic, 1)")                           \
+    for (int64_t p = 0; p < np; p++) {                                         \
+        const int64_t *q = tasks + 9 * piece[2 * p];                           \
+        const int64_t c0 = piece[2 * p + 1];                                   \
+        const int64_t c1 = (p + 1 < np && piece[2 * p + 2] == piece[2 * p])    \
+                           ? piece[2 * p + 3] : q[1];                          \
+        if (q[2] > 0)                                                          \
+            gemm_##SFX(0, 0, q[0], c1 - c0, q[2], *alpha, a + q[3], q[4],      \
+                       b + q[5] + c0, q[6], *beta, c + q[7] + c0, q[8]);       \
+        else                                                                   \
+            for (int64_t i = 0; i < q[0]; i++)                                 \
+                for (int64_t j = c0; j < c1; j++)                              \
+                    c[q[7] + i * q[8] + j] *= *beta;                           \
+    }                                                                          \
+    free(piece);                                                               \
+}
+DEFINE_GEMM_TASKS(double, d)
+DEFINE_GEMM_TASKS(double complex, z)
+
 /* Batched GEMM over slices: C_i = alpha op(A) B_i + beta C_i for i < nb, with
  * B_i = b + i sb (k x n, leading dimension ldb) and C_i = c + i sc (m x n,
  * leading dimension ldc).  One slice per thread, BLAS sequential inside. */

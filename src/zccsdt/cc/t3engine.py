@@ -31,7 +31,7 @@ import ctypes
 import numpy as np
 
 from zccsdt import scratch
-from zccsdt.blas import gemm
+from zccsdt.blas import gemm, gemm_tasks
 from zccsdt.cc import t3pack, t3kern
 from zccsdt.timing import timer
 
@@ -824,21 +824,37 @@ def _spin_block_c_methods():
                                                 G_Pd[nvir + j0:nvir + j1, p0:p1,
                                                      vr[sd][0]:vr[sd][1]]), axis=0)
                             t_ = timer('pass1.gemm'); t_.__enter__()
-                            X = gemm(np.ascontiguousarray(G).reshape(G.shape[0], -1), Tf)
+                            # (a few rows times a wide matrix: pieces of columns,
+                            # one sequential GEMM each, shared by the threads)
+                            Gc = np.ascontiguousarray(G, dtype=dtype).reshape(G.shape[0], -1)
+                            X = np.empty((Gc.shape[0], Tf.shape[1]), dtype=dtype)
+                            gemm_tasks([(Gc.shape[0], Tf.shape[1], Gc.shape[1], 0, Gc.shape[1],
+                                         0, Tf.shape[1], 0, Tf.shape[1])], Gc, Tf, X, cols=256)
                             t_.__exit__(None, None, None)
                             t_ = timer('pass1.acc'); t_.__enter__()
                             X = X.reshape(-1, nm, nQ)
                             m0, m1 = orr[sm]
-                            Xacc[e0:e1, m0:m1, Qlo:Qhi] += X[:e1 - e0]
-                            Xacc[nvir + j0:nvir + j1, m0:m1, Qlo:Qhi] += X[e1 - e0:]
+                            t3pack.axpby(Xacc[e0:e1, m0:m1, Qlo:Qhi], X[:e1 - e0])
+                            t3pack.axpby(Xacc[nvir + j0:nvir + j1, m0:m1, Qlo:Qhi], X[e1 - e0:])
                             t_.__exit__(None, None, None)
                             t_ = timer('pass1.gemm'); t_.__enter__()
-                            Y = gemm(Tf, gy(sm, gQ, sy)).reshape(len(pb), nd, -1)
+                            # (a tall matrix times a few columns: pieces of rows)
+                            Gy = gy(sm, gQ, sy)
+                            nrow, ncol, ny = Tf.shape[0], Tf.shape[1], Gy.shape[1]
+                            Y = np.empty((nrow, ny), dtype=dtype)
+                            r0 = np.arange(0, nrow, 8, dtype=np.int64)
+                            tasks = np.empty((len(r0), 9), dtype=np.int64)
+                            tasks[:] = (0, ny, ncol, 0, ncol, 0, ny, 0, ny)
+                            tasks[:, 0] = np.minimum(r0 + 8, nrow) - r0
+                            tasks[:, 3] = r0 * ncol
+                            tasks[:, 7] = r0 * ny
+                            gemm_tasks(tasks, Tf, Gy, Y, cols=max(ny, 1))
+                            Y = Y.reshape(len(pb), nd, -1)
                             t_.__exit__(None, None, None)
                             t_ = timer('pass1.acc'); t_.__enter__()
                             d0, d1 = vr[sd]
-                            Yall[p0:p1, d0:d1, j0:j1] += Y[:, :, :j1 - j0]
-                            Yall[p0:p1, d0:d1, nocc + e0:nocc + e1] += Y[:, :, j1 - j0:]
+                            t3pack.axpby(Yall[p0:p1, d0:d1, j0:j1], Y[:, :, :j1 - j0])
+                            t3pack.axpby(Yall[p0:p1, d0:d1, nocc + e0:nocc + e1], Y[:, :, j1 - j0:])
                             t_.__exit__(None, None, None)
                         if sd == sm:
                             t_ = timer('pass1.r1rA'); t_.__enter__()
@@ -978,10 +994,15 @@ def _spin_block_c_methods():
                             sub.append((r0, n))
                         r0 += n
                     t_ = timer('pass2.ring'); t_.__enter__()
-                    for k in range(nbp):
-                        for r0, n in sub:
-                            zo = zoff[k, gQ] + r0 * nQ
-                            gemm(Wd[delta][r0:r0 + n], T[k], Z[zo:zo + n * nQ].reshape(n, nQ))
+                    # one product per pair of the batch and block of rows: all
+                    # of them in one parallel region (blas.gemm_tasks)
+                    if sub:
+                        tasks = np.empty((len(sub), nbp, 9), dtype=np.int64)
+                        for j, (r0, n) in enumerate(sub):
+                            tasks[j] = (n, nQ, nr, r0 * nr, nr, 0, nQ, 0, nQ)
+                            tasks[j, :, 5] = np.arange(nbp) * (nr * nQ)
+                            tasks[j, :, 7] = zoff[:, gQ] + r0 * nQ
+                        gemm_tasks(tasks, Wd[delta], T, Z)
                     t_.__exit__(None, None, None)
                     t_ = timer('pass2.drive'); t_.__enter__()
                     # drive terms on the (s_c, s_i) sub-blocks of D_delta
@@ -993,13 +1014,17 @@ def _spin_block_c_methods():
                         if nc and ni and 0 <= se < self.nc and (gQ, si) in Bd \
                                 and gP + si in L.stored:
                             (e0, e1), (m0, m1) = vr[se], orr[se]
-                            for k, P in enumerate(pb):
-                                A = np.concatenate((t2mn[P, e0:e1, c0:c1].T,
-                                                    Wo[m0:m1, c0:c1, P].T), axis=1)
-                                zo = zoff[k, gQ] + r0 * nQ
-                                Zs = Z[zo:zo + nc * ni * nQ].reshape(nc, ni * nQ)
-                                gemm(np.ascontiguousarray(A, dtype=dtype), Bd[gQ, si], Zs,
-                                     alpha=-1.0, beta=1.0)
+                            # A[P, c, (e | m)] of all pairs of the batch, and their
+                            # products with the right-hand side in one parallel region
+                            A = np.ascontiguousarray(np.concatenate(
+                                (t2mn[p0:p1, e0:e1, c0:c1].transpose(0, 2, 1),
+                                 Wo[m0:m1, c0:c1, p0:p1].transpose(2, 1, 0)), axis=2), dtype=dtype)
+                            kk = A.shape[2]
+                            tasks = np.empty((nbp, 9), dtype=np.int64)
+                            tasks[:] = (nc, ni * nQ, kk, 0, kk, 0, ni * nQ, 0, ni * nQ)
+                            tasks[:, 3] = np.arange(nbp) * (nc * kk)
+                            tasks[:, 7] = zoff[:, gQ] + r0 * nQ
+                            gemm_tasks(tasks, A, Bd[gQ, si], Z, alpha=-1.0, beta=1.0)
                         r0 += nc * ni
                     t_.__exit__(None, None, None)
                 t_ = timer('pass2.reduce'); t_.__enter__()
