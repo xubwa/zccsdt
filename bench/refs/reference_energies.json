@@ -619,5 +619,54 @@
    "e_ccsdtq": -22854.93378181932,
    "e_ccsdtq(p)": -22854.933785264926
   }
+ },
+ "eom_ee": {
+  "description": "Excitation energies (Hartree) of EOM-EE-CCSD / EOM-EE-CCSDT (MRCC: LR-CC, the same eigenvalues), total energy of the excited state minus that of the ground state as printed (12 decimals); MRCC release Feb 2018, cctol=11.  h2o_631g: MRCC's own RHF and integrals, geometry in bohr (bench/refs/mrcc/h2o_631g/MINP.eom*.bohr), nsing=4 ntrip=3: three excited singlets, three triplets (in MRCC's order of roots).  hbr_ccpvdzdk_x2c_mdcint: the integrals of the entry of that name (PySCF X2C spinors written by zccsdt.dirac), iface=dirac, nstate=4 (bench/dirac/mrcc_eom.sh): the three excited states MRCC finds from its guess, not the three lowest of the spectrum (zccsdt has a pair at 0.25206 between them).",
+  "h2o_631g": {
+   "ccsdt_all_electron": {
+    "e_ccsdt": -76.120425238932,
+    "singlets": [
+     0.3116877692,
+     0.404172632463,
+     0.394170561703
+    ],
+    "triplets": [
+     0.284831364143,
+     0.366400122961,
+     0.375682797356
+    ]
+   },
+   "ccsd_frozen_core": {
+    "e_ccsd": -76.118438198598,
+    "singlets": [
+     0.308222703511,
+     0.401716625386,
+     0.391932951235
+    ],
+    "triplets": [
+     0.281140765433,
+     0.363214932464,
+     0.373870668947
+    ]
+   }
+  },
+  "hbr_ccpvdzdk_x2c_mdcint": {
+   "ccsdt": {
+    "e_ccsdt": -2604.93575872969,
+    "states": [
+     0.247501052593,
+     0.247501052595,
+     0.260178222291
+    ]
+   },
+   "ccsd": {
+    "e_ccsd": -2604.934959554418,
+    "states": [
+     0.247699688957,
+     0.247699688959,
+     0.261343263658
+    ]
+   }
+  }
  }
 }
