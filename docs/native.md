@@ -17,8 +17,9 @@ working memory is the work array that CFOUR's `CRAPSI` allocates
 `lambda_blk.py`, `quadruples_lambda.py`; docs/factorization.md, docs/lambda.md),
 which is the reference of every number below.
 
-State of this document: the program at the commit that adds the density
-stage (section 13; the threading of the iterations: section 12; the Lambda
+State of this document: the program at the commit that gives whole groups
+of (Q) to the ranks and maps T3 for them (section 14; the density stage:
+section 13; the threading of the iterations: section 12; the Lambda
 equations and (Q)_Lambda: section 11).  What is measured says so (job, node);
 what is not done is listed at the end.  In short: CCSDT, (Q), the Lambda
 equations of CCSDT and (Q)_Lambda - dense or in the blocks of symmetry
@@ -93,15 +94,18 @@ per node; `-ppn 1`) or `-N 1 --ntasks-per-node=4 -c 8` (`-ppn 4`: the case
 that was run).
 Only (Q) and (Q)_Lambda are parallel over ranks; the CCSDT iterations and the
 Lambda equations are those of rank 0, with its threads.  Rank 0 is the CFOUR program (CRAPSI, JOBARC, the output).
-The other ranks get joda's flags from it, allocate a work array of the same
-size themselves (`GETMEM`), write their output to `xzccsdt.rNNNN`, wait until
+The other ranks get joda's flags from it, write their output to
+`xzccsdt.rNNNN`, wait for the plan of rank 0 and allocate a work array
+themselves (`GETMEM`) - not `MEMORY_SIZE` but the words that (Q) takes with
+that plan (section 4) -, wait until
 rank 0 has the amplitudes (a blocking broadcast: with Intel MPI a waiting rank
-spins on one core unless `I_MPI_WAIT_MODE=1`), then read the integral files
-and `XZAMPS` themselves.  The run directory must therefore be on a file system
+spins on one core unless `I_MPI_WAIT_MODE=1`), then read the integral files,
+T1 and T2 of `XZAMPS` themselves and map the T3 of that file (section 5: one
+copy per node).  The run directory must therefore be on a file system
 that all nodes see (with lambda on the left: `XZLAMB` too).  All ranks read
 the same files and make the same decisions
 (blocks, real or complex, the task list): nothing but the flags, the sizes of
-JOBARC and the final sums is communicated.
+JOBARC, the size of the plan and the final sums is communicated.
 
 The steps can be separate invocations, as the X2CSO programs are called one
 after the other: `xzccsdt ccsdt` (serial or one rank), then
@@ -138,8 +142,8 @@ Written:
 | `JOBARC` | `TOTENERG`: the energy of the method |
 | `XZAMPS` | after converged CCSDT: unformatted stream; `'XZAMPS01'`, 5 integers of 8 bytes (occupied, virtual, words per element: 1 real / 2 complex, classes of the labels, elements of T3 as stored), the correlation energy (real, 8 bytes), then T1 `[i][a]`, T2 `[i][j][a][b]`, T3 as stored (packed i<j<k, a<b<c; its blocks one after the other), row-major, in the order of the spinors of the run that wrote it |
 | `XZLAMB` | after converged Lambda equations: the format of `XZAMPS` with the tag `'XZLAMB01'`; the real number is the CCSDT correlation energy of the amplitudes that lambda belongs to (checked against `XZAMPS` when both are read); then l1 `[i][a]`, l2 `[i][j][a][b]`, l3 as T3 is stored |
-| `XZDIIS` | only if the DIIS vectors do not fit in the work array: direct-access file with the T3 parts of the vectors (of the amplitudes, then of lambda); deleted at the end |
-| `XZQCHK.NNNN` | one per rank during (Q): a line per finished task (task, its two energies, seconds); deleted when (Q) has finished |
+| `XZDIIS` | only if the DIIS vectors do not all fit in the work array (section 4: all in memory or all in the file): direct-access file with the T3 parts of the vectors (of the amplitudes, then of lambda); deleted at the end |
+| `XZQCHK.NNNN` | one per rank during (Q): a first line that names the calculation and the task list (kind, sizes, tasks, a number computed from the list), then a line per finished task (task, its two energies, seconds); deleted when (Q) has finished |
 | `xfull`, `dpoo`, `dpvv`, `dii0`, `daa0`, `dpopo`, `dpvpv` | `density`, `ccsdt_density`: the input of CFOUR's `xx2czvec` (section 10.2: one record each, complex, CFOUR's order of the spinors) |
 | `xzccsdt.rNNNN` | output of the ranks other than 0 (MPI) |
 
@@ -147,6 +151,20 @@ A run that reads `XZAMPS` or `XZLAMB` must run in the mode of the run that wrote
 (labels used or not, real or complex: both follow from the same integral
 files, so this only matters with `XZ_LABELS` / `XZ_REAL`); the header is
 checked.
+
+**`XZAMPS` and `XZLAMB` are also what (Q) computes from**: (Q) and (Q)_Lambda
+do not read T3 and lambda3 into the work array but map the two files
+read-only (`mmap`; `xz_map_file` of `xzutil.c`) and read the amplitudes where
+the system has them - in the page cache of the node, once for all the ranks
+there (section 5).  This needs no conversion in any mode: the T3 of the file
+is the stored T3 of the program byte for byte - the packed dense array, or
+its blocks one after the other, real (8 bytes) or complex (16) - behind a
+header of 56 bytes and T1 and T2, i.e. at an offset that is a multiple of 8.
+The files must not be changed while a (Q) runs on them.  `XZ_QMAP=0` reads
+T3 (lambda3) into the work array of every rank as before; a run directory on
+a network file system (NFS, Lustre, GPFS, BeeGFS, ...) gets a warning that
+says so - mapping works there, but pages are then read over the network when
+first touched or after the system has dropped them.
 
 **Files beyond 2 GB.**  ifort writes a record of more than 2^31 - 9 bytes
 as a chain of sub-records, each between two markers of 4 bytes (the leading
@@ -177,9 +195,9 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzplan.F90` | the memory plan |
 | `xzdata.F90` | sizes, the job, offsets of the arrays that live for the run |
 | `xzdiis.F90` | DIIS: slots, the file, the small linear problem (ZHEEV) |
-| `xzpar.F90` | ranks and the task list of (Q), checkpoint files |
+| `xzpar.F90` | ranks and the task list of (Q) (groups, pieces, the distribution by the cost model), checkpoint files |
 | `xzkern.F90`, `xzkern.inc` | explicit `bind(C)` interfaces of the kernels, one include for `_d` and `_z` |
-| `xzmpi.c`, `xzutil.c` | C: the MPI calls behind a few functions (stubs without MPI); free disk space, resident set, BLAS integer size |
+| `xzmpi.c`, `xzutil.c` | C: the MPI calls behind a few functions (stubs without MPI); free disk space, resident set (anonymous and mapped), BLAS integer size, a file mapped read-only (`xz_map_file`: T3 of (Q)), whether a directory is on a network file system |
 | `xztype.h` | the element type of a compilation of the type-generic sources |
 | `xzimd.inc` | T1-dressed integrals, W and F intermediates, the CCSD part, the occupied operator |
 | `xzstep.inc` | one CCSDT step: the order of the stages, the placement of every array |
@@ -310,9 +328,16 @@ plan` to the word).
   of a pp-ladder batch (up to 1.3 GB of buffers), pairs of a batch of the
   passes (up to 2 GB: the defaults of the Python program), first indices of
   a W_vvvo batch (up to v/8).
-- The DIIS vectors (8, each with its error vector) are in the work array if
-  all of them fit next to that.  Otherwise their T3 parts are records of the
+- The DIIS vectors (8, each with its error vector): **memory first, all or
+  nothing** (the user's decision, 2026-10-09: no split between memory and
+  file).  They are in the work array if all of them fit next to the batches
+  at the sizes just chosen - the batches come first, because small batches
+  slow every pass.  Otherwise the T3 parts of all of them are records of the
   direct-access file `XZDIIS` and are passed over in chunks (2^20 elements);
+  the same place holds for the amplitudes and for lambda.  The plan says
+  which (`DIIS:   8 vectors in the work array` or `DIIS:   8 vectors, T3
+  parts in the file XZDIIS (... MB)`); what the file costs when all cores
+  are busy is measured in section 14.  Further:
   if the disk of the run directory does not hold all of them (free space is
   asked from the system before the first iteration), fewer vectors are used -
   in the file or in the work array, whichever holds more - and with fewer
@@ -320,7 +345,24 @@ plan` to the word).
   later stops the run with a message that names the file and its size.
 - (Q) has the work array to itself after the iterations: Xv for more
   occupied indices first, then the two products in fewer batches of columns,
-  then more rows per step of the formation of Xv.
+  then more rows per step of the formation of Xv.  T3 (and lambda3) are not
+  part of it: (Q) reads them where the files `XZAMPS` (`XZLAMB`) are mapped
+  (section 2), and the plan prints both numbers - the words private to a
+  rank, and the mapped files that a node holds once:
+
+        (Q) with this plan:                   1446046720  =    11568.4 MB
+          (private to a rank.  Not in the work array: T3, read where the file XZAMPS is mapped -
+           one copy in the page cache of a node for all its ranks:     1591.0 MB)
+
+  With `XZ_QMAP=0` T3 is in the work array of every rank and the line says
+  `(private to a rank, T3 included: XZ_QMAP=0)`.  A run that iterates first
+  (`ccsdt(q)`) keeps T3 in the work array for the iterations, writes
+  `XZAMPS`, releases T3 and maps the file like the other ranks.
+- The work array of a rank other than 0 is not `MEMORY_SIZE`: rank 0 sends
+  the words that (Q) takes with its plan, and the other ranks allocate that
+  (plus 4096 words) and make the same plan in it.  `MEMORY_SIZE` (and
+  `XZ_MAXCOR`) therefore bound the plan of every rank, and the memory of a
+  node is ranks x the private words + the mapped files once.
 
 **The smallest MEMORY_SIZE** for o occupied and v virtual spinors, complex,
 dense (one class): with p = v(v-1)/2, f = o v p (the size of `<ov||vv>` on
@@ -343,14 +385,19 @@ exact numbers are printed by every run ("the least that CCSDT takes"):
 | H2O / cc-pVTZ | 10, 106 | 2123 MB | 2879 MB | 9124 MB | 370 MB |
 
 Real arithmetic halves these; blocks of labels reduce T3 and `<vv||vv>` to
-their allowed parts (section 6).  **Not done:** T3 in a mapped scratch file -
-T3, its residual and (in the file-DIIS mode) nothing else of the size of T3
-must fit in the work array.
+their allowed parts (section 6).  The (Q) columns of the table are those of
+the private copy (`XZ_QMAP=0`); with the map they are smaller by T3.  **Not
+done:** T3 of the *iterations* in a mapped scratch file - T3, its residual
+and (in the file-DIIS mode) nothing else of the size of T3 must fit in the
+work array; the map of section 2 is read-only and serves (Q) alone.
 
 Test hooks (environment): `XZ_MAXCOR=n` uses only n words of the work array;
 `XZ_PLAN="nqs nbt nbp nba qxv qc22 qc13 qrows"` gives the batch sizes
 (0: as planned), `XZ_DIIS=m8|f8|m0` the place (memory / file) and number of
-the DIIS vectors.  `XZ_NCYC`, `XZ_START`, `XZ_HH`: section 12.
+the DIIS vectors (read together with `XZ_PLAN`: `XZ_PLAN="0 0 0 0 0 0 0 0"
+XZ_DIIS=f8` is the planned run with the vectors in the file).  `XZ_QMAP=0`:
+(Q) with a private T3 (above).  `XZ_NCYC`, `XZ_START`, `XZ_HH`: section 12;
+`XZ_QTASKS`, `XZ_QRANKS`, `XZ_QSAMPLE`, `XZ_QSTOP`, `XZ_QCOST`: section 5.
 
 Measured (H2O / 6-31G, login node): the same energies to 1e-12 with the work
 array at its floor (2022176 words: DIIS in the file, one pair per batch),
@@ -367,26 +414,68 @@ time, r and z over all virtual quadruples from five stacked matrix products,
 each reduced onto a<b<c<d by the kernels of `tnpack.c`; the intermediate Xv
 of T2 with `<vv||vv>` is held for the pairs (x, l) of one largest index l.
 
-The unit of work is a **task** (`xzpar.F90`): the quadruples i<j<k<l of one
-l, or - where one l is more than a fair share - those of one l whose smallest
-index i lies in a range.  A task needs Xv(x, l) only for x >= its smallest i;
-it reads T2, T3 and the integrals and returns two numbers (its parts of E[Q]
-and of E(Q) - E[Q]).  The serial program is the one-rank case of the same
-code: the list, a loop that does the tasks of this rank, a sum.  One task
-per l for one rank (no Xv is formed twice); about eight tasks per rank
-otherwise (`XZ_QTASKS=n` sets the number asked for).  Consecutive tasks of
-one l on a rank keep the Xv they share.
+The unit of work is a **task** (`xzpar.F90`): a *group* - the quadruples
+i<j<k<l of one l, which share the Xv(x, l) of that l - or a *piece* of a
+group: those of one l whose smallest index i lies in a range.  A task needs
+Xv(x, l) only for x >= its smallest i; it reads T2, T3 and the integrals and
+returns two numbers (its parts of E[Q] and of E(Q) - E[Q]).  The serial
+program is the one-rank case of the same code: the list, a loop that does
+the tasks of this rank, a sum.  Consecutive tasks of one l on a rank keep
+the Xv they share.
 
-**Ranks: a static partition.**  The tasks are given to the ranks by their
-estimated cost (operation counts of the products and of Xv), the largest
-first, each to the rank with the least so far; every rank builds the same
-list and does its own tasks in the order of l; one `MPI_Reduce` adds the
-energies.  Chosen over pulling tasks from rank 0 because no rank then serves
-another while it computes with all its threads, the list is fixed (which is
-what restart needs), and nothing is communicated before the end.  The price:
-the balance is that of the cost model.  The output gives the time of every
-rank's part and "sum over ranks / slowest", the speedup that the partition
-allows.
+**Ranks: whole groups, a static partition.**  The groups go whole to the
+ranks - the largest task first, each to the rank with the least cost so far
+- so that no Xv is formed twice.  The groups are of very different size (l
+quadruples C(l, 3): for 26 occupied spinors the last group is 15 % of all),
+so with many ranks whole groups cannot be balanced; then, and only as far as
+needed, groups are cut: while the slowest rank of the cost model is more
+than 3 % above the mean, the group of the largest task gets one piece more
+(pieces of equal cost, ranges of i), and the list is distributed again.
+Pieces of one group on different ranks each form the Xv they need: that
+repeat is accepted - passing Xv on between ranks was not tried, because a
+repeat is small: Xv(x, l) for all x of the largest group costs about as much
+as a dozen of its 2300 quadruples (measured: section 14).  The output says what
+the list means:
+
+       tasks:     33   ranks:    12   tasks of this rank:      3   rank     0
+       groups (one largest index l, one Xv):     23;  Xv(x, l):    322 pairs,    500 formed over all ranks
+       cost model: the slowest rank   2.50 % above the mean; the repeated Xv   0.25 % of the work
+
+For 26 occupied spinors (the model in blocks, 26 + 78; `XZ_QRANKS="2 3 4 6 8
+12 16 24 48"` prints these lines for any numbers of ranks without running
+them):
+
+| ranks | tasks | Xv formed (of 322 pairs) | slowest rank above the mean | repeated Xv, of the work |
+|---|---|---|---|---|
+| 2, 3, 4 | 23 | 322 | 0.00, 0.12, 0.69 % | 0 |
+| 6 | 23 | 322 | 2.19 % | 0 |
+| 8 | 34 | 462 | 1.64 % | 0.19 % |
+| 12 | 33 | 500 | 2.50 % | 0.25 % |
+| 16 | 41 | 633 | 2.93 % | 0.45 % |
+| 24 | 100 | 1352 | 2.72 % | 1.61 % |
+| 48 | 166 | 2178 | 2.95 % | 2.88 % |
+
+Every rank builds the same list (it depends on the number of ranks and on
+the sizes of the classes, not on anything a rank computes) and does its own
+tasks in the order of l; one `MPI_Reduce` adds the energies.  Chosen over
+pulling tasks from rank 0 because no rank then serves another while it
+computes with all its threads, the list is fixed (which is what restart
+needs), and nothing is communicated before the end.  The price: the balance
+is that of the cost model.  The output ends with a line per rank - tasks,
+quadruples, seconds, the seconds of Xv and Xo, its own memory and the mapped
+files - and "sum over ranks / slowest", the speedup that the partition
+allowed.
+
+**The cost model** (`xzqmodel` of `xzdrv.F90`, `xzq_costs`), in units of one
+virtual quadruple: an occupied quadruple of total class M costs the number
+of virtual quadruples a<b<c<d of total class M (their sector; without labels
+all of them, so every quadruple costs the same); Xv(x, l) costs 0.0012 times
+the elements of its products (`<bc||ef>` on (bc), e times T2 on f, d, in the
+blocks of the classes of x and l).  It was measured, not derived: section 14
+(per group within 5 % on 6 threads and 13 % on 24, where one cost per
+quadruple is off by up to 21 %).
+`XZ_QCOST=file` writes the times of every quadruple and of every Xv of rank
+0 to a file, which is what the model was fitted to.
 
 **The left side** of the correction is an argument of the routine of one
 quadruple (`xzquad`, `xzqsquad`): for (Q), z from T2 with the conjugated
@@ -396,24 +485,40 @@ layer, the reader, the reduction, restart, progress and sampling do not
 depend on what is on the left; the checkpoint files carry its kind, so a
 checkpoint of (Q) is not taken for (Q)_Lambda.
 
-**Memory per rank:** each rank has its own work array of MAXCOR words and
-its own plan.  A rank holds the integrals (`<vv||vv>` on pairs, `<ov||vv>` on
-pairs, the small blocks), T2 and one T3 (read-only: the dense packed T3
-without labels, its blocks with labels), Xo, Xv for the occupied indices of
-the plan, and the work arrays of a quadruple.  H2O / cc-pVTZ, complex, dense:
-at least 2879 MB per rank, 6561 MB with the default plan (T3 370 MB, the
-integrals 1.5 GB, Xv 2.9 GB, the vectors of a quadruple 0.24 GB, operands).
+**Memory per rank, and what a node holds once.**  Each rank has its own work
+array (section 4: the words that (Q) takes with the plan of rank 0) for what
+is private: the integrals (`<vv||vv>` on pairs, `<ov||vv>` on pairs, the
+small blocks), T1, T2, Xo, Xv for the occupied indices of the plan, and the
+work arrays of a quadruple.  **T3 (and lambda3 for (Q)_Lambda) are not in
+it**: the ranks read them where `XZAMPS` (`XZLAMB`) are mapped, and the page
+cache of the node holds the file once for all of them.  The (Q) routines
+only read T3 (the map is read-only: a write would stop the program), so
+nothing else changes - the address of the map enters as the index `jt3`
+(`jl3`) of the work array's address space, as CFOUR's `ICORE(I0)` does for
+the work array itself.  Measured sizes and the resident memory of the ranks:
+section 14.  What a rank still holds of the size of T3 or larger is Xo
+(C(o,3) o v(v-1)/2 numbers, dense in every mode: 6.9 GB for 26 + 160 real),
+formed by every rank - the next thing to share (not done).
 
 **Restart, progress, sampling.**  Every rank appends a line per finished
 task to `XZQCHK.<rank>`.  A later run with the same task list (the same
 number of ranks, or the same `XZ_QTASKS`) takes the finished tasks of all
-such files as done and continues; the files are deleted when (Q) has
-finished.  After every task a rank prints the task, its time, the per cent of
-its own work done and the time left by the cost model.  `XZ_QSAMPLE=f`
-(0 < f < 1) does the fraction f of the quadruples of every task and prints
-the estimated wall time of the whole (Q) (from above: Xv is formed for every
-task in full); no energy is printed and TOTENERG is not written.
-`XZ_QSTOP=n` (a test hook) ends the run after n tasks of a rank.
+such files as done and continues - the first line of a file carries a number
+computed from the list, so the file of another list is not taken (with
+another number of ranks the calculation starts again) -; all ranks read the
+files before any of them writes one; the files are deleted when (Q) has
+finished.  After every task a rank prints the task, its time, the per cent
+of its own work done and the time left by the cost model.  `XZ_QSAMPLE=f`
+(0 < f < 1) does the fraction f of the quadruples of every task, evenly
+spread over the task (at least one), with Xv formed as in the whole
+calculation, and prints the estimated wall time of the whole (Q) (per task:
+the time of Xv plus the time of its quadruples in proportion; the slowest
+rank); no energy is printed and TOTENERG is not written.  (Before 2026-10-09
+a sample took the *first* quadruples of a task, whose sectors are not the
+average ones, and formed Xv again for every task: its estimates are not
+comparable - section 14.)  `XZ_QTASKS=n` asks for about n tasks of equal
+numbers of quadruples instead of the rule above, `XZ_QSTOP=n` ends the run
+after n tasks of a rank (test hooks of the list and of restart).
 
 ## 6. Symmetry labels and blocks
 
@@ -723,9 +828,15 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   equations with constant terms (lambda of CCSDT(Q), the equations of the
   first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); the densities of
   (Q) and (Q)_Lambda (the density of CCSDT is there: section 13).
-- (Q) over ranks on separate nodes was not timed (section 8); a smaller
-  duplication of Xv between the ranks (tasks of one l kept on one rank where
-  the balance allows it) was not tried.
+- (Q) over ranks on separate nodes was not timed (section 8).  Whole groups
+  now go to the ranks and T3 is shared between the ranks of a node (sections
+  5, 14).  Not done there: Xo shared in the same way (it is formed by every
+  rank - 21 to 25 s per rank at 12 x 4 - and is the largest private array
+  of (Q): 6.9 GB of 11.6 GB per rank for 26 + 160 in real blocks, which is
+  what limits the number of ranks on a node now); Xv passed between ranks instead of formed again by the pieces of a
+  cut group; the mapped T3 on a network file system (the warning and
+  `XZ_QMAP=0` are there, no such run was made); a cost model with a constant
+  of Xv per mode (one constant, between the two measured ones).
 - (Q) in sectors was validated at cc-pVDZ only and not timed; its memory
   plan has one knob (the occupied indices whose Xv is held), no batches of
   columns.
@@ -734,8 +845,11 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   SCF).
 - A scheduler compiled once for both element types (section 3): today one
   source, two instances.
-- T3 in a mapped scratch file; `<ab||cd>` in a file (it is in the work
-  array, bare, once; the dressed operator is never stored whole).
+- T3 of the iterations in a mapped scratch file ((Q) reads a mapped T3:
+  section 5); `<ab||cd>` in a file (it is in the work array, bare, once; the
+  dressed operator is never stored whole).  A split of the DIIS vectors
+  between the work array and the file: decided against (section 4: all in
+  memory, or all in the file).
 - CCSDTQ, (P), properties, the AO-driven CCSD(T); CFOUR's nonrelativistic
   programs.
 - The relaxed density for `xsox2cprop` (`denfinal`): the density stage and
@@ -745,8 +859,7 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   production size; a relaxed density for labelled real spinors (`xx2czvec`
   needs the spinors of CFOUR's SCF, which have no labels); a Z-vector solver
   of our own where `xx2czvec` is wrong (section 10.4).
-- The one-rank-per-node timing of (Q), a smaller duplication of Xv between
-  ranks, labels with a modulus: as before.
+- The one-rank-per-node timing of (Q), labels with a modulus: as before.
 - No input section of the ZMAT is read (`%zccsdt` of the Python front end):
   method by argument or CALC, thresholds by CC_CONV / CC_MAXCYC, everything
   else by the environment variables named above (test hooks and overrides).
@@ -1865,3 +1978,271 @@ spinors is not known.
   active spinors has no such array.
 - T3 or l3 in a mapped file; the pages of the work array touched in
   parallel (section 12).
+
+## 14. (Q) over the ranks of a node: whole groups, a shared T3; the DIIS file
+
+Three things were decided on 2026-10-09 and are in the program at this
+commit: (A) the DIIS vectors stay all in memory or all in the file - no
+split (section 4; nothing changed in the code, the rule is stated and its
+cost measured below); (B) (Q) and (Q)_Lambda give whole groups to the ranks
+(section 5); (C) the ranks of a node read one T3 (lambda3) from the mapped
+files (sections 2, 4, 5).  One timing job on a whole node: **job 31790244,
+node c426** (2 x 24 cores Xeon Gold 6248R, 189 GB; `sbatch -p parallel -N 1
+-n 1 -c 48 --mem=180G`), HBr / cc-pVQZ-DK, 10 spinors frozen, labelled real
+spinors written by `bench/cfour/labelled_run.py` (26 + 160, 10 classes; T3
+1591 MB, 11.4 % of the dense array), run directories and `XZAMPS` in the
+node-local `/tmp`, `MEMORY_SIZE=150 GB`; the binary of master before these
+changes ("old", commit 429d755) and the present one ("new", 676d901)
+alternating; Intel MPI on the one node (`I_MPI_HYDRA_BOOTSTRAP=fork`,
+`I_MPI_PIN_DOMAIN=omp`, `OMP_PROC_BIND=close OMP_PLACES=cores`: each rank on
+its own cores).  The validation of the final state is job 31790248 (node
+c105, 24 cores) and the login node.  Scripts, logs and all outputs:
+`/home/xwang405/.claude/jobs/7ba4fcf7/tmp/natq/` (`job.sbatch`,
+`job-31790244.log`, `job_31790244/`; `d2.sbatch`, `d2-31790248.log`,
+`d2_31790248/`; `tab.py`, `stages.py`, `fitcost.py`; `regrD.sh`, `tq.sh`,
+`tc.sh`).
+
+### What the earlier numbers were, and what (Q) over ranks really takes
+
+The reason for (B) was the table "1 x 48, 2 x 24, 4 x 12, 6 x 8 ranks x
+threads: 15.0, 8.1, 6.1, 6.8 minutes", read as "the finer split loses to the
+repeated Xv".  Those were *estimates of a 0.5 % sample* (`XZ_QSAMPLE`), and
+the sample of that binary was biased twice: it took the first quadruples of
+every task (sectors that are not the average ones), and it formed Xv again
+for every task.  **The whole calculation, measured** (wall time of `mpirun`,
+reading the integrals included; converged amplitudes, CCSDT 20 cycles of
+9.17 s on 48 threads):
+
+| ranks x threads | old: wall | new: wall | old: sum over ranks / slowest | new | new: slowest rank above the mean |
+|---|---|---|---|---|---|
+| 1 x 48 | not run | 729.9 s | - | - | - |
+| 2 x 24 | 413.2 s | 421.6 s | 1.99 | 1.99 | 0.3 % |
+| 4 x 12 | 391.3 s | 383.4 s | 3.82 | 3.96 | 1.1 % |
+| 6 x 8 | 386.0 s | 376.3 s | 5.76 | 5.90 | 1.6 % |
+| 12 x 4 | 391.5 s | 386.4 s | 11.71 | 11.85 | 1.3 % |
+
+E(CCSDT[Q]) = -2605.380721510858 and E(CCSDT(Q)) = -2605.381268110720 in
+all nine runs (old and new; 1, 2, 4, 6 and 12 ranks).
+
+So, plainly: **the finer split never lost to the repeated Xv, and (B) gains
+2 %, not a factor.**  One rank per socket is 1.7 to 1.8 times one rank on both
+sockets; beyond that the wall time of (Q) on this node does not depend on
+how the 48 cores are cut into ranks (376 to 392 s), with the old binary as
+with the new one.  What (B) changed, measured: the balance (sum over ranks /
+slowest 3.96 of 4, 5.90 of 6, 11.85 of 12, from 3.82, 5.76, 11.71) and the
+seconds of Xv (rank 0: 7.1 -> 4.0 s at 4 x 12, 8.6 -> 3.9 s at 6 x 8; all
+ranks of the new binary together: 10.0, 17.3, 25.1, 77.6 rank-seconds for 2,
+4, 6, 12 ranks, i.e. at most 1.7 % of the 12 x 375 rank-seconds).  Why one
+node does not get faster beyond two ranks was **not determined** here (the
+three parts of a quadruple - operands, products, reductions: 73, 122, 167 s
+of rank 0 at 4 x 12 - all run at their full number of threads; the same
+flat curve shows at 26 + 78 on 24 cores, below).  Ranks on separate nodes
+were not measured (section 8).
+
+What is formed by every rank and *does* grow with the number of ranks is
+**Xo**: 2.2 s on one rank with 48 threads, but 5.3 to 8.0 s per rank at 4 x
+12, 9.4 to 12.6 s at 6 x 8 and 21 to 25 s per rank at 12 x 4 (6 % of the
+375 s; 290 rank-seconds), three times the Xv there.  It is also the largest
+private array (below).  Sharing Xo as T3 is shared is the next step; it was
+not part of this work.
+
+**The sample** (`XZ_QSAMPLE=0.005`, 74 of 14950 quadruples; each run twice):
+estimated wall time of the whole (Q) against the slowest rank of the whole
+calculation above.
+
+| ranks x threads | old: estimates | old: measured | new: estimates | new: measured |
+|---|---|---|---|---|
+| 1 x 48 | 745, 640 s | - | 760, 752 s | 725 s |
+| 2 x 24 | 332, 349 s | 408 s | 421, 429 s | 415 s |
+| 4 x 12 | 371, 359 s | 386 s | 420, 418 s | 378 s |
+| 6 x 8 | 405, 427 s | 380 s | 448, 507 s | 372 s |
+| 12 x 4 | 490, 492 s | 384 s | 442, 440 s | 375 s |
+
+The old sample was off by -19 to +28 % and put the rank counts in the wrong
+order; the new one (quadruples evenly spread over a task, Xv as in the
+whole calculation) is high by 1 to 36 %, more with more ranks: with one or
+two quadruples between two formations of Xv the sampled quadruples run on
+cold caches.  It is an upper estimate to plan a job with, not a
+measurement; a ranking of rank counts needs whole calculations.
+
+### (B) The distribution and its cost model
+
+The rule is in section 5.  For 26 occupied spinors no Xv is formed twice up
+to 6 ranks (23 tasks = the 23 groups, 322 pairs (x, l)); with 12 ranks 33
+tasks and 499 formations (the old list: 101 tasks), and the slowest rank of
+the model 2.5 % above the mean.  Energies do not depend on the number of
+ranks or on the list: 12 decimals at 26 + 160 (above), at 26 + 78 with 1, 2,
+4, 6, 12 ranks in blocks and 1, 4 ranks dense (below), and in the small
+cases with 1 to 4 ranks, with `XZ_QTASKS=20`, interrupted (`XZ_QSTOP`) and
+restarted with the same and - the files then being of another list and not
+taken - with another number of ranks (`tq.sh`).
+
+**The model was measured** with `XZ_QCOST` (the wall time of every
+quadruple and of every Xv of a whole (Q); `fitcost.py`), HBr 26 + 78:
+
+- *Blocks (8 classes).*  The time of a quadruple follows the number of
+  virtual quadruples of its sector; operation counts of the five products
+  add nothing to the fit.  Per group l, model over measured time, for the
+  groups from l = 15 on (93 % of the time): 0.95 to 1.03 on 6 threads (login
+  node), 0.87 to 1.04 on 24 threads (job 31790248: small sectors do not get
+  cheaper in proportion with many threads).  One cost for every quadruple,
+  the former model: 0.89 to 1.21 and 0.91 to 1.21 - the largest group (l =
+  25, 15 % of all quadruples) is overrated by a fifth; at 26 + 160 on 48
+  threads the quadruples of l = 25 take 41.9 ms against 48 to 52 ms for l =
+  13 to 24.
+- *Dense.*  One cost per quadruple is right within 5 % per group (24
+  threads, real).
+- *Xv*, in seconds per element of its products over seconds per virtual
+  quadruple: 0.0017 (blocks, 6 threads), 0.0025 (blocks, 24 threads), 0.0005
+  (dense real, 24 threads).  The program uses one constant, 0.0012; Xv is at
+  most 2 % of the work, so a factor of two in it moves the balance by a per
+  cent.  Xv(x, l) for all x of the largest group costs about as much as a
+  dozen of its 2300 quadruples (26 + 160, 12 threads: 54 ms per pair, 100 ms
+  per quadruple), which is why a cut group forms its Xv again on every rank
+  that has a piece instead of passing it on.
+
+What the model achieves is the "sum over ranks / slowest" column above: the
+slowest rank within 1.6 % of the mean at 26 + 160, within 5 % at 26 + 78 (6
+x 4: 37.8 to 41.4 s).
+
+### (C) One T3 per node
+
+`XZAMPS` (`XZLAMB`) is mapped read-only by every rank; the T3 of the file is
+the stored T3 of every mode, so no mode needs a conversion or a second file
+(validated: real and complex, blocks and dense, with phases - `tc.sh`: all
+of section 7's small cases, serial and with 2 and 3 ranks, from the files
+and in one run with the iterations, against `XZ_QMAP=0`; identical to 12
+decimals).  The plan of a rank (26 + 160, real blocks):
+
+| | old / `XZ_QMAP=0` | mapped |
+|---|---|---|
+| (Q): least, per rank | 10923.9 MB | 9332.9 MB |
+| (Q): with the default plan, per rank | 13159.4 MB | 11568.4 MB, and 1591.0 MB once per node |
+| (Q)_Lambda: with the default plan, per rank | 15177 MB | 11994.7 MB, and 3182.1 MB once per node |
+
+Measured resident memory (sampled every 5 s from `/proc/<pid>/status`; MB;
+the sample with the largest sum; `RssAnon` is a rank's own memory, `RssFile`
+the pages of mapped files that it has touched, which it shares):
+
+| run | binary | RssAnon, sum of the ranks | largest rank | RssFile per rank | `Cached` of the node |
+|---|---|---|---|---|---|
+| (Q), 2 x 24 | old | 25579 | 12850 | 21 | 15721 |
+| | new | 22609 | 11306 | 1671 | 15721 |
+| (Q), 4 x 12 | old | 50015 | 12700 | 21 | 15106 |
+| | new | 44123 | 11081 | 1671 | 15106 |
+| | new, `XZ_QMAP=0` (sample) | 47523 | 12017 | 21 | 15113 |
+| (Q), 6 x 8 | old | 73985 | 12474 | 21 | 15137 |
+| | new | 64804 | 10905 | 1671 | 15137 |
+| (Q), 12 x 4 | old | 147134 | 12397 | 21 | 15231 |
+| | new | 127089 | 10886 | 1670 | 15218 |
+| (Q)_Lambda, 4 x 12 | old | 57705 | 14623 | 21 | 16745 |
+| | new | 45781 | 11510 | 3320 | 16745 |
+
+Every rank's own memory is smaller by T3 (by T3 and lambda3: 3.1 GB per
+rank for (Q)_Lambda), every rank shows the mapped file as 1650 MB of
+`RssFile`, and the page cache of the node is the same with 1 and with 12
+ranks and with the old and the new binary - the file is in it once (it was
+there before as well: the old ranks had read it through the same cache into
+their own copies).  At 12 x 4 the node had 8 GB free with the old binary
+and 28 GB with the new one.  The time is unchanged by the map (4 x 12
+sample: 23.7 s mapped, 24.1 s private; the whole (Q)_Lambda: 508.2 s new,
+509.0 s old).  The ranks other than 0 allocate 11.6 GB instead of 150 GB.
+
+**24 x 2 was not run**: the least that a rank takes is 9.33 GB, and 24 of
+them are 224 GB on a node of 189 GB.  T3 is no longer the reason - Xo is
+(C(26,3) x 26 x 12720 numbers = 6.9 GB of the 9.3 GB, in every rank, dense in
+every mode).  For the sizes named with the task: complex dense 26 + 160 has
+a T3 of 27.9 GB and an Xo of 13.8 GB per rank; 26 + 320 a T3 of 225 GB,
+which must then fit the page cache of the node once (it had to fit the work
+array of every rank before) - neither was run.
+
+**Not validated:** a run directory on a network file system (the warning of
+section 2 and `XZ_QMAP=0` exist; `xz_fs_local` was not exercised on such a
+directory); more than one node.
+
+### (A) The DIIS vectors in the work array or in the file
+
+`XZ_NCYC=6`, the new binary, `XZ_PLAN="0 0 0 0 0 0 0 0"` with `XZ_DIIS=m8`
+(all in the work array) or `f8` (the T3 parts in `XZDIIS`); seconds per
+cycle, mean of six and the sixth (5 vectors in the subspace by then; the
+runs in blocks and dense on 48 threads were made twice):
+
+| case | threads | in memory: mean, 6th | in the file: mean, 6th | DIIS stage, 6 cycles: memory, file | work array: memory, file |
+|---|---|---|---|---|---|
+| 26 + 160, real blocks (T3 1.6 GB) | 24 | 11.50, 11.60 (11.49, 11.60) | 14.17, 16.14 (14.19, 16.41) | 1.9, 17.0 s | 32.8, 9.0 GB |
+| | 48 | 9.40, 9.82 (9.28, 9.11) | 12.96, 15.67 (12.90, 15.82) | 1.5, 19.4 s | |
+| 26 + 120, real dense (`XZ_LABELS=0`; T3 5.8 GB) | 24 | 70.55, 71.77 | 80.11, 88.37 | 5.4, 60.1 s | 103.5, 15.9 GB |
+| | 48 | 48.09, 48.83 (47.95, 48.19) | 59.04, 67.29 (59.19, 68.72) | 3.3, 69.9 s | |
+
+With five vectors in the subspace a cycle with the file is 23 to 65 % longer
+than one with the vectors in memory (dense 24 threads: 23 %, 48 threads: 38
+%; blocks: 39 and 60 to 65 %), and it grows with every vector (by about 4 s
+at 26 + 120; cycles with all eight were not run).  **Where** it costs is not where
+the Python program lost it (docs/benchmarks.md, "The DIIS file and the last
+cores": the write-back slowed the products of the following passes): here
+the passes are unchanged - dense, 48 threads, six cycles: pass 2 154.4 s in
+memory and 150.3 s with the file, pass 1 46.1 and 46.3 s, the pp-ladder
+GEMM 62.8 and 63.1 s - and the whole difference is the DIIS stage itself,
+which reads the earlier vectors record by record for the overlaps and again
+for the extrapolation (69.9 s against 3.3 s; the file of 93.5 GB, 70 GB of
+it in the page cache of the node at the end).  So "memory first" is right
+for the native program too, and a plan that has the memory should use it:
+the default plan did (`DIIS:   8 vectors in the work array`, 32.8 GB for 26
++ 160, 103.5 GB for 26 + 120 dense with `MEMORY_SIZE=150 GB`).  **Not
+done:** a DIIS stage in the file with fewer passes over it (the overlaps of
+the new error vector and the extrapolation in one pass per old vector would
+halve the reads).
+
+### Validation of the final state
+
+(1) **The regression set** of sections 7, 11, 13 with the new binary (login
+node, 4 threads; `regrD.sh`): `ccsdt(q)_l` of H2O / 6-31G, the frozen +
+`%vircut` case, HBr / cc-pVDZ-DK dense, the labelled case in its four modes,
+with phases (blocks and dense), shuffled, and `ccsdt(q)` of two - cycles,
+E(CCSDT), E(CCSDT[Q]_L), E(CCSDT(Q)_L), E(CCSDT[Q]), E(CCSDT(Q)) identical
+to the 12 decimals of the lines kept from before this work
+(`native3/base.regr`; one pseudo-energy differs in its 14th decimal).  The
+density stage (`ccsdt_density`) with the old and the new binary, the seven
+files of `xx2czvec` number by number, largest |difference|: H2O 8.7e-19;
+H2O with frozen and dropped spinors 6.9e-18 (`dpopo`, `dpvpv` identical);
+HBr / cc-pVDZ-DK with 28 frozen 1.7e-18 and with 28 frozen, 2 dropped
+1.1e-19 (`dpopo` 2e-28, `dpvpv` 1e-25); the labelled case, active part, in
+blocks 5.6e-17, dense complex 1.4e-20; with phases 5.6e-17.
+
+(2) **HBr / cc-pVTZ-DK, 10 frozen, labelled (26 + 78)**, converged
+(`CC_CONV=9`), the native program in blocks and dense and the Python program
+(`pytime.py`: the front end's calls, labels on) on the same files; job
+31790248, node c105, 24 threads, the binary of 676d901:
+
+| | native, blocks | native, dense | Python |
+|---|---|---|---|
+| E(CCSDT) | -2605.269299541779 | -2605.269299541779 | -2605.269299541779 |
+| E(CCSDT[Q]) | -2605.268881367132 | -2605.268881367132 | -2605.268881367132 |
+| E(CCSDT(Q)) | -2605.269257610936 | -2605.269257610936 | -2605.269257610936 |
+| E(CCSDT[Q]_L) | -2605.268884407869 | -2605.268884407869 | -2605.268884407869 |
+| E(CCSDT(Q)_L) | -2605.269268719835 | -2605.269268719835 | -2605.269268719835 |
+| cycles, CCSDT / Lambda | 20 / 18 | 20 / 18 | 20 / 18 |
+
+(the files of this job are not those of the table in section 12, hence the
+other last digits; the three columns here are one set of files.)  The same
+numbers from: (Q) and (Q)_Lambda in blocks with 2 x 12, 4 x 6, 6 x 4 and 12
+x 2 ranks x threads, mapped; (Q) with `XZ_QMAP=0`, serial and 4 x 6;
+`ccsdt(q)_l` in one run on 3 x 8; dense (Q) and (Q)_Lambda on 4 x 6.  Wall
+times of (Q) there (24 cores): blocks 78.8 s on one rank, 41.2, 41.0, 41.8,
+43.4 s on 2, 4, 6, 12 ranks; dense 458 s on one rank, 310 s on 4 x 6;
+(Q)_Lambda in blocks 107.3 s, and 62.2, 57.4 s on 2, 4 ranks.  The Python
+times of this job are not a comparison of the programs (its Lambda ran on
+the packed block) and are not quoted.
+
+(3) `tests/test_cfour.py` (the hand-over formats; the worktree's libraries):
+12 passed.
+
+### Not done
+
+- Xo formed once per node and mapped like T3 (above: the largest private
+  array and the one repeated cost that grows with the ranks).
+- Why (Q) on one node does not get faster beyond one rank per socket.
+- Ranks on several nodes; a run directory on a network file system.
+- The DIIS stage in the file with fewer passes; cycles with all eight
+  vectors in the file were not timed.
+- The estimate of `XZ_QSAMPLE` is an upper estimate (1 to 36 % high here).

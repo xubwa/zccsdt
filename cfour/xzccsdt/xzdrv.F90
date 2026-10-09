@@ -836,10 +836,10 @@ end subroutine xzwrec
 !   xc(K)  Xv for a pair (x, l) of total class K: gxv times the elements of
 !          its products (<bc||ef> on (bc), e times t2 on f, d)
 ! Measured (docs/native.md, section 14): with qc the times of the groups
-! that hold nine tenths of (Q) are met within 5 % in blocks (HBr, 26 + 78),
-! where one cost for every quadruple is off by up to 21 %; gxv is 0.0017
-! there and 0.00075 for dense complex H2O (10 + 106) - Xv is a few per cent
-! of the work, so its constant matters little.
+! that hold nine tenths of (Q) are met within 5 % (6 threads) to 13 % (24
+! threads) in blocks (HBr, 26 + 78), where one cost for every quadruple is
+! off by up to 21 %; gxv is 0.0017 to 0.0025 there and 0.0005 for dense
+! real T3 - Xv is at most 2 % of the work, so its constant matters little.
 subroutine xzqmodel(qc, xc)
   use xzdata
   implicit none
