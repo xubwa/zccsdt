@@ -257,15 +257,21 @@ def write_labels(directory, labels, modulus=0):
             f.write(' '.join('%d' % x for x in labels[k:k + 16]) + '\n')
 
 
-def read_dgcosym(directory):
-    '''2 m_j of all spinors from the file ``dgcosym`` that CFOUR's
-    two-component SCF (xsox2chf) writes: one Fortran record of 8-byte
-    integers, the m_j block of each spinor in the order of scf2ceig - block
-    2k - 1 is m_j = +(2k - 1)/2, block 2k is m_j = -(2k - 1)/2 (linsym of
-    sox2chf).  With a ``%dglin`` section (or %dg2lin, %dg3lin, %dg4lin) in
-    the ZMAT the SCF is done in these blocks and its spinors give real MO
-    integrals; without one every spinor is in block 1.  None if the file is
-    not there or has one block only.'''
+def read_dgcosym(directory, table=None):
+    '''Labels of all spinors from the file ``dgcosym`` that CFOUR's
+    two-component SCF (xsox2chf) writes with a ``%dglin`` section (or
+    %dg2lin, %dg3lin, %dg4lin) in the ZMAT: one Fortran record of 8-byte
+    integers, the number of the m_j block of each spinor in the order of
+    scf2ceig.  A block number is not a label that adds; ``table`` is the
+    definition that turns it into one: table[block number] = label (a dict
+    or a sequence indexed from 1).  Without it the definition of the SCF
+    itself is used (linsym of sox2chf): block 2k - 1 is 2 m_j = +(2k - 1),
+    block 2k is 2 m_j = -(2k - 1).  None if the file is not there or has one
+    block only (no %dglin: no symmetry).
+
+    This is a conversion to be asked for, not something read_labels() does:
+    the labels of a run are those of the file ``xzlabels`` (write_labels()),
+    and the programs give them no meaning beyond adding up.'''
     path = os.path.join(directory, 'dgcosym')
     if not os.path.isfile(path):
         return None
@@ -277,17 +283,18 @@ def read_dgcosym(directory):
         raise ValueError('%s: block numbers from 1 expected' % path)
     if blocks.max() == 1:
         return None
-    return np.where(blocks % 2 == 1, blocks, -(blocks - 1)).astype(np.int64)
+    if table is None:
+        return np.where(blocks % 2 == 1, blocks, -(blocks - 1)).astype(np.int64)
+    get = table.__getitem__ if isinstance(table, dict) else (lambda k: table[k - 1])
+    return np.array([get(int(k)) for k in blocks], dtype=np.int64)
 
 
 def read_labels(directory):
     '''(labels of all spinors, modulus) of the file ``xzlabels`` of a run
-    directory (write_labels()); without that file, 2 m_j from CFOUR's own
-    ``dgcosym`` (read_dgcosym(), modulus 0); None if neither gives labels.'''
+    directory (write_labels()); None if the file is not there.'''
     path = os.path.join(directory, LABELS)
     if not os.path.isfile(path):
-        mj = read_dgcosym(directory)
-        return None if mj is None else (mj, 0)
+        return None
     with open(path) as f:
         numbers = [int(x) for line in f if not line.lstrip().startswith('#') for x in line.split()]
     if len(numbers) < 2 or len(numbers) != numbers[0] + 2:

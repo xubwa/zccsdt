@@ -428,24 +428,27 @@ def test_handover_to_a_stand_in_for_xx2czvec(tmp_path, monkeypatch, method, nfro
 
 
 def test_labels_from_dgcosym(tmp_path):
-    '''2 m_j of the spinors from the file dgcosym of CFOUR's two-component
-    SCF (%dglin): block 2k - 1 is +(2k - 1), block 2k is -(2k - 1); xzlabels
-    has precedence; one block only means no labels.'''
+    '''Labels from the block numbers of CFOUR's dgcosym (%dglin): a
+    conversion with a table given from outside, or with the definition of
+    the SCF (block 2k - 1 is +(2k - 1), block 2k is -(2k - 1)); read_labels()
+    reads xzlabels only; one block means no labels.'''
     from zccsdt import cfour
     d = str(tmp_path)
-    assert cfour.read_labels(d) is None
     blocks = np.array([1, 1, 2, 2, 3, 4, 1, 2, 5, 6], dtype=np.int64)
 
     def record(x):
         n = np.array([x.nbytes], dtype=np.int32)
         with open(tmp_path / 'dgcosym', 'wb') as f:
             f.write(n.tobytes() + x.tobytes() + n.tobytes())
+    assert cfour.read_dgcosym(d) is None
     record(blocks)
+    assert cfour.read_labels(d) is None
+    assert cfour.read_dgcosym(d).tolist() == [1, 1, -1, -1, 3, -3, 1, -1, 5, -5]
+    other = {1: -1, 2: 1, 3: -3, 4: 3, 5: -5, 6: 5}
+    assert cfour.read_dgcosym(d, other).tolist() == [-1, -1, 1, 1, -3, 3, -1, 1, -5, 5]
+    assert cfour.read_dgcosym(d, [0, 2, 4, 6, 8, 10]).tolist() == [0, 0, 2, 2, 4, 6, 0, 2, 8, 10]
+    cfour.write_labels(d, cfour.read_dgcosym(d))
     lab, mod = cfour.read_labels(d)
     assert mod == 0 and lab.tolist() == [1, 1, -1, -1, 3, -3, 1, -1, 5, -5]
-    cfour.write_labels(d, np.arange(10), 4)
-    lab, mod = cfour.read_labels(d)
-    assert mod == 4 and lab.tolist() == list(range(10))
-    os.remove(tmp_path / 'xzlabels')
     record(np.ones(10, dtype=np.int64))
-    assert cfour.read_dgcosym(d) is None and cfour.read_labels(d) is None
+    assert cfour.read_dgcosym(d) is None
