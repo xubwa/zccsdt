@@ -44,7 +44,8 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   integer(8) :: kd, kxacc, kgmq, kbuf, kwv, kg2, kyb, ku, kxb
   integer(8) :: kslab, ktv, kxp, kbd, ktb, kz, kgq, kpib, kgh, nbdw
   integer(8) :: q0, nq, i0, nb, h, lo, nqh
-  logical :: dense
+  integer(8) :: khg, khx
+  logical :: dense, pairhh
   real(8) :: stats(4), t0
   ZT :: one, zero, half
   one = 1
@@ -87,7 +88,8 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   kweff = xzget(NW * ov2, 'W_ovvo')
   kwo = xzget(NW * ov * npo, 'W_vooo')
   kadrv = xzget(NW * npo * nv * ny, 'pass-2 operand A')
-  ko6 = xzget(NW * nto * nto, 'occupied operator')
+  pairhh = xzhhpair()
+  ko6 = xzget(NW * merge(npo * npo, nto * nto, pairhh), 'occupied operator')
   kwring = xzget(NW * ov2, 'pass-2 operand W')
   ka2 = xzget(NW * ov2, 'work A')
   kb2 = xzget(NW * ov2, 'work B')
@@ -274,7 +276,11 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
                    w(kt1n), w(kt2n), w(ka2), w(kb2), w(kx2))
     call xztoc(1, 'CCSD part')
     call xztic()
-    call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(kwkl), w(kfeoo), w(ko6))
+    if (pairhh) then
+      call N(xzwpair)(no, npo, w(jopa), w(jopb), w(kwkl), w(kfeoo), w(ko6))
+    else
+      call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(kwkl), w(kfeoo), w(ko6))
+    end if
     call xztoc(1, 'occupied operator')
   end if
 
@@ -310,10 +316,17 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   else
     call N(xzbpass2)(w, kt3, kr3, w(kwring), w(kadrv), w(kbd), 1_8, 0_8, w(kbd), w(kbd))
   end if
+  if (pairhh) then
+    khg = xzget(NW * npo * no * xzhhcols(), 'hh ladder: T3 by pairs')
+    khx = xzget(NW * npo * no * xzhhcols(), 'hh ladder: product')
+  end if
   if (.not. xzdry) then
     call xztoc(1, 'pass 2')
     call xztic()
-    if (dense) then
+    if (pairhh) then
+      call N(xzhhapply)(1_4, no, npo, nto, nvt, xzhhcols(), w(jotri), w(josgn), w(jofree), w(jopair), w(ko6), &
+                        w(kt3), w(kr3), w(khg), w(khx))
+    else if (dense) then
       call N(zc_t3_occop)(w(ko6), w(kt3), nto, nvt, ncb, c_null_ptr, w(kr3))
     else
       call N(xzbocc)(w, kt3, kr3, w(ko6))

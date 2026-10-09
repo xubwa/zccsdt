@@ -61,7 +61,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   lwov = xzget(NW * ov * ov, 'W_ovvo')
   lwl = xzget(NW * ov * ov, 'ring operator')
   lwkl = xzget(NW * npo * npo, 'W_oooo')
-  lo6t = xzget(NW * nto * nto, 'occupied operator')
+  lo6t = xzget(NW * merge(npo * npo, nto * nto, xzhhpair()), 'occupied operator')
   looovd = xzget(NW * no * no * ov, 'dressed <oo||ov>')
   lt2p = xzget(NW * no * no * nvp, 'T2 [i][j][Q]')
   lgmq = xzget(NW * no * nvp * ny, 'pass-1 operand G')
@@ -306,7 +306,7 @@ subroutine N(xzlamim)(w)
     call N(xzlops)(no, nv, npo, nvp, nto, w(jt2), w(kt2pp), w(lfov), w(looovd), w(kooood), w(joovv), &
                    w(joovvp), w(jgpp), w(kd), w(kwo), w(lwov), w(lfoo), w(jopa), w(jopb), w(jvpa), &
                    w(jvpb), w(jofree), w(jopair), w(lgpd), w(lbdrv), w(ladrv), w(lvx), w(lwl), w(lwkl), &
-                   w(lo6t))
+                   w(lo6t), xzhhpair())
     call xztoc(3, 'kept operands, occ. operator')
   end if
   ! W_vvvo moves down to the place of the dressed <ov||vv>
@@ -395,7 +395,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   integer(8) :: m0, m1, ov, ov2, kk
   integer(8) :: kl2p, kl2pp, kyall, kdr, kd1, kg, kdo4, kgoo3, kgvv3, kgvv, kgoo, kdov, ku, kvp
   integer(8) :: kr1, kr2, kr2q, kr1x, kxij, ky1c, kg2, kpmv, ky2t, kbl, kbt, kz, ktv, kxp, kx2b
-  integer(8) :: ky2x, ky1u, km, ka2, kb2, kyab, i0, nb, g, ni, na, h, lo, nqh, plo, np
+  integer(8) :: ky2x, ky1u, km, ka2, kb2, kyab, i0, nb, g, ni, na, h, lo, nqh, plo, np, khg, khx
   logical :: dense
   real(8) :: stats(4), t0
   character(len=256) :: dbg
@@ -544,15 +544,24 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   call xzrel(m1)
 
   ! ---- the transposed operator on the occupied triples
+  m1 = xzmark()
+  if (xzhhpair()) then
+    khg = xzget(NW * npo * no * xzhhcols(), 'hh ladder: L3 by pairs')
+    khx = xzget(NW * npo * no * xzhhcols(), 'hh ladder: product')
+  end if
   if (.not. xzdry) then
     call xztic()
-    if (dense) then
+    if (xzhhpair()) then
+      call N(xzhhapply)(0_4, no, npo, nto, nvt, xzhhcols(), w(jotri), w(josgn), w(jofree), w(jopair), w(lo6t), &
+                        w(kl3), w(kr3), w(khg), w(khx))
+    else if (dense) then
       call N(zc_t3_occop)(w(lo6t), w(kl3), nto, nvt, ncb, c_null_ptr, w(kr3))
     else
       call N(xzbocc)(w, kl3, kr3, w(lo6t))
     end if
     call xztoc(2, 'hh ladder, F_oo')
   end if
+  call xzrel(m1)
 
   ! ---- the residuals of rank 1 and 2
   m1 = xzmark()
@@ -653,7 +662,7 @@ subroutine N(xzlamdump)(w, pre)
   call xzdumpw(pre // '.foo', NW * no * no, w(lfoo))
   call xzdumpw(pre // '.wov', NW * ov * ov, w(lwov))
   call xzdumpw(pre // '.wkl', NW * npo * npo, w(lwkl))
-  call xzdumpw(pre // '.o6t', NW * nto * nto, w(lo6t))
+  if (.not. xzhhpair()) call xzdumpw(pre // '.o6t', NW * nto * nto, w(lo6t))
   call xzdumpw(pre // '.gmq', NW * no * nvp * ny, w(lgmq))
   call xzdumpw(pre // '.gpd', NW * ny * npo * nv, w(lgpd))
   call xzdumpw(pre // '.bdrv', NW * 2 * ny * no * nvp, w(lbdrv))
@@ -727,7 +736,7 @@ end subroutine
 !   wkl[K][P] = ~<K||P> + sum_Q <K||Q> t2[P][Q]
 !   o6t: the transpose of the operator of the T3 equation on occupied triples
 subroutine N(xzlops)(no, nv, npo, nvp, nto, t2, t2pp, fov, ooovd, ooood, oovv, oovvp, gpp, d, wo, wov, &
-                     feoo, opa, opb, vpa, vpb, ofree, opair, gpd, bdrv, adrv, vx, wl, wkl, o6t)
+                     feoo, opa, opb, vpa, vpb, ofree, opair, gpd, bdrv, adrv, vx, wl, wkl, o6t, pairhh)
   use xzkern
   implicit none
   integer(8), intent(in) :: no, nv, npo, nvp, nto
@@ -750,7 +759,8 @@ subroutine N(xzlops)(no, nv, npo, nvp, nto, t2, t2pp, fov, ooovd, ooood, oovv, o
   ZT, intent(out) :: vx(0:nv-1, 0:no-1, 0:nv-1, 0:nv-1)        ! [g][e][j][b]
   ZT, intent(out) :: wl(0:no-1, 0:nv-1, 0:no-1, 0:nv-1)        ! [c][k][e][m]
   ZT, intent(out) :: wkl(0:npo-1, 0:npo-1)                     ! [K][P]
-  ZT, intent(out) :: o6t(0:nto-1, 0:nto-1)
+  ZT :: o6t(*)                                               ! [I][J], or on pairs [K][P]
+  logical, intent(in) :: pairhh
   integer(8) :: p, e, f, j, i, q, n, k, c, m, g, kk, it, jt
   ZT :: s, one, v
   one = 1
@@ -824,12 +834,27 @@ subroutine N(xzlops)(no, nv, npo, nvp, nto, t2, t2pp, fov, ooovd, ooood, oovv, o
     end do
   end do
   if (npo > 0) call N(zc_gemm)(0_4, 1_4, npo, npo, nvp, one, gpp, nvp, t2pp, nvp, one, wkl, npo)
-  call N(xzo6)(no, npo, nto, ofree, opair, wkl, feoo, o6t)
-  do it = 0, nto - 1
-    do jt = it + 1, nto - 1
-      v = o6t(jt, it)
-      o6t(jt, it) = o6t(it, jt)
-      o6t(it, jt) = v
+  if (pairhh) then
+    call N(xzwpair)(no, npo, opa, opb, wkl, feoo, o6t)
+  else
+    call N(xzo6)(no, npo, nto, ofree, opair, wkl, feoo, o6t)
+    call N(xzsqtr)(nto, o6t)
+  end if
+end subroutine
+
+! a square matrix transposed in place
+subroutine N(xzsqtr)(n, a)
+  implicit none
+  integer(8), intent(in) :: n
+  ZT, intent(inout) :: a(0:n-1, 0:n-1)
+  integer(8) :: i, j
+  ZT :: v
+  !$omp parallel do private(i, j, v) schedule(dynamic, 16)
+  do i = 0, n - 1
+    do j = i + 1, n - 1
+      v = a(j, i)
+      a(j, i) = a(i, j)
+      a(i, j) = v
     end do
   end do
 end subroutine

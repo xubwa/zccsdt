@@ -131,6 +131,8 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f12.1,a,i16,a)') '   T3 on i<j<k, a<b<c: ', 8d-6 * nwe * n3, ' MB (', n3, ' amplitudes)'
   if (ncls > 1) write(6, '(a,f8.2,a,f8.2,a)') '   of the dense arrays: T3 ', 100d0 * n3 / (nto * nvt), &
     ' %, <ab||cd> ', 100d0 * nvv / (nvp * nvp), ' %'
+  write(6, '(a,a)') '   hh ladder and F_oo of T3: ', merge('through occupied pairs (as in CCSD)   ', &
+    'one operator on the occupied triples  ', xzhhpair())
   write(6, '(a,f10.2,a)') '   integrals read and sorted: ', tread, ' s'
   flush(6)
 

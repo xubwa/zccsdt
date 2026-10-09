@@ -126,6 +126,7 @@ module xzdata
   integer(8) :: nbt = 1             ! occupied triples of a batch of the pp ladder
   integer(8) :: nba = 1             ! first virtual indices of a batch of the W_vvvo terms
   integer(8) :: ncb = 0             ! columns of a product of the occupied operator
+  integer :: hhset = 0              ! the hh ladder of dense T3: 1 operator on triples, 2 through pairs
 
   ! ---- batch sizes of (Q)
   integer(8) :: qc22 = 1            ! columns (cd) of a product [(ab)][(cd)]
@@ -161,6 +162,34 @@ module xzdata
   real(8) :: tlamim = 0d0                       ! the intermediates of the Lambda equations
 
 contains
+
+  ! The hh ladder and F_oo of dense T3 through occupied pairs (xzhhapply) or
+  ! with the operator on occupied triples (xzo6)?  Operation counts per
+  ! virtual triple: C(o,2)**2 o against C(o,3)**2, a ratio (o-2)**2 / (9 o);
+  ! with the gather and the reduction of the pair form it wins from about 17
+  ! occupied spinors (measured: docs/native.md).  XZ_HH=pair|o6 overrides.
+  ! In blocks of the labels the operator on triples is used (its products
+  ! are below 1 % of an iteration there).
+  logical function xzhhpair()
+    character(len=8) :: arg
+    integer :: larg
+    if (hhset == 0) then
+      hhset = 1
+      if ((no - 2) ** 2 > 12 * no) hhset = 2
+      call get_environment_variable('XZ_HH', arg, larg)
+      if (larg > 0) then
+        if (arg(1:1) == 'p') hhset = 2
+        if (arg(1:1) == 'o') hhset = 1
+      end if
+      if (no < 3) hhset = 1
+    end if
+    xzhhpair = hhset == 2 .and. ncls == 1
+  end function xzhhpair
+
+  ! columns of T3 per product of the pair form
+  integer(8) function xzhhcols()
+    xzhhcols = max(1_8, min(nvt, 512_8))
+  end function xzhhcols
 
   ! the clocks start
   subroutine xztic()

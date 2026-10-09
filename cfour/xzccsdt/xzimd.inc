@@ -832,6 +832,84 @@ subroutine N(xzo6)(no, npo, nto, ofree, opair, wkl, feoo, o6)
 end subroutine
 
 ! ---------------------------------------------------------------------------
+! The same operator on occupied pairs, as CCSD does its hh term:
+!   (L t)[i][j][k] = P(k/ij) sum_{m<n} wp[(mn)][(ij)] t[m][n][k]
+!   wp[(mn)][(ij)] = W[m][n][i][j] - 1/2 (F[m][i] d(n,j) - F[m][j] d(n,i) - F[n][i] d(m,j) + F[n][j] d(m,i))
+! (every index of a triple is in two of its three pairs: the F term with 1/2).
+subroutine N(xzwpair)(no, npo, opa, opb, wkl, feoo, wp)
+  implicit none
+  integer(8), intent(in) :: no, npo
+  integer(8), intent(in) :: opa(0:npo-1), opb(0:npo-1)
+  ZT, intent(in) :: wkl(0:npo-1, 0:npo-1)                      ! [K][P]
+  ZT, intent(in) :: feoo(0:no-1, 0:no-1)                       ! [m][i]
+  ZT, intent(out) :: wp(0:npo-1, 0:npo-1)                      ! [K][P]
+  integer(8) :: kk, p, m, n, i, j
+  ZT :: v
+  !$omp parallel do private(kk, p, m, n, i, j, v)
+  do kk = 0, npo - 1
+    m = opa(kk)
+    n = opb(kk)
+    do p = 0, npo - 1
+      i = opa(p)
+      j = opb(p)
+      v = 0
+      if (n == j) v = v + feoo(i, m)
+      if (n == i) v = v - feoo(j, m)
+      if (m == j) v = v - feoo(i, n)
+      if (m == i) v = v + feoo(j, n)
+      wp(p, kk) = wkl(p, kk) - 0.5d0 * v
+    end do
+  end do
+end subroutine
+
+! ---------------------------------------------------------------------------
+! r3[I][A] += P(k/ij) sum_K op(wp)[K][(ij)] t3[K + k][A] on the packed T3, in
+! chunks of nc columns A: the rows of T3 gathered by occupied pair,
+! tg[K][k][A] = +- t3[K + k][A], one product with the operator on pairs, and
+! the three terms of every triple added to the residual.
+!   ta        1: wp[K][P] as it is (the T3 equation); 0: its transpose (Lambda)
+!   tg, x     work npo * no * nc each
+subroutine N(xzhhapply)(ta, no, npo, nto, nvt, nc, otri, osgn, ofree, opair, wp, t3, r3, tg, x)
+  use xzkern
+  implicit none
+  integer(4), intent(in) :: ta
+  integer(8), intent(in) :: no, npo, nto, nvt, nc
+  integer(8), intent(in) :: otri(0:npo-1, 0:no-1)
+  integer(1), intent(in) :: osgn(0:npo-1, 0:no-1)
+  integer(8), intent(in) :: ofree(0:nto-1, 0:2), opair(0:nto-1, 0:2)
+  ZT, intent(in) :: wp(0:npo-1, 0:npo-1)
+  ZT, intent(in) :: t3(0:nvt-1, 0:nto-1)
+  ZT, intent(inout) :: r3(0:nvt-1, 0:nto-1)
+  ZT :: tg(0:nc-1, 0:no-1, 0:npo-1)                            ! [K][k][A]
+  ZT :: x(0:nc-1, 0:no-1, 0:npo-1)                             ! [P][k][A]
+  integer(8) :: c0, n, p, k, it
+  ZT :: one, zero
+  one = 1
+  zero = 0
+  do c0 = 0, nvt - 1, nc
+    n = min(nc, nvt - c0)
+    !$omp parallel do collapse(2) private(p, k)
+    do p = 0, npo - 1
+      do k = 0, no - 1
+        if (osgn(p, k) > 0) then
+          tg(0:n - 1, k, p) = t3(c0:c0 + n - 1, otri(p, k))
+        else if (osgn(p, k) < 0) then
+          tg(0:n - 1, k, p) = -t3(c0:c0 + n - 1, otri(p, k))
+        else
+          tg(0:n - 1, k, p) = 0
+        end if
+      end do
+    end do
+    call N(zc_gemm)(ta, 0_4, npo, no * nc, npo, one, wp, npo, tg, no * nc, zero, x, no * nc)
+    !$omp parallel do private(it)
+    do it = 0, nto - 1
+      r3(c0:c0 + n - 1, it) = r3(c0:c0 + n - 1, it) + x(0:n - 1, ofree(it, 0), opair(it, 0)) &
+                              - x(0:n - 1, ofree(it, 1), opair(it, 1)) + x(0:n - 1, ofree(it, 2), opair(it, 2))
+    end do
+  end do
+end subroutine
+
+! ---------------------------------------------------------------------------
 ! The operands of pass 2 that are small:
 !   wring[(a, i)][(d, m)] = weff[m][a][d][i]
 !   adrv[P][c][e] = t2[P][e][c],  adrv[P][c][nv + m] = wo[m][c][P]
