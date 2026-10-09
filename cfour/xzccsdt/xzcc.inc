@@ -82,7 +82,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   call get_environment_variable('XZ_DEBUG', dbg, ldbg)
   if (ldbg > 0 .and. nrank > 1) then
     write(6, '(/,a)') ' @XZCCSDT-F, XZ_DEBUG (one step from a file) runs with one rank only.'
-    call errex
+    call xzerrex
   end if
   if (ldbg > 0) then
     ! one step on amplitudes read from a file, the result written next to it
@@ -333,7 +333,7 @@ subroutine N(xzamps)(w, rw, ecorr)
     if (ios == 0) close(77, iostat=ios)
     if (ios /= 0) then
       write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZAMPS failed (iostat ', ios, '): disk full?'
-      call errex
+      call xzerrex
     end if
     return
   end if
@@ -344,13 +344,13 @@ subroutine N(xzamps)(w, rw, ecorr)
   inquire(file='XZAMPS', exist=there)
   if (.not. there) then
     write(6, '(/,a)') ' @XZCCSDT-F, no file XZAMPS: the amplitudes of a converged CCSDT run of xzccsdt.'
-    call errex
+    call xzerrex
   end if
   open(unit=77, file='XZAMPS', form='unformatted', access='stream', status='old', action='read', iostat=ios)
   if (ios == 0) read(77, iostat=ios) tag, head, ecorr
   if (ios /= 0 .or. tag /= 'XZAMPS01') then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZAMPS is not a file of amplitudes of this program.'
-    call errex
+    call xzerrex
   end if
   if (head(1) /= no .or. head(2) /= nv .or. head(3) /= NW .or. head(4) /= ncls .or. head(5) /= n3) then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZAMPS belongs to another calculation or another mode:'
@@ -358,7 +358,7 @@ subroutine N(xzamps)(w, rw, ecorr)
     write(6, '(a,5i12)') '   and here:                                                      ', no, nv, &
       int(NW, 8), ncls, n3
     write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: XZ_LABELS, XZ_REAL)'
-    call errex
+    call xzerrex
   end if
   read(77, iostat=ios) w(jt1:jt1 + n1 - 1)
   if (ios == 0) read(77, iostat=ios) w(jt2:jt2 + n2 - 1)
@@ -366,7 +366,7 @@ subroutine N(xzamps)(w, rw, ecorr)
   close(77)
   if (ios /= 0) then
     write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZAMPS failed, iostat ', ios
-    call errex
+    call xzerrex
   end if
   ! T3 where the file is mapped (stored there as the program uses it, in every mode)
   if (t3shared) call xzmapt3(w, 'XZAMPS', n1 + n2, NW * n3, jt3)

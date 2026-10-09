@@ -360,7 +360,7 @@ subroutine N(xzq)(w, eq5, eq6)
     else
       if (ndone /= tnq(it)) then
         write(6, '(a,i6,2i12)') ' @XZCCSDT-F, (Q): quadruples done and expected in task ', it, ndone, tnq(it)
-        call errex
+        call xzerrex
       end if
       te(:, it) = e
       tdone(it) = .true.
@@ -434,7 +434,7 @@ subroutine N(xzq)(w, eq5, eq6)
       write(6, '(a)') '   (Xv formed as in the whole calculation; the quadruples of a task in proportion)'
     else if (nint(tot(3), 8) /= nquad) then
       write(6, '(a,2i12)') ' @XZCCSDT-F, (Q): occupied quadruples done and expected: ', nint(tot(3), 8), nquad
-      call errex
+      call xzerrex
     else
       call xzq_cleanup()
     end if
@@ -453,7 +453,7 @@ integer(8) function N(xzqslot)(nslot, l, slot)
     end if
   end do
   write(6, '(a)') ' @XZCCSDT-F, (Q): no free place for Xv (an error of the schedule).'
-  call errex
+  call xzerrex
   N(xzqslot) = 0
 end function
 

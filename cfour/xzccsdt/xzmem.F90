@@ -50,7 +50,7 @@ contains
       write(6, '(a,i16,a,i16,a)') '   words needed: ', xztop + m, '   words there: ', xzsize, &
         '   (MEMORY_SIZE)'
       write(6, '(a)') '   This is an error of the memory plan, not of the input.'
-      call errex
+      call xzerrex
     end if
     xztop = xztop + m
     xzpeak = max(xzpeak, xztop)

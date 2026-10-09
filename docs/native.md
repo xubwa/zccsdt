@@ -17,14 +17,15 @@ working memory is the work array that CFOUR's `CRAPSI` allocates
 `lambda_blk.py`, `quadruples_lambda.py`; docs/factorization.md, docs/lambda.md),
 which is the reference of every number below.
 
-State of this document: the program at the commit that gives whole groups
-of (Q) to the ranks and maps T3 for them (section 14; the density stage:
+State of this document: the program at the commit that runs the CCSDT
+iterations and the Lambda iterations over MPI ranks (section 15; (Q) over
+ranks with whole groups and a mapped T3: section 14; the density stage:
 section 13; the threading of the iterations: section 12; the Lambda
 equations and (Q)_Lambda: section 11).  What is measured says so (job, node);
 what is not done is listed at the end.  In short: CCSDT, (Q), the Lambda
 equations of CCSDT and (Q)_Lambda - dense or in the blocks of symmetry
-labels, complex or real, (Q) and (Q)_Lambda over MPI ranks with restart - are
-there and validated against the Python program; so is the density stage of
+labels, complex or real, the iterations and (Q), (Q)_Lambda over MPI ranks,
+(Q) with restart - are there and validated against the Python program; so is the density stage of
 CCSDT with the files for `xx2czvec`, frozen and dropped spinors included
 (section 13), validated against the Python hand-over of section 10 and
 through `xx2czvec` and `xsox2cprop`.
@@ -34,7 +35,7 @@ through `xx2czvec` and `xsox2cprop`.
     source /data/lcheng24/intel/oneapi/setvars.sh --force
     cd cfour/xzccsdt
     make                # -> build/xzccsdt/xzccsdt           (serial: no MPI in it)
-    make MPI=1          # -> build/xzccsdt_mpi/xzccsdt       ((Q) parallel over ranks)
+    make MPI=1          # -> build/xzccsdt_mpi/xzccsdt       (the iterations and (Q) over ranks)
 
 Compilers and flags are those of the CFOUR build (`ifort`, `icc`, `-i8`,
 `-assume byterecl`; `make.config` of `~/apps/cfour-x2cso-rebuild`).  Linked:
@@ -83,29 +84,44 @@ The final energy is written to JOBARC as `TOTENERG`, as `xx2cccsd` does
 
 Threads: `OMP_NUM_THREADS` (kernels and MKL share Intel's OpenMP runtime).
 
-### MPI: (Q) over ranks
+### MPI: the iterations and (Q) over ranks
 
     export PATH=$PATH:/cm/shared/apps/slurm/current/bin   # in a job: mpirun needs srun (section 8)
-    export OMP_NUM_THREADS=8 I_MPI_PIN_DOMAIN=omp         # threads per rank
-    mpirun -np 4 -ppn 1 xzccsdt "ccsdt(q)"                # Intel MPI, inside a Slurm allocation
+    export OMP_NUM_THREADS=24 I_MPI_PIN_DOMAIN=omp        # threads per rank
+    mpirun -np 8 -ppn 2 xzccsdt "ccsdt(q)"                # Intel MPI, inside a Slurm allocation
 
-e.g. `sbatch -N 4 --ntasks-per-node=1 -c 8 --mem-per-cpu=3700M` (one rank
-per node; `-ppn 1`) or `-N 1 --ntasks-per-node=4 -c 8` (`-ppn 4`: the case
-that was run).
-Only (Q) and (Q)_Lambda are parallel over ranks; the CCSDT iterations and the
-Lambda equations are those of rank 0, with its threads.  Rank 0 is the CFOUR program (CRAPSI, JOBARC, the output).
-The other ranks get joda's flags from it, write their output to
-`xzccsdt.rNNNN`, wait for the plan of rank 0 and allocate a work array
-themselves (`GETMEM`) - not `MEMORY_SIZE` but the words that (Q) takes with
-that plan (section 4) -, wait until
-rank 0 has the amplitudes (a blocking broadcast: with Intel MPI a waiting rank
-spins on one core unless `I_MPI_WAIT_MODE=1`), then read the integral files,
-T1 and T2 of `XZAMPS` themselves and map the T3 of that file (section 5: one
-copy per node).  The run directory must therefore be on a file system
-that all nodes see (with lambda on the left: `XZLAMB` too).  All ranks read
-the same files and make the same decisions
-(blocks, real or complex, the task list): nothing but the flags, the sizes of
-JOBARC, the size of the plan and the final sums is communicated.
+e.g. `sbatch -N 4 --ntasks-per-node=1 -c 48 --mem=180G` - one Slurm task per
+node with all its cores; Intel MPI starts `-ppn` ranks on every node and
+pins each to `OMP_NUM_THREADS` cores (`-ppn 2`: one rank per socket) - or `-N
+1 --ntasks-per-node=1 -c 48` and `mpirun -np 2` on one node
+(`I_MPI_HYDRA_BOOTSTRAP=fork` then needs no `srun`).  What was run, with
+which fabric, and what is specific to Intel MPI: section 15.
+
+Rank 0 is the CFOUR program (CRAPSI, JOBARC, the output).  The other ranks
+get joda's flags from it, write their output to `xzccsdt.rNNNN`, wait for
+the plan of rank 0 and allocate a work array themselves (`GETMEM`) - not
+`MEMORY_SIZE` but the words that their part takes with that plan (section
+4) -, and read the integral files themselves: **the run directory must
+exist, with the integral files (and `xzlabels`), under the same path on
+every node** - a shared file system, or a copy in the node-local scratch of
+every node.  All ranks read the same files and make the same decisions
+(blocks, real or complex, the batches and their ranks, the task list of
+(Q)).
+
+- **The CCSDT iterations and the Lambda iterations** run on all ranks
+  (section 15): every rank has the amplitudes in its own work array, does
+  its batches of pass 1, pass 2 and the pp ladder, and the parts of the
+  residual are summed.  Nothing is read from `XZAMPS` or `XZLAMB` for them:
+  rank 0 sends the amplitudes, so a node-local directory on every node is
+  enough for `ccsdt`, `lambda` and `ccsdt_density`.
+- **(Q) and (Q)_Lambda** run on all ranks as before (sections 5, 14): the
+  ranks read T1 and T2 of `XZAMPS` (and lambda of `XZLAMB`) and map T3 -
+  which rank 0 has written - so for them the run directory must be one that
+  all nodes see (a blocking broadcast tells the other ranks when the files
+  are there; with Intel MPI a waiting rank spins on one core unless
+  `I_MPI_WAIT_MODE=1`).
+- The density stage (`density`, the last step of `ccsdt_density`) is rank
+  0's.
 
 The steps can be separate invocations, as the X2CSO programs are called one
 after the other: `xzccsdt ccsdt` (serial or one rank), then
@@ -196,8 +212,9 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzdata.F90` | sizes, the job, offsets of the arrays that live for the run |
 | `xzdiis.F90` | DIIS: slots, the file, the small linear problem (ZHEEV) |
 | `xzpar.F90` | ranks and the task list of (Q) (groups, pieces, the distribution by the cost model), checkpoint files |
+| `xzdist.F90` | the iterations over ranks: the batches of pairs and triples and their ranks (cost model), the slices of T3, the times of the ranks |
 | `xzkern.F90`, `xzkern.inc` | explicit `bind(C)` interfaces of the kernels, one include for `_d` and `_z` |
-| `xzmpi.c`, `xzutil.c` | C: the MPI calls behind a few functions (stubs without MPI); free disk space, resident set (anonymous and mapped), BLAS integer size, a file mapped read-only (`xz_map_file`: T3 of (Q)), whether a directory is on a network file system |
+| `xzmpi.c`, `xzutil.c` | C: all MPI calls of the program behind a few functions (stubs without MPI) - broadcasts and sums of a few numbers, and arrays of the size of T3 in chunks: broadcast, send / receive, sum onto rank 0, sum on all ranks, the two exchanges of slices; free disk space, resident set (anonymous and mapped), BLAS integer size, a file mapped read-only (`xz_map_file`: T3 of (Q)), whether a directory is on a network file system |
 | `xztype.h` | the element type of a compilation of the type-generic sources |
 | `xzimd.inc` | T1-dressed integrals, W and F intermediates, the CCSD part, the occupied operator |
 | `xzstep.inc` | one CCSDT step: the order of the stages, the placement of every array |
@@ -209,7 +226,11 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzq.inc`, `xzqs.inc` | (Q) and (Q)_Lambda: the task loop and the dense quadruple; the quadruple in sectors of the labels |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
-Kernels of `csrc/` that are called: `zc_t3_pass1w`, `zc_t3_pass2w`,
+Kernels of `csrc/` that are called: `zc_t3_pass1r`, `zc_t3_pass2r` (the
+passes for a range of occupied pairs - four kernels added to `ccsdt_t3.c`
+for the ranks, with `zc_l3_pass1r`, `zc_l3_pass2r`: the loops of
+`zc_t3_pass1w` etc. from `plo` to `phi`; the scheduler calls them batch by
+batch), `zc_t3_pass1w`, `zc_t3_pass2w` (the density stage),
 `zc_t3_occop`, `zc_t3_update`, `zc_gemm` (ccsdt_t3.c); `zc_gather_vir_half`,
 `zc_reduce_pair_first_rows`, `zc_pair_antisym_batch_add`,
 `zc_pair_t1_contract`, `zc_add_transposed`, `zc_vvvv_dress`,
@@ -358,11 +379,37 @@ plan` to the word).
   `(private to a rank, T3 included: XZ_QMAP=0)`.  A run that iterates first
   (`ccsdt(q)`) keeps T3 in the work array for the iterations, writes
   `XZAMPS`, releases T3 and maps the file like the other ranks.
-- The work array of a rank other than 0 is not `MEMORY_SIZE`: rank 0 sends
-  the words that (Q) takes with its plan, and the other ranks allocate that
-  (plus 4096 words) and make the same plan in it.  `MEMORY_SIZE` (and
-  `XZ_MAXCOR`) therefore bound the plan of every rank, and the memory of a
-  node is ranks x the private words + the mapped files once.
+- **The work array of a rank other than 0 is not `MEMORY_SIZE`.**  Rank 0
+  makes the plan - the batch sizes, the place of the DIIS vectors - in its
+  `MEMORY_SIZE`, then runs the scheduler dry once more *as a rank other
+  than 0* (`asworker` of `xzdist.F90`: the same allocations without the DIIS
+  vectors, and with the largest number of threads that a rank has, because
+  the passes in blocks have buffers per thread) and sends the peak of that
+  run - or what (Q) takes, if that is more - with the batch sizes.  The
+  other ranks allocate that many words (plus 4096) and use the batch sizes
+  as they are; a rank whose work array is too short for the plan of rank 0
+  stops with both numbers.  What such a rank holds in the iterations: the
+  tables and the integrals (as rank 0: it reads them itself), T1, T2, T3,
+  one region of the size of T3 for its part of the residual (for the Lambda
+  equations T3, lambda3 and the residual: three), and the arrays of a step
+  at the batch sizes of the plan.  The plan prints it, and - node by node,
+  from the names of the nodes and `MemAvailable` of each at the start - the
+  work arrays of the ranks of a node against what the node had, with a
+  warning if they are more:
+
+        a rank other than 0 takes:              1987654321  =    15901.2 MB
+          (its own work array: the integrals, the amplitudes, its part of the residual, the batches; no DIIS vectors)
+        the work arrays of the ranks, node by node (MB; rank 0: its plan):
+          node of rank     0:    2 ranks, work arrays     119405.3   memory available at the start     184200.1
+
+  **With several ranks on one node `MEMORY_SIZE` is rank 0's alone**: it
+  must leave room for the other ranks of the node (the line above says how
+  much), otherwise rank 0 plans the DIIS vectors into memory that the node
+  does not have.  With slices (`XZ_SLICES=1`, section 15) every rank holds
+  its slice of every DIIS vector and takes what rank 0 takes.
+- With more than one rank the batches of pairs and of triples are what is
+  dealt to the ranks, so their targets are capped: at least 8 batches of
+  each kind per rank (`XZ_BPR`).  One rank: the targets of before.
 
 **The smallest MEMORY_SIZE** for o occupied and v virtual spinors, complex,
 dense (one class): with p = v(v-1)/2, f = o v p (the size of `<ov||vv>` on
@@ -398,6 +445,12 @@ the DIIS vectors (read together with `XZ_PLAN`: `XZ_PLAN="0 0 0 0 0 0 0 0"
 XZ_DIIS=f8` is the planned run with the vectors in the file).  `XZ_QMAP=0`:
 (Q) with a private T3 (above).  `XZ_NCYC`, `XZ_START`, `XZ_HH`: section 12;
 `XZ_QTASKS`, `XZ_QRANKS`, `XZ_QSAMPLE`, `XZ_QSTOP`, `XZ_QCOST`: section 5.
+The iterations over ranks (section 15): `XZ_MPICHUNK=n` (words of a
+message), `XZ_MPITEST=n` (a test of the chunked transfers on arrays of n
+words), `XZ_DIST=digits` (the kinds of batches that are dealt out: 1, 2, 3
+pass 1, pass 2, pp ladder; 4, 5, 6 those of the Lambda equations; `0`:
+rank 0 does all), `XZ_BPR`, `XZ_BCOST=file` (the seconds of every batch),
+`XZ_SLICES=1`, `XZ_R0LOAD`.  `XZ_MAXCOR` is read by rank 0 only.
 
 Measured (H2O / 6-31G, login node): the same energies to 1e-12 with the work
 array at its floor (2022176 words: DIIS in the file, one pair per batch),
@@ -828,6 +881,13 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   equations with constant terms (lambda of CCSDT(Q), the equations of the
   first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); the densities of
   (Q) and (Q)_Lambda (the density of CCSDT is there: section 13).
+- The iterations over ranks (section 15): what is not distributed (the
+  small intermediates are made by every rank with its own threads - in
+  blocks of the labels they are a third of an iteration; the CCSD part,
+  the Gram matrix and the residuals of rank 1 and 2 of the Lambda
+  equations are rank 0's); T3 shared between the ranks of one node (every
+  rank has its own copy); a cost model that is corrected from the measured
+  seconds during the run.
 - (Q) over ranks on separate nodes was not timed (section 8).  Whole groups
   now go to the ranks and T3 is shared between the ranks of a node (sections
   5, 14).  Not done there: Xo shared in the same way (it is formed by every

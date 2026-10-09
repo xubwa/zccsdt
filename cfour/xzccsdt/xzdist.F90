@@ -359,7 +359,7 @@ contains
     real(8) :: need
     logical :: first
     if (nrank == 1 .or. .not. allocated(rnode)) return
-    write(6, '(a)') '     the work arrays of the ranks, node by node (MB; rank 0 has MEMORY_SIZE):'
+    write(6, '(a)') '     the work arrays of the ranks, node by node (MB; rank 0: its plan):'
     do r = 0, nrank - 1
       first = .true.
       do q = 0, r - 1

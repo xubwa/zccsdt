@@ -263,7 +263,7 @@ subroutine N(xzlamb)(w, rw, ecorr)
     if (ios == 0) close(77, iostat=ios)
     if (ios /= 0) then
       write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZLAMB failed (iostat ', ios, '): disk full?'
-      call errex
+      call xzerrex
     end if
     return
   end if
@@ -274,13 +274,13 @@ subroutine N(xzlamb)(w, rw, ecorr)
   inquire(file='XZLAMB', exist=there)
   if (.not. there) then
     write(6, '(/,a)') ' @XZCCSDT-F, no file XZLAMB: lambda of a converged run of xzccsdt lambda.'
-    call errex
+    call xzerrex
   end if
   open(unit=77, file='XZLAMB', form='unformatted', access='stream', status='old', action='read', iostat=ios)
   if (ios == 0) read(77, iostat=ios) tag, head, e
   if (ios /= 0 .or. tag /= 'XZLAMB01') then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZLAMB is not a file of lambda of this program.'
-    call errex
+    call xzerrex
   end if
   if (head(1) /= no .or. head(2) /= nv .or. head(3) /= NW .or. head(4) /= ncls .or. head(5) /= n3) then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZLAMB belongs to another calculation or another mode:'
@@ -288,12 +288,12 @@ subroutine N(xzlamb)(w, rw, ecorr)
     write(6, '(a,5i12)') '   and here:                                                      ', no, nv, &
       int(NW, 8), ncls, n3
     write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: XZ_LABELS, XZ_REAL)'
-    call errex
+    call xzerrex
   end if
   if (abs(e - ecorr) > 1d-9) then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZLAMB is lambda of other amplitudes than those of XZAMPS:'
     write(6, '(a,2f20.12)') '   CCSDT correlation energies of the two files: ', e, ecorr
-    call errex
+    call xzerrex
   end if
   if (with_den) read(77, iostat=ios) w(jl1:jl1 + n1 - 1)
   if (ios == 0) read(77, pos=57 + 8 * n1, iostat=ios) w(jl2:jl2 + n2 - 1)
@@ -301,7 +301,7 @@ subroutine N(xzlamb)(w, rw, ecorr)
   close(77)
   if (ios /= 0) then
     write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZLAMB failed, iostat ', ios
-    call errex
+    call xzerrex
   end if
   if (t3shared) call xzmapt3(w, 'XZLAMB', n1 + n2, NW * n3, jl3)
 end subroutine

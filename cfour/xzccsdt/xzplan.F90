@@ -209,20 +209,25 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     call setpar(k, plo(k))
   end do
 
-  ! ---- the floor
+  ! ---- the floor (a rank other than 0 has none of its own: rank 0 plans its
+  !      memory and it takes that plan, below)
   pfile = .true.
   pslot = ndiis
   pchunk = min(max(n3, 1_8), 1048576_8)
+  if (myrank > 0 .and. flooronly) return
   floor_cc = 0
+  floor_q = 0
+  if (myrank == 0) then
   if (.not. planq) floor_cc = xzpeak_cc(w)
   ! (MP2: the integrals and one array of the size of T2 twice)
   if (method == 'MP2') with_q = .false.
   floor_q = xzpeak_q(w)
   if (flooronly .and. max(floor_cc, floor_q) <= xzsize) return
+  end if
   write(6, '(/,a,a,a)') '   Memory plan (words of 8 bytes; ', merge('real numbers   ', 'complex numbers', nwe == 1), ')'
-  if (.not. planq) write(6, '(a,a36,i16,a,f10.1,a)') '     the least that ', trim(what) // ' takes:', floor_cc, '  = ', &
-    8d-6 * floor_cc, ' MB'
-  if (with_q) write(6, '(a,i16,a,f10.1,a)') '     the least that (Q) takes:       ', floor_q, '  = ', &
+  if (.not. planq .and. myrank == 0) write(6, '(a,a36,i16,a,f10.1,a)') '     the least that ', trim(what) // ' takes:', &
+    floor_cc, '  = ', 8d-6 * floor_cc, ' MB'
+  if (with_q .and. myrank == 0) write(6, '(a,i16,a,f10.1,a)') '     the least that (Q) takes:       ', floor_q, '  = ', &
     8d-6 * floor_q, ' MB'
   write(6, '(a,i16,a,f10.1,a)') '     the work array has:             ', xzsize, '  = ', 8d-6 * xzsize, ' MB'
   if (max(floor_cc, floor_q) > xzsize) then
@@ -231,7 +236,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     write(6, '(a,i16,a,i16)') '   words needed: ', max(floor_cc, floor_q), '   words there: ', xzsize
     write(6, '(a,i16,a,f12.1,a)') '   Set MEMORY_SIZE to at least ', max(floor_cc, floor_q) + 64, &
       ' words (', 8d-6 * (max(floor_cc, floor_q) + 64), ' MB).'
-    call errex
+    call xzerrex
   end if
 
   ! ---- a rank other than 0: the batch sizes of rank 0, in the work array
@@ -262,7 +267,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       write(6, '(/,a)') ' @XZCCSDT-F, the work array of this rank is too short for the plan of rank 0.'
       write(6, '(a,i16,a,i16)') '   words needed: ', max(need_cc, need_q), '   words there: ', xzsize
       write(6, '(a)') '   (rank 0 plans the memory of all ranks: do the ranks differ in their environment?)'
-      call errex
+      call xzerrex
     end if
     flush(6)
     return
@@ -395,7 +400,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   end if
   if (max(need_cc, need_q) > xzsize) then
     write(6, '(/,a)') ' @XZCCSDT-F, the plan does not fit the work array (XZ_PLAN?).'
-    call errex
+    call xzerrex
   end if
   flush(6)
 
@@ -432,7 +437,7 @@ contains
     read(text, *, iostat=ios) v
     if (ios /= 0) then
       write(6, '(a)') ' @XZCCSDT-F, XZ_PLAN: eight numbers expected.'
-      call errex
+      call xzerrex
     end if
     do kk = 1, npar
       if (v(kk) > 0) call setpar(kk, max(1_8, v(kk)))

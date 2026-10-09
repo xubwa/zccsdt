@@ -61,7 +61,7 @@ subroutine N(xzdiis_alloc)(nslot, usefile, nch)
            recl=8 * NW * nchunk, iostat=ios)
       if (ios /= 0) then
         write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, cannot open the file ', trim(fdiis), ' of the DIIS vectors, iostat ', ios
-        call errex
+        call xzerrex
       end if
     end if
   end if
@@ -106,7 +106,7 @@ subroutine N(xzdiis_io)(rw, slot, kind, irec, buf, n)
       ' the file ' // trim(fdiis) // ' of the DIIS vectors failed: record ', ' ', rec, ', iostat ', ios
     write(6, '(a,f12.1,a)') '   The file takes ', 16d-6 * mdiis * nrec * nchunk * NW, &
       ' MB when all vectors are there.  Is the disk of the run directory full?'
-    call errex
+    call xzerrex
   end if
 end subroutine
 

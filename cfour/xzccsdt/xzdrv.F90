@@ -79,11 +79,11 @@ subroutine xzdrv(w, maxcor)
   end if
   if (ilp64 /= 1) then
     write(6, '(a)') ' @XZCCSDT-F, the kernels were not compiled for the 8-byte integers of this BLAS.'
-    call errex
+    call xzerrex
   end if
   if (no < 3 .or. nv < 3) then
     write(6, '(a)') ' @XZCCSDT-F, fewer than three occupied or virtual spinors: no triples.'
-    call errex
+    call xzerrex
   end if
 
   ! ---- the symmetry labels
@@ -181,6 +181,12 @@ subroutine xzdrv(w, maxcor)
     rplan(10:12) = dble([nslot, merge(1_8, 0_8, usefile), nch])
     call xzmpi_bcast(rplan, 128_8)
   end if
+  ! (a test hook: XZ_WFAIL, an error on a rank other than 0)
+  call get_environment_variable('XZ_WFAIL', length=larg)
+  if (larg > 0 .and. myrank > 0) then
+    write(6, '(a)') ' @XZCCSDT-F, XZ_WFAIL: a test of the exit of a rank other than 0.'
+    call xzerrex
+  end if
   ! the batches of the iterations, dealt to the ranks
   if (with_cc .or. with_lam) call xzdeal()
   flush(6)
@@ -213,7 +219,7 @@ subroutine xzdrv(w, maxcor)
         ' cycles (CC_MAXCYC).'
       call xzmpi_bcast(sync, 16_8)
       if (larg > 0) return
-      call errex
+      call xzerrex
     end if
     write(6, '(a,i4,a)') '   CCSDT converged in ', ncyc, ' cycles.'
     call xztable(1, 'the CCSDT iterations', tcc, ncyc)
@@ -288,7 +294,7 @@ subroutine xzdrv(w, maxcor)
       write(6, '(/,a,i5,a)') ' @XZCCSDT-F, the Lambda equations of CCSDT did not converge in ', maxcyc, &
         ' cycles (CC_MAXCYC).'
       call xzmpi_bcast(sync, 16_8)
-      call errex
+      call xzerrex
     end if
     write(6, '(a,i4,a)') '   The Lambda equations converged in ', ncyc, ' cycles.'
     call xztable(3, 'the intermediates of the Lambda equations', tlamim, 0_8)
@@ -317,7 +323,7 @@ subroutine xzdrv(w, maxcor)
       call xzlayout(w, status)
       if (status /= 0) then
         write(6, '(/,a)') ' @XZCCSDT-F, the integral files changed during the run.'
-        call errex
+        call xzerrex
       end if
       if (nwe == 2) then
         call xzamps_z(w, 'r', ecorr)
@@ -457,7 +463,7 @@ subroutine xzjob()
       write(6, '(/,a,i4,a,i3,a)') ' @XZCCSDT-F, CALC of the ZMAT (level ', level, ', EXCITATION ', nexc, &
         ') is not CCSDT, CCSDT[Q] or CCSDT(Q).'
       write(6, '(a)') '   Give the method as the argument: xzccsdt ccsdt | "ccsdt(q)"'
-      call errex
+      call xzerrex
     end if
   end if
   select case (method)
@@ -466,7 +472,7 @@ subroutine xzjob()
   case default
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), &
       ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, DENSITY, CCSDT_DENSITY, MP2.'
-    call errex
+    call xzerrex
   end select
   with_cc = method(1:5) == 'CCSDT'
   larg = len_trim(method)
@@ -874,7 +880,7 @@ subroutine xzwrec(name, n, rec)
   if (ios == 0) close(79, iostat=ios)
   if (ios /= 0) then
     write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', name, ' failed (iostat ', ios, ').'
-    call errex
+    call xzerrex
   end if
 end subroutine xzwrec
 
@@ -993,7 +999,7 @@ subroutine xzmpistart()
     call xzmpi_max(a, b, 1_8)
     if (myrank == 0) write(6, '(a,i12,a,i10,a,i4,a,i12)') ' XZ_MPITEST: arrays of ', n, ' words in messages of ', &
       xzmpi_chunk(), ' words over ', nrank, ' ranks; wrong words (largest count of a rank): ', nint(b(1), 8)
-    if (myrank == 0 .and. b(1) /= 0d0) call errex
+    if (myrank == 0 .and. b(1) /= 0d0) call xzerrex
   end if
 end subroutine xzmpistart
 
@@ -1016,12 +1022,32 @@ subroutine xzmapt3(w, name, nskip, n3w, j3)
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', name, ' could not be mapped (or has another length than its header says).'
     write(6, '(a,i16,a,i16)') '   bytes mapped: ', nbytes, '   expected: ', 56 + 8 * (nskip + n3w)
     write(6, '(a)') '   XZ_QMAP=0 reads T3 into the work array of every rank instead.'
-    call errex
+    call xzerrex
   end if
   diff = addr + 56 + 8 * nskip - loc(w(1))
   if (mod(diff, 8_8) /= 0) then
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, the map of the file ', name, ' is not aligned with the work array; use XZ_QMAP=0.'
-    call errex
+    call xzerrex
   end if
   j3 = diff / 8 + 1
 end subroutine xzmapt3
+
+! ---------------------------------------------------------------------------
+! The exit after an error (every error of the program comes here, its message
+! written).  Rank 0: CFOUR's ERREX (status 1, the ERROR banner).  A rank
+! other than 0 must not call ERREX - it closes JOBARC as if this rank had
+! opened it and writes an empty index (JAINDX) over that of the run
+! directory -: it stops all ranks through MPI.
+subroutine xzerrex()
+  use xzpar
+  implicit none
+  flush(6)
+  if (myrank == 0) then
+    call errex
+  else
+    write(6, '(a,i5,a)') ' @XZCCSDT-F, rank ', myrank, ' stops the run.'
+    flush(6)
+    call xzmpi_abort(1_8)
+  end if
+  stop 1
+end subroutine xzerrex
