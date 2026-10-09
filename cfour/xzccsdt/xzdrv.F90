@@ -805,3 +805,62 @@ subroutine xzwrec(name, n, rec)
     call errex
   end if
 end subroutine xzwrec
+
+! ---------------------------------------------------------------------------
+! The cost model of the tasks of (Q) (xzpar.F90), in units of one virtual
+! quadruple of a sector:
+!   qc(M)  an occupied quadruple of total class M: the virtual quadruples
+!          a<b<c<d of total class M (one class: all of them)
+!   xc(K)  Xv for a pair (x, l) of total class K: gxv times the elements of
+!          its products (<bc||ef> on (bc), e times t2 on f, d)
+! Measured (docs/native.md, section 14): with qc the times of the groups
+! that hold nine tenths of (Q) are met within 5 % in blocks (HBr, 26 + 78),
+! where one cost for every quadruple is off by up to 21 %; gxv is 0.0017
+! there and 0.00075 for dense complex H2O (10 + 106) - Xv is a few per cent
+! of the work, so its constant matters little.
+subroutine xzqmodel(qc, xc)
+  use xzdata
+  implicit none
+  real(8), intent(out) :: qc(0:4 * maxcls), xc(0:2 * maxcls)
+  real(8), parameter :: gxv = 0.0012d0
+  real(8) :: ways(0:4, 0:4 * maxcls), new(0:4, 0:4 * maxcls), bin(0:4)
+  integer(8) :: c, n, t, m, s, k, ke, q2, kf, kd, tt
+  ways = 0d0
+  ways(0, 0) = 1d0
+  do c = 0, ncls - 1
+    n = vcoff(c + 1) - vcoff(c)
+    bin(0) = 1d0
+    do m = 1, 4
+      bin(m) = bin(m - 1) * dble(n - m + 1) / dble(m)
+      if (m > n) bin(m) = 0d0
+    end do
+    new = 0d0
+    do t = 0, 4
+      do s = 0, 4 * (ncls - 1)
+        if (ways(t, s) == 0d0) cycle
+        do m = 0, 4 - t
+          if (s + c * m > 4 * (ncls - 1)) cycle
+          new(t + m, s + c * m) = new(t + m, s + c * m) + ways(t, s) * bin(m)
+        end do
+      end do
+    end do
+    ways = new
+  end do
+  qc = 0d0
+  qc(0:4 * (ncls - 1)) = ways(4, 0:4 * (ncls - 1))
+  xc = 0d0
+  do k = 0, 2 * (ncls - 1)
+    do ke = 0, ncls - 1
+      tt = ke + k
+      if (tt >= ntg) cycle
+      if (vtoff(tt + 1) == vtoff(tt)) cycle
+      do q2 = 0, npg - 1
+        kf = q2 - ke
+        kd = k - kf
+        if (kf < 0 .or. kf >= ncls .or. kd < 0 .or. kd >= ncls) cycle
+        xc(k) = xc(k) + gxv * dble(vpoff(q2 + 1) - vpoff(q2)) * dble(vcoff(ke + 1) - vcoff(ke)) &
+                * dble(vcoff(kd + 1) - vcoff(kd)) * dble(vcoff(kf + 1) - vcoff(kf))
+      end do
+    end do
+  end do
+end subroutine xzqmodel
