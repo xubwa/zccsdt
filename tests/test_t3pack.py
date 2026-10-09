@@ -110,6 +110,51 @@ def test_occ_operator():
 
 
 @pytest.mark.parametrize('cplx', [False, True])
+@pytest.mark.parametrize('labels', [False, True])
+def test_ccsd_pack_kernels(cplx, labels, impl):
+    '''The threaded gathers, antisymmetrizing packs and the T2 update of the
+    CCSD part against fancy indexing; pairs in lexicographic order and
+    grouped by a label; o = 12.'''
+    from zccsdt.cc import ccsdt_opt
+    rng = np.random.default_rng(5)
+    o, v = 12, 9
+    om = t3pack.TripleMap(o, [0] * 3 + [1] * 4 + [2] * 5, 3) if labels else t3pack.TripleMap(o)
+    vm = t3pack.TripleMap(v, [0] * 4 + [1] * 2 + [2] * 3, 3) if labels else t3pack.TripleMap(v)
+    i, j = om.pairs[:, 0][:, None], om.pairs[:, 1][:, None]
+    a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+    Y = _rand((o, o, v, v), rng, cplx)
+    np.testing.assert_array_equal(t3pack.pack_last2(Y, vm), Y[:, :, a, b])
+    np.testing.assert_array_equal(t3pack.pack_last2(Y[i[:, 0], j[:, 0]], vm), Y[i, j, a, b])
+    R0 = _rand((om.npair, vm.npair), rng, cplx)
+    Yp = np.ascontiguousarray(Y[i[:, 0], j[:, 0]])
+    np.testing.assert_allclose(t3pack.add_asym_last2(R0.copy(), Yp, vm, alpha=0.5),
+                               R0 + 0.5 * (Yp[:, a, b] - Yp[:, b, a]), atol=1e-13)
+    # x[i,j,a,b] stored as X[i,a,j,b] (the ring layout)
+    X = np.ascontiguousarray(Y.transpose(0, 2, 1, 3))
+    ref = R0 - 2 * (Y[i, j, a, b] - Y[j, i, a, b] - Y[i, j, b, a] + Y[j, i, b, a])
+    np.testing.assert_allclose(t3pack.add_asym_pack4(R0.copy(), X, om, vm, axes=(0, 2, 1, 3),
+                                                     alpha=-2.0), ref, atol=1e-13)
+    np.testing.assert_array_equal(ccsdt_opt.transposed(Y, (3, 1, 0, 2)), Y.transpose(3, 1, 0, 2))
+    # the Jacobi step of T2
+    t2 = _asym_pair(_asym_pair(_rand((o, o, v, v), rng, cplx), 0), 2)
+    eo, ev = -1 - rng.random(o), 1 + rng.random(v)
+    eia = eo[:, None] - ev[None, :]
+    ref = t2 + ccsdt_opt._unpack_pairs(R0, om, vm) / (eia[:, None, :, None] + eia[None, :, None, :])
+    np.testing.assert_allclose(t3pack.t2_update(t2, R0, om, vm, eo, ev), ref, atol=1e-13)
+    # the ket dressing of <ab||ij> with t1
+    t1, B = _rand((o, v), rng, cplx), _rand((vm.npair, v, o), rng, cplx)
+    G0 = _rand((vm.npair, om.npair), rng, cplx)
+    Yq = np.matmul(t1, B)
+    np.testing.assert_allclose(t3pack.vvoo_ket_add(G0.copy(), B, t1, om),
+                               G0 + Yq[:, i[:, 0], j[:, 0]] - Yq[:, j[:, 0], i[:, 0]], atol=1e-13)
+    # -P(ij) F_kj t_ikab as a matrix on the packed occupied pairs
+    F = _rand((o, o), rng, cplx)
+    Z = np.einsum('ikab,kj->ijab', t2, F)
+    ref = -(Z[i, j, a, b] - Z[j, i, a, b])
+    np.testing.assert_allclose(ccsdt_opt.occ_pair_one_body(F, om).T @ t2[i, j, a, b], ref, atol=1e-13)
+
+
+@pytest.mark.parametrize('cplx', [False, True])
 @pytest.mark.parametrize('o, labels, ncls', [
     (5, None, None), (8, None, None), (12, None, None), (8, [0] * 4 + [1] * 4, None),
     (9, [0, 0, 1, 1, 1, 2, 2, 2, 2], 3), (12, [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3], 4)])

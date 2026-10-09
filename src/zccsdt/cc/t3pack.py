@@ -462,15 +462,109 @@ def axpby(out, inp, alpha=1.0, beta=1.0):
         return out
     pad = 4 - out.ndim
     isz = out.itemsize
-    n = np.array((1,) * pad + out.shape, dtype=np.int64)
-    os_ = np.array((0,) * pad + tuple(x // isz for x in out.strides), dtype=np.int64)
-    is_ = np.array((0,) * pad + tuple(x // isz for x in inp.strides), dtype=np.int64)
+    # (unit axes after the first one: a 2-D array is split over its rows)
+    k = 1 if out.ndim >= 2 else 0
+
+    def padded(t, fill):
+        return np.array(t[:k] + (fill,) * pad + t[k:], dtype=np.int64)
+    n = padded(out.shape, 1)
+    os_ = padded(tuple(x // isz for x in out.strides), 0)
+    is_ = padded(tuple(x // isz for x in inp.strides), 0)
     al = np.array(alpha, dtype=out.dtype)
     be = np.array(beta, dtype=out.dtype)
     getattr(_lib, 'zc_axpby4_' + _sfx(out.dtype))(
         ctypes.c_void_p(out.ctypes.data), ctypes.c_void_p(inp.ctypes.data), _p(n),
         _p(os_), _p(is_), _p(al), _p(be))
     return out
+
+
+def _ccsd_c(*arrays):
+    return USE_C and hasattr(_lib, 'zc_pack_last2_d') and all(
+        a.flags.c_contiguous and a.dtype == arrays[0].dtype for a in arrays) \
+        and arrays[0].dtype in (np.float64, np.complex128)
+
+
+def pack_last2(Y, vm):
+    '''Y[..., a, b] for the pairs (a, b) of ``vm``: (..., npair), threaded.'''
+    Y = np.asarray(Y)
+    lead = Y.shape[:-2]
+    out = np.empty(lead + (vm.npair,), dtype=Y.dtype)
+    if _ccsd_c(Y):
+        getattr(_lib, 'zc_pack_last2_' + _sfx(Y.dtype))(
+            _p(out), _p(Y), _I64(int(np.prod(lead))), _I64(vm.n), _I64(vm.npair),
+            _p(vm.pa_c), _p(vm.pb_c), _p(np.ones(1, dtype=Y.dtype)), ctypes.c_int(0))
+    else:
+        out[...] = Y[..., vm.pairs[:, 0], vm.pairs[:, 1]]
+    return out
+
+
+def add_asym_last2(R, Y, vm, alpha=1.0):
+    '''R[..., Q] += alpha (Y[..., a, b] - Y[..., b, a]) for the pairs Q = (a, b).'''
+    if _ccsd_c(R, Y):
+        getattr(_lib, 'zc_pack_last2_' + _sfx(R.dtype))(
+            _p(R), _p(Y), _I64(R.size // max(vm.npair, 1)), _I64(vm.n), _I64(vm.npair),
+            _p(vm.pa_c), _p(vm.pb_c), _p(np.array([alpha], dtype=R.dtype)), ctypes.c_int(1))
+    else:
+        a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+        R += alpha * (Y[..., a, b] - Y[..., b, a])
+    return R
+
+
+def add_asym_pack4(R, X, om, vm, axes=(0, 1, 2, 3), alpha=1.0):
+    '''R[P, Q] += alpha (x[i,j,a,b] - x[j,i,a,b] - x[i,j,b,a] + x[j,i,b,a]) for
+    P = (i, j) of ``om`` and Q = (a, b) of ``vm``, where x is the 4-index
+    array X with its axes ``axes`` taken as (i, j, a, b) (no transposed copy).'''
+    if _ccsd_c(R, X):
+        st = [X.strides[ax] // X.itemsize for ax in axes]
+        getattr(_lib, 'zc_asym_pack4_' + _sfx(R.dtype))(
+            _p(R), _p(X), _I64(om.npair), _I64(vm.npair), _p(om.pa_c), _p(om.pb_c),
+            _p(vm.pa_c), _p(vm.pb_c), *[_I64(s) for s in st],
+            _p(np.array([alpha], dtype=R.dtype)))
+    else:
+        x = X.transpose(axes)
+        i, j = om.pairs[:, 0][:, None], om.pairs[:, 1][:, None]
+        a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+        R += alpha * (x[i, j, a, b] - x[j, i, a, b] - x[i, j, b, a] + x[j, i, b, a])
+    return R
+
+
+def t2_update(t2, R, om, vm, eo, ev):
+    '''t2 + A(R) / D: the Jacobi step of T2 from the packed residual R[(i<j),
+    (a<b)], with A(R) its antisymmetric (o, o, v, v) array and
+    D[i,j,a,b] = (eo[i] - ev[a]) + (eo[j] - ev[b]).'''
+    dt = np.result_type(t2, R)
+    t2 = np.ascontiguousarray(t2, dtype=dt)
+    R = np.ascontiguousarray(R, dtype=dt)
+    if _ccsd_c(t2, R):
+        out = np.empty_like(t2)
+        getattr(_lib, 'zc_t2_update_' + _sfx(dt))(
+            _p(out), _p(t2), _p(R), _I64(om.n), _I64(vm.n), _I64(om.npair), _I64(vm.npair),
+            _p(om.pa_c), _p(om.pb_c), _p(vm.pa_c), _p(vm.pb_c),
+            _p(np.ascontiguousarray(eo, dtype=np.float64)),
+            _p(np.ascontiguousarray(ev, dtype=np.float64)))
+        return out
+    i, j = om.pairs[:, 0][:, None], om.pairs[:, 1][:, None]
+    a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+    d = R / ((eo[i] - ev[a]) + (eo[j] - ev[b]))
+    out = t2.copy()
+    out[i, j, a, b] += d
+    out[j, i, a, b] -= d
+    out[i, j, b, a] -= d
+    out[j, i, b, a] += d
+    return out
+
+
+def vvoo_ket_add(G, B, t1, om):
+    '''G[Q, P] += Y[Q, i, j] - Y[Q, j, i] for the pairs P = (i, j) of ``om``,
+    Y[Q, i, j] = sum_e t1[i, e] B[Q, e, j], one Q at a time (threads over Q).'''
+    if _ccsd_c(G, B, np.ascontiguousarray(t1, dtype=G.dtype)):
+        getattr(_lib, 'zc_vvoo_ket_' + _sfx(G.dtype))(
+            _p(G), _p(B), _p(np.ascontiguousarray(t1, dtype=G.dtype)), _I64(G.shape[0]),
+            _I64(t1.shape[1]), _I64(t1.shape[0]), _I64(om.npair), _p(om.pa_c), _p(om.pb_c))
+    else:
+        Y = np.matmul(t1, B)
+        G += Y[:, om.pairs[:, 0], om.pairs[:, 1]] - Y[:, om.pairs[:, 1], om.pairs[:, 0]]
+    return G
 
 
 def flip_pairs(m):

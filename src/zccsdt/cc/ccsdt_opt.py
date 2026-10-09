@@ -412,6 +412,33 @@ def _contract_slot(b, M, p):
     return out.reshape(sh[:p] + (M.shape[1],) + sh[p + 1:])
 
 
+def _add_contract_slot(out, b, M, p):
+    '''out += b with its slot p contracted against M[source, target] (the
+    values of _contract_slot), without a temporary of the size of the result:
+    the GEMMs of the kernel library accumulate in ``out``; a slot in the
+    middle is contracted for one leading index at a time (slot 1) or moved to
+    the end and back by the threaded transposing copies of t3pack (slot 2).'''
+    dt, sh, nt = out.dtype, b.shape, M.shape[1]
+    if not out.flags.c_contiguous or dt not in (np.float64, np.complex128):
+        out += _contract_slot(b, M, p)
+        return out
+    b = np.ascontiguousarray(b, dtype=dt)
+    M = np.asarray(M, dtype=dt)
+    if p == 3:
+        gemm(b.reshape(-1, sh[3]), np.ascontiguousarray(M), out.reshape(-1, nt), beta=1.0)
+    elif p == 0:
+        gemm(np.ascontiguousarray(M.T), b.reshape(sh[0], -1), out.reshape(nt, -1), beta=1.0)
+    elif p == 1:
+        Mt = np.ascontiguousarray(M.T)
+        b3, o3 = b.reshape(sh[0], sh[1], -1), out.reshape(sh[0], nt, -1)
+        for x in range(sh[0]):
+            gemm(Mt, b3[x], o3[x], beta=1.0)
+    else:
+        tmp = gemm(transposed(b, (0, 1, 3, 2)).reshape(-1, sh[2]), np.ascontiguousarray(M))
+        t3pack.axpby(out, tmp.reshape(sh[0], sh[1], sh[3], nt).transpose(0, 1, 3, 2), 1.0, 1.0)
+    return out
+
+
 def dress_block(eris, t1, key):
     '''T1-dressed block of <pq||rs>: a virtual bra index a picks up
     -sum_m t1[m,a] <m..||..>, an occupied ket index i picks up
@@ -430,6 +457,8 @@ def dress_block(eris, t1, key):
     state = {''.join(c): get_block(eris, ''.join(c))
              for c in np.ndindex(*[len(x) for x in choices])
              for c in [tuple(choices[p][i] for p, i in enumerate(c))]}
+    dtype = np.result_type(t1, *state.values())
+    owned = set()               # blocks that are copies already (added to in place)
     for p in sorted(alt, reverse=True):
         src, M = alt[p]
         new = {}
@@ -437,8 +466,9 @@ def dress_block(eris, t1, key):
             if k[p] != key[p]:
                 continue
             k_alt = k[:p] + src + k[p + 1:]
-            new[k] = blk + _contract_slot(state[k_alt], M, p)
-        state = new
+            out = blk if k in owned else transposed(blk, (0, 1, 2, 3), dtype)
+            new[k] = _add_contract_slot(out, state[k_alt], M, p)
+        state, owned = new, set(new)
     return state[key]
 
 
@@ -593,8 +623,10 @@ def dressed_vvoo_pp(eris, t1, Bv, om, vm):
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     dtype = np.result_type(t1, eris.oovv)
     # bra-dressed <ab||ij> = <ab||ij> - P(ab) t1[m,a] <mb||ij> + tau1 <mn||ij>
-    vvoo = np.ascontiguousarray(get_block(eris, 'vvoo'), dtype=dtype)   # [a,b,i,j]
-    G = np.array(vvoo[md, ne][:, mm, nn], order='C', copy=True)         # (Q, P)
+    # (<ab||ij> = <ij||ab>^*, from the packed bare oovv if it is there)
+    c = eris.__dict__.get('_bare_Q') if hasattr(eris, '__dict__') else None
+    H = c[2] if c is not None and c[0] is vm else np.asarray(eris.oovv)[mm, nn][:, md, ne]
+    G = np.array(H.T.conj(), dtype=dtype, order='C', copy=True)         # (Q, P)
     ovoo = np.ascontiguousarray(get_block(eris, 'ovoo')[:, :, mm, nn], dtype=dtype)
     L = gemm(np.asfortranarray(t1.T), ovoo.reshape(nocc, -1))           # [a, (b, P)]
     t3pack.pair_antisym_add(G.reshape(vm.npair, om.npair, 1), L, vm,
@@ -602,14 +634,38 @@ def dressed_vvoo_pp(eris, t1, Bv, om, vm):
     oooo = np.ascontiguousarray(np.asarray(eris.oooo)[mm, nn][:, mm, nn], dtype=dtype)
     gemm(np.asfortranarray(_tau1_pairs(t1, om, vm).T), oooo, G, beta=1.0)
     # ket dressing with Bv: Y[Q, i, j] = sum_e Bv[Q,e,j] t1[i,e]
-    Y = np.matmul(t1, Bv)                                                # (Q, i, j)
-    G += Y[:, mm, nn] - Y[:, nn, mm]
+    t3pack.vvoo_ket_add(G, np.ascontiguousarray(Bv, dtype=dtype), t1, om)
     return np.ascontiguousarray(G.T)                                     # (P, Q)
+
+
+def transposed(x, perm, dtype=None):
+    '''A C-contiguous copy of x.transpose(perm) (at most 4 axes), written by
+    the threads of t3pack.axpby (numpy copies on one thread).'''
+    x = np.asarray(x) if dtype is None else np.asarray(x, dtype=dtype)
+    out = np.empty(tuple(x.shape[p] for p in perm), dtype=x.dtype)
+    return t3pack.axpby(out, x.transpose(perm), 1.0, 0.0)
+
+
+def occ_pair_one_body(F, om):
+    '''M[(P'), (i<j)] with sum_P' M[P', (ij)] t[P'] = -sum_k (t[i,k] F[k,j]
+    - t[j,k] F[k,i]): the term -P(ij) F_kj t_ikab of the T2 equation as a
+    matrix on the packed occupied pairs (it is added to W_klij there).'''
+    n, npair = om.n, om.npair
+    M = np.zeros((npair, npair), dtype=np.asarray(F).dtype)
+    i, j = om.pairs[:, 0][:, None], om.pairs[:, 1][:, None]
+    k = np.arange(n)[None, :]
+    cols = np.broadcast_to(np.arange(npair)[:, None], (npair, n))
+    for x, y, sign in ((i, j, -1.0), (j, i, 1.0)):      # P' = {x, k}: sign F[k, y] s(x, k)
+        rows = om.pidx[np.minimum(x, k), np.maximum(x, k)]
+        valid = np.broadcast_to(k != x, (npair, n))
+        val = sign * np.where(x < k, 1.0, -1.0) * F[k, y]
+        np.add.at(M, (rows[valid], cols[valid]), val[valid])
+    return M
 
 
 def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
                          Weff_ovvo, om, vm, r1_vovv=None, ladder_t2=None, t2pp=None,
-                         goovv_pp=None, tau=None, ladder=None):
+                         goovv_pp=None, tau=None, ladder=None, t2mn=None, ring=None):
     '''CCSD residuals in the T1-dressed formalism (CCSD with T1 = 0 and the
     dressed Hamiltonian; validated against the determinant-space oracle):
       R1 = f_ai + f_kc t_ikac + 1/2 g_akcd t_ikcd - 1/2 g_klic t_klac
@@ -622,7 +678,16 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
     contribution to the ladder is subtracted.  t2pp, goovv_pp (packed (P, Q))
     and tau (tau1 packed) may be passed in when already formed.  ``ladder``
     (packed (P, Q)): the ladder term sum_{d<e} ~<ab||de> (t + tau1)[ij,de],
-    computed by the caller (Vd is then not used).'''
+    computed by the caller (Vd is then not used).  t2mn: t2[(m<n), a, b] if
+    formed already.  ring = (A, B): t2 and W_kbcj in the ring layout,
+    A[(i a), (k c)] = t2[i,k,a,c] and B[(k c), (j b)] = 1/2 (g + W)[k,b,c,j],
+    if formed already (Weff_ovvo is then not used).
+
+    Nothing of o^2 v^2 elements is gathered, transposed or antisymmetrized by
+    numpy on one thread: the layouts come from the kernels of t3pack
+    (transposed, pack_last2, add_asym_last2, add_asym_pack4), the products
+    are GEMMs, and F_oo acts on the packed occupied pairs together with
+    W_klij (as in zccsdt.zccsd.amps).'''
     nocc, nvir = t1.shape
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
@@ -633,14 +698,28 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
         goovv_pp = np.ascontiguousarray(ge['oovv'][mm, nn][:, md, ne])
     if tau is None:
         tau = _tau1_pairs(t1, om, vm)
-    t2mn = t2[mm, nn]                                                    # (P, a, b)
-    # R1
-    R1 = fdr[v, o].T + einsum('kc,ikac->ia', fdr[o, v], t2)
+    dt = np.result_type(t2, vvoo_pp)
+    if t2mn is None:
+        t2mn = np.ascontiguousarray(t2[mm, nn], dtype=dt)               # (P, a, b)
+    if ring is None:
+        Ar = transposed(t2, (0, 2, 1, 3), dt)
+        Br = transposed(0.5 * (ge['ovvo'] + Weff_ovvo), (0, 2, 3, 1), dt)
+    else:
+        Ar, Br = ring
+    Ar = Ar.reshape(nocc * nvir, nocc * nvir)
+    Br = Br.reshape(nocc * nvir, nocc * nvir)
+    # R1: f_kc t_ikac = A f;  -1/2 g_klic t_klac = 1/2 sum_l A[l, a, (k c)] g[(k c), l, i]
+    R1 = fdr[v, o].T + (Ar @ np.ascontiguousarray(fdr[o, v], dtype=dt).ravel()).reshape(nocc, nvir)
     if r1_vovv is None:
         R1 += einsum('akR,ikR->ia', ge['vovv'][:, :, md, ne], t2[:, :, md, ne])
     else:
         R1 += r1_vovv
-    R1 -= einsum('Pic,Pac->ia', ge['ooov'][mm, nn], t2mn)
+    Gl = np.ascontiguousarray(np.asarray(ge['ooov']).transpose(1, 0, 3, 2), dtype=dt)  # [l, k, c, i]
+    A3 = Ar.reshape(nocc, nvir, nocc * nvir)
+    X1 = np.zeros((nvir, nocc), dtype=dt)
+    for l in range(nocc):
+        gemm(A3[l], Gl[l].reshape(nocc * nvir, nocc), X1, alpha=0.5, beta=1.0)
+    R1 = R1 + X1.T
     # R2: driving + ladder (with the t1 t1 part of the vvoo dressing) + hh;
     # ladder as Vd[h] tt^T, one pass over each distinct (possibly shared) block
     R2 = np.array(vvoo_pp, order='C', copy=True)
@@ -673,26 +752,20 @@ def ccsd_residual_packed(t1, t2, fdr, ge, Vd, vvoo_pp, Feff_vv, Feff_oo,
             klo, khi = vm.blocks[k]
             t3pack.axpby(R2[:, klo:khi], X[:, j * npo:(j + 1) * npo].T)
             t2_part(k)
-    Wkl = np.ascontiguousarray(ge['oooo'][mm, nn][:, mm, nn])           # (kl, ij)
+    # 1/2 W_klij t_klab - P(ij) F_kj t_ikab: one matrix on the packed occupied pairs
+    Wkl = np.array(ge['oooo'][mm, nn][:, mm, nn], dtype=R2.dtype, order='C', copy=True)  # (kl, ij)
     gemm(goovv_pp, t2pp.T, Wkl, beta=1.0)
+    Wkl += occ_pair_one_body(np.asarray(Feff_oo), om)
     gemm(np.asfortranarray(Wkl.T), t2pp, R2, beta=1.0)
     # P(ab) F_bc t_ijac on the packed occupied pairs: Y[P, a, b] = t[P, a, c] F[b, c]
-    Y = gemm(np.ascontiguousarray(t2mn).reshape(-1, nvir), np.asarray(Feff_vv).T)
-    Y = Y.reshape(len(mm), nvir, nvir)
-    R2 += Y[:, md, ne] - Y[:, ne, md]
-    # - P(ij) F_kj t_ikab on the packed virtual pairs: Z[i, j, Q] = t[i, k, Q] F[k, j]
-    Z = np.einsum('ikQ,kj->ijQ', t2[:, :, md, ne], Feff_oo, optimize=True)
-    R2 -= Z[mm, nn] - Z[nn, mm]
-    # P(ij) P(ab) W_kbcj t_ikac: X[(i,a), (j,b)] = t[i,k,a,c] W2[k,b,c,j]
-    W2 = 0.5 * (ge['ovvo'] + Weff_ovvo)                                  # [k,b,c,j]
-    A = np.ascontiguousarray(t2.transpose(0, 2, 1, 3)).reshape(nocc * nvir, -1)  # (ia,kc)
-    B = np.ascontiguousarray(W2.transpose(0, 2, 3, 1)).reshape(nocc * nvir, -1)  # (kc,jb)
-    X = gemm(A, B)
-    ia = mm[:, None] * nvir + md[None, :]
-    ib = mm[:, None] * nvir + ne[None, :]
-    ja = nn[:, None] * nvir + md[None, :]
-    jb = nn[:, None] * nvir + ne[None, :]
-    R2 += X[ia, jb] - X[ja, ib] - X[ib, ja] + X[jb, ia]
+    Y = gemm(np.ascontiguousarray(t2mn, dtype=R2.dtype).reshape(-1, nvir),
+             np.asarray(Feff_vv, dtype=R2.dtype).T)
+    t3pack.add_asym_last2(R2, Y, vm)
+    del Y
+    # P(ij) P(ab) W_kbcj t_ikac: X[(i,a), (j,b)] = t[i,k,a,c] W2[k,b,c,j],
+    # antisymmetrized into the packed residual by the kernel
+    X = gemm(Ar, Br)
+    t3pack.add_asym_pack4(R2, X.reshape(nocc, nvir, nocc, nvir), om, vm, axes=(0, 2, 1, 3))
     return R1, R2
 
 
@@ -710,11 +783,13 @@ def dressed_vvvv_pp(eris, t1, om, vm):
     out = []
     for h, (lo, hi) in enumerate(vm.blocks):
         nq = hi - lo
-        blk = np.array(V[h], dtype=np.result_type(V[h], ovvv_Q, t1), order='C', copy=True)
+        # (the copies by the threads of t3pack.axpby)
+        blk = transposed(V[h], (0, 1), np.result_type(V[h], ovvv_Q, t1))
         if nq:
             a, b = md[lo:hi], ne[lo:hi]
             x0, x1 = int(min(a.min(), b.min())), int(max(a.max(), b.max())) + 1
-            G = np.ascontiguousarray(ovvv_Q[:, :, lo:hi]).reshape(nocc, -1)
+            G = ovvv_Q if nq == vm.npair else transposed(ovvv_Q[:, :, lo:hi], (0, 1, 2))
+            G = np.ascontiguousarray(G).reshape(nocc, -1)
             # blk[(a<b), Q] -= Y[a,b,Q] - Y[b,a,Q], Y built in batches of x
             nb = max(1, int(2e9 // (nvir * nq * blk.itemsize)))
             for xb in range(x0, x1, nb):
@@ -834,10 +909,22 @@ def dress_fock(eris, t1):
     n = fock.shape[0]
     sp = {'o': slice(0, nocc), 'v': slice(nocc, n)}
     fp = fock.astype(dtype)
+    nvir = n - nocc
     for r in 'ov':
         for s in 'ov':
-            g = get_block(eris, r + 'o' + s + 'v')
-            fp[sp[r], sp[s]] += einsum('risa,ia->rs', g, t1)
+            # sum_ia <ri||sa> t1[i,a], from the stored blocks as they are (no
+            # transposed copies: <ai||sb> = -<ia||sb>)
+            if r == 'o':
+                x = np.einsum('risa,ia->rs', get_block(eris, 'oo' + s + 'v'), t1)
+            elif s == 'o':
+                x = -np.einsum('iaje,ie->aj', np.asarray(eris.ovov), t1)
+            else:
+                ovvv = np.asarray(eris.ovvv)
+                x = np.zeros(nvir * nvir, dtype=dtype)
+                for i in range(nocc):
+                    x -= ovvv[i].reshape(nvir * nvir, nvir) @ t1[i]
+                x = x.reshape(nvir, nvir)
+            fp[sp[r], sp[s]] += x
     x = np.eye(n, dtype=dtype)
     x[nocc:, :nocc] -= t1.T
     y = np.eye(n, dtype=dtype)
@@ -1143,7 +1230,6 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
     T3p = np.ascontiguousarray(np.asarray(T3p, dtype=dtype).ravel())
     mo_e = eris.mo_energy
     eia = mo_e[:nocc, None] - (mo_e[None, nocc:] + opts.level_shift)
-    eijab = eia[:, None, :, None] + eia[None, :, None, :]
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
 
@@ -1154,8 +1240,9 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
     tight = plan.t3_file or plan.pp_file or plan.pp_bytes is not None
     # (nor what an earlier run with another plan has kept for the operator)
     eris.__dict__.get('_buffers', {}).pop('vvvv' if sliced else 'vvvv_rows', None)
+    t2 = np.ascontiguousarray(t2, dtype=dtype)
     t2mn = t2[mm, nn]                                   # (P, a, b)
-    t2pp_v = np.ascontiguousarray(t2mn[:, md, ne])      # (P, Q)
+    t2pp_v = t3pack.pack_last2(t2mn, vm)                # (P, Q)
     with timer('t1_dress'):
         if spin:
             # vvvv_pp then includes the T2 part of the ladder operator,
@@ -1177,10 +1264,11 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
     goovv = ge['oovv']
 
     # ---- pass 1: quantities linear in T3 that feed T1, T2 and the W's
-    t2P = t2[:, :, md, ne]                              # (i, j, Q)
-    goovv_pp = goovv[mm, nn][:, md, ne]                 # (P, Q)
-    goovv_P = goovv[:, :, md, ne]                       # (m, n, Q)
+    goovv = np.ascontiguousarray(goovv, dtype=dtype)
+    t2P = t3pack.pack_last2(t2, vm)                     # (i, j, Q)
     goovv_mn = goovv[mm, nn]                            # (P, e, f)
+    goovv_pp = t3pack.pack_last2(goovv_mn, vm)          # (P, Q)
+    goovv_P = t3pack.pack_last2(goovv, vm)              # (m, n, Q)
     goovo_mn = ge['oovo'][mm, nn]                       # (P, e, j)
     # stacked integral operands so that pass 1 is two GEMMs per batch
     G_Pd = np.concatenate((goovv_mn.transpose(1, 0, 2),        # [e, P, f]
@@ -1250,23 +1338,45 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
         del Bv
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wvooo'); t_.__enter__()
+        # t2 in the ring layout, A[(i a), (k c)] = t2[i,k,a,c] (a symmetric
+        # matrix): W_vooo, W_ovvo with the Fock intermediates and the CCSD ring
+        # term are GEMMs with it
+        A = transposed(t2, (0, 2, 1, 3)).reshape(nocc * nvir, nocc * nvir)
         Wvooo = govoo.copy()
-        tmp2 = einsum('mnie,jnbe->mbij', ooov, t2)
+        # tmp2[m,b,i,j] = sum_ne ooov[m,n,i,e] t2[j,n,b,e]
+        Oo = np.ascontiguousarray(np.asarray(ooov).transpose(0, 2, 1, 3), dtype=dtype)
+        tmp2 = gemm(Oo.reshape(nocc * nocc, nocc * nvir), A.T).reshape(
+            nocc, nocc, nocc, nvir).transpose(0, 3, 1, 2)
         Wvooo -= (tmp2 - tmp2.transpose(0, 1, 3, 2)).transpose(0, 1, 3, 2)
         if spin:
             o_, v_ = eris.spaces['o'], eris.spaces['v']
             T2s = SpinTensor.from_dense(t2, (o_, o_, v_, v_), sig=(-1, -1, 1, 1))
             ovvv_t2 = s_einsum('mbef,ijef->mbij', ges['ovvv'], T2s).to_dense()
         else:
-            ovvv_t2 = einsum('mbef,ijef->mbij', ge['ovvv'], t2)
+            ovvv_t2 = gemm(np.ascontiguousarray(ge['ovvv'], dtype=dtype).reshape(nocc * nvir, -1),
+                           t2.reshape(nocc * nocc, -1).T).reshape(nocc, nvir, nocc, nocc)
             del ge['ovvv']
         Wvooo -= (0.5 * ovvv_t2).transpose(0, 1, 3, 2)
         Wo = Wvooo[:, :, nn, mm] + dWo                   # [m, a, P(ij)]
         t_.__exit__(None, None, None)
         t_ = timer('imd.ring_F'); t_.__enter__()
-        Weff_ovvo = ge['ovvo'] + einsum('mnde,inae->madi', goovv, t2)
-        Feff_vv = fvv - einsum('Paf,Pdf->ad', t2mn, goovv_mn)
-        Feff_oo = foo + einsum('mnP,inP->mi', goovv_P, t2P)
+        # X[(m d), (i a)] = sum_ne <mn||de> t2[i,n,a,e]: the T2 part of W_ovvo;
+        # the T2 parts of the Fock intermediates are its partial traces,
+        #   F_oo[m,i] += 1/2 sum_d X[(m d), (i d)],  F_vv[a,d] -= 1/2 sum_m X[(m d), (m a)]
+        Gr = transposed(goovv, (0, 2, 1, 3)).reshape(nocc * nvir, nocc * nvir)
+        X = gemm(Gr, A.T)
+        del Gr
+        X4 = X.reshape(nocc, nvir, nocc, nvir)                  # [m, d, i, a]
+        Feff_oo = foo + 0.5 * np.einsum('mdid->mi', X4)
+        Feff_vv = fvv - 0.5 * np.einsum('mdma->ad', X4)
+        # W_ovvo[m,a,d,i] = ~<ma||di> + X, in the ring layout [(m d), (i a)]; from it
+        # the operator of the T3 ring term [(a i), (d m)] and that of the CCSD
+        # ring term, B = 1/2 (g + W)
+        Br = transposed(ge['ovvo'], (0, 2, 3, 1), dtype).reshape(nocc * nvir, nocc * nvir)
+        t3pack.axpby(X, Br, 1.0, 1.0)
+        WringT = transposed(X4, (3, 2, 1, 0)).reshape(nvir * nocc, nvir * nocc)
+        t3pack.axpby(Br, X, 0.5, 0.5)
+        del X, X4
         t_.__exit__(None, None, None)
         # CCSD residuals (T1-dressed) + T3 contributions, before the dressed
         # packed vvvv is turned into the T3 ladder operator in place
@@ -1288,11 +1398,13 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
                                 Wv, R3)
             t_ = timer('ccsd'); t_.__enter__()
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
-                                      Feff_oo, Weff_ovvo, om, vm, r1_vovv, ladder_t2,
-                                      t2pp=t2pp_v, goovv_pp=goovv_pp, ladder=lad)
+                                      Feff_oo, None, om, vm, r1_vovv, ladder_t2,
+                                      t2pp=t2pp_v, goovv_pp=goovv_pp, ladder=lad,
+                                      t2mn=t2mn, ring=(A, Br))
         t1new = t1 + (R1 + r1) / eia
-        t2new = t2 + _unpack_pairs(R2 + r2_t3, om, vm) / eijab
-        del vvoo_pp, R1, R2, lad
+        R2 += r2_t3
+        t2new = t3pack.t2_update(t2, R2, om, vm, mo_e[:nocc], mo_e[nocc:] + opts.level_shift)
+        del vvoo_pp, R1, R2, lad, A, Br
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wpp'); t_.__enter__()
         Wpp = vvvv_pp            # in place, per pair block: W(ab,de) = ~<ab||de> + ...
@@ -1315,7 +1427,6 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
         t_.__exit__(None, None, None)
 
     # ---- T3 residual: ring + drive, pp ladder (+F_vv), hh ladder (+F_oo)
-    WringT = Weff_ovvo.transpose(1, 3, 2, 0).reshape(nvir * nocc, nvir * nocc)
     del ge, Yall, B0, C0, goovv_P, goovv_mn, goovo_mn, G_Pd
     if spin:
         del ges
@@ -1361,7 +1472,8 @@ def ccsd_update_amps(opts, t1, t2, eris):
         r1_vovv = _spin_r1_vovv(eris, ges, t2, vm) if spin else None
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
                                       Feff_oo, Weff_ovvo, om, vm, r1_vovv)
-    return t1 + R1 / eia, t2 + _unpack_pairs(R2, om, vm) / eijab
+    return t1 + R1 / eia, t3pack.t2_update(t2, R2, om, vm, mo_e[:nocc],
+                                           mo_e[nocc:] + opts.level_shift)
 
 
 def _unpack_pairs(packed, om, vm):

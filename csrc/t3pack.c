@@ -1700,3 +1700,114 @@ void zc_occ_operator_##SFX(T *O, int64_t nI, const int64_t *rows,              \
 }
 DEFINE_OCCOP(double, d)
 DEFINE_OCCOP(double complex, z)
+
+
+/* ---- The CCSD part of the CCSDT iteration on packed T2 (zccsdt/cc/
+ * ccsdt_opt.py): the gathers, antisymmetrizing packs and the update that
+ * numpy did on one thread by fancy indexing.  The pairs are those of the
+ * maps (any order): opa/opb (npo) and vpa/vpb (nq) hold their two indices.
+ *
+ * zc_pack_last2: mode 0  R[L, Q] = Y[L, a, b]
+ *                mode 1  R[L, Q] += alpha (Y[L, a, b] - Y[L, b, a])
+ *   for the pairs Q = (a, b); Y: (nl, nv, nv), R: (nl, nq).
+ * zc_asym_pack4: R[P, Q] += alpha (X[i,j,a,b] - X[j,i,a,b] - X[i,j,b,a] + X[j,i,b,a])
+ *   for P = (i, j), Q = (a, b), with X[i,j,a,b] at the element
+ *   i si + j sj + a sa + b sb of X (any layout); R: (npo, nq).
+ * zc_t2_update: out = t2 + A(R) / D, A(R) the antisymmetric (no, no, nv, nv)
+ *   array of the packed R (npo, nq), D[i,j,a,b] = (eo[i] - ev[a]) + (eo[j] - ev[b]).
+ * zc_vvoo_ket: G[Q, P] += Y[i, j] - Y[j, i] for P = (i, j),
+ *   Y[i, j] = sum_e t1[i, e] B[Q, e, j];  B: (nq, nv, no), t1: (no, nv), G: (nq, npo). */
+#define DEFINE_CCSDPACK(T, SFX)                                                \
+void zc_pack_last2_##SFX(T *R, const T *Y, int64_t nl, int64_t nv, int64_t nq, \
+                         const int64_t *vpa, const int64_t *vpb,               \
+                         const T *alpha, int mode)                             \
+{                                                                              \
+    const T al = *alpha;                                                       \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t l = 0; l < nl; l++) {                                         \
+        const T *y = Y + l * nv * nv;                                          \
+        T *r = R + l * nq;                                                     \
+        if (mode == 0)                                                         \
+            for (int64_t q = 0; q < nq; q++) r[q] = y[vpa[q] * nv + vpb[q]];   \
+        else                                                                   \
+            for (int64_t q = 0; q < nq; q++)                                   \
+                r[q] += al * (y[vpa[q] * nv + vpb[q]] - y[vpb[q] * nv + vpa[q]]); \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_asym_pack4_##SFX(T *R, const T *X, int64_t npo, int64_t nq,            \
+                         const int64_t *opa, const int64_t *opb,               \
+                         const int64_t *vpa, const int64_t *vpb,               \
+                         int64_t si, int64_t sj, int64_t sa, int64_t sb,       \
+                         const T *alpha)                                       \
+{                                                                              \
+    const T al = *alpha;                                                       \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t p = 0; p < npo; p++) {                                        \
+        const int64_t i = opa[p], j = opb[p];                                  \
+        const T *xij = X + i * si + j * sj, *xji = X + j * si + i * sj;        \
+        T *r = R + p * nq;                                                     \
+        for (int64_t q = 0; q < nq; q++) {                                     \
+            const int64_t ab = vpa[q] * sa + vpb[q] * sb;                      \
+            const int64_t ba = vpb[q] * sa + vpa[q] * sb;                      \
+            r[q] += al * (xij[ab] - xji[ab] - xij[ba] + xji[ba]);              \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_t2_update_##SFX(T *out, const T *t2, const T *R, int64_t no,           \
+                        int64_t nv, int64_t npo, int64_t nq,                   \
+                        const int64_t *opa, const int64_t *opb,                \
+                        const int64_t *vpa, const int64_t *vpb,                \
+                        const double *eo, const double *ev)                    \
+{                                                                              \
+    const int64_t n2 = nv * nv;                                                \
+    if (out != t2) {                                                           \
+        _Pragma("omp parallel for schedule(static)")                           \
+        for (int64_t ij = 0; ij < no * no; ij++)                               \
+            memcpy(out + ij * n2, t2 + ij * n2, sizeof(T) * n2);               \
+    }                                                                          \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t p = 0; p < npo; p++) {                                        \
+        const int64_t i = opa[p], j = opb[p];                                  \
+        T *oij = out + (i * no + j) * n2, *oji = out + (j * no + i) * n2;      \
+        const T *r = R + p * nq;                                               \
+        for (int64_t q = 0; q < nq; q++) {                                     \
+            const int64_t a = vpa[q], b = vpb[q];                              \
+            const T d = r[q] / ((eo[i] - ev[a]) + (eo[j] - ev[b]));            \
+            oij[a * nv + b] += d;                                              \
+            oji[a * nv + b] -= d;                                              \
+            oij[b * nv + a] -= d;                                              \
+            oji[b * nv + a] += d;                                              \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_vvoo_ket_##SFX(T *G, const T *B, const T *t1, int64_t nq, int64_t nv,  \
+                       int64_t no, int64_t npo, const int64_t *opa,            \
+                       const int64_t *opb)                                     \
+{                                                                              \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *Y = malloc(sizeof(T) * (no * no + 1));                              \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t q = 0; q < nq; q++) {                                     \
+            const T *b = B + q * nv * no;                                      \
+            memset(Y, 0, sizeof(T) * no * no);                                 \
+            for (int64_t i = 0; i < no; i++) {                                 \
+                T *y = Y + i * no;                                             \
+                for (int64_t e = 0; e < nv; e++) {                             \
+                    const T t = t1[i * nv + e];                                \
+                    const T *be = b + e * no;                                  \
+                    for (int64_t j = 0; j < no; j++) y[j] += t * be[j];        \
+                }                                                              \
+            }                                                                  \
+            T *g = G + q * npo;                                                \
+            for (int64_t p = 0; p < npo; p++)                                  \
+                g[p] += Y[opa[p] * no + opb[p]] - Y[opb[p] * no + opa[p]];     \
+        }                                                                      \
+        free(Y);                                                               \
+    }                                                                          \
+}
+DEFINE_CCSDPACK(double, d)
+DEFINE_CCSDPACK(double complex, z)
