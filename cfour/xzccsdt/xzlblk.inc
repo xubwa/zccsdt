@@ -55,7 +55,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
         kl = xzget(NW * nb * nr * nq, 'pass-1 batch of L3')
         kt = xzget(NW * nb * nr * nq, 'pass-1 batch of T3')
         if (.not. xzdry) then
-          t0 = omp_get_wtime()
+          call xztic()
           r0 = 0
           do sd = 0, ncls - 1
             sm = sd - delta
@@ -72,18 +72,18 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
             end if
             r0 = r0 + nd * nm
           end do
-          tlam(2) = tlam(2) + omp_get_wtime() - t0
-          t0 = omp_get_wtime()
+          call xztoc(2, 'pass 1: gather')
+          call xztic()
           do k = 0, nb - 1
             call N(zc_gemm)(0_4, 1_4, nr, nr, nq, one, w(kl + NW * k * nr * nq), nq, &
                             w(kt + NW * k * nr * nq), nq, one, w(kdd + NW * wdoff(delta)), nr)
             if (delta == 0) call N(zc_gemm)(0_4, 0_4, nr, 1_8, nq, one, w(kt + NW * k * nr * nq), nq, &
                                             l2pp(qlo, p0 + k), 1_8, one, w(kd0), 1_8)
           end do
-          tlam(4) = tlam(4) + omp_get_wtime() - t0
+          call xztoc(2, 'pass 1: density')
         end if
         ! the stacked products, per class of d and of m
-        t0 = omp_get_wtime()
+        call xztic()
         r0 = 0
         do sd = 0, ncls - 1
           sm = sd - delta
@@ -112,7 +112,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           end if
           r0 = r0 + nd * nm
         end do
-        if (.not. xzdry) tlam(3) = tlam(3) + omp_get_wtime() - t0
+        if (.not. xzdry) call xztoc(2, 'pass 1: stacked GEMMs')
         call xzrel(mk)
       end do
     end do
@@ -205,15 +205,15 @@ subroutine N(xzlbladder)(w, kl3, kr3, xq, x2, r2q, r1x)
         kxp = xzget(NW * nqh * nb * nc, 'ladder product')
         ka = xzget(NW * max(np * nb * nc, nqh * nb * nj), 'batch of Xq, X2')
         if (.not. xzdry) then
-          t0 = omp_get_wtime()
+          call xztic()
           call N(zc_bgather_vir)(w(kl3), w(jobase), w(jvcol), w(josig), w(jvsig), w(jvtri), w(jvsgn), nvp, &
                                  nb, w(jrows + i0), qlo, nqh, vcoff(sc), nc, w(ktv))
-          tlam(7) = tlam(7) + omp_get_wtime() - t0
-          t0 = omp_get_wtime()
+          call xztoc(2, 'ladder: gather')
+          call xztic()
           call N(zc_gemm)(1_4, 0_4, nqh, nb * nc, nqh, one, w(jvvvv + NW * vvoff(h)), nqh, w(ktv), nb * nc, &
                           zero, w(kxp), nb * nc)
-          tlam(8) = tlam(8) + omp_get_wtime() - t0
-          t0 = omp_get_wtime()
+          call xztoc(2, 'ladder: GEMM')
+          call xztic()
           call N(zc_breduce_ppl_rows)(w(kr3), w(jobase), w(jvcol), nb, w(jrows + i0), nvt, vtoff(g), &
                                       vtoff(g + 1), w(jvfree), w(jvpair), vcls, sc, qlo, 0_8, nqh, &
                                       nc, vcoff(sc), w(kxp))
@@ -227,7 +227,7 @@ subroutine N(xzlbladder)(w, kl3, kr3, xq, x2, r2q, r1x)
             call N(zc_gemm)(1_4, 0_4, nc, nj, nqh * nb, one, w(ktv), nc, w(ka), nj, one, &
                             r1x(j0, vcoff(sc)), no)
           end if
-          tlam(9) = tlam(9) + omp_get_wtime() - t0
+          call xztoc(2, 'ladder: reduction, small')
         end if
         call xzrel(mk)
       end do

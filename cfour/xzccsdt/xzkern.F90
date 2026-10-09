@@ -48,6 +48,10 @@ module xzkern
     end subroutine
 
     ! number of threads of the BLAS and whether its integers have 8 bytes
+    subroutine xz_clocks(wall, cpu) bind(C)
+      import
+      real(c_double), intent(out) :: wall, cpu
+    end subroutine
     subroutine xz_blas_info(nthreads, ilp64) bind(C)
       import
       integer(c_int64_t) :: nthreads, ilp64

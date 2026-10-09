@@ -95,16 +95,20 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   md = xzmark()
   kd = xzget(NW * ov * nvp, 'dressed <ov||vv>')
   if (.not. xzdry) then
-    t0 = omp_get_wtime()
+    call xztic()
     call N(xzfock)(no, nv, nvp, w(jeps), w(kt1), w(jooov), w(joovv), w(jovvo), w(jovvq), &
                    w(jvpa), w(jvpb), w(kfoo), w(kfov), w(kfvo), w(kfvv), w(kpvv))
+    call xztoc(1, 'dressing: Fock')
     call N(xzdroo)(no, nv, w(kt1), w(jooov), w(joovv), w(joooo), w(kooovd), w(kooood))
+    call xztoc(1, 'dressing: <oo||ov>, <oo||oo>')
     call N(xzdrovvq)(no, nv, nvp, w(kt1), w(jovvq), w(joovvp), w(kd))
+    call xztoc(1, 'dressing: <ov||vv>')
     call N(xzdrov)(no, nv, nvp, w(kt1), w(jooov), w(jovvo), w(jovvq), w(kd), w(kooood), &
                    w(jvpidx), w(kovvod), w(kovood), w(kk))
+    call xztoc(1, 'dressing: <ov||vo>, <ov||oo>')
     call N(xzt2forms)(no, nv, npo, nvp, w(kt1), w(kt2), w(jopa), w(jopb), w(jvpa), w(jvpb), &
                       w(kt2p), w(kt2pp), w(ktau), w(ktt))
-    tstage(1) = tstage(1) + omp_get_wtime() - t0
+    call xztoc(1, 'T2 on pairs, tau')
   end if
 
   ! ---- pass 1
@@ -112,12 +116,12 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   m1 = xzmark()
   kgmq = xzget(NW * no * nvp * ny, 'pass-1 operand G')
   if (.not. xzdry) then
-    t0 = omp_get_wtime()
+    call xztic()
     call N(xzp1ops)(no, nv, npo, nvp, w(joovv), w(kooovd), w(joovvp), w(kd), w(kfov), &
                     w(jopa), w(jopb), w(kgpd), w(kgmq), w(kft))
-    tstage(2) = tstage(2) + omp_get_wtime() - t0
+    call xztoc(1, 'pass-1 operands')
   end if
-  t0 = omp_get_wtime()
+  call xztic()
   if (dense) then
     kbuf = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
     if (.not. xzdry) then
@@ -132,10 +136,11 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     call N(xzbpass1)(w, kt3, w(kgpd), w(kgmq), w(jgpp), w(kfov), w(kxacc), w(kyall), w(kr1c), w(kra))
   end if
   if (.not. xzdry) then
+    call xztoc(1, 'pass 1')
     ! sum_{k,Q} ~<ak||Q> t2[i][k][Q], at the columns no + a
     call N(zc_gemm)(0_4, 0_4, no, ny, no * nvp, one, w(kt2p), no * nvp, w(kgmq), ny, zero, w(kr1v), ny)
     call N(xzr2t3)(no, nv, npo, nvp, w(jopa), w(jopb), w(jvpa), w(jvpb), w(kyall), w(kxacc), w(kra))
-    tstage(3) = tstage(3) + omp_get_wtime() - t0
+    call xztoc(1, 'R1, R2 from pass 1')
   end if
   call xzrel(m1)
 
@@ -147,30 +152,38 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   ku = xzget(NW * nv ** 3, 'dressed <mb||ef> of one m')
   kxb = xzget(NW * nba * no * nv * nv, 'batch of W_vvvo terms X')
   if (.not. xzdry) then
-    t0 = omp_get_wtime()
+    call xztic()
     call N(xzbv)(no, nv, npo, nvp, nba, w(kt1), w(ktau), w(jovvq), w(jooov), w(jovvo), &
                  w(jopa), w(jopb), w(jvpa), w(jvpb), w(kwv), w(kg2), w(kyb))
+    call xztoc(1, 'W_vvvo: bare, tau, t1')
     call N(xzvvoo)(no, nv, npo, nvp, w(kt1), w(ktau), w(jgpp), w(jooov), w(joooo), w(kwv), &
                    w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2))
+    call xztoc(1, 'dressed <ab||ij>')
     ! the T3 part: wv[Q][(e, i)] += xacc[(e, i)][Q]
     call N(zc_add_transposed)(w(kwv), w(kxacc), nvp, ov, ov, nvp, one)
     call N(xzwvoovo)(no, nv, npo, nvp, w(kt2pp), w(kooovd), w(kfov), w(jopa), w(jopb), w(kwv), w(kg2))
+    call xztoc(1, 'W_vvvo: T3 part, t2 <oo||vo>')
     call N(xzwvx)(no, nv, nvp, nba, w(kt2), w(kd), w(jvpa), w(jvpb), w(kwv), w(ka2), w(ku), &
                   w(kxb), w(kyb))
-    tstage(4) = tstage(4) + omp_get_wtime() - t0
-    t0 = omp_get_wtime()
+    call xztoc(1, 'W_vvvo: t2 <ov||vv>')
     call N(xzwo)(no, nv, npo, nvp, w(kt2), w(kt2pp), w(kooovd), w(kovood), w(kd), w(kyall), &
                  w(jopa), w(jopb), w(kwo), w(ktmp))
+    call xztoc(1, 'W_vooo')
     call N(xzweff)(no, nv, nvp, w(kt2), w(kt2p), w(joovv), w(joovvp), w(kovvod), w(kfoo), w(kfvv), &
                    w(kweff), w(kfevv), w(kfeoo), w(ka2), w(kb2), w(kx2))
+    call xztoc(1, 'W_ovvo, F_vv, F_oo')
     call N(xzp2ops)(no, nv, npo, w(kt2), w(kweff), w(kwo), w(jopa), w(jopb), w(kwring), w(kadrv))
-    tstage(5) = tstage(5) + omp_get_wtime() - t0
+    call xztoc(1, 'pass-2 operands W, A')
   end if
   ! W_vvvo moves down to the place of the dressed <ov||vv>, which goes, as
   ! does the pass-1 result
   call xzrel(md)
   kd = xzget(NW * nvp * ov, 'W_vvvo')
-  if (.not. xzdry) call N(xzmove)(nvp * ov, w(kwv), w(kd))
+  if (.not. xzdry) then
+    call xztic()
+    call N(xzmove)(nvp * ov, w(kwv), w(kd))
+    call xztoc(1, 'moves')
+  end if
   kwv = kd
 
   ! ---- the sweep over the rows of the dressed <ab||cd>, block by block
@@ -188,19 +201,24 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     kxp = xzget(NW * nqs * nbt * nv, 'pp-ladder product')
   end if
   if (.not. xzdry) then
+    call xztic()
     call zc_vzero_d(NW * n3, w(kr3))
     call zc_vzero_d(NW * npo * nvp, w(klad))
+    call xztoc(1, 'zero of the residual')
   end if
   do h = 0, npg - 1
     lo = vpoff(h)
     nqh = vpoff(h + 1) - lo
     if (nqh == 0) cycle
-    if (.not. dense .and. .not. xzdry) call N(xzgrpcols)(no, nv, npo, nvp, lo, nqh, w(jovvq), w(jgpp), &
-                                                          w(jvpidx), w(kgq), w(kgh), w(kpib))
+    if (.not. dense .and. .not. xzdry) then
+      call xztic()
+      call N(xzgrpcols)(no, nv, npo, nvp, lo, nqh, w(jovvq), w(jgpp), w(jvpidx), w(kgq), w(kgh), w(kpib))
+      call xztoc(1, 'dressed <ab||cd> rows')
+    end if
     do q0 = 0, nqh - 1, nqs
       nq = min(nqs, nqh - q0)
       if (.not. xzdry) then
-        t0 = omp_get_wtime()
+        call xztic()
         ! ~<ab||de> = <ab||de> - sum_m t1[m][a] <mb||de> + sum_m t1[m][b] <ma||de>
         !             + sum_{m<n} tau1[mn][ab] <mn||de>
         call N(xzdrrows)(no, nv, npo, nvp, nqh, nq, w(kt1), w(ktau + NW * (lo + q0)), &
@@ -208,35 +226,35 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
                          w(jvpb + lo + q0), w(kslab), w(ka2))
         ! W_vvvo[Q][e][i] += sum_f ~<ab||ef> t1[i][f]
         call N(zc_pair_t1_contract)(w(kwv + NW * (lo + q0) * ov), w(kslab), w(kt1), nq, nv, nqh, w(kpib), no)
-        tstage(6) = tstage(6) + omp_get_wtime() - t0
-        t0 = omp_get_wtime()
+        call xztoc(1, 'dressed <ab||cd> rows')
+        call xztic()
         ! the CCSD ladder: lad[P][q] = sum_Q ~<q||Q> (t2 + tau1)[P][Q]
         if (npo > 0) call N(zc_gemm)(0_4, 1_4, npo, nq, nqh, one, w(ktt + NW * lo), nvp, w(kslab), nqh, &
                                      zero, w(klad + NW * (lo + q0)), nvp)
-        tstage(10) = tstage(10) + omp_get_wtime() - t0
-        t0 = omp_get_wtime()
+        call xztoc(1, 'CCSD pp ladder (GEMM)')
+        call xztic()
         ! the pp operator of T3: + sum_{m<n} t2[mn][ab] <mn||de> + 1/2 A[F_vv delta]
         if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nqh, npo, one, w(kt2pp + NW * (lo + q0)), nvp, &
                                      w(jgpp + NW * lo), nvp, one, w(kslab), nqh)
         call N(zc_pair_one_body_add)(w(kslab), nq, nqh, w(jvpa + lo + q0), w(jvpb + lo + q0), w(kpib), nv, &
                                      w(kfevv), nv, half)
-        tstage(6) = tstage(6) + omp_get_wtime() - t0
+        call xztoc(1, 'dressed <ab||cd> rows')
       end if
       if (dense) then
         if (xzdry) cycle
         do i0 = 0, nto - 1, nbt
           nb = min(nbt, nto - i0)
-          t0 = omp_get_wtime()
+          call xztic()
           call N(zc_gather_vir_half)(w(kt3), nvt, w(jrows + i0), nb, w(jvtri), w(jvsgn), nv, nvp, w(ktv))
-          tstage(7) = tstage(7) + omp_get_wtime() - t0
-          t0 = omp_get_wtime()
+          call xztoc(1, 'pp ladder: gather')
+          call xztic()
           call N(zc_gemm)(0_4, 0_4, nq, nb * nv, nvp, one, w(kslab), nvp, w(ktv), nb * nv, zero, &
                           w(kxp), nb * nv)
-          tstage(8) = tstage(8) + omp_get_wtime() - t0
-          t0 = omp_get_wtime()
+          call xztoc(1, 'pp ladder: GEMM')
+          call xztic()
           call N(zc_reduce_pair_first_rows)(w(kr3), nvt, w(kxp), w(jrows + i0), nb, nv, q0, q0 + nq, &
                                             w(jvfree), w(jvpair))
-          tstage(9) = tstage(9) + omp_get_wtime() - t0
+          call xztoc(1, 'pp ladder: reduction')
         end do
       else
         call N(xzbppl)(w, kt3, kr3, h, q0, nq, w(kslab))
@@ -247,32 +265,36 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
 
   ! ---- the CCSD part and the operator on the occupied triples
   if (.not. xzdry) then
-    t0 = omp_get_wtime()
+    call xztic()
     call N(xzccsd)(no, nv, npo, nvp, w(jeps), w(kt1), w(kt2), w(kt2p), w(kt2pp), w(jgpp), w(kooovd), &
                    w(kooood), w(kovvod), w(kweff), w(kfov), w(kfvo), w(kfevv), w(kfeoo), w(kr1v), &
                    w(kr1c), w(kra), w(klad), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2), w(kwkl), &
                    w(kt1n), w(kt2n), w(ka2), w(kb2), w(kx2))
-    tstage(10) = tstage(10) + omp_get_wtime() - t0
-    t0 = omp_get_wtime()
+    call xztoc(1, 'CCSD part')
+    call xztic()
     call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(kwkl), w(kfeoo), w(ko6))
-    tstage(11) = tstage(11) + omp_get_wtime() - t0
+    call xztoc(1, 'occupied operator')
   end if
 
   ! ---- pass 2: its right-hand side from W_vvvo, in the place of W_vvvo
   nbdw = ny * no * nvp
   if (.not. dense) nbdw = nbd
   kbd = xzget(NW * nbdw, 'pass-2 operand B')
-  t0 = omp_get_wtime()
   if (.not. xzdry) then
+    call xztic()
     if (dense) then
       call N(xzbdrv)(no, nv, nvp, w(kwv), w(kt2p), w(kbd))
     else
       call N(xzbbd)(w(kwv), w(kt2p), w(kbd))
     end if
+    call xztoc(1, 'pass-2 operand B')
   end if
   call xzrel(md)
   kd = xzget(NW * nbdw, 'pass-2 operand B')
-  if (.not. xzdry) call N(xzmove)(nbdw, w(kbd), w(kd))
+  if (.not. xzdry) then
+    call N(xzmove)(nbdw, w(kbd), w(kd))
+    call xztoc(1, 'moves')
+  end if
   kbd = kd
   if (dense) then
     ktb = xzget(NW * nbp * ov * nvp, 'pass-2 batch of T3')
@@ -287,21 +309,21 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     call N(xzbpass2)(w, kt3, kr3, w(kwring), w(kadrv), w(kbd), 1_8, 0_8, w(kbd), w(kbd))
   end if
   if (.not. xzdry) then
-    tstage(12) = tstage(12) + omp_get_wtime() - t0
-    t0 = omp_get_wtime()
+    call xztoc(1, 'pass 2')
+    call xztic()
     if (dense) then
       call N(zc_t3_occop)(w(ko6), w(kt3), nto, nvt, ncb, c_null_ptr, w(kr3))
     else
       call N(xzbocc)(w, kt3, kr3, w(ko6))
     end if
-    tstage(13) = tstage(13) + omp_get_wtime() - t0
-    t0 = omp_get_wtime()
+    call xztoc(1, 'hh ladder, F_oo')
+    call xztic()
     if (dense) then
       call N(zc_t3_update)(w(kt3), w(kr3), nto, nvt, w(jeo3), w(jev3), c_null_ptr)
     else
       call N(xzbupd)(w, kt3, kr3)
     end if
-    tstage(14) = tstage(14) + omp_get_wtime() - t0
+    call xztoc(1, 'T3 update')
   end if
   call xzrel(m0)
 end subroutine

@@ -506,18 +506,18 @@ subroutine N(xzbppl)(w, kt3, kr3, h, q0, nq, slab)
       ktv = xzget(NW * nqh * nb * nc, 'pp-ladder batch of T3')
       kxp = xzget(NW * nq * nb * nc, 'pp-ladder product')
       if (.not. xzdry) then
-        t0 = omp_get_wtime()
+        call xztic()
         call N(zc_bgather_vir)(w(kt3), w(jobase), w(jvcol), w(josig), w(jvsig), w(jvtri), w(jvsgn), nvp, &
                                nb, w(jrows + i0), vpoff(h), nqh, vcoff(sc), nc, w(ktv))
-        tstage(7) = tstage(7) + omp_get_wtime() - t0
-        t0 = omp_get_wtime()
+        call xztoc(1, 'pp ladder: gather')
+        call xztic()
         call N(zc_gemm)(0_4, 0_4, nq, nb * nc, nqh, one, slab, nqh, w(ktv), nb * nc, zero, w(kxp), nb * nc)
-        tstage(8) = tstage(8) + omp_get_wtime() - t0
-        t0 = omp_get_wtime()
+        call xztoc(1, 'pp ladder: GEMM')
+        call xztic()
         call N(zc_breduce_ppl_rows)(w(kr3), w(jobase), w(jvcol), nb, w(jrows + i0), nvt, vtoff(g), &
                                     vtoff(g + 1), w(jvfree), w(jvpair), vcls, sc, vpoff(h), q0, q0 + nq, &
                                     nc, vcoff(sc), w(kxp))
-        tstage(9) = tstage(9) + omp_get_wtime() - t0
+        call xztoc(1, 'pp ladder: reduction')
       end if
       call xzrel(m0)
     end do

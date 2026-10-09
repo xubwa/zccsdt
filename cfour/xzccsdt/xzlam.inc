@@ -81,8 +81,8 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   call get_environment_variable('XZ_LDEBUG', dbg, ldbg)
   t0 = omp_get_wtime()
   call N(xzlamim)(w)
-  tlam(1) = omp_get_wtime() - t0
-  write(6, '(/,a,f10.2,a)') '   intermediates of the Lambda equations: ', tlam(1), ' s'
+  tlamim = omp_get_wtime() - t0
+  write(6, '(/,a,f10.2,a)') '   intermediates of the Lambda equations: ', tlamim, ' s'
   if (ldbg > 0) call N(xzlamdump)(w, dbg(1:ldbg))
 
   ! the start: conj(t)
@@ -104,9 +104,9 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
       call xzdumpw(dbg(1:ldbg) // '.l2n', NW * ov * ov, w(kl2n))
       call xzdumpw(dbg(1:ldbg) // '.l3n', NW * n3, w(kr3))
     end if
-    t1w = omp_get_wtime()
+    call xztic()
     call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms)
-    tlam(12) = tlam(12) + omp_get_wtime() - t1w
+    call xztoc(2, 'DIIS')
     call N(xzlpseudo)(no, nv, w(jl2), w(joovv), pe)
     normt = norms(1) + norms(2) + norms(3)
     write(6, '(i8,f28.14,3es11.3,i7,f10.2)') icyc, dble(pe), norms, ncnt, omp_get_wtime() - t0
@@ -246,6 +246,7 @@ subroutine N(xzlamim)(w)
   md = xzmark()
   kd = xzget(NW * ov * nvp, 'dressed <ov||vv>')
   if (.not. xzdry) then
+    call xztic()
     call N(xzfock)(no, nv, nvp, w(jeps), w(jt1), w(jooov), w(joovv), w(jovvo), w(jovvq), &
                    w(jvpa), w(jvpb), w(kfoo), w(lfov), w(kfvo), w(kfvv), w(kpvv))
     call N(xzdroo)(no, nv, w(jt1), w(jooov), w(joovv), w(joooo), w(looovd), w(kooood))
@@ -257,6 +258,7 @@ subroutine N(xzlamim)(w)
     ! the operands of pass 1 over T3, in the places of the kept ones
     call N(xzp1ops)(no, nv, npo, nvp, w(joovv), w(looovd), w(joovvp), w(kd), w(lfov), &
                     w(jopa), w(jopb), w(lgpd), w(lgmq), w(kft))
+    call xztoc(3, 'T1 dressing, operands')
   end if
 
   ! ---- pass 1 over T3: the T3 parts of W_vvvo and W_vooo (its result X in
@@ -275,6 +277,7 @@ subroutine N(xzlamim)(w)
   else
     call N(xzbpass1)(w, jt3, w(lgpd), w(lgmq), w(jgpp), w(lfov), w(lbdrv), w(kyall), w(kr1c), w(kra))
   end if
+  if (.not. xzdry) call xztoc(3, 'pass 1 over T3')
   call xzrel(m1)
 
   ! ---- W_vvvo (without its <ab||cd> part), W_vooo, W_ovvo, F_vv, F_oo
@@ -291,15 +294,18 @@ subroutine N(xzlamim)(w)
     call N(xzwvoovo)(no, nv, npo, nvp, w(kt2pp), w(looovd), w(lfov), w(jopa), w(jopb), w(kwv), w(kg2))
     call N(xzwvx)(no, nv, nvp, nba, w(jt2), w(kd), w(jvpa), w(jvpb), w(kwv), w(ka2), w(ku), &
                   w(kxb), w(kyb))
+    call xztoc(3, 'W_vvvo')
     call N(xzwo)(no, nv, npo, nvp, w(jt2), w(kt2pp), w(looovd), w(kovood), w(kd), w(kyall), &
                  w(jopa), w(jopb), w(kwo), w(ktmp))
     call N(xzweff)(no, nv, nvp, w(jt2), w(lt2p), w(joovv), w(joovvp), w(kovvod), w(kfoo), w(kfvv), &
                    w(lwov), w(lfvv), w(lfoo), w(ka2), w(kb2), w(kx2))
+    call xztoc(3, 'W_vooo, W_ovvo, F')
     ! the kept operands that the dressed <ov||vv> and W_vooo go into
     call N(xzlops)(no, nv, npo, nvp, nto, w(jt2), w(kt2pp), w(lfov), w(looovd), w(kooood), w(joovv), &
                    w(joovvp), w(jgpp), w(kd), w(kwo), w(lwov), w(lfoo), w(jopa), w(jopb), w(jvpa), &
                    w(jvpb), w(jofree), w(jopair), w(lgpd), w(lbdrv), w(ladrv), w(lvx), w(lwl), w(lwkl), &
                    w(lo6t))
+    call xztoc(3, 'kept operands, occ. operator')
   end if
   ! W_vvvo moves down to the place of the dressed <ov||vv>
   call xzrel(md)
@@ -338,6 +344,7 @@ subroutine N(xzlamim)(w)
                                    w(kpib), nv, w(lfvv), nv, half)
     end do
     call N(xzlgmq)(no, nv, nvp, w(lt2p), w(kwv), w(lgmq))
+    call xztoc(3, 'pp operator in place')
   end if
   call xzrel(m2)
   call xzrel(md)
@@ -364,6 +371,7 @@ subroutine N(xzlamim)(w)
   else
     call N(xzlbcx)(w, jt3, w(jgpp), w(kvq), w(lxq), w(lx2))
   end if
+  if (.not. xzdry) call xztoc(3, 'Xq, X2 from T3')
   call xzrel(ms)
 end subroutine
 
@@ -425,10 +433,12 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
 
   ! ---- pass 1: l3 with t2, with the W's and with T3
   if (.not. xzdry) then
+    call xztic()
     call N(xzl2forms)(no, nv, npo, nvp, w(kl2), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kl2p), w(kl2pp))
     call zc_vzero_d(NW * ny * no * nvp, w(lbdrv))
     call zc_vzero_d(NW * ov2, w(kdr))
     call zc_vzero_d(NW * ov, w(kd1))
+    call xztoc(2, 'L2 on pairs, zeros')
   end if
   m1 = xzmark()
   if (dense) then
@@ -436,10 +446,14 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     kbt = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
     if (.not. xzdry) then
       stats = 0
+      call xztic()
       call N(zc_l3_pass1w)(w(kl3), w(jt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), &
                            w(jvsgn), nbp, w(lgpd), w(lgmq), ny, w(kl2pp), w(lbdrv), w(kyall), w(kdr), &
                            w(kd1), stats, w(kbl), w(kbt))
-      tlam(2:4) = tlam(2:4) + stats(1:3)
+      call xztoc(2, 'pass 1')
+      call xztpart(2, 'pass 1: gather', stats(1))
+      call xztpart(2, 'pass 1: stacked GEMMs', stats(2))
+      call xztpart(2, 'pass 1: density', stats(3))
     end if
   else
     call N(xzlbpass1)(w, kl3, jt3, w(lgpd), w(lgmq), w(kl2pp), w(lbdrv), w(kyall), w(kdr), w(kd1))
@@ -448,7 +462,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
 
   ! ---- the Gram matrix of l3 and T3
   if (.not. xzdry) then
-    t0 = omp_get_wtime()
+    call xztic()
     if (dense) then
       call N(zc_gemm)(0_4, 1_4, nto, nto, nvt, one, w(kl3), nvt, w(jt3), nvt, zero, w(kg), nto)
     else
@@ -462,14 +476,15 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
       end do
     end if
     call N(xzlgramd)(no, npo, nto, w(jotri), w(josgn), w(kg), w(kdo4), w(kgoo3))
-    tlam(5) = tlam(5) + omp_get_wtime() - t0
+    call xztoc(2, 'Gram matrix')
     ! the operands of this iteration
     call N(xzlitops)(no, nv, npo, nvp, w(kl1), w(kl2), w(kl2p), w(kl2pp), w(lfov), w(looovd), w(jgpp), &
                      w(kyall), w(jopa), w(jopb), w(lbdrv), w(ladrv), w(kxij), w(ky1c), w(ku), w(kvp), w(kg2))
+    call xztoc(2, 'operands of the iteration')
   end if
 
   ! ---- pass 2: ring, outer products, drive products
-  t0 = omp_get_wtime()
+  call xztic()
   if (.not. xzdry) call zc_vzero_d(NW * n3, w(kr3))
   m1 = xzmark()
   if (dense) then
@@ -487,7 +502,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     call N(xzbpass2)(w, kl3, kr3, w(lwl), w(ladrv), w(kbl), 2_8, 2_8, w(ku), w(kvp))
   end if
   call xzrel(m1)
-  if (.not. xzdry) tlam(6) = tlam(6) + omp_get_wtime() - t0
+  if (.not. xzdry) call xztoc(2, 'pass 2')
 
   ! ---- the ladder with the transposed pp operator; Xq and X2
   if (.not. xzdry) then
@@ -502,14 +517,14 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     if (.not. xzdry) then
       do i0 = 0, nto - 1, nbt
         nb = min(nbt, nto - i0)
-        t0 = omp_get_wtime()
+        call xztic()
         call N(zc_gather_vir_half)(w(kl3), nvt, w(jrows + i0), nb, w(jvtri), w(jvsgn), nv, nvp, w(ktv))
-        tlam(7) = tlam(7) + omp_get_wtime() - t0
-        t0 = omp_get_wtime()
+        call xztoc(2, 'ladder: gather')
+        call xztic()
         call N(zc_gemm)(1_4, 0_4, nvp, nb * nv, nvp, one, w(jvvvv), nvp, w(ktv), nb * nv, zero, &
                         w(kxp), nb * nv)
-        tlam(8) = tlam(8) + omp_get_wtime() - t0
-        t0 = omp_get_wtime()
+        call xztoc(2, 'ladder: GEMM')
+        call xztic()
         call N(zc_reduce_pair_first_rows)(w(kr3), nvt, w(kxp), w(jrows + i0), nb, nv, 0_8, nvp, &
                                           w(jvfree), w(jvpair))
         ! r2q[P][Q] += Xq[P][(I, e)] Lv[Q][(I, e)];  r1x[a][i] += Lv[(Q, I)][a] X2[(Q, I)][i]
@@ -517,7 +532,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
                                      w(ktv), nb * nv, one, w(kr2q), nvp)
         call N(xzlx2b)(no, nvp, nto, nb, i0, w(lx2), w(kx2b))
         call N(zc_gemm)(1_4, 0_4, nv, no, nvp * nb, one, w(ktv), nv, w(kx2b), no, one, w(kr1x), no)
-        tlam(9) = tlam(9) + omp_get_wtime() - t0
+        call xztoc(2, 'ladder: reduction, small')
       end do
     end if
   else
@@ -527,13 +542,13 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
 
   ! ---- the transposed operator on the occupied triples
   if (.not. xzdry) then
-    t0 = omp_get_wtime()
+    call xztic()
     if (dense) then
       call N(zc_t3_occop)(w(lo6t), w(kl3), nto, nvt, ncb, c_null_ptr, w(kr3))
     else
       call N(xzbocc)(w, kl3, kr3, w(lo6t))
     end if
-    tlam(10) = tlam(10) + omp_get_wtime() - t0
+    call xztoc(2, 'hh ladder, F_oo')
   end if
 
   ! ---- the residuals of rank 1 and 2
@@ -545,9 +560,10 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   kb2 = xzget(NW * ov2, 'work B')
   kyab = xzget(NW * npo * nv * nv, 'R2 part [P][a][b]')
   if (.not. xzdry) then
-    t0 = omp_get_wtime()
+    call xztic()
     call N(xzldens)(no, nv, nvp, w(kl2), w(jt2), w(lt2p), w(lbdrv), w(kdr), w(kd1), w(kgoo3), w(kgvv3), &
                     w(kgvv), w(kgoo), w(kdov))
+    call xztoc(2, 'R1, R2: densities')
     ! Y2 on both orders of its pair, and with the columns of the pp operator
     call zc_vzero_d(NW * ov, w(kpmv))
     if (dense) then
@@ -562,14 +578,17 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
                                                     nvp, lo, nqh, w(jvpa + lo), w(jvpb + lo))
       end do
     end if
+    call xztoc(2, 'R1, R2: Y2 expand, pp matvec')
     call N(xzlr1)(no, nv, npo, nvp, w(kl1), w(kl2), w(kl2p), w(lfov), w(lfvv), w(lfoo), w(lwov), w(lgmq), &
                   w(lgpd), w(lvx), w(joovv), w(looovd), w(lwkl), w(kyall), w(kdr), w(kgvv), w(kgoo), &
                   w(kgvv3), w(kgoo3), w(kdov), w(kdo4), w(kpmv), w(ky2x), w(ky1u), w(kr1x), w(ky2t), &
                   w(jopa), w(jopb), w(kr1))
+    call xztoc(2, 'R1')
     ! the Lambda_2 residual: the products with the pp operator and on pairs first
     call N(xzlr2a)(no, nv, npo, nvp, w(kl1), w(kl2), w(kl2p), w(lfvv), w(lfoo), w(lbdrv), w(joovv), &
                    w(joovvp), w(jgpp), w(looovd), w(kyall), w(kgvv), w(kgoo), w(kxij), w(kyab), &
                    w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2), w(kr2q))
+    call xztoc(2, 'R2: part a')
     if (npo > 0) then
       if (dense) then
         call N(zc_gemm)(0_4, 0_4, npo, nvp, nvp, one, w(kl2pp), nvp, w(jvvvv), nvp, one, w(kr2), nvp)
@@ -590,10 +609,11 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
       call N(zc_gemm)(0_4, 0_4, npo, nvp, npo, sixth, w(kdo4), npo, w(jgpp), nvp, one, w(kr2), nvp)
       call N(zc_gemm)(0_4, 0_4, npo, nvp, ov, one, w(kg2), ov, w(lbdrv), nvp, one, w(kr2), nvp)
     end if
+    call xztoc(2, 'R2: GEMMs on pairs')
     call N(xzlr2b)(no, nv, npo, nvp, w(kl1), w(kl2), w(lfov), w(lwov), w(lvx), w(joovv), w(looovd), &
                    w(kdr), w(ky2x), w(ky1u), w(jopa), w(jopb), w(jvpa), w(jvpb), w(km), w(ka2), w(kb2), &
                    w(kr2))
-    tlam(11) = tlam(11) + omp_get_wtime() - t0
+    call xztoc(2, 'R2: part b')
     if (dump) then
       call get_environment_variable('XZ_LDEBUG', dbg, ldbg)
       call xzdumpw(dbg(1:ldbg) // '.r1', NW * ov, w(kr1))
@@ -601,15 +621,16 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
       call xzdumpw(dbg(1:ldbg) // '.r3', NW * n3, w(kr3))
     end if
     ! ---- the Jacobi step
-    t0 = omp_get_wtime()
+    call xztic()
     call N(xzlupd)(no, nv, npo, nvp, w(jeps), w(kl1), w(kl2), w(kr1), w(kr2), w(jopa), w(jopb), &
                    w(jvpa), w(jvpb), w(kl1n), w(kl2n))
+    call xztoc(2, 'update of L1, L2')
     if (dense) then
       call N(zc_t3_update)(w(kl3), w(kr3), nto, nvt, w(jeo3), w(jev3), c_null_ptr)
     else
       call N(xzbupd)(w, kl3, kr3)
     end if
-    tlam(12) = tlam(12) + omp_get_wtime() - t0
+    call xztoc(2, 'L3 update')
   end if
   call xzrel(m0)
 end subroutine

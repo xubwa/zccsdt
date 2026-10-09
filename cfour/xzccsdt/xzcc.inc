@@ -77,12 +77,12 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     t0 = omp_get_wtime()
     kr3 = N(xzdiis_target)()
     call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
-    t1w = omp_get_wtime()
+    call xztic()
     call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms)
-    tstage(15) = tstage(15) + omp_get_wtime() - t1w
-    t1w = omp_get_wtime()
+    call xztoc(1, 'DIIS')
+    call xztic()
     call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
-    tstage(16) = tstage(16) + omp_get_wtime() - t1w
+    call xztoc(1, 'energy')
     enew = dble(e)
     de = enew - eold
     eold = enew

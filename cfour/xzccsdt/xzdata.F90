@@ -147,19 +147,64 @@ module xzdata
   real(8) :: qparts(4) = 0d0
   logical :: qsampled = .false.     ! (Q) ran in sample mode: its energies are not (Q)
 
-  ! ---- wall times of the stages of the iterations (seconds)
-  integer, parameter :: ntime = 16
-  real(8) :: tstage(ntime) = 0d0
-  character(len=28), parameter :: tname(ntime) = [character(len=28) :: &
-    'T1 dressing', 'pass-1 operands', 'pass 1', 'W_vvvo', 'intermediates', &
-    'dressed <ab||cd> rows', 'pp ladder: gather', 'pp ladder: GEMM', 'pp ladder: reduction', &
-    'CCSD part', 'occupied operator', 'pass 2', 'hh ladder, F_oo', 'T3 update', 'DIIS', 'energy']
+  ! ---- wall and CPU times of the stages, by name, in the order of their
+  !      first use.  Sets: 1 the CCSDT iterations, 2 the iterations of the
+  !      Lambda equations, 3 the intermediates of the Lambda equations (once)
+  integer, parameter :: ntset = 3, ntmax = 64
+  character(len=28) :: tnam(ntmax, ntset) = ' '
+  real(8) :: twal(ntmax, ntset) = 0d0, tcpu(ntmax, ntset) = 0d0
+  logical :: tpart(ntmax, ntset) = .false.      ! a part of another entry: wall only, not summed
+  integer :: ntim(ntset) = 0
+  real(8) :: tic_w = 0d0, tic_c = 0d0
+  real(8) :: tlamim = 0d0                       ! the intermediates of the Lambda equations
 
-  ! ---- wall times of the stages of the Lambda equations
-  integer, parameter :: nltime = 12
-  real(8) :: tlam(nltime) = 0d0
-  character(len=28), parameter :: lname(nltime) = [character(len=28) :: &
-    'intermediates (once)', 'pass 1: gather', 'pass 1: stacked GEMMs', 'pass 1: density', &
-    'Gram matrix', 'pass 2', 'ladder: gather', 'ladder: GEMM', 'ladder: reduction, small', &
-    'hh ladder, F_oo', 'residuals of rank 1, 2', 'update, DIIS']
+contains
+
+  ! the clocks start
+  subroutine xztic()
+    use xzkern
+    call xz_clocks(tic_w, tic_c)
+  end subroutine xztic
+
+  integer function xztslot(set, name)
+    integer, intent(in) :: set
+    character(len=*), intent(in) :: name
+    integer :: k
+    do k = 1, ntim(set)
+      if (tnam(k, set) == name) then
+        xztslot = k
+        return
+      end if
+    end do
+    ntim(set) = min(ntim(set) + 1, ntmax)
+    xztslot = ntim(set)
+    tnam(xztslot, set) = name
+  end function xztslot
+
+  ! the wall and CPU time (all threads of the process) since the last xztic
+  ! or xztoc go to the stage `name'; the clocks start again
+  subroutine xztoc(set, name)
+    use xzkern
+    integer, intent(in) :: set
+    character(len=*), intent(in) :: name
+    integer :: k
+    real(8) :: w1, c1
+    call xz_clocks(w1, c1)
+    k = xztslot(set, name)
+    twal(k, set) = twal(k, set) + w1 - tic_w
+    tcpu(k, set) = tcpu(k, set) + c1 - tic_c
+    tic_w = w1
+    tic_c = c1
+  end subroutine xztoc
+
+  ! a wall time measured inside a kernel: a part of the stage that the call is in
+  subroutine xztpart(set, name, wall)
+    integer, intent(in) :: set
+    character(len=*), intent(in) :: name
+    real(8), intent(in) :: wall
+    integer :: k
+    k = xztslot(set, name)
+    twal(k, set) = twal(k, set) + wall
+    tpart(k, set) = .true.
+  end subroutine xztpart
 end module xzdata
