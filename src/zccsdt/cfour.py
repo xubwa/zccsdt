@@ -257,12 +257,37 @@ def write_labels(directory, labels, modulus=0):
             f.write(' '.join('%d' % x for x in labels[k:k + 16]) + '\n')
 
 
-def read_labels(directory):
-    '''(labels of all spinors, modulus) of the file ``xzlabels`` of a run
-    directory (write_labels()); None if the file is not there.'''
-    path = os.path.join(directory, LABELS)
+def read_dgcosym(directory):
+    '''2 m_j of all spinors from the file ``dgcosym`` that CFOUR's
+    two-component SCF (xsox2chf) writes: one Fortran record of 8-byte
+    integers, the m_j block of each spinor in the order of scf2ceig - block
+    2k - 1 is m_j = +(2k - 1)/2, block 2k is m_j = -(2k - 1)/2 (linsym of
+    sox2chf).  With a ``%dglin`` section (or %dg2lin, %dg3lin, %dg4lin) in
+    the ZMAT the SCF is done in these blocks and its spinors give real MO
+    integrals; without one every spinor is in block 1.  None if the file is
+    not there or has one block only.'''
+    path = os.path.join(directory, 'dgcosym')
     if not os.path.isfile(path):
         return None
+    raw = np.fromfile(path, dtype=np.int32)
+    if raw.size < 4 or raw[0] != raw[-1] or raw[0] != 4 * (raw.size - 2) or raw[0] % 8:
+        raise ValueError('%s: one record of 8-byte integers expected' % path)
+    blocks = raw[1:-1].view(np.int64)
+    if blocks.min() < 1:
+        raise ValueError('%s: block numbers from 1 expected' % path)
+    if blocks.max() == 1:
+        return None
+    return np.where(blocks % 2 == 1, blocks, -(blocks - 1)).astype(np.int64)
+
+
+def read_labels(directory):
+    '''(labels of all spinors, modulus) of the file ``xzlabels`` of a run
+    directory (write_labels()); without that file, 2 m_j from CFOUR's own
+    ``dgcosym`` (read_dgcosym(), modulus 0); None if neither gives labels.'''
+    path = os.path.join(directory, LABELS)
+    if not os.path.isfile(path):
+        mj = read_dgcosym(directory)
+        return None if mj is None else (mj, 0)
     with open(path) as f:
         numbers = [int(x) for line in f if not line.lstrip().startswith('#') for x in line.split()]
     if len(numbers) < 2 or len(numbers) != numbers[0] + 2:

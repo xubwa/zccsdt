@@ -425,3 +425,27 @@ def test_handover_to_a_stand_in_for_xx2czvec(tmp_path, monkeypatch, method, nfro
     with pytest.raises(cfour.ProgramFailed, match='did not solve the Z-vector equations'):
         cfour.run_direct(d, j, verbose=0, stdout=io.StringIO(), density=True, zvector='cfour')
     assert not os.path.isfile(os.path.join(d, 'denfinal')) and os.path.isfile(os.path.join(d, 'denfinal.wrong'))
+
+
+def test_labels_from_dgcosym(tmp_path):
+    '''2 m_j of the spinors from the file dgcosym of CFOUR's two-component
+    SCF (%dglin): block 2k - 1 is +(2k - 1), block 2k is -(2k - 1); xzlabels
+    has precedence; one block only means no labels.'''
+    from zccsdt import cfour
+    d = str(tmp_path)
+    assert cfour.read_labels(d) is None
+    blocks = np.array([1, 1, 2, 2, 3, 4, 1, 2, 5, 6], dtype=np.int64)
+
+    def record(x):
+        n = np.array([x.nbytes], dtype=np.int32)
+        with open(tmp_path / 'dgcosym', 'wb') as f:
+            f.write(n.tobytes() + x.tobytes() + n.tobytes())
+    record(blocks)
+    lab, mod = cfour.read_labels(d)
+    assert mod == 0 and lab.tolist() == [1, 1, -1, -1, 3, -3, 1, -1, 5, -5]
+    cfour.write_labels(d, np.arange(10), 4)
+    lab, mod = cfour.read_labels(d)
+    assert mod == 4 and lab.tolist() == list(range(10))
+    os.remove(tmp_path / 'xzlabels')
+    record(np.ones(10, dtype=np.int64))
+    assert cfour.read_dgcosym(d) is None and cfour.read_labels(d) is None
