@@ -118,6 +118,13 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   write(6, '(a)') '  ' // repeat('-', 98)
   converged = .false.
   ncyc = maxcyc
+  ! (the other ranks read the integrals after rank 0: wait for them here, so
+  ! that the clock of the first broadcast is not that of their reading)
+  if (nrank > 1) then
+    call xztic()
+    call xzmpi_barrier()
+    call xztoc(1, 'MPI: ranks reading integrals')
+  end if
   do icyc = 1, maxcyc
     t0 = omp_get_wtime()
     if (nrank > 1) then
@@ -193,6 +200,7 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
   icyc = 0
   write(6, '(/,a)') '  CCSDT iterations: the batches of this rank'
   if (slices) call zc_vzero_d(NW * n3, w(jt3))
+  call xzmpi_barrier()
   do
     call xzmpi_bcast(ctl, 16_8)
     if (ctl(1) /= 1d0) exit

@@ -91,7 +91,9 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   call get_environment_variable('XZ_LDEBUG', dbg, ldbg)
   t0 = omp_get_wtime()
   if (nrank > 1) then
-    ! the amplitudes of rank 0 on every rank
+    ! the amplitudes of rank 0 on every rank (when all ranks have read the integrals)
+    call xzmpi_barrier()
+    t0 = omp_get_wtime()
     tsg = omp_get_wtime()
     call xzmpi_bcast_w(w(jt1), NW * ov)
     call xzmpi_bcast_w(w(jt2), NW * ov * ov)
