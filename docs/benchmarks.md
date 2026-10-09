@@ -3789,7 +3789,11 @@ alternating, seconds per step:
 
 The CCSD-only work is 0.3 % of a dense complex CCSDT iteration at 26 + 78
 (110.3 s on 8 threads, 45.0 s on 24).  The factors 2.7 - 6 of the section
-"Two-component CCSD(T)" are against xx2cccsd with `ABCDTYPE=AOBASIS`.
+"Two-component CCSD(T)" are against xx2cccsd with `ABCDTYPE=AOBASIS`, the
+AO-direct ladder, which is how CFOUR's spinor CCSD is run in production
+(`<ab||cd>` is never in memory there, and `<ab||ci>` is read from disk
+because it is then the largest array); `ABCDTYPE=STANDARD`, which the
+native program needs for `moinpppp`, is not CFOUR's production mode.
 
 ## Correctness references
 
