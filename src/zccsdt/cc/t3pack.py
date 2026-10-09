@@ -451,8 +451,9 @@ def axpby(out, inp, alpha=1.0, beta=1.0):
     (beta = 0 overwrites).  The first two axes are split over threads and the
     last axis is the inner loop, so order the axes accordingly.'''
     assert out.shape == inp.shape and out.ndim <= 4
+    # (small arrays: numpy on this thread costs less than waking the others)
     if not (USE_C and hasattr(_lib, 'zc_axpby4_d') and inp.dtype == out.dtype
-            and out.dtype in (np.float64, np.complex128)):
+            and out.dtype in (np.float64, np.complex128)) or out.size < 65536:
         if beta == 0:
             out[...] = alpha * inp
         else:

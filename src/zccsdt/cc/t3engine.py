@@ -441,6 +441,34 @@ class SpinBlockT3:
         nbt = max(1, int(mem_mb * 1e6 // max(3 * vm.npair * vm.n * isz, 1)))
         return nb, nb1, nbt
 
+    def _pass2_unit(self):
+        '''Elements of the work array per occupied pair of a batch of pass 2:
+        the products of all pair groups and one gathered block, for the group
+        of occupied pairs that takes most.'''
+        om, vm = self.om, self.vm
+        no, nv = [len(r) for r in self.orng], [len(r) for r in self.vrng]
+        nQ = [int(vm.pair_off[g + 1] - vm.pair_off[g]) for g in range(self.npg)]
+        nD = {d: sum(nv[sa] * no[si] for sa, si in self.dsub[d]) for d in self.deltas}
+        unit = 1
+        for gP in range(self.npg):
+            sizes = [nD[gP - gQ] * nQ[gQ] for gQ in range(self.npg)
+                     if abs(gP - gQ) < self.nc and nQ[gQ]]
+            if sizes and om.pair_off[gP + 1] > om.pair_off[gP]:
+                unit = max(unit, sum(sizes) + max(sizes))
+        return unit
+
+    def _pass2_batch(self, mem_mb):
+        '''Occupied pairs per batch of pass 2 (C kernels).  The pair batch of
+        the dense layout (pair_batch_size) counts o v C(v,2) elements per
+        pair; in blocks a pair takes a fraction of that (_pass2_unit), and
+        batches of that size - three pairs with 26 + 120 spinors - make
+        thousands of gathers, products and reductions too small for the
+        threads.  As many pairs as two thirds of ``mem_mb`` hold (the share
+        of the batch buffers in the dense engine), at least that batch.'''
+        isz = np.dtype(self.dtype).itemsize
+        nb = self._batch_sizes(mem_mb)[0]
+        return max(nb, int(mem_mb * 1e6 * 2 / 3 // max(self._pass2_unit() * isz, 1)))
+
     def set_memory(self, mem_mb):
         '''Batch sizes for a buffer budget of ``mem_mb`` MB.  A change gives
         the work array back: it is allocated again with the new sizes.'''
@@ -448,6 +476,7 @@ class SpinBlockT3:
             return
         self.mem_mb = mem_mb
         self.nb, self.nb1, self.nbt = self._batch_sizes(mem_mb)
+        self.nb2 = self._pass2_batch(mem_mb)
         self.__dict__.pop('_redt', None)        # (targets cached per batch of pairs)
         release_workspace()
 
@@ -472,6 +501,7 @@ class SpinBlockT3:
         om, vm, L = self.om, self.vm, self.L
         isz = np.dtype(self.dtype).itemsize
         nb, nb1, nbt = self._batch_sizes(mem_mb)
+        nb = self._pass2_batch(mem_mb)          # (pass 2 with the C kernels; else smaller)
         no, nv = [len(r) for r in self.orng], [len(r) for r in self.vrng]
         npg, nc = self.npg, self.nc
         nP = [int(om.pair_off[g + 1] - om.pair_off[g]) for g in range(npg)]
@@ -778,6 +808,7 @@ def _spin_block_c_methods():
         r1 = np.zeros((nvir, nocc), dtype=dtype)
         rA = np.zeros((om.npair, npv), dtype=dtype)
         G3 = G_mQ.reshape(nocc, npv, nocc + nvir)
+        gpp = np.ascontiguousarray(gpp, dtype=dtype)
         vr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.vrng]
         orr = [(r[0], r[-1] + 1) if len(r) else (0, 0) for r in self.orng]
         gy_cache = {}           # Y-GEMM operands depend on (sm, gQ, sy) only
@@ -860,13 +891,25 @@ def _spin_block_c_methods():
                             t_ = timer('pass1.r1rA'); t_.__enter__()
                             d0, d1 = vr[sd]
                             m0, m1 = orr[sm]
-                            Tm = T.reshape(len(pb), nd * nm, nQ)
-                            acc = np.zeros(nd * nm, dtype=dtype)
-                            for k, P in enumerate(pb):
-                                acc += Tm[k] @ gpp[P, Qlo:Qhi]
-                            r1[d0:d1, m0:m1] += acc.reshape(nd, nm)
-                            fdm = np.ascontiguousarray(fov[m0:m1, d0:d1].T).ravel()
-                            rA[p0:p1, Qlo:Qhi] += np.matmul(fdm, Tm)
+                            # one matrix-vector product per pair for each of the
+                            # two, all pairs in one parallel region:
+                            #   r1[(d m)] += T[P, (d m), Q] gpp[P, Q]
+                            #   rA[P, Q]  += f[(d m)] T[P, (d m), Q]
+                            nbp, ndm = len(pb), nd * nm
+                            ks = np.arange(nbp, dtype=np.int64)
+                            acc = np.empty((nbp, ndm), dtype=dtype)
+                            tasks = np.empty((nbp, 9), dtype=np.int64)
+                            tasks[:] = (ndm, 1, nQ, 0, nQ, 0, 1, 0, 1)
+                            tasks[:, 3] = ks * (ndm * nQ)
+                            tasks[:, 5] = (p0 + ks) * npv + Qlo
+                            tasks[:, 7] = ks * ndm
+                            gemm_tasks(tasks, T, gpp, acc)
+                            r1[d0:d1, m0:m1] += acc.sum(axis=0).reshape(nd, nm)
+                            fdm = np.ascontiguousarray(fov[m0:m1, d0:d1].T, dtype=dtype).ravel()
+                            tasks[:] = (1, nQ, ndm, 0, ndm, 0, nQ, 0, nQ)
+                            tasks[:, 5] = ks * (ndm * nQ)
+                            tasks[:, 7] = (p0 + ks) * npv + Qlo
+                            gemm_tasks(tasks, fdm, T, rA, beta=1.0, cols=max(nQ, 1))
                             t_.__exit__(None, None, None)
         if flip:
             with timer('pass1.flip'):
@@ -956,7 +999,7 @@ def _spin_block_c_methods():
         I_, p_ = _CArgs.I, _CArgs.p
         top = 1 if L.flip else npg - 1
         for gP in range(top + 1):
-            for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
+            for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb2):
                 p0, p1, nbp = pb[0], pb[-1] + 1, len(pb)
                 gQs = [gQ for gQ in range(npg) if abs(gP - gQ) < self.nc and nQg[gQ] > 0]
                 if not gQs:
