@@ -34,7 +34,8 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   integer(8) :: gp, gq, p0, nb, delta, nr, nq, qlo, sd, sm, sy, nd, nm, ne, nj, r0, k
   integer(8) :: m0, mk, kdd, kd0, kdw, nth, nrmax, ig, ngq, it, ntask, me
   integer(8) :: lst(0:npg-1), gkl(0:npg-1), gkt(0:npg-1)
-  integer(8), dimension(npg * ncls) :: tgq, tsd, tr0, tks, tkg, tkx, tkgy, tky
+  integer(8), dimension(npg * ncls) :: tgq, tsd, tr0, tks, tkg, tkx, tkgy, tky, ggq, gsd, gr0
+  integer(8) :: ngath
   logical :: par
   ZT :: one, zero
   one = 1
@@ -59,6 +60,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
       mk = xzmark()
       ngq = 0
       ntask = 0
+      ngath = 0
       do gq = 0, npg - 1
         delta = gp - gq
         if (abs(delta) >= ncls) cycle
@@ -75,6 +77,12 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           if (sm < 0 .or. sm >= ncls) cycle
           nd = vcoff(sd + 1) - vcoff(sd)
           nm = ocoff(sm + 1) - ocoff(sm)
+          if (nd > 0 .and. nm > 0) then
+            ngath = ngath + 1
+            ggq(ngath) = gq
+            gsd(ngath) = sd
+            gr0(ngath) = r0
+          end if
           sy = gp - sd
           if (nd > 0 .and. nm > 0 .and. sy >= 0 .and. sy < ncls) then
             ne = vcoff(sy + 1) - vcoff(sy)
@@ -96,33 +104,30 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
       end do
       if (.not. xzdry .and. ngq > 0) then
         call xztic()
-        do ig = 0, ngq - 1
-          gq = lst(ig)
+        ! the gathers: one task per (gQ, class of d)
+        par = 4 * ngath >= nth
+        !$omp parallel do schedule(dynamic) if(par) private(it, gq, sd, sm, delta, nr, qlo, nq, nd, nm)
+        do it = 1, ngath
+          gq = ggq(it)
+          sd = gsd(it)
           delta = gp - gq
+          sm = sd - delta
           nr = ndel(delta)
           qlo = vpoff(gq)
           nq = vpoff(gq + 1) - qlo
-          r0 = 0
-          do sd = 0, ncls - 1
-            sm = sd - delta
-            if (sm < 0 .or. sm >= ncls) cycle
-            nd = vcoff(sd + 1) - vcoff(sd)
-            nm = ocoff(sm + 1) - ocoff(sm)
-            if (nd > 0 .and. nm > 0) then
-              call N(zc_bgather2)(w(kl3), w(jobase), w(josig), w(jotri), w(josgn), npo, w(jvci), &
-                w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
-                qlo, nq, nr * nq, w(gkl(gq) + NW * r0 * nq))
-              call N(zc_bgather2)(w(kt3), w(jobase), w(josig), w(jotri), w(josgn), npo, w(jvci), &
-                w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
-                qlo, nq, nr * nq, w(gkt(gq) + NW * r0 * nq))
-            end if
-            r0 = r0 + nd * nm
-          end do
+          nd = vcoff(sd + 1) - vcoff(sd)
+          nm = ocoff(sm + 1) - ocoff(sm)
+          call N(zc_bgather2)(w(kl3), w(jobase), w(josig), w(jotri), w(josgn), npo, w(jvci), &
+            w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
+            qlo, nq, nr * nq, w(gkl(gq) + NW * gr0(it) * nq))
+          call N(zc_bgather2)(w(kt3), w(jobase), w(josig), w(jotri), w(josgn), npo, w(jvci), &
+            w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
+            qlo, nq, nr * nq, w(gkt(gq) + NW * gr0(it) * nq))
         end do
         call xztoc(2, 'pass 1: gather')
         ! the densities: one task per (gQ, P), each product in the buffer of
         ! its thread and added to the block of gP - gQ
-        par = ngq * nb >= nth
+        par = 4 * ngq * nb >= nth
         !$omp parallel do collapse(2) schedule(dynamic) if(par) private(ig, k, gq, delta, nr, qlo, nq, me)
         do ig = 0, ngq - 1
           do k = 0, nb - 1
@@ -144,7 +149,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
         end do
         call xztoc(2, 'pass 1: density')
         ! the stacked products, per gQ and class of d (and of m)
-        par = ntask >= nth
+        par = 4 * ntask >= nth
         !$omp parallel do schedule(dynamic) if(par) private(it, gq, sd, sm, sy, delta, nr, qlo, nq, nd, nm, ne, nj)
         do it = 1, ntask
           gq = tgq(it)

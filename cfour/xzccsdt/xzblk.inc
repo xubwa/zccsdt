@@ -81,6 +81,10 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
       end do
       if (.not. xzdry .and. ntask > 0) then
         call xztoc(tcur, 'pass 1: other')
+        ! (with a quarter as many tasks as threads the loop is still better
+        ! than a threaded BLAS on products of this size)
+        par = 4 * ntask >= omp_get_max_threads()
+        !$omp parallel do schedule(dynamic) if(par) private(it, sd, sm, sy, gq, nd, nm, qlo, nq, ne, nj)
         do it = 1, ntask
           sd = tsd(it)
           sm = tsm(it)
@@ -92,18 +96,6 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
           call N(zc_bgather2)(w(kt3), w(jobase), w(josig), w(jotri), w(josgn), npo, &
             w(jvci), w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, &
             w(jrows + ocoff(sm)), qlo, nq, nd * nm * nq, w(tkt(it)))
-        end do
-        call xztoc(tcur, 'pass 1: gather')
-        par = ntask >= omp_get_max_threads()
-        !$omp parallel do schedule(dynamic) if(par) private(it, sd, sm, sy, gq, nd, nm, qlo, nq, ne, nj)
-        do it = 1, ntask
-          sd = tsd(it)
-          sm = tsm(it)
-          gq = gp + sm - sd
-          nd = vcoff(sd + 1) - vcoff(sd)
-          nm = ocoff(sm + 1) - ocoff(sm)
-          qlo = vpoff(gq)
-          nq = vpoff(gq + 1) - qlo
           if (tkg(it) >= 0) then
             sy = gp - sd
             ne = vcoff(sy + 1) - vcoff(sy)
@@ -131,7 +123,7 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
           end if
           if (tkacc(it) >= 0) call N(xzbp1radd)(nvp, nb, nq, w(tkra(it)), ra(qlo, p0))
         end do
-        call xztoc(tcur, 'pass 1: products')
+        call xztoc(tcur, 'pass 1: gather, products')
       end if
       call xzrel(m0)
     end do
@@ -325,9 +317,9 @@ end subroutine
 !   Z[P][(a, i)][Q]  = wd[(a, i)][(d, m)] T[P][(d, m)][Q]
 !   Z[P][(a, i)][Q] += u[(a, i)][x] vp[P][x][Q]             (gP = gQ; nu of them)
 !   Z[P][c][(i, Q)] -= adrv[P][c][k] bd[k][(i, Q)]
-! and the reduction onto the blocks of the residual.  The batch of T3 is
-! gathered for all gQ first; the products of one (gQ, P) are then one task
-! of a parallel loop, with the BLAS sequential inside (a few hundred products
+! and the reduction onto the blocks of the residual.  The gather of T and
+! the products of one (gQ, P) are one task of a parallel loop, with a buffer
+! for T per thread and the BLAS sequential inside (a few hundred products
 ! of milliseconds per batch, which a threaded BLAS does not run at its rate).  The summed index k of
 ! the drive terms has npart parts of nv + no values each (virtual, then
 ! occupied: one part in the T3 equation, two in the Lambda equations); bd is
@@ -336,6 +328,7 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
   use xzdata
   use xzmem
   use xzkern
+  use omp_lib
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: kt3, kr3, npart, nu
@@ -369,12 +362,12 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
       if (off == 0) cycle
       k = xzmark()
       kz = xzget(NW * off, 'pass-2 products')
-      kt = xzget(NW * off, 'pass-2 batch of T3')
+      kt = xzget(NW * omp_get_max_threads() * (tmax / nb), 'pass-2 T3 of a pair, per thread')
       kzoff = xzget(nb * npg, 'pass-2 offsets')
       ktg = xzget(4 * 3 * nto, 'pass-2 targets')
       if (.not. xzdry) then
         call N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, w(kwd), adrv, bd, npart, nu, w(ku0), vp, &
-                           w(kz), w(kt), w(kzoff), w(ktg))
+                           w(kz), w(kt), tmax / nb, w(kzoff), w(ktg))
       end if
       call xzrel(k)
     end do
@@ -437,23 +430,24 @@ subroutine N(xzbbdk)(npart, bdrv, bd)
 end subroutine
 
 ! one batch of pass 2
-subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, u0, vp, z, t, zoff, tg)
+subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, u0, vp, z, t, nt1, zoff, tg)
   use xzdata
   use xzkern
   use omp_lib
   implicit none
   real(8) :: w(*)
-  integer(8), intent(in) :: kt3, kr3, gp, p0, nb, npart, nu
+  integer(8), intent(in) :: kt3, kr3, gp, p0, nb, npart, nu, nt1
   integer(8), intent(in) :: nqg(0:npg-1)
   ZT, intent(in) :: wd(0:*), bd(0:*)
   ZT, intent(in) :: adrv(0:npart*(nv+no)-1, 0:nv-1, 0:npo-1)   ! [P][c][k]
   ZT, intent(in) :: u0(*)
   ZT, intent(in) :: vp(0:nvp-1, 0:max(nu,1_8)-1, 0:*)          ! [P][x][Q]
-  ZT :: z(0:*), t(0:*)
+  ZT :: z(0:*)
+  ZT :: t(0:nt1-1, 0:*)                                        ! T3 of one pair, per thread
   integer(8) :: zoff(0:npg-1, 0:nb-1)                          ! [P][gQ]
   integer(8) :: tg(0:3*nto-1, 0:3)                             ! targets: base, index, pair, (sign)
-  integer(8) :: gq, delta, nr, nq, qlo, off, k, sa, si, r0, nd, nm, g, nt, r, ig, ngq
-  integer(8) :: toff(0:npg-1), lst(0:npg-1)
+  integer(8) :: gq, off, k, g, nt, r, ig, ngq
+  integer(8) :: lst(0:npg-1)
   logical :: par
   call xztoc(tcur, 'pass 2: other')
   zoff = -1
@@ -465,45 +459,25 @@ subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, 
       off = off + ndel(gp - gq) * nqg(gq)
     end do
   end do
-  ! T[P][(d, m)][Q] on the pairs (d, m) of delta, for every gQ
-  off = 0
   ngq = 0
   do gq = 0, npg - 1
     if (abs(gp - gq) >= ncls .or. nqg(gq) == 0) cycle
-    delta = gp - gq
-    nr = ndel(delta)
-    if (nr == 0) cycle
-    qlo = vpoff(gq)
-    nq = nqg(gq)
-    toff(gq) = off
+    if (ndel(gp - gq) == 0) cycle
     lst(ngq) = gq
     ngq = ngq + 1
-    r0 = 0
-    do sa = 0, ncls - 1
-      si = sa - delta
-      if (si < 0 .or. si >= ncls) cycle
-      nd = vcoff(sa + 1) - vcoff(sa)
-      nm = ocoff(si + 1) - ocoff(si)
-      if (nd > 0 .and. nm > 0) call N(zc_bgather2)(w(kt3), w(jobase), w(josig), w(jotri), w(josgn), npo, &
-        w(jvci), w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sa)), nm, w(jrows + ocoff(si)), &
-        qlo, nq, nr * nq, t(off + r0 * nq))
-      r0 = r0 + nd * nm
-    end do
-    off = off + nb * nr * nq
   end do
-  call xztoc(tcur, 'pass 2: gather')
-  ! the products: one task per (gQ, P); with fewer tasks than threads the
-  ! loop is serial and the BLAS threaded
-  par = ngq * nb >= omp_get_max_threads()
+  ! one task per (gQ, P): the gather of T[(d, m)][Q] and the products; with
+  ! few tasks for the threads the loop is serial and the kernels threaded
+  par = 4 * ngq * nb >= omp_get_max_threads()
   !$omp parallel do collapse(2) schedule(dynamic) if(par) private(ig, k, gq)
   do ig = 0, ngq - 1
     do k = 0, nb - 1
       gq = lst(ig)
-      call N(xzbp2task)(gp, gq, p0 + k, nqg(gq), wd, adrv, bd, npart, nu, u0, vp, &
-                        t(toff(gq) + k * ndel(gp - gq) * nqg(gq)), z(zoff(gq, k)))
+      call N(xzbp2task)(w, kt3, gp, gq, p0 + k, nqg(gq), wd, adrv, bd, npart, nu, u0, vp, &
+                        t(0, omp_get_thread_num()), z(zoff(gq, k)))
     end do
   end do
-  call xztoc(tcur, 'pass 2: products')
+  call xztoc(tcur, 'pass 2: gather, products')
   ! the reduction: per group of triples, the occupied triples with a pair in
   ! the batch
   do g = 0, ntg - 1
@@ -523,18 +497,19 @@ end subroutine
 
 ! the products of pass 2 of one pair P and one group gQ:
 !   z[(a, i)][Q] = wd t + u0 vp - adrv bd
-subroutine N(xzbp2task)(gp, gq, p, nq, wd, adrv, bd, npart, nu, u0, vp, t, z)
+subroutine N(xzbp2task)(w, kt3, gp, gq, p, nq, wd, adrv, bd, npart, nu, u0, vp, t, z)
   use xzdata
   use xzkern
   implicit none
-  integer(8), intent(in) :: gp, gq, p, nq, npart, nu
+  real(8) :: w(*)
+  integer(8), intent(in) :: kt3, gp, gq, p, nq, npart, nu
   ZT, intent(in) :: wd(0:*), bd(0:*)
   ZT, intent(in) :: adrv(0:npart*(nv+no)-1, 0:nv-1, 0:npo-1)   ! [P][c][k]
   ZT, intent(in) :: u0(*)
   ZT, intent(in) :: vp(0:nvp-1, 0:max(nu,1_8)-1, 0:*)          ! [P][x][Q]
-  ZT, intent(in) :: t(0:*)                                     ! [(d, m)][Q]
+  ZT :: t(0:*)                                                 ! [(d, m)][Q]
   ZT :: z(0:*)                                                 ! [(a, i)][Q]
-  integer(8) :: delta, nr, qlo, sc, si, se, r0, nc, ni, ne, nm, part, ka, kb
+  integer(8) :: delta, nr, qlo, sc, si, se, r0, nc, ni, ne, nm, part, ka, kb, sa, nd
   ZT :: one, zero, mone
   one = 1
   zero = 0
@@ -542,6 +517,18 @@ subroutine N(xzbp2task)(gp, gq, p, nq, wd, adrv, bd, npart, nu, u0, vp, t, z)
   delta = gp - gq
   nr = ndel(delta)
   qlo = vpoff(gq)
+  ! T[(d, m)][Q] of the pair on the pairs (d, m) of delta
+  r0 = 0
+  do sa = 0, ncls - 1
+    si = sa - delta
+    if (si < 0 .or. si >= ncls) cycle
+    nd = vcoff(sa + 1) - vcoff(sa)
+    nm = ocoff(si + 1) - ocoff(si)
+    if (nd > 0 .and. nm > 0) call N(zc_bgather2)(w(kt3), w(jobase), w(josig), w(jotri), w(josgn), npo, &
+      w(jvci), w(jvsgn), nvp, 1_8, w(jrows + p), nd, w(jrows + vcoff(sa)), nm, w(jrows + ocoff(si)), &
+      qlo, nq, nr * nq, t(r0 * nq))
+    r0 = r0 + nd * nm
+  end do
   ! the ring term, and the outer products
   call N(zc_gemm)(0_4, 0_4, nr, nq, nr, one, wd(wdoff(delta)), nr, t, nq, zero, z, nq)
   if (delta == 0 .and. nu > 0) call N(zc_gemm)(0_4, 0_4, nr, nq, nu, one, u0, nu, vp(qlo, 0, p), &
