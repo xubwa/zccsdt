@@ -475,9 +475,76 @@ def symmetric_singles(eris):
     return np.asarray(om.spins)[:, None] == np.asarray(vm.spins)[None, :]
 
 
+def ghost(eris, t1, t2, t3=None, kind='ip'):
+    """(eris, t1, t2, t3, singles) of the problem with one more spinor that
+    no integral touches and whose Fock element is zero - the last virtual
+    one (kind 'ip') or the first occupied one ('ea') -, the amplitudes
+    padded with zeros (t3: on the packed block in lexicographic order, in
+    and out), and the single excitations [i,a] into (out of) it.  The
+    EE problem there, among the vectors that have the ghost index once, is
+    the IP (EA) problem: r[i,x] = r[i], r[ij,ax] = r[ij,a], r[ijk,abx] =
+    r[ijk,ab] (EA: r[x,a], r[xi,ab], r[xij,abc]); its eigenvalues are the
+    ionization energies (EA: E(N+1) - E(N)).  Dense integrals without
+    symmetry labels; the vectors have the length of the EE problem with
+    one spinor more - the cost of that problem, not of one with vectors an
+    order shorter (docs/eom.md)."""
+    from zccsdt.eris import ERIs
+    no, n = eris.nocc, np.asarray(eris.fock).shape[0]
+    nv = n - no
+    at = n if kind == 'ip' else 0
+    keep = np.array([p for p in range(n + 1) if p != at])
+    sp = 'v' if kind == 'ip' else 'o'
+    no2, nv2 = (no, nv + 1) if kind == 'ip' else (no + 1, nv)
+
+    def pad(x, key):
+        x = np.asarray(x)
+        out = np.zeros(tuple(d + (c == sp) for d, c in zip(x.shape, key)), dtype=x.dtype)
+        out[tuple(slice(0, d) if kind == 'ip' else slice(int(c == sp), None) for d, c in zip(x.shape, key))] = x
+        return out
+    fock = np.zeros((n + 1, n + 1), dtype=np.asarray(eris.fock).dtype)
+    fock[np.ix_(keep, keep)] = eris.fock
+    e = np.zeros(n + 1)
+    e[keep] = np.asarray(eris.mo_energy).real
+    blocks = {k: (None if getattr(eris, k) is None else pad(getattr(eris, k), k))
+              for k in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv')}
+    out = ERIs(nocc=no2, fock=fock, mo_energy=e, e_hf=eris.e_hf, e_nuc=eris.e_nuc,
+               source=(eris.source or '') + ' + ghost', **blocks)
+    pp = getattr(eris, '_vvvv_pp', None)
+    if pp is not None:
+        if kind == 'ip':            # the pairs of nv + 1 virtual indices that do not have the last one
+            a, b = np.triu_indices(nv2, 1)
+            sel = np.flatnonzero(b < nv)
+            new = np.zeros((len(a), len(a)), dtype=np.asarray(pp).dtype)
+            new[np.ix_(sel, sel)] = pp
+            out._vvvv_pp = new
+        else:
+            out._vvvv_pp = np.ascontiguousarray(pp)
+    t1p, t2p = pad(t1, 'ov'), pad(t2, 'oovv')
+    t3p = None
+    if t3 is not None:
+        from math import comb
+        io = np.array([k for k, (i, j, l) in enumerate(_triples(no2)) if kind == 'ip' or i > 0])
+        iv = np.array([k for k, (a, b, c) in enumerate(_triples(nv2)) if kind == 'ea' or c < nv])
+        t3p = np.zeros((comb(no2, 3), comb(nv2, 3)), dtype=np.asarray(t3).dtype)
+        if len(io) and len(iv):
+            t3p[np.ix_(io, iv)] = np.asarray(t3).reshape(comb(no, 3), comb(nv, 3))
+        t3p = t3p.ravel()
+    singles = np.zeros((no2, nv2), bool)
+    if kind == 'ip':
+        singles[:, nv] = True
+    else:
+        singles[0, :] = True
+    return out, t1p, t2p, t3p, singles
+
+
+def _triples(n):
+    from itertools import combinations
+    return combinations(range(n), 3)
+
+
 def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None,
            nguess=None, guess_tol=1e-4, opts=None, mem_mb=2000.0, verbose=False, plan=None, ground=None,
-           stdout=None):
+           stdout=None, singles=None, name='EE'):
     '''EOM-EE-CCSDT for converged amplitudes (t3 flat in the layout of the
     engine of ``eris``; None: EOM-EE-CCSD for CCSD amplitudes): the
     ``nroots`` lowest excitation energies and right-hand vectors.
@@ -486,6 +553,9 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     default: the roots of the singles-doubles block from ``nguess`` (default
     nroots) unit vectors on the lowest singles, converged to ``guess_tol``.
     With symmetry labels in use the states are the totally symmetric ones.
+    ``singles`` [i,a]: the single excitations the unit vectors of the guess
+    are taken from (default: the totally symmetric ones); with the
+    integrals and amplitudes of ghost() they select the IP or EA problem.
     ``conv_tol``: the norm of the residual of a normalized vector.
     ``opts``: solver.Options for max_memory, max_disk, incore_complete.
     Returns a Result.'''
@@ -525,8 +595,8 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
             y[1][:] = s2.ravel()
         return apply
 
-    say('EOM-EE-%s: %d roots, vectors of %d + %d + %d elements, %s' % (
-        'CCSDT' if with3 else 'CCSD', nroots, sizes[0], sizes[1], sizes[2], 'real' if dtype.kind == 'f' else 'complex'))
+    say('EOM-%s-%s: %d roots, vectors of %d + %d + %d elements, %s' % (
+        name, 'CCSDT' if with3 else 'CCSD', nroots, sizes[0], sizes[1], sizes[2], 'real' if dtype.kind == 'f' else 'complex'))
     say('  ' + plan.text())
     if g.change > 1e-5:
         say('  warning: the amplitudes are not converged (a Jacobi step changes them by %.1e)' % g.change)
@@ -535,7 +605,10 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     first = None
     t0 = time.perf_counter()
     if guess is None:
-        idx = singles_guess(g, nguess or nroots, symmetric_singles(eris))
+        allowed = symmetric_singles(eris)
+        if singles is not None:
+            allowed = allowed & np.asarray(singles, bool)
+        idx = singles_guess(g, nguess or nroots, allowed)
         gs = []
         for k in idx:
             v = sd.new()

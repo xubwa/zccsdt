@@ -258,3 +258,60 @@ def test_memory_against_the_plan():
     tracemalloc.stop()
     assert res.nsigma >= 6
     assert 0.5 * arrays < peak <= arrays, (peak, arrays, plan)
+
+
+# ------------------------------------------------- ionized and attached states
+
+@pytest.mark.parametrize('cplx', [False, True])
+@pytest.mark.parametrize('method', ['ccsd', 'ccsdt'])
+def test_ip_and_ea_by_the_ghost_spinor(cplx, method):
+    '''LiH / STO-3G: the four lowest ionization energies and the four
+    lowest E(N+1) - E(N) of EOM-CCSD and EOM-CCSDT - the EE problem with a
+    ghost spinor on packed amplitudes (the packed <ab||cd> with the real
+    spin orbitals) - are the lowest eigenvalues of the dense IP and EA
+    matrices of the reference to 1e-9; Kramers pairs.'''
+    mf = scf.addons.convert_to_ghf(_scf('lih'))
+    C = _spin_mixed(mf)[0] if cplx else mf.mo_coeff
+    eris = E.from_scf(mf, mo_coeff=C, packed_vvvv=not cplx)
+    rt = solver.kernel(eris, method, TIGHT)
+    fock, g, mo_e, no = R.integrals(E.from_scf(mf, mo_coeff=C))
+    om, vm = t3pack.maps_for(eris)
+    with3 = method == 'ccsdt'
+    amps = [rt.t1, rt.t2] + ([Q.expand(np.asarray(rt.t3).reshape(om.ntri, vm.ntri), no, vm.n, 3)] if with3 else [])
+    for kind in ('ip', 'ea'):
+        e2, t1, t2, t3, singles = eom.ghost(eris, rt.t1, rt.t2, rt.t3 if with3 else None, kind)
+        assert e2.nocc == no + (kind == 'ea') and e2.fock.shape[0] == len(mo_e) + 1 and singles.sum() == (no if kind == 'ip' else vm.n)
+        res = eom.kernel(e2, t1, t2, t3, nroots=4, conv_tol=1e-9, singles=singles, name=kind.upper())
+        w = eom_ref.eigenvalues(amps, fock, g, no, kind)
+        assert res.converged.all() and abs(res.e - w.real[:4]).max() < 1e-9
+        assert abs(res.e[0] - res.e[1]) < 1e-9 and res.e[0] > 0.05
+        # the vectors have the ghost index once: no singles outside of it
+        assert abs(res.r1[0][~singles]).max() < 1e-12 and abs(res.r1[0][singles]).max() > 0.5
+
+
+def test_ip_and_ea_against_pyscf_and_the_front_end(lih_x2c):
+    '''EOM-IP- and EA-CCSD of H2O / STO-3G against PySCF's roots; the front
+    end: eom_ip() and eom_ea() of a calculation in label blocks and of one
+    on the packed block give the same energies (both run on the packed
+    block with the ghost spinor).'''
+    from conftest import water_ghf
+    from test_eom_ref import pyscf_roots
+    eris = E.from_scf(water_ghf('sto-3g'))
+    rt = solver.kernel(eris, 'ccsd', TIGHT)
+    ref = pyscf_roots()
+    for kind in ('ip', 'ea'):
+        e2, t1, t2, _, singles = eom.ghost(eris, rt.t1, rt.t2, None, kind)
+        res = eom.kernel(e2, t1, t2, None, nroots=4, conv_tol=1e-9, singles=singles)
+        assert abs(res.e - np.sort(ref[kind])[:4]).max() < 1e-8
+    buf = io.StringIO()
+    a, b = lih_x2c[True], lih_x2c[False]
+    a.verbose, a.stdout = 4, buf
+    ea, ra = a.eom_ip(nroots=2, conv_tol=1e-8)
+    a.verbose = 0
+    eb, rb = b.eom_ip(nroots=2, conv_tol=1e-8)
+    assert 'EOM-IP-CCSDT: 2 roots' in buf.getvalue()
+    assert ra.converged.all() and abs(ea - eb).max() < 1e-8 and abs(ea[0] - ea[1]) < 1e-8
+    assert 0.2 < ea[0] < 0.4 and a.eom_ip_result is ra
+    xa, _ = a.eom_ea(nroots=2, conv_tol=1e-8)
+    xb, _ = b.eom_ea(nroots=2, conv_tol=1e-8)
+    assert abs(xa - xb).max() < 1e-8 and abs(xa[0] - xa[1]) < 1e-8
