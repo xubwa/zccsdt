@@ -92,6 +92,8 @@ def main():
     cc.verbose, cc.symmetry, cc.real_spinors = 3, a.mode == 'blocks', bool(a.real)
     cc.conv_tol, cc.conv_tol_normt = 1e-12, 1e-10
     cc.max_cycle = a.niter if a.what == 'iter' else 2
+    if os.environ.get('BP_INCORE'):     # the DIIS vectors in memory, not in the scratch file (give such runs a tag)
+        cc.incore_complete = True
     marks = [(time.perf_counter(), time.process_time())]
     cc.callback = lambda info: marks.append((time.perf_counter(), time.process_time()))
     snap = timing.snapshot()
