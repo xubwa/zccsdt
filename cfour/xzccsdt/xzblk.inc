@@ -28,6 +28,7 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
   use xzdata
   use xzmem
   use xzkern
+  use xzdist
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -48,6 +49,10 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
   do gp = 0, npg - 1
     do p0 = opoff(gp), opoff(gp + 1) - 1, nbp
       nb = min(nbp, opoff(gp + 1) - p0)
+      if (.not. xzdry) then
+        if (.not. xzmine(p0)) cycle
+      end if
+      call xzbtic()
       m0 = xzmark()
       ntask = 0
       do sd = 0, ncls - 1
@@ -136,6 +141,7 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
           if (tkacc(it) >= 0) call N(xzbp1radd)(nvp, nb, nq, w(tkra(it)), ra(qlo, p0))
         end do
         call xztoc(tcur, 'pass 1: gather, products')
+        call xzbtoc(p0)
       end if
       call xzrel(m0)
     end do
@@ -340,6 +346,7 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
   use xzdata
   use xzmem
   use xzkern
+  use xzdist
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -364,6 +371,9 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
   do gp = 0, npg - 1
     do p0 = opoff(gp), opoff(gp + 1) - 1, nbp
       nb = min(nbp, opoff(gp + 1) - p0)
+      if (.not. xzdry) then
+        if (.not. xzmine(p0)) cycle
+      end if
       off = 0
       tmax = 0
       do gq = 0, npg - 1
@@ -378,8 +388,10 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
       kzoff = xzget(nb * npg, 'pass-2 offsets')
       ktg = xzget(4 * 3 * nto, 'pass-2 targets')
       if (.not. xzdry) then
+        call xzbtic()
         call N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, w(kwd), adrv, bd, npart, nu, w(ku0), vp, &
                            w(kz), w(kt), tmax / nb, w(kzoff), w(ktg))
+        call xzbtoc(p0)
       end if
       call xzrel(k)
     end do
@@ -612,6 +624,7 @@ subroutine N(xzbppl)(w, kt3, kr3, h, q0, nq, slab)
   use xzdata
   use xzmem
   use xzkern
+  use xzdist
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -630,6 +643,10 @@ subroutine N(xzbppl)(w, kt3, kr3, h, q0, nq, slab)
     if (nc == 0 .or. vtoff(g + 1) == vtoff(g)) cycle
     do i0 = otoff(g), otoff(g + 1) - 1, nbt
       nb = min(nbt, otoff(g + 1) - i0)
+      if (.not. xzdry) then
+        if (.not. xzmine(i0)) cycle
+      end if
+      call xzbtic()
       m0 = xzmark()
       ktv = xzget(NW * nqh * nb * nc, 'pp-ladder batch of T3')
       kxp = xzget(NW * nq * nb * nc, 'pp-ladder product')
@@ -646,6 +663,7 @@ subroutine N(xzbppl)(w, kt3, kr3, h, q0, nq, slab)
                                     vtoff(g + 1), w(jvfree), w(jvpair), vcls, sc, vpoff(h), q0, q0 + nq, &
                                     nc, vcoff(sc), w(kxp))
         call xztoc(1, 'pp ladder: reduction')
+        call xzbtoc(i0)
       end if
       call xzrel(m0)
     end do

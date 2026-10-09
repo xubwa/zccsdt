@@ -34,6 +34,7 @@ module xzpland
   logical :: pfile = .true.
   logical :: planq = .false.          ! only (Q) is planned (a rank that does no iterations)
   integer(8) :: pneedq = 0            ! words of the work array that (Q) takes with the plan
+  integer(8) :: pneedw = 0            ! words that a rank other than 0 takes with the plan (iterations, (Q))
 contains
   subroutine setpar(k, v)
     use xzdata
@@ -66,6 +67,7 @@ integer(8) function xzpeak_cc(w)
   use xzdata
   use xzmem
   use xzpland
+  use xzdist, only: xzworker
   implicit none
   real(8) :: w(*)
   real(8) :: e
@@ -92,8 +94,8 @@ integer(8) function xzpeak_cc(w)
       call xzlam_d(w, pslot, pfile, pchunk, c, n)
     end if
   end if
-  ! the density stage: the integrals, the amplitudes and lambda again, then its arrays
-  if (with_den) then
+  ! the density stage (rank 0): the integrals, the amplitudes and lambda again, then its arrays
+  if (with_den .and. .not. xzworker()) then
     call xzrel(mlay)
     k = xzget(nwe * no * nv, 'T1')
     k = xzget(nwe * no * no * nv * nv, 'T2')
@@ -147,11 +149,14 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   use xzmem
   use xzkern
   use xzpland
+  use xzdist
+  use omp_lib
   implicit none
   real(8) :: w(*)
   integer(8), intent(out) :: nslot, nch
   logical, intent(out) :: usefile
   logical, intent(in) :: flooronly
+  integer :: nthr0
   integer(8), external :: xzpeak_cc, xzpeak_q
   integer(8) :: f, floor_cc, floor_q, need_cc, need_q, free_bytes, per_vec, nfit, k8
   integer :: k
@@ -219,6 +224,34 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     call errex
   end if
 
+  ! ---- a rank other than 0: the batch sizes of rank 0, in the work array
+  !      that rank 0 planned for it; no DIIS vectors
+  if (myrank > 0) then
+    do k = 1, npar
+      call setpar(k, max(1_8, int(rplan(1 + k), 8)))
+    end do
+    pslot = 0
+    pfile = .false.
+    need_cc = 0
+    if (.not. planq) need_cc = xzpeak_cc(w)
+    need_q = xzpeak_q(w)
+    nslot = 0
+    usefile = .false.
+    nch = pchunk
+    pneedq = need_q
+    if (.not. planq) write(6, '(a,a43,i16,a,f10.1,a)') '     this rank, ', trim(what) // ' with the plan of rank 0:', &
+      need_cc, '  = ', 8d-6 * need_cc, ' MB'
+    if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with the plan of rank 0:    ', need_q, '  = ', 8d-6 * need_q, ' MB'
+    if (max(need_cc, need_q) > xzsize) then
+      write(6, '(/,a)') ' @XZCCSDT-F, the work array of this rank is too short for the plan of rank 0.'
+      write(6, '(a,i16,a,i16)') '   words needed: ', max(need_cc, need_q), '   words there: ', xzsize
+      write(6, '(a)') '   (rank 0 plans the memory of all ranks: do the ranks differ in their environment?)'
+      call errex
+    end if
+    flush(6)
+    return
+  end if
+
   ! ---- the batches of the iterations, one after the other
   if (.not. planq) then
   do k = 1, 4
@@ -281,11 +314,30 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   usefile = pfile
   nch = pchunk
   pneedq = need_q
+  ! what a rank other than 0 takes: the iterations without the DIIS vectors
+  ! (with the most threads that a rank has), or (Q)
+  pneedw = 0
+  if (nrank > 1) then
+    pneedw = need_q
+    if (.not. planq) then
+      nthr0 = omp_get_max_threads()
+      if (maxthr > nthr0) call omp_set_num_threads(int(maxthr))
+      asworker = .true.
+      pneedw = max(pneedw, xzpeak_cc(w))
+      asworker = .false.
+      if (maxthr > nthr0) call omp_set_num_threads(nthr0)
+    end if
+  end if
   if (.not. planq) then
   write(6, '(a,a51,i16,a,f10.1,a)') '     ', trim(what) // ' with this plan:', need_cc, '  = ', 8d-6 * need_cc, ' MB'
   end if
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with this plan:             ', need_q, '  = ', &
     8d-6 * need_q, ' MB'
+  if (nrank > 1 .and. (.not. planq .or. with_q)) then
+    write(6, '(a,i16,a,f10.1,a)') '     a rank other than 0 takes:      ', pneedw, '  = ', 8d-6 * pneedw, ' MB'
+    if (.not. planq) write(6, '(a)') '       (its own work array: the integrals, the amplitudes, its part of the residual,' // &
+      ' the batches; no DIIS vectors)'
+  end if
   if (with_q .and. t3shared) then
     if (q_left) then
       write(6, '(a)') '       (private to a rank.  Not in the work array: T3 and Lambda3, read where the files XZAMPS'

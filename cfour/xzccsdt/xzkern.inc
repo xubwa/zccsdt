@@ -65,6 +65,45 @@
       real(c_double) :: stats(4)
     end subroutine
 
+    ! ---- the passes for the pairs plo <= P < phi alone (the batches of a rank)
+    subroutine N(zc_t3_pass1r)(t3, nto, nvt, no, nv, npo, nvp, otri, osgn, vtri, vsgn, batch, plo, phi, &
+                               gpd, gmq, ny, gpp, ft, xacc, yall, r1, ra, io, stats, buf) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, plo, phi, ny
+      type(*), dimension(*) :: t3, otri, osgn, vtri, vsgn, gpd, gmq, gpp, ft, xacc, yall, r1, ra, buf
+      type(c_ptr), value :: io
+      real(c_double) :: stats(4)
+    end subroutine
+
+    subroutine N(zc_t3_pass2r)(t3, nto, nvt, no, nv, npo, nvp, otri, osgn, ofree, opair, &
+                               vtri, vsgn, vfree, vpair, batch, plo, phi, wring, adrv, bdrv, r, io, stats, &
+                               tb, z) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, plo, phi
+      type(*), dimension(*) :: t3, otri, osgn, ofree, opair, vtri, vsgn, vfree, vpair
+      type(*), dimension(*) :: wring, adrv, bdrv, r, tb, z
+      type(c_ptr), value :: io
+      real(c_double) :: stats(4)
+    end subroutine
+
+    subroutine N(zc_l3_pass1r)(l3, t3, nto, nvt, no, nv, npo, nvp, otri, osgn, vtri, vsgn, batch, plo, phi, &
+                               gpd, gmq, ny, l2pp, xacc, yall, dr, d1, stats, bufl, buft) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, plo, phi, ny
+      type(*), dimension(*) :: l3, t3, otri, osgn, vtri, vsgn, gpd, gmq, l2pp, xacc, yall, dr, d1, bufl, buft
+      real(c_double) :: stats(4)
+    end subroutine
+
+    subroutine N(zc_l3_pass2r)(l3, nto, nvt, no, nv, npo, nvp, otri, osgn, ofree, opair, &
+                               vtri, vsgn, vfree, vpair, batch, plo, phi, wl, u, nu, vp, adrv, k, bdrv, r, stats, &
+                               tb, z) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, plo, phi, nu, k
+      type(*), dimension(*) :: l3, otri, osgn, ofree, opair, vtri, vsgn, vfree, vpair
+      type(*), dimension(*) :: wl, u, vp, adrv, bdrv, r, tb, z
+      real(c_double) :: stats(4)
+    end subroutine
+
     subroutine N(zc_lam_pair_expand)(y, out, ny, nx, n) bind(C)
       import
       integer(c_int64_t), value :: ny, nx, n
