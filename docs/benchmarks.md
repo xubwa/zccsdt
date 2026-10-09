@@ -3795,6 +3795,87 @@ AO-direct ladder, which is how CFOUR's spinor CCSD is run in production
 because it is then the largest array); `ABCDTYPE=STANDARD`, which the
 native program needs for `moinpppp`, is not CFOUR's production mode.
 
+## EOM-EE-CCSDT on spin orbitals and spinors, 8 cores (2026-10-09)
+
+Excitation energies by `GCCSDT.eom_ee` (`docs/eom.md`): a sigma vector
+against the CCSDT iteration of the same run, the sigma vectors per root,
+memory against the plan, and MRCC for the same molecules.
+
+Job 31825453, 8 cores and 30 GB of c105 (2 x Xeon Gold 6248R; the shared
+node - other work ran on its other cores, among it test runs of this
+development on 2 to 4 threads), `bench/slurm_eom.sh`, commit 190ddad, MRCC
+first, then zccsdt, scratch on the local disk.  MRCC: its release binary
+(February 2018; OpenMP, 8 threads, 24 GB allowed).  Thresholds: zccsdt
+1e-6 in the norm of the residual, MRCC `cctol=8` (H2O) and 11 (HBr).
+Measured once.
+
+**H2O / cc-pVTZ, all electrons** (10 + 106 spin orbitals; the basis of
+CFOUR's GENBAS in both programs, SCF energies equal to 1e-12).  MRCC at its
+best for a closed shell - its own RHF integrals, C2v, spin adaptation, 2.0
+million determinants; the lowest singlet and the lowest triplet (`nsing=2`,
+`ntrip=1`, `symm=B2`).  zccsdt: RHF as GHF spin orbitals, no symmetry of
+any kind, T3 of 23.2 million elements, real; four roots = the triplet
+(three roots) and the singlet.
+
+| | zccsdt | MRCC |
+|---|---|---|
+| CCSDT iteration | 3.94 s (median of 17) | 5.6 s (17 iterations in 1.59 min) |
+| sigma vector | 8.18 s = 2.08 CCSDT iterations (the triples stage by its 56 sigma vectors; 7.2 s in the sigma vectors, 0.9 s in the vector operations of the solver) | 8.1 s per LR iteration (18 in 2.43 min, for each of the two states; 0.11 min at the start, 0.16 at the end) |
+| sigma vectors | 56 = 14 per root, 14 iterations, 2 collapses | 18 per state |
+| excited states, time | 470 s (guess stage 7.5 s: 32 singles-doubles vectors of 0.2 s; prepare 3.8 s) | 291 s |
+| omega / Eh: triplet, singlet | 0.2783768695, 0.2984329001 | 0.278376868212, 0.298432899788 |
+| peak resident memory; plan | 12.44 GB; 12.57 GB (24 vectors and their sigma vectors in memory: 8.99 GB; fixed part 3.58 GB) | 24 GB allowed |
+
+The energies differ by 1.3e-9 and 3e-10 at these thresholds.  Per sigma
+vector the two programs are level, MRCC with the point group and the spin
+adaptation and zccsdt with neither; zccsdt needs fewer vectors per root
+but computes the triplet three times, so the excited states took 1.6
+times MRCC's time.
+
+A sigma vector of zccsdt (seconds, of 8.18): the residual with R3 and the
+operators of the ground state 2.80 (pass 2 1.41, pp ladder 1.37); the
+residual with T3 and the derivatives of the operators 2.82 (1.41, 1.39);
+the two passes 1 1.04; W'_vvvo 0.26; `<ab||de>'` and the ladders of
+sigma_2 0.21; the small terms 0.13; the solver's vector operations 0.89
+(residual vectors and orthogonalization on threads, preconditioner and
+collapse with numpy on one thread).  A CCSDT iteration (3.94): pass 2
+1.46, pp ladder 1.41, pass 1 0.51, intermediates 0.25, DIIS 0.17, dressing
+0.11.
+
+**HBr / cc-pVTZ-DK, X2C spinors, 28 frozen** (8 + 78).  MRCC through its
+interface to DIRAC on the MRCONEE / MDCINT written from PySCF's spinors
+(`nstate=4`; no spin adaptation, the two fermion irreps of the files);
+zccsdt through the front end on the same SCF, in the blocks of the
+symmetry labels (the totally symmetric states) and on the packed block (all
+states), real arithmetic.  CCSDT energies: -2605.165536741802 (MRCC),
+-2605.16553674179 (zccsdt).
+
+| | zccsdt, label blocks | zccsdt, packed block | MRCC |
+|---|---|---|---|
+| CCSDT iteration | 0.21 s | 0.61 s | 6.1 s (first six: 0.61 min) |
+| sigma vector | 0.36 s = 1.75 iterations | 1.33 s = 2.19 iterations | about 10 s (91 LR iterations and 22 CCSDT iterations in 1063 s) |
+| roots; sigma vectors | 3 symmetric; 43 = 14.3 per root, 2 collapses | 6; 107 = 17.8 per root, 4 collapses | 3 states; 25, 28, 38 iterations |
+| excited states, time | 17 s | 150 s | about 930 s (1063 s with the ground state) |
+| omega / Eh | 0.2404148156, 0.2408465051, 0.3332902955 | 0.2298116645 (twice), 0.2337441996 (twice), 0.2404148166, 0.2408465143 | 0.229811656650, 0.229811656668, 0.240414821269 |
+| peak resident memory; plan | 0.93 GB; 1.62 GB | 3.79 GB; 4.23 GB | 24 GB allowed |
+
+MRCC's three states are roots of zccsdt on the packed block to 8e-9 and
+5e-9 (the residuals are 4e-7 to 9e-7; the same comparison with 8 + 16
+spinors and a threshold of 1e-8 agrees to 2e-11, `docs/eom.md` 7).  The
+symmetric root at 0.24041 comes out of the blocks and of the packed block
+equal to 1e-9.  Per sigma vector zccsdt on the packed block takes an
+eighth of MRCC's LR iteration, in the blocks a twenty-eighth - the ratio
+of the CCSDT iterations (10 and 29).
+
+In the blocks the plan is far above what was used (1.62 against 0.93 GB):
+`fixed_bytes` counts the batch buffers and the o v^3 arrays of the dense
+layout.  On the packed block and for H2O the peak is 90% and 99% of the
+plan; nothing was above it.
+
+What was not measured: a run with the vectors in the scratch file at
+production size (the tests do it at 8 + 16), complex arithmetic at
+production size, more than 8 threads, IP and EA.
+
 ## Correctness references
 
 | Reference | Agreement | Test |
@@ -3808,3 +3889,9 @@ native program needs for `moinpppp`, is not CFOUR's production mode.
 | MRCC through its interface to DIRAC, on DIRAC's integrals and on integrals written here (X2C spinors) | 1e-12 | `tests/test_dirac.py` |
 | A linear molecule turned off the axis (complex spinors) against itself on the axis | 5e-13 | `tests/test_dirac.py` |
 | Dense evaluation of every term of CCSDTQ, (Q) and (P) (Wick's theorem; Fock space) | 1e-12 | `tests/test_ccsdtq_terms.py`, `tests/test_pentuples.py` |
+| EOM-CCSDT sigma vector: differentiated term table, five-point formula, the commutator in a Fock space (complex) | 1e-12 | `tests/test_eom_ref.py` |
+| EOM-CCSDT, 3 electrons: all eigenvalues against the determinant space (real spin orbitals; complex spinors) | 1e-9 | `tests/test_eom_ref.py` |
+| EOM-EE / IP / EA-CCSD against PySCF GHF EOM-CCSD (complex orbitals: invariance) | 1e-8 | `tests/test_eom_ref.py`, `tests/test_eom.py` |
+| EOM sigma vector on packed amplitudes against the dense reference (real, complex, frozen core, label blocks against the packed block) | 1e-12, 1e-11 | `tests/test_eom_opt.py`, `tests/test_eom.py` |
+| MRCC LR-CCSD / LR-CCSDT excitation energies: H2O / 6-31G (own integrals); HBr X2C spinors through `iface=dirac` on the same integrals | 1e-9 (observed 2e-10; 2e-11) | `tests/test_eom.py` |
+| CFOUR `xx2ceomcc` (EOM-CCSD) on CFOUR's complex spinors, H2O and HBr | 5e-12 to 2e-10 | `bench/cfour/eom_ccsd.sh` (not a test: it runs CFOUR) |

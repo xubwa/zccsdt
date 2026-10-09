@@ -455,6 +455,66 @@ e_ql = mycc.ccsdt_q_lambda()            # (Q)_Lambda: e_ql, e_ql5 ([Q]_Lambda), 
 - An RHF reference makes `zccsdt.CCSDT` the closed-shell class, which has
   none of this: `zccsdt.CCSDT(mf.to_ghf())` for these methods.
 
+### Excited, ionized and attached states: EOM-CCSDT
+
+```python
+mycc = zccsdt.CCSDT(mf).run()            # GHF or X2C reference (GCCSDT)
+e, res = mycc.eom_ee(nroots=4)           # excitation energies / Hartree, zccsdt.cc.eom.Result
+e_ip, _ = mycc.eom_ip(nroots=2)          # ionization energies
+e_ea, _ = mycc.eom_ea(nroots=2)          # E(N+1) - E(N)
+```
+
+Equation-of-motion CCSDT on the converged amplitudes: the lowest
+eigenvalues of the Jacobian of the amplitude equations and their
+right-hand vectors (`docs/eom.md`), real or complex as the ground state.
+
+| Option of `eom_ee` | Default | |
+|---|---|---|
+| `nroots` | 3 | roots; spin is not a label of spin orbitals or spinors, so a triplet is three of them |
+| `conv_tol` | 1e-6 | norm of the residual `H R - omega R` of the normalized vector; the energies are converged further (1e-8 gave 2e-10 Eh against MRCC) |
+| `max_space` | 8 + 4 nroots | vectors of the Davidson subspace before it is collapsed to the roots; lowered to what `max_memory` or `max_disk` hold |
+| `max_cycle` | 60 | iterations (each adds one vector per root that is not converged) |
+| `guess` | None | `[(r1[i,a], r2[(i<j),(a<b)])]` to start from and follow; default: the roots of the singles-doubles block from `nguess` unit vectors on the lowest single excitations |
+| `nguess`, `guess_tol` | nroots, 1e-4 | more unit vectors than roots help when the lowest singles are not the lowest states |
+
+`res.e` are the energies (`res.e_imag` their imaginary parts, zero for a
+real spectrum), `res.converged`, `res.residuals` per root; `res.r1[k]`,
+`res.r2[k]` (pairs i<j, a<b), `res.r3[k]` (flat, the layout of `mycc.t3`)
+the vectors, normalized to one over their unique elements;
+`res.weights[k]` the shares of singles, doubles and triples; `res.nsigma`
+the sigma vectors of the triples stage; `res.plan` the memory plan.  With
+`verbose >= 4` every iteration prints a line (size of the subspace; per
+root omega and the norm of the residual, `*` when converged) and the end a
+table in Hartree and eV with the shares.
+
+**Which states.**  After a ground state on the packed block: all of them.
+After one in the blocks of the symmetry labels (a linear molecule with
+`symmetry`, the default): the totally symmetric states, those with the m_j
+of the ground state; set `mycc.symmetry = False` before `kernel()` for the
+others (states with a label of their own in the blocks are not implemented,
+`docs/eom.md` 6).  The solver finds the lowest roots; the three components
+of a triplet count as three, and with more near-degenerate states than
+`nroots` which of them come out depends on the guess.
+
+**Cost and memory.**  A sigma vector is two T3 residuals: 2.1 CCSDT
+iterations measured for H2O / cc-pVTZ (`docs/benchmarks.md`), with 14 sigma
+vectors per root to 1e-6.  The operands of the ground state and of one sigma vector are kept
+in memory (about twice the pp operator, seven arrays of o v^3, T3, the
+batch buffers); the vectors of the subspace - 2 `max_space` of the size of
+T3 - go to a scratch file if `max_memory` does not hold them.  A ground
+state that needed the sliced pp operator or T3 in a scratch file cannot
+run EOM yet (`MemoryError` with the numbers).
+
+**EOM-IP and EOM-EA** take the options of `eom_ee`.  They run the EE code
+with one ghost spinor (`docs/eom.md` 5): correct and checked against a
+dense reference and PySCF, but at the cost of an EE calculation and on the
+packed block - the implementation with short vectors is not written.
+
+**EOM-CCSD** on CCSD amplitudes: `zccsdt.cc.eom.kernel(eris, t1, t2, None,
+nroots=..)` with the amplitudes of `zccsdt.cc.solver.kernel(eris, 'ccsd')`;
+on CFOUR's spinors with `zccsdt.cfour.from_cfour` it reproduces
+`xx2ceomcc` (`bench/cfour/eom_ccsd.sh`).
+
 ### Integrals from another program, and for another program
 
 The classes for spin orbitals and spinors also run on an integral container

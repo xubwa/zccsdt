@@ -1212,11 +1212,15 @@ def _pp_sweep_spin(eng, plan, eris, t1, t2pp, Feff_vv, om, vm, T3p, Wv, R3):
     return lad
 
 
-def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
+def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, capture=None):
     '''One Jacobi step.  T3p is packed (notri, nvtri) or flat; returns
     (t1new, t2new, T3p_new) with T3p_new flat.  ``out``: a flat array of the
     size of T3p for the new T3 (e.g. a mapped file; default: a new array).
-    ``plan``: MemoryPlan (default: everything in memory).'''
+    ``plan``: MemoryPlan (default: everything in memory).  ``capture``: a
+    dict that receives the dressed integrals and the intermediates of the
+    step (the operands of the T3 passes among them) for a code that
+    linearizes it (zccsdt.cc.eom_opt); for dense integrals with the dressed
+    operator in memory.'''
     from zccsdt.scratch import io_desc
     plan = plan or MemoryPlan()
     if plan.mem_mb is not None:
@@ -1236,6 +1240,8 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
     spin = _is_spin_eris(eris)
     # the dressed packed vvvv in slabs of rows
     sliced = plan.pp_bytes is not None and sliceable(eris, eng)
+    if capture is not None and (spin or sliced):
+        raise NotImplementedError('capture: for dense integrals and the pp operator in memory')
     # memory is short: no ovvv-sized array is kept for the next iteration
     tight = plan.t3_file or plan.pp_file or plan.pp_bytes is not None
     # (nor what an earlier run with another plan has kept for the operator)
@@ -1293,6 +1299,8 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
     # which is then dropped (ovvv-sized arrays are dropped as soon as they
     # have been used: they decide how much memory a run needs at least)
     r1_vovv = gemm(np.ascontiguousarray(t2P).reshape(nocc, -1), G_mQ[:, nocc:])
+    if capture is not None:
+        capture.update(G_Pd=G_Pd, G_mQ=G_mQ, goovv_pp=goovv_pp, goovv_P=goovv_P)
     del G_mQ
     C0 = -2 * Xacc[nvir:].transpose(1, 0, 2)               # [i, j, Q]
     dWo = Yall[:, :, :nocc].transpose(2, 1, 0)             # [m, a, P(ij)]
@@ -1319,6 +1327,8 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
             if spin else None
         with timer('wv.vvoo'):
             vvoo_pp = dressed_vvoo_pp(eris, t1, Bv, om, vm)    # needs Bv before W
+        if capture is not None:     # (the bra-dressed <ab||ei>: W_vvvo is built in it)
+            capture.update(Bv=Bv.copy(), ovvv=ge['ovvv'])
         # W_vvvo is built in Bv from here on.  Its T3 part first, so that the
         # pass-1 result can go: Wv[Q, e, i] += Xacc[e, i, Q]
         with timer('wv.dWv'):
@@ -1427,6 +1437,9 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
         t_.__exit__(None, None, None)
 
     # ---- T3 residual: ring + drive, pp ladder (+F_vv), hh ladder (+F_oo)
+    if capture is not None:
+        capture.update(fdr=fdr, ge=ge, Feff_oo=Feff_oo, Feff_vv=Feff_vv, WringT=WringT, Wv=Wv, Wo=Wo,
+                       Wpp=Wpp, O6=O6, Weff_oooo=Weff_oooo, om=om, vm=vm, dtype=np.dtype(dtype), eng=eng)
     del ge, Yall, B0, C0, goovv_P, goovv_mn, goovo_mn, G_Pd
     if spin:
         del ges
