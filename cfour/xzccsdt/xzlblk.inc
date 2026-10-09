@@ -18,8 +18,7 @@
 ! equation with L (xzbp1xy):
 !   xacc[e|j][m][Q] += sum_{P,d} gpd[e|j][P][d] L,   yall[P][d][j|e] += sum_{m,Q} L gmq[m][Q][j|e]
 ! xacc, dr and d1 are added to; yall is zeroed here.  A batch is gathered
-! for all gQ first; then the densities of a range of rows of one gQ (a task
-! owns its rows of the result: nothing is shared, no lock) and the stacked
+! for all gQ first; then the densities of one (gQ, P) and the stacked
 ! products of one (gQ, class of d) are the tasks of two parallel loops, with
 ! the BLAS sequential inside.
 subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
@@ -33,10 +32,8 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   ZT :: gpd(*), gmq(*), xacc(*), yall(*), dr(*), d1(*)
   ZT, intent(in) :: l2pp(0:nvp-1, 0:npo-1)
   integer(8) :: gp, gq, p0, nb, delta, nr, nq, qlo, sd, sm, sy, nd, nm, ne, nj, r0, k
-  integer(8) :: m0, mk, kdd, kd0, nth, ig, ngq, it, ntask
+  integer(8) :: m0, mk, kdd, kd0, kdw, nth, nrmax, ig, ngq, it, ntask, me
   integer(8) :: lst(0:npg-1), gkl(0:npg-1), gkt(0:npg-1)
-  integer(8) :: choff(0:npg), r1
-  real(8) :: tot
   integer(8), dimension(npg * ncls) :: tgq, tsd, tr0, tks, tkg, tkx, tkgy, tky, ggq, gsd, gr0
   integer(8) :: ngath
   real(8) :: cost(npg * max(ncls, nbp))
@@ -46,9 +43,14 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   one = 1
   zero = 0
   nth = omp_get_max_threads()
+  nrmax = 0
+  do delta = 1 - ncls, ncls - 1
+    nrmax = max(nrmax, ndel(delta))
+  end do
   m0 = xzmark()
   kdd = xzget(NW * nwd, 'densities of pass 1')
   kd0 = xzget(NW * ndel(0), 'density of L2 with T3')
+  kdw = xzget(NW * nth * (nrmax * nrmax + nrmax), 'densities of pass 1, per thread')
   if (.not. xzdry) then
     call zc_vzero_d(NW * npo * nv * ny, yall)
     call zc_vzero_d(NW * nwd, w(kdd))
@@ -133,40 +135,38 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
         end do
         end do
         call xztoc(tcur, 'pass 1: gather')
-        ! the densities: a task is a range of the rows (a, i) of the block of
-        ! gP - gQ, which it alone adds to - the products of all P of the batch,
-        ! one after the other; about four tasks per thread, by the work of a gQ
-        tot = 0d0
+        ! the densities: one task per (gQ, P), each product in the buffer of
+        ! its thread and added to the block of gP - gQ.  (The lock is not what
+        ! limits this loop: tasks that own a range of rows of the block and add
+        ! to it without a lock were measured 1.7 to 2.3 times slower on 8 to 48
+        ! threads - thin products that read the batch of T3 once per task;
+        ! docs/native.md, section 13.)
         do ig = 0, ngq - 1
           gq = lst(ig)
-          cost(ig + 1) = dble(ndel(gp - gq)) ** 2 * (vpoff(gq + 1) - vpoff(gq))
-          tot = tot + cost(ig + 1)
+          cost(ig * nb + 1:ig * nb + nb) = dble(ndel(gp - gq)) ** 2 * (vpoff(gq + 1) - vpoff(gq))
         end do
-        choff(0) = 0
+        call xzbig(ngq * nb, cost, big)
+        do phase = 1, 2
+        !$omp parallel do collapse(2) schedule(dynamic) if(phase == 2) private(ig, k, gq, delta, nr, qlo, nq, me)
         do ig = 0, ngq - 1
-          choff(ig + 1) = choff(ig) + max(1_8, min(ndel(gp - lst(ig)), &
-                                                   int(4d0 * nth * cost(ig + 1) / max(tot, 1d0) + 0.999d0, 8)))
-        end do
-        !$omp parallel do schedule(dynamic) private(it, ig, k, gq, delta, nr, qlo, nq, r0, r1)
-        do it = 0, choff(ngq) - 1
-          ig = 0
-          do while (it >= choff(ig + 1))
-            ig = ig + 1
-          end do
-          gq = lst(ig)
-          delta = gp - gq
-          nr = ndel(delta)
-          qlo = vpoff(gq)
-          nq = vpoff(gq + 1) - qlo
-          r0 = ((it - choff(ig)) * nr) / (choff(ig + 1) - choff(ig))
-          r1 = ((it - choff(ig) + 1) * nr) / (choff(ig + 1) - choff(ig))
-          if (r1 == r0) cycle
           do k = 0, nb - 1
-            call N(zc_gemm)(0_4, 1_4, r1 - r0, nr, nq, one, w(gkl(gq) + NW * (k * nr + r0) * nq), nq, &
-                            w(gkt(gq) + NW * k * nr * nq), nq, one, w(kdd + NW * (wdoff(delta) + r0 * nr)), nr)
-            if (delta == 0) call N(zc_gemm)(0_4, 0_4, r1 - r0, 1_8, nq, one, &
-              w(gkt(gq) + NW * (k * nr + r0) * nq), nq, l2pp(qlo, p0 + k), 1_8, one, w(kd0 + NW * r0), 1_8)
+            if (big(ig * nb + k + 1) .neqv. (phase == 1)) cycle
+            gq = lst(ig)
+            delta = gp - gq
+            nr = ndel(delta)
+            qlo = vpoff(gq)
+            nq = vpoff(gq + 1) - qlo
+            me = kdw + NW * omp_get_thread_num() * (nrmax * nrmax + nrmax)
+            call N(zc_gemm)(0_4, 1_4, nr, nr, nq, one, w(gkl(gq) + NW * k * nr * nq), nq, &
+                            w(gkt(gq) + NW * k * nr * nq), nq, zero, w(me), nr)
+            if (delta == 0) call N(zc_gemm)(0_4, 0_4, nr, 1_8, nq, one, w(gkt(gq) + NW * k * nr * nq), nq, &
+                                            l2pp(qlo, p0 + k), 1_8, zero, w(me + NW * nrmax * nrmax), 1_8)
+            !$omp critical (xzlbdens)
+            call N(xzlbacc)(nr * nr, w(me), w(kdd + NW * wdoff(delta)))
+            if (delta == 0) call N(xzlbacc)(nr, w(me + NW * nrmax * nrmax), w(kd0))
+            !$omp end critical (xzlbdens)
           end do
+        end do
         end do
         call xztoc(tcur, 'pass 1: density')
         ! the stacked products, per gQ and class of d (and of m)
