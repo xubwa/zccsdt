@@ -315,7 +315,17 @@ class Plan:
                    self.fixed / 1e9))
 
 
-def fixed_bytes(eris, dtype, with_t3=True, mem_mb=2000.0):
+def _shifter(eng):
+    '''The t3shift.ShiftT3 of an engine of label blocks (kept with it).'''
+    from zccsdt.cc import t3shift
+    if not hasattr(eng, 'L'):
+        raise ValueError('a label shift needs symmetry labels in use (blocks of the labels)')
+    if getattr(eng, '_shifter', None) is None:
+        eng._shifter = t3shift.ShiftT3(eng)
+    return eng._shifter
+
+
+def fixed_bytes(eris, dtype, with_t3=True, mem_mb=2000.0, shift=None):
     '''Bytes of ordinary memory that prepare() and a sigma vector take
     besides the vectors of the subspace: the larger of
 
@@ -326,7 +336,17 @@ def fixed_bytes(eris, dtype, with_t3=True, mem_mb=2000.0):
                 pass 1: 3.5 f; T3; 16 arrays of o^2 v^2), the derivative of
                 the pp operator, 3.5 f of transients (W'_vvvo, its parts and
                 the drive operand), the batch buffers and the occupied
-                operators.'''
+                operators.
+
+    In the blocks of the symmetry labels the rank-3 arrays, the pp
+    operator and the work array have the sizes of the blocks (the o v^3
+    arrays are dense there too), and the amplitude step is counted with
+    what the blocks of its occupied operator take - at most two blocks of
+    T3 - instead of the quarter of ``mem_mb`` that the plan of the ground
+    state sets aside for them.  ``shift``: a vector with that label shift
+    (classes of the maps): the work array of the shifted passes, the
+    derivative of the pp operator between the pair blocks h and h + shift,
+    the blocks of the occupied operator between the groups g and g + shift.'''
     om, vm = t3pack.maps_for(eris)
     o, v = om.n, vm.n
     isz = np.dtype(dtype).itemsize
@@ -335,12 +355,29 @@ def fixed_bytes(eris, dtype, with_t3=True, mem_mb=2000.0):
     s = o * o * v * v * isz
     pp = sum((hi - lo) ** 2 for lo, hi in vm.blocks) * isz
     t3 = eng.size * isz if with_t3 else 0
-    step = ccsdt_opt.plan_memory(o, v, isz, mem_mb=mem_mb, t3_bytes=eng.size * isz, pp_bytes=pp, engine=eng)
-    prep = step.need + 2 * f
+    bufs = int(eng.buffer_bytes(mem_mb))
+    if hasattr(eng, 'L'):
+        L = eng.L
+        blk = max([int(L.nI[g]) * int(L.nA[g]) for g in L.stored] + [0]) * isz
+        small = 8 * s + 2 * om.ntri ** 2 * isz + ccsdt_opt.overhead()
+        dress = min(2_000_000_000, 2 * pp) + f // 2
+        prep = small + bufs + max(int(3.5 * f), int(1.75 * f) + max(dress, min(int(mem_mb * 250_000), 2 * blk))) \
+            + 2 * eng.size * isz + pp + 2 * f
+    else:
+        step = ccsdt_opt.plan_memory(o, v, isz, mem_mb=mem_mb, t3_bytes=eng.size * isz, pp_bytes=pp, engine=eng)
+        prep = step.need + 2 * f
     occ = 2 * om.ntri ** 2 * isz if o < t3kern_min_occ() else 4 * om.npair ** 2 * isz
-    sig = 2 * pp + 7 * f + 22 * s + t3 + int(eng.buffer_bytes(mem_mb)) + 2 * occ + ccsdt_opt.overhead()
+    dpp = pp
+    if shift is not None:
+        sh = _shifter(eng)
+        nq = [hi - lo for lo, hi in vm.blocks]
+        dpp = sum(nq[h] * nq[h + shift] for h in range(len(nq)) if 0 <= h + shift < len(nq)) * isz
+        if with_t3:
+            bufs = max(bufs, int(sh.buffer_bytes(mem_mb, shift)))
+            occ += sh.occ_bytes(shift)
+    sig = pp + dpp + 7 * f + 22 * s + t3 + bufs + 2 * occ + ccsdt_opt.overhead()
     if not with_t3:
-        sig = 2 * pp + 3 * f + 22 * s + ccsdt_opt.overhead()
+        sig = pp + dpp + 3 * f + 22 * s + ccsdt_opt.overhead()
     return max(prep, sig)
 
 
@@ -349,7 +386,7 @@ def t3kern_min_occ():
     return t3kern.HH_PAIR_MIN_OCC
 
 
-def plan_for(eris, dtype, nroots, max_space=None, with_t3=True, opts=None, mem_mb=2000.0):
+def plan_for(eris, dtype, nroots, max_space=None, with_t3=True, opts=None, mem_mb=2000.0, shift=None):
     '''The Plan for ``nroots`` roots: ``max_space`` (default 8 + 4 nroots)
     vectors and their sigma vectors in memory if ``opts.max_memory`` (MB
     for the whole process; default 80% of what is available) holds them
@@ -365,8 +402,9 @@ def plan_for(eris, dtype, nroots, max_space=None, with_t3=True, opts=None, mem_m
     eng = ccsdt_opt.engine_for(eris, dtype)
     asked = max_space or 8 + 4 * nroots
     floor = min(asked, 2 * nroots + 2)
-    one = (om.n * vm.n + om.npair * vm.npair + (eng.size if with_t3 else 0)) * isz
-    fixed = fixed_bytes(eris, dtype, with_t3, mem_mb)
+    n3 = (eng.size if shift is None else _shifter(eng).size(shift)) if with_t3 else 0
+    one = (om.n * vm.n + om.npair * vm.npair + n3) * isz
+    fixed = fixed_bytes(eris, dtype, with_t3, mem_mb, shift=shift)
     if opts.incore_complete:
         return Plan(nroots, asked, False, fixed + 2 * asked * one, fixed, 2 * asked * one, 0, asked)
     budget = memory.budget(opts.max_memory)
@@ -392,7 +430,7 @@ def plan_for(eris, dtype, nroots, max_space=None, with_t3=True, opts=None, mem_m
             '(max_memory, max_disk, ZCCSDT_TMPDIR)'
             % (nroots, floor, one / 1e9, 2 * floor * one / 1e9, (budget - fixed) / 1e9, fixed / 1e9,
                (left or 0) / 1e9))
-    big = (eng.size if with_t3 else 0) * isz        # (the parts of rank one and two stay in memory)
+    big = n3 * isz                                  # (the parts of rank one and two stay in memory)
     return Plan(nroots, space, True, fixed + 2 * space * (one - big), fixed, 2 * space * one, 2 * space * big, asked)
 
 
@@ -416,6 +454,9 @@ class Result:
     plan: object = None
     ground: object = None
     timings: dict = None
+    shift: object = None        # the label shift in classes of the maps (None: totally symmetric, layout of t3)
+    label_shift: object = None  # the same in units of the labels (set by the front end)
+    partner_of: object = None   # these are the time-reversed states of that label shift (no vectors)
 
 
 def denominators(g):
@@ -430,9 +471,14 @@ def denominators(g):
     return d1, d2, (eo[om.triples].sum(axis=1), ev[vm.triples].sum(axis=1))
 
 
-def make_precond(g, with_t3, floor=1e-3):
+def make_precond(g, with_t3, floor=1e-3, shift=None):
     d1, d2, (eo3, ev3) = denominators(g)
-    blocks = zeta_opt._blocks(g.eris, g.dtype) if with_t3 else []
+    if not with_t3:
+        blocks = []
+    elif shift is None:
+        blocks = zeta_opt._blocks(g.eris, g.dtype)
+    else:
+        blocks = [(None, None) + b for b in g.shifter().layout(shift).blocks()]
 
     def div(x, d, omega):
         den = omega - d
@@ -466,13 +512,73 @@ def singles_guess(g, nguess, allowed=None):
     return [int(x) for x in order if np.isfinite(d1[x])]
 
 
-def symmetric_singles(eris):
+def symmetric_singles(eris, shift=0):
     '''[i,a] True where a single excitation is totally symmetric for the
-    labels in use (all of them without labels).'''
+    labels in use (all of them without labels), or has the label shift
+    ``shift`` (classes of the maps).'''
     om, vm = t3pack.maps_for(eris)
     if om.spins is None:
         return np.ones((om.n, vm.n), bool)
-    return np.asarray(om.spins)[:, None] == np.asarray(vm.spins)[None, :]
+    return np.asarray(vm.spins)[None, :] - np.asarray(om.spins)[:, None] == shift
+
+
+def class_shift(eris, label_shift):
+    '''The shift in classes of the maps for a change ``label_shift`` of
+    the sum of the symmetry labels (for 2 m_j, whose step is 2: half of
+    it); ValueError if no excitation changes the labels by that.'''
+    lab = getattr(eris, 'labels', None)
+    om, _ = t3pack.maps_for(eris)
+    if lab is None or om.spins is None:
+        raise ValueError('a label shift needs the symmetry labels in use: a calculation in the blocks of the '
+                         'labels (symmetry = True; a linear molecule on the z axis)')
+    u = np.unique(np.asarray(lab))
+    step = int(np.gcd.reduce(np.diff(u))) if len(u) > 1 else 1
+    if int(label_shift) % step:
+        raise ValueError('the labels of these spinors differ by multiples of %d: no state with a shift of %d'
+                         % (step, label_shift))
+    return int(label_shift) // step
+
+
+def time_reversal_symmetric(eris, tol=1e-7):
+    '''Do the spinors come in pairs of labels l, -l with equal energies,
+    occupied and virtual ones apart - the mark of a closed shell that is
+    symmetric under time reversal?  Then the states of the label shifts D
+    and -D are each other's time-reversed images, with equal energies.'''
+    lab = getattr(eris, 'labels', None)
+    if lab is None:
+        return False
+    lab = np.asarray(lab)
+    e = np.asarray(eris.mo_energy).real
+    no = eris.nocc
+    for sl in (slice(0, no), slice(no, None)):
+        l, x = lab[sl], e[sl]
+        for v in np.unique(l):
+            a, b = np.sort(x[l == v]), np.sort(x[l == -v])
+            if len(a) != len(b) or (len(a) and abs(a - b).max() > tol):
+                return False
+    return True
+
+
+def partner(res, label_shift, nroots=None):
+    '''The Result of the time-reversed states of ``res`` (the label shift
+    ``label_shift`` = minus that of res): the same energies, no vectors.'''
+    import copy
+    out = copy.copy(res)
+    n = len(res.e) if nroots is None else min(nroots, len(res.e))
+    out.e, out.e_imag, out.converged, out.residuals = (np.array(x[:n]) for x in (res.e, res.e_imag, res.converged, res.residuals))
+    out.weights = np.array(res.weights[:n])
+    out.r1 = out.r2 = out.r3 = None
+    out.partner_of, out.label_shift = res.label_shift, label_shift
+    out.shift = None if res.shift is None else -res.shift
+    return out
+
+
+def label_shifts(eris):
+    '''The changes of the sum of the labels that a single excitation can
+    make (the shifts with singles), sorted.'''
+    lab = np.asarray(eris.labels)
+    no = eris.nocc
+    return sorted({int(x) for x in (lab[None, no:] - lab[:no, None]).ravel()})
 
 
 def ghost(eris, t1, t2, t3=None, kind='ip'):
@@ -544,7 +650,7 @@ def _triples(n):
 
 def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None,
            nguess=None, guess_tol=1e-4, opts=None, mem_mb=2000.0, verbose=False, plan=None, ground=None,
-           stdout=None, singles=None, name='EE'):
+           stdout=None, singles=None, name='EE', shift=None):
     '''EOM-EE-CCSDT for converged amplitudes (t3 flat in the layout of the
     engine of ``eris``; None: EOM-EE-CCSD for CCSD amplitudes): the
     ``nroots`` lowest excitation energies and right-hand vectors.
@@ -556,6 +662,11 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     ``singles`` [i,a]: the single excitations the unit vectors of the guess
     are taken from (default: the totally symmetric ones); with the
     integrals and amplitudes of ghost() they select the IP or EA problem.
+    ``shift``: with symmetry labels in use, the states whose excitation
+    operator changes the sum of the labels by ``shift`` (in classes of the
+    maps: class_shift()) - r1[i,a] where l_a - l_i = shift, the rank-3
+    part in the blocks of t3shift.ShiftLayout; default: the totally
+    symmetric states, in the layout of t3.
     ``conv_tol``: the norm of the residual of a normalized vector.
     ``opts``: solver.Options for max_memory, max_disk, incore_complete.
     Returns a Result.'''
@@ -567,12 +678,12 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     with3 = t3 is not None
     dtype = np.dtype(np.result_type(t1, t2, eris.oovv, eris.fock, *([t3] if with3 else [])))
     if plan is None:
-        plan = plan_for(eris, dtype, nroots, max_space, with3, opts, mem_mb)
+        plan = plan_for(eris, dtype, nroots, max_space, with3, opts, mem_mb, shift=shift)
     if plan.mapped:
         disk.require(plan.disk, 'the vectors of the EOM subspace', opts.max_disk)
     t_all = time.perf_counter()
     g = ground if ground is not None else eom_opt.prepare(eris, t1, t2, t3, opts, mem_mb)
-    sizes = g.sizes()
+    sizes = g.sizes(shift)
     nocc, nvir = g.om.n, g.vm.n
     times = {'prepare': time.perf_counter() - t_all}
 
@@ -590,13 +701,17 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     def apply_for(with_r3):
         def apply(x, y):
             s1, s2, _ = eom_opt.sigma(g, x[0].reshape(nocc, nvir), x[1], x[2] if with_r3 else None,
-                                      out=y[2] if with_r3 else None, sd=not with_r3)
+                                      out=y[2] if with_r3 else None, sd=not with_r3, shift=shift)
             y[0][:] = s1.ravel()
             y[1][:] = s2.ravel()
         return apply
 
     say('EOM-%s-%s: %d roots, vectors of %d + %d + %d elements, %s' % (
         name, 'CCSDT' if with3 else 'CCSD', nroots, sizes[0], sizes[1], sizes[2], 'real' if dtype.kind == 'f' else 'complex'))
+    if shift is not None:
+        m1, m2 = g.masks(shift)
+        say('  label shift: %d classes; %d singles, %d doubles and %d triples have it'
+            % (shift, m1.sum(), m2.sum(), sizes[2]))
     say('  ' + plan.text())
     if g.change > 1e-5:
         say('  warning: the amplitudes are not converged (a Jacobi step changes them by %.1e)' % g.change)
@@ -605,7 +720,7 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     first = None
     t0 = time.perf_counter()
     if guess is None:
-        allowed = symmetric_singles(eris)
+        allowed = symmetric_singles(eris, shift or 0)
         if singles is not None:
             allowed = allowed & np.asarray(singles, bool)
         idx = singles_guess(g, nguess or nroots, allowed)
@@ -616,6 +731,9 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
             gs.append(v)
         nroots = min(nroots, len(gs))
         final = not with3
+        if not gs:
+            raise ValueError('no single excitation to start from%s' % (
+                '' if shift is None else ' with a label shift of %d classes' % shift))
         first = davidson(apply_for(False), make_precond(g, False), gs, sd, nroots,
                          conv_tol if final else guess_tol, max(4 * nroots + 16, plan.max_space if final else 0),
                          max_cycle, log=logger('SD   ' if with3 else 'iter '))
@@ -637,7 +755,7 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
             v[0][:], v[1][:] = x[0], x[1]
             gs.append(v)
         t0 = time.perf_counter()
-        res = davidson(apply_for(True), make_precond(g, True), gs, store, nroots, conv_tol, plan.max_space,
+        res = davidson(apply_for(True), make_precond(g, True, shift=shift), gs, store, nroots, conv_tol, plan.max_space,
                        max_cycle, follow=True, log=logger('iter '))
         times['iterations'] = time.perf_counter() - t0
     wts = np.array([[float(np.vdot(p, p).real) if p.size else 0.0 for p in v] for v in res.vectors])
@@ -649,7 +767,7 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
                      r1=[v[0].reshape(nocc, nvir) for v in vec], r2=[v[1].reshape(g.om.npair, g.vm.npair) for v in vec],
                      r3=[v[2] for v in vec] if with3 else None, weights=wts[order], niter=res.niter,
                      nsigma=res.nsigma, ncollapse=res.ncollapse, guess=first if with3 else None,
-                     history=res.history, plan=plan, ground=g, timings=times)
+                     history=res.history, plan=plan, ground=g, timings=times, shift=shift)
     times['total'] = time.perf_counter() - t_all
     say('  root   omega / Eh       omega / eV   |residual|   %R1   %R2   %R3')
     for k in range(len(out_res.e)):

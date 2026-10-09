@@ -1606,18 +1606,33 @@ class GCCSDT(UCCSDT):
         return self.e_ql
 
     def eom_ee(self, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None, nguess=None,
-               guess_tol=1e-4):
+               guess_tol=1e-4, shift=None, partners=False):
         '''EOM-EE-CCSDT: the ``nroots`` lowest excitation energies of the
         converged amplitudes and their right-hand vectors (zccsdt.cc.eom;
         docs/eom.md).  Returns (energies in Hartree, zccsdt.cc.eom.Result);
         the result is kept as self.eom, the energies as self.e_ee.
 
-        The states: all of them on the packed block; where the iterations
+        The states: all of them on the packed block.  Where the iterations
         ran in the blocks of the symmetry labels (a linear molecule with
-        ``symmetry``), the totally symmetric ones - those with the m_j of
-        the ground state.  Spin is not a label here: the three components
-        of a triplet are three roots.
+        ``symmetry``), the states of one label shift: the excitation
+        operator changes the sum of the labels of the spinors (2 m_j, as
+        the output lists them) by ``shift`` - r1[i,a] where l_a - l_i =
+        shift, r2 and r3 likewise with the sums.  Default 0: the totally
+        symmetric states, those with the m_j of the ground state.  Each
+        shift is an eigenproblem of its own, in the blocks of that shift.
+        Spin is not a label here: the three components of a triplet are
+        three roots (in a linear molecule in different shifts, unless two
+        of them have the same).
 
+        shift        a number, or a list of them (or 'all': every shift a single
+                     excitation can make): then ``nroots`` roots of each (nroots may be
+                     a list too), and the return value is ({shift: energies}, {shift:
+                     Result}).  For a reference that is symmetric under time reversal
+                     (a closed shell: every spinor of label l has a partner of label -l
+                     with its energy) the states of -shift are the time-reversed states
+                     of +shift with the same energies: of such a pair in the list only
+                     the first is computed and the other gets its energies (a Result
+                     without vectors, ``partner_of`` set), unless ``partners`` is True.
         conv_tol     the norm of the residual (H R - omega R) of a normalized vector
         max_space    vectors of the Davidson subspace at most (default 8 + 4 nroots;
                      lowered to what max_memory or max_disk hold)
@@ -1629,13 +1644,51 @@ class GCCSDT(UCCSDT):
         if self.t3 is None:
             raise RuntimeError('%s.eom_ee(): no amplitudes (kernel() first)' % self.__class__.__name__)
         eris = self._eris if self._eris is not None else self.ao2mo()
-        with disk.limit(self.max_disk):
-            res = eom.kernel(eris, self.t1, self.t2, self.t3, nroots=nroots, conv_tol=conv_tol,
-                             max_space=max_space, max_cycle=max_cycle, guess=guess, nguess=nguess,
-                             guess_tol=guess_tol, opts=self._options(None, None),
-                             verbose=self.verbose >= logger.NOTE, stdout=self.stdout)
-        self.eom, self.e_ee = res, res.e
-        return res.e, res
+
+        def run(n, cls):
+            with disk.limit(self.max_disk):
+                return eom.kernel(eris, self.t1, self.t2, self.t3, nroots=n, conv_tol=conv_tol,
+                                  max_space=max_space, max_cycle=max_cycle, guess=guess, nguess=nguess,
+                                  guess_tol=guess_tol, opts=self._options(None, None),
+                                  verbose=self.verbose >= logger.NOTE, stdout=self.stdout, shift=cls)
+        if shift is None:
+            res = run(nroots, None)
+            self.eom, self.e_ee = res, res.e
+            return res.e, res
+        many = isinstance(shift, (list, tuple, str))
+        if isinstance(shift, str):
+            if shift != 'all':
+                raise ValueError("shift: a number, a list of numbers or 'all'")
+            eom.class_shift(eris, 0)            # (the labels must be in use)
+            shifts = sorted(eom.label_shifts(eris), key=lambda d: (abs(d), -d))
+        else:
+            shifts = [int(d) for d in (shift if many else [shift])]
+        counts = list(nroots) if isinstance(nroots, (list, tuple)) else [nroots] * len(shifts)
+        if len(counts) != len(shifts):
+            raise ValueError('nroots: one number, or one per shift')
+        classes = [eom.class_shift(eris, d) for d in shifts]
+        paired = not partners and eom.time_reversal_symmetric(eris)
+        out = {}
+        for d, cls, n in zip(shifts, classes, counts):
+            if d in out:
+                continue
+            if paired and d != 0 and -d in out and len(out[-d].e) >= n:
+                out[d] = eom.partner(out[-d], d, n)
+                if self.verbose >= logger.NOTE:
+                    print('EOM-EE: label shift %+d: the time-reversed states of shift %+d, the same energies'
+                          % (d, -d), file=self.stdout, flush=True)
+                continue
+            if self.verbose >= logger.NOTE:
+                print('EOM-EE: label shift %+d' % d, file=self.stdout, flush=True)
+            # (shift 0: the layout of T3 and the engine as it is)
+            out[d] = run(n, cls if cls else None)
+            out[d].label_shift = d
+        if not many:
+            res = out[shifts[0]]
+            self.eom, self.e_ee = res, res.e
+            return res.e, res
+        self.eom, self.e_ee = out, {d: r.e for d, r in out.items()}
+        return self.e_ee, out
 
     def eom_ip(self, nroots=3, **kwargs):
         '''EOM-IP-CCSDT: the ``nroots`` lowest ionization energies (Hartree)

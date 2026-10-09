@@ -65,10 +65,27 @@ class Ground:
     def with_t3(self):
         return self.T3 is not None
 
-    def sizes(self):
-        '''Lengths of the three parts of a vector.'''
+    def sizes(self, shift=None):
+        '''Lengths of the three parts of a vector (``shift``: of a vector
+        with that label shift, whose rank-3 part is in the blocks of
+        t3shift.ShiftLayout).'''
         om, vm = self.om, self.vm
-        return [om.n * vm.n, om.npair * vm.npair, self.eng.size if self.with_t3 else 0]
+        n3 = self.eng.size if shift is None else self.shifter().size(shift)
+        return [om.n * vm.n, om.npair * vm.npair, n3 if self.with_t3 else 0]
+
+    def shifter(self):
+        '''The passes of the engine for arrays with a label shift.'''
+        from zccsdt.cc import eom
+        return eom._shifter(self.eng)
+
+    def masks(self, shift):
+        '''([i,a], [(i<j),(a<b)]) True where an element has the label shift.'''
+        key = ('_mask', int(shift))
+        if key not in self.c:
+            om, vm = self.om, self.vm
+            self.c[key] = (np.asarray(vm.spins)[None, :] - np.asarray(om.spins)[:, None] == shift,
+                           np.asarray(vm.pair_grp)[None, :] - np.asarray(om.pair_grp)[:, None] == shift)
+        return self.c[key]
 
 
 def _dtau(t1, r1, om, vm):
@@ -125,25 +142,38 @@ def prepare(eris, t1, t2, T3=None, opts=None, mem_mb=2000.0):
     return Ground(eris, om, vm, eng, dtype, t1, t2, None if T3 is None else T, c, change)
 
 
-def _pass1(g, T, G_Pd, G_mQ, gpp, fov):
+def _pass1(g, T, G_Pd, G_mQ, gpp, fov, shifts=None, **kw):
     '''Pass 1 over a packed rank-3 array: (its rank-1 part [i,a], its rank-2
-    part [P,Q], the part of W_vvvo [(e,i),Q], the part of W_vooo [m,a,P]).'''
+    part [P,Q], the part of W_vvvo [(e,i),Q], the part of W_vooo [m,a,P]).
+    ``shifts`` = (of T, of the integrals): in the blocks of these shifts.'''
     om, vm = g.om, g.vm
     nocc, nvir = om.n, vm.n
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
-    Xacc, Yall, r1, rA = g.eng.pass1(T, G_Pd, G_mQ, gpp, fov)
+    if shifts is None:
+        Xacc, Yall, r1, rA = g.eng.pass1(T, G_Pd, G_mQ, gpp, fov)
+    else:
+        Xacc, Yall, r1, rA = g.shifter().pass1(T, shifts[0], G_Pd, G_mQ, gpp, fov, shifts[1], **kw)
     C0 = -2 * Xacc[nvir:].transpose(1, 0, 2)
     B0 = -2 * Yall[:, :, nocc:].transpose(0, 2, 1)
     r2 = rA + 0.5 * (B0[:, md, ne] - B0[:, ne, md]) - 0.5 * (C0[mm, nn] - C0[nn, mm])
     return r1.T, r2, Xacc[:nvir].reshape(nvir * nocc, vm.npair), Yall[:, :, :nocc].transpose(2, 1, 0)
 
 
-def sigma(g, r1, r2p, R3=None, out=None, sd=False):
+def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
     '''(sigma_1[i,a], sigma_2[(i<j),(a<b)], sigma_3 flat) for the vector
     (r1, r2p, R3) - see the module; ``out``: a flat array for sigma_3.
     ``sd``: the singles-doubles block only - no R3 and none of the terms of
-    T3 in sigma_2 (the guess of zccsdt.cc.eom).'''
+    T3 in sigma_2 (the guess of zccsdt.cc.eom).
+
+    ``shift``: the label shift of the vector (classes of the maps; the
+    integrals with their labels in use): r1, r2p have their elements where
+    l_a - l_i (l_a + l_b - l_i - l_j) = shift, R3 and sigma_3 are flat in
+    the layout g.shifter().layout(shift).  None: a totally symmetric
+    vector in the layout of T3 (the same as shift = 0, by the engine
+    itself).'''
+    s = 0 if shift is None else int(shift)
+    sh = None if shift is None else g.shifter()
     om, vm, eng, dt, c = g.om, g.vm, g.eng, g.dtype, g.c
     nocc, nvir = om.n, vm.n
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
@@ -223,39 +253,56 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False):
     Wpp = c['Wpp']
     dWpp = []
     G_Q = c['ovvv_Q']
+    # the derivative of the operator by its column block h; with a shift its rows are the
+    # pairs of block h + s (lo2:hi2)
     for h, (lo, hi) in enumerate(vm.blocks):
         nq = hi - lo
-        blk = np.zeros((nq, nq), dtype=dt)
+        lo2, hi2 = vm.blocks[h + s] if 0 <= h + s < len(vm.blocks) else (0, 0)
+        nq2 = hi2 - lo2
+        blk = np.zeros((nq2, nq), dtype=dt)
         if nq:
-            Gh = np.ascontiguousarray(G_Q if nq == vm.npair else G_Q[:, :, lo:hi]).reshape(nocc, -1)
-            nb = max(1, int(1e9 // (nvir * nq * blk.itemsize)))
-            for xb in range(0, nvir, nb):
-                xe = min(xb + nb, nvir)
-                Y = gemm(np.ascontiguousarray(r1[:, xb:xe].T), Gh).reshape(xe - xb, nvir, nq)
-                t3pack.pair_antisym_batch_add(blk, Y, vm, xb, alpha=-1.0, block=h)
-                del Y
-            t3pack.axpby(s2[:, lo:hi], gemm(blk, np.ascontiguousarray(t2pp[:, lo:hi].T)).T)
+            if nq2:
+                Gh = np.ascontiguousarray(G_Q if nq == vm.npair else G_Q[:, :, lo:hi]).reshape(nocc, -1)
+                nb = max(1, int(1e9 // (nvir * nq * blk.itemsize)))
+                for xb in range(0, nvir, nb):
+                    xe = min(xb + nb, nvir)
+                    Y = gemm(np.ascontiguousarray(r1[:, xb:xe].T), Gh).reshape(xe - xb, nvir, nq)
+                    t3pack.pair_antisym_batch_add(blk, Y, vm, xb, alpha=-1.0, block=h + s)
+                    del Y
+                t3pack.axpby(s2[:, lo2:hi2], gemm(blk, np.ascontiguousarray(t2pp[:, lo:hi].T)).T)
             # 1/2 <ab||cd>~ (r2 + dtau1): the ladder operator of T3 less its T2 part
             t3pack.axpby(s2[:, lo:hi], gemm(Wpp[h], np.ascontiguousarray(xp[:, lo:hi].T)).T)
             s2[:, lo:hi] -= (xp[:, lo:hi] @ gpp[:, lo:hi].T) @ t2pp[:, lo:hi]
-            if with3:
-                gemm(np.asfortranarray(r2p[:, lo:hi].T), np.ascontiguousarray(gpp[:, lo:hi]), blk, beta=1.0)
-                ccsdt_opt.add_one_body_pairs(blk, dFvv, vm, 0.5, block=h)
+            if with3 and nq2:
+                gemm(np.asfortranarray(r2p[:, lo2:hi2].T), np.ascontiguousarray(gpp[:, lo:hi]), blk, beta=1.0)
+                if s == 0:
+                    ccsdt_opt.add_one_body_pairs(blk, dFvv, vm, 0.5, block=h)
+                else:
+                    from zccsdt.cc import t3shift
+                    blk += t3shift.one_body_pairs(dFvv, vm, h + s, h, 0.5, dt)
         dWpp.append(blk)
     t_.__exit__(None, None, None)
+    if sh is not None:
+        m1, m2 = g.masks(s)
     if not with3:
+        if sh is not None:
+            s1 *= m1
+            s2 *= m2
         return s1, s2, None
 
     # ---- pass 1 over R3 with the integrals of the ground state, over T3 with H'
     with timer('eom.pass1'):
-        a1, a2, Xv, dWo = _pass1(g, R3, c['G_Pd'], c['G_mQ'], gpp, fov)
+        a1, a2, Xv, dWo = _pass1(g, R3, c['G_Pd'], c['G_mQ'], gpp, fov, None if sh is None else (s, 0))
         s1 += a1
         s2 += a2
         G1 = np.zeros_like(c['G_Pd'])
         G1[nvir:] = d_oovo[mm, nn].transpose(2, 0, 1)
         G2 = np.zeros((nocc * vm.npair, nocc + nvir), dtype=dt)
         gemm(np.asfortranarray(goovv_P.reshape(nocc, -1).T), r1, G2[:, nocc:], alpha=-1.0)   # <am||Q>' = -r1[n,a] <nm||Q>
-        s2 += _pass1(g, g.T3, G1, G2, np.zeros_like(gpp), dfov)[1]
+        if sh is None:
+            s2 += _pass1(g, g.T3, G1, G2, np.zeros_like(gpp), dfov)[1]
+        else:       # (of H' only <mn||ei>', <am||ef>' and f'[m,e] are not zero)
+            s2 += _pass1(g, g.T3, G1, G2, None, dfov, (0, s), xe=False, yj=False)[1]
         del G1, G2
 
     # ---- the derivatives of W_vvvo and W_vooo
@@ -297,6 +344,18 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False):
         dO6 = t3kern.OccOperator(om, dWoooo, dFoo, dt)
 
     # ---- sigma_3
+    if sh is not None:
+        # R3 (shift s) with the operators of the ground state, the drive terms t2 x W' (shift s);
+        # T3 with the derivatives of the operators (shift s), the drive terms r2 (shift s) x W
+        with timer('eom.r3'):
+            S3 = sh.residual(R3, s, c['WringT'], t2mn, dWv, dWo, t2P, Wpp, c['O6'], sW=0, sa=0, out=out)
+        del dWv
+        with timer('eom.t3'):
+            sh.residual(g.T3, 0, dWringT, r2mn, c['Wv'], c['Wo'], r2P, dWpp, (dWoooo, dFoo), sW=s, sa=s,
+                        out=S3, clear=False)
+        s1 *= m1
+        s2 *= m2
+        return s1, s2, S3.reshape(-1)
     with timer('eom.r3'):
         S3 = eng.residual(R3, c['WringT'], t2mn, dWv, dWo, t2P, Wpp, c['O6'], out=out)
     del dWv
