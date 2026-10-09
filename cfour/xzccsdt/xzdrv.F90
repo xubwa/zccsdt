@@ -29,7 +29,7 @@ subroutine xzdrv(w, maxcor)
   integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2), nmax, status
   logical :: usefile, converged, uselab, tryreal, isreal, there, docc
   real(8) :: sync(2)
-  real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall, tlm
+  real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall, tlm, tden, lhs, rhs
   character(len=32) :: arg
   integer :: larg
 
@@ -99,7 +99,11 @@ subroutine xzdrv(w, maxcor)
   !      rank 0; the other ranks wait for them here and then read the
   !      integrals, the amplitudes (file XZAMPS) and lambda (XZLAMB) themselves
   docc = with_cc
-  planq = .not. (with_cc .or. with_lam) .or. myrank > 0
+  planq = .not. (with_cc .or. with_lam .or. with_den) .or. myrank > 0
+  if (with_den .and. myrank > 0) return
+  ! (a test hook: XZ_DEN_ACTIVE=1 writes the files of the active spinors alone)
+  call get_environment_variable('XZ_DEN_ACTIVE', arg, larg)
+  den_active = larg > 0
   if (method == 'MP2' .and. myrank > 0) return
   sync = 0d0
   if ((with_cc .or. with_lam) .and. myrank > 0) then
@@ -230,7 +234,7 @@ subroutine xzdrv(w, maxcor)
     end if
     write(6, '(/,a,f10.1,a,f8.2,a)') '   lambda written to the file XZLAMB (', &
       8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
-    if (with_q) then
+    if (with_q .or. with_den) then
       ! the pp operator took the place of <ab||cd>: the integrals and the
       ! amplitudes are read again for what follows
       call xzrel(0_8)
@@ -246,7 +250,7 @@ subroutine xzdrv(w, maxcor)
       end if
     end if
   end if
-  if (q_left .and. with_q) then
+  if ((q_left .and. with_q) .or. with_den) then
     if (nwe == 2) then
       call xzlamb_z(w, 'r', ecorr)
     else
@@ -259,6 +263,33 @@ subroutine xzdrv(w, maxcor)
     call xzmpi_bcast(sync, 16_8)
   end if
   flush(6)
+
+  ! ---- the density and the orbital gradient of CCSDT; the files of xx2czvec
+  tden = 0d0
+  if (with_den) then
+    t0 = omp_get_wtime()
+    if (nwe == 2) then
+      call xzden_z(w)
+    else
+      call xzden_d(w)
+    end if
+    tden = omp_get_wtime() - t0
+    call xztable(4, 'the density and the orbital gradient', tden, 0_8)
+    write(6, '(/,a)') '   unrelaxed density and orbital gradient of CCSDT: the files xfull, dpoo, dpvv, dii0,'
+    write(6, '(a)') '   daa0, dpopo, dpvpv written for xx2czvec (the Z-vector equations and denfinal are its).'
+    ! what xx2czvec of cfour-x2cso (2026-10) needs to be right: docs/native.md, section 10.4
+    lhs = 1d0 + 0.5d0 * dble(nv) * dble(nv - 1) * dble(nv - 2) + dble(nv) * dble(nv + 1) + dble(no) * dble(no + 1)
+    rhs = 2d0 * dble(ntot) * dble(ntot)
+    if (lhs < rhs) then
+      write(6, '(/,a)') ' @XZCCSDT-W, xx2czvec will NOT give the relaxed density of these files: with so few'
+      write(6, '(a)') '             active virtual spinors its response integrals are wrong (an unset work'
+      write(6, '(a)') '             offset in its source; CFOUR''s own relaxed CC densities have the defect too).'
+      write(6, '(a,f16.0,a,f16.0)') '             1 + 3 C(nv,3) + nv (nv+1) + no (no+1) = ', lhs, &
+        '   is below   2 N^2 = ', rhs
+      write(6, '(a,i6,a,i6,a,i6)') '             (active occupied ', no, ', active virtual ', nv, ', spinors N ', ntot
+      write(6, '(a)') '             The files themselves are right; solve the Z-vector equations elsewhere.'
+    end if
+  end if
 
   ! ---- (Q), on all ranks
   eq5 = 0d0
@@ -306,11 +337,14 @@ subroutine xzdrv(w, maxcor)
   call xz_rss(kb)
   write(6, '(/,a,f10.2,a,f10.2,a,f10.2,a,f10.2,a)') '   wall times: integrals ', tread, ' s   CCSDT ', tcc, &
     ' s   Lambda ', tlm, ' s   (Q) ', tq, ' s'
+  if (with_den) write(6, '(a,f10.2,a)') '               density and gradient ', tden, ' s'
   write(6, '(a,i14,a,f10.1,a,f8.1,a)') '   work array used: ', xzpeak, ' words = ', 8d-6 * xzpeak, &
     ' MB (', 100d0 * xzpeak / max(xzsize, 1_8), ' % of MAXCOR)'
   write(6, '(a,f10.1,a)') '   peak resident memory of the process: ', 1d-3 * kb(1), ' MB'
   write(6, '(a,f10.2,a)') '   XZCCSDT total wall time: ', omp_get_wtime() - twall, ' s'
-  if (method == 'LAMBDA') then
+  if (with_den) then
+    write(6, '(a)') '   XZCCSDT finished: density of CCSDT done.'
+  else if (method == 'LAMBDA') then
     write(6, '(a)') '   XZCCSDT finished: lambda of CCSDT done.'
   else
     write(6, '(a)') '   XZCCSDT finished: ' // trim(method) // ' energy done.'
@@ -356,17 +390,19 @@ subroutine xzjob()
   end if
   select case (method)
   case ('CCSDT', 'CCSDT[Q]', 'CCSDT(Q)', '(Q)', '[Q]', 'MP2', 'LAMBDA', 'CCSDT(Q)_L', 'CCSDT[Q]_L', &
-        '(Q)_L', '[Q]_L')
+        '(Q)_L', '[Q]_L', 'DENSITY', 'CCSDT_DENSITY')
   case default
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), &
-      ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, MP2.'
+      ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, DENSITY, CCSDT_DENSITY, MP2.'
     call errex
   end select
   with_cc = method(1:5) == 'CCSDT'
   larg = len_trim(method)
   q_left = method(max(larg - 1, 1):larg) == '_L'
   with_lam = method == 'LAMBDA' .or. (with_cc .and. q_left)
-  with_q = method /= 'CCSDT' .and. method /= 'MP2' .and. method /= 'LAMBDA'
+  with_den = method == 'DENSITY' .or. method == 'CCSDT_DENSITY'
+  with_lam = with_lam .or. method == 'CCSDT_DENSITY'
+  with_q = method /= 'CCSDT' .and. method /= 'MP2' .and. method /= 'LAMBDA' .and. .not. with_den
   conv_t = 10d0 ** (-abs(iflags(4)))
   conv_e = 10d0 ** (-abs(iflags(4)) - 2)
   maxcyc = iflags(7)
@@ -746,3 +782,26 @@ subroutine xzdumpw(name, n, x)
   write(78) x
   close(78)
 end subroutine xzdumpw
+
+! one record of n complex numbers to the sequential unformatted file `name'
+! (n = 0: a record without elements), as CFOUR's programs read it
+subroutine xzwrec(name, n, rec)
+  implicit none
+  character(len=*), intent(in) :: name
+  integer(8), intent(in) :: n
+  complex(8), intent(in) :: rec(*)
+  integer :: ios
+  open(unit=79, file=name, form='unformatted', access='sequential', status='replace', iostat=ios)
+  if (ios == 0) then
+    if (n > 0) then
+      write(79, iostat=ios) rec(1:n)
+    else
+      write(79, iostat=ios)
+    end if
+  end if
+  if (ios == 0) close(79, iostat=ios)
+  if (ios /= 0) then
+    write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', name, ' failed (iostat ', ios, ').'
+    call errex
+  end if
+end subroutine xzwrec

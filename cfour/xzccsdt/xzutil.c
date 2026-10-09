@@ -8,6 +8,8 @@
 #include <string.h>
 #include <sys/statvfs.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <mkl.h>
 
 /* bytes free for this user on the file system of `path' (-1: unknown) */
@@ -53,4 +55,26 @@ void xz_clocks(double *wall, double *cpu)
     *wall = (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t);
     *cpu = (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+
+/* The standard output of the process to /dev/null (quiet = 1) and back
+ * (quiet = 0): around calls of CFOUR routines that print debug lines for
+ * every call.  The caller flushes its own unit before and after. */
+void xz_stdout(const int64_t *quiet)
+{
+    static int saved = -1;
+    fflush(stdout);
+    if (*quiet && saved < 0) {
+        int null = open("/dev/null", O_WRONLY);
+        if (null < 0)
+            return;
+        saved = dup(1);
+        if (saved >= 0)
+            dup2(null, 1);
+        close(null);
+    } else if (!*quiet && saved >= 0) {
+        dup2(saved, 1);
+        close(saved);
+        saved = -1;
+    }
 }

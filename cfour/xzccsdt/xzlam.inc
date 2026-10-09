@@ -133,7 +133,8 @@ end subroutine
 !   l1 [i][a], l2 [i][j][a][b], l3 as stored (packed i<j<k, a<b<c; its blocks
 !   one after the other), in the order of the spinors of the run that wrote it
 ! rw = 'w': written from the work array; 'r': the regions of l2 and l3 are
-! taken from the stack and filled (a dry run: only taken); l1 is not read.
+! taken from the stack and filled (a dry run: only taken); l1 only for the
+! density (with_den).
 subroutine N(xzlamb)(w, rw, ecorr)
   use xzdata
   use xzmem
@@ -161,6 +162,7 @@ subroutine N(xzlamb)(w, rw, ecorr)
     end if
     return
   end if
+  if (with_den) jl1 = xzget(n1, 'Lambda1')
   jl2 = xzget(n2, 'Lambda2')
   jl3 = xzget(NW * n3, 'Lambda3')
   if (xzdry) return
@@ -188,7 +190,8 @@ subroutine N(xzlamb)(w, rw, ecorr)
     write(6, '(a,2f20.12)') '   CCSDT correlation energies of the two files: ', e, ecorr
     call errex
   end if
-  read(77, pos=57 + 8 * n1, iostat=ios) w(jl2:jl2 + n2 - 1)
+  if (with_den) read(77, iostat=ios) w(jl1:jl1 + n1 - 1)
+  if (ios == 0) read(77, pos=57 + 8 * n1, iostat=ios) w(jl2:jl2 + n2 - 1)
   if (ios == 0) read(77, iostat=ios) w(jl3:jl3 + NW * n3 - 1)
   close(77)
   if (ios /= 0) then

@@ -67,6 +67,8 @@ module xzdata
   logical :: with_cc = .false.      ! the CCSDT iterations are part of the job
   logical :: with_lam = .false.     ! the Lambda equations are
   logical :: q_left = .false.       ! (Q) with lambda on the left: (Q)_Lambda
+  logical :: with_den = .false.     ! the density and the orbital gradient of CCSDT are (xzden.inc)
+  logical :: den_active = .false.   ! XZ_DEN_ACTIVE: the files of the active spinors alone (a test hook)
   real(8) :: conv_e = 1d-9, conv_t = 1d-7
   integer(8) :: maxcyc = 50
   integer(8) :: ndiis = 8           ! DIIS vectors asked for
@@ -151,8 +153,9 @@ module xzdata
 
   ! ---- wall and CPU times of the stages, by name, in the order of their
   !      first use.  Sets: 1 the CCSDT iterations, 2 the iterations of the
-  !      Lambda equations, 3 the intermediates of the Lambda equations (once)
-  integer, parameter :: ntset = 3, ntmax = 64
+  !      Lambda equations, 3 the intermediates of the Lambda equations (once),
+  !      4 the density and the orbital gradient
+  integer, parameter :: ntset = 4, ntmax = 64
   character(len=28) :: tnam(ntmax, ntset) = ' '
   real(8) :: twal(ntmax, ntset) = 0d0, tcpu(ntmax, ntset) = 0d0
   logical :: tpart(ntmax, ntset) = .false.      ! a part of another entry: wall only, not summed

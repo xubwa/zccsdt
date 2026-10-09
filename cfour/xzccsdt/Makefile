@@ -38,7 +38,11 @@ BLAS    := -L$(MKLLIB) -lmkl_intel_ilp64 -lmkl_intel_thread -lmkl_core -liomp5 \
 # (the run-time libraries are found without the oneAPI environment)
 ICLIB   ?= $(dir $(shell which ifort 2>/dev/null))../../compiler/lib/intel64_lin
 RPATH   := -Wl,-rpath,$(MKLLIB) -Wl,-rpath,$(abspath $(ICLIB))
-LIBS    := -L$(CFOUR)/lib -llibr $(BLAS) -lrt $(RPATH) $(XLIBS)
+# integrals with a frozen index for the density stage (xzfrz.F90): CFOUR's own
+# transformation, three objects of its program directory x2czvec, and its
+# reader of the AO integrals in libx2cint (module cvwint_module of libx2c)
+FRZOBJ  := $(addprefix $(CFOUR)/x2czvec/, vtranpsog.o vtran1sparse.o expnd2p.o)
+LIBS    := $(FRZOBJ) -L$(CFOUR)/lib -lx2cint -llibr -lx2cint $(BLAS) -lrt $(RPATH) $(XLIBS)
 
 # the compiler of the kernels (default: icc, as the rest; an experiment:
 #   make KCC=gcc KCFLAGS='-O3 -march=native -std=gnu99 -fopenmp -fcx-limited-range \
@@ -49,9 +53,9 @@ KCFLAGS ?= $(CFLAGS)
 
 # the C kernels that the program calls
 KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda
-MODS    := xzkern xzmem xzdata xzdiis xzpar
+MODS    := xzkern xzmem xzdata xzdiis xzpar xzfrz
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
-INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzlam.inc xzlblk.inc xzq.inc xzqs.inc
+INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc
 
 OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil xzmpi $(KERNELS)))
 
@@ -61,7 +65,7 @@ $(BUILD)/xzccsdt: $(OBJS)
 	$(LD) $(FCFLAGS) -o $@ $(OBJS) $(LIBS)
 
 $(BUILD)/%.o: %.F90 $(INCS) | $(BUILD)
-	$(FC) $(FCFLAGS) -module $(BUILD) -I. -c $< -o $@
+	$(FC) $(FCFLAGS) -module $(BUILD) -I. -I$(CFOUR)/libx2c -c $< -o $@
 
 $(BUILD)/xzccsdt.o: xzccsdt.f $(BUILD)/xzpar.o | $(BUILD)
 	$(FC) $(FCFLAGS) -extend-source -module $(BUILD) -c $< -o $@
@@ -78,6 +82,7 @@ $(BUILD)/%.o: $(CSRC)/%.c | $(BUILD)
 # the modules before what uses them
 $(addprefix $(BUILD)/, $(addsuffix .o, $(SRCS))): $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS)))
 $(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o $(BUILD)/xzpar.o: $(BUILD)/xzkern.o
+$(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o
 
 $(BUILD):
 	mkdir -p $(BUILD)

@@ -69,9 +69,10 @@ integer(8) function xzpeak_cc(w)
   real(8) :: w(*)
   real(8) :: e
   logical :: c
-  integer(8) :: n, peak, status, k
+  integer(8) :: n, peak, status, k, mlay
   call xzdry_begin(0_8)
   call xzlayout(w, status)
+  mlay = xzmark()
   if (with_cc) then
     if (nwe == 2) then
       call xzcc_z(w, pslot, pfile, pchunk, e, c, n)
@@ -88,6 +89,21 @@ integer(8) function xzpeak_cc(w)
       call xzlam_z(w, pslot, pfile, pchunk, c, n)
     else
       call xzlam_d(w, pslot, pfile, pchunk, c, n)
+    end if
+  end if
+  ! the density stage: the integrals, the amplitudes and lambda again, then its arrays
+  if (with_den) then
+    call xzrel(mlay)
+    k = xzget(nwe * no * nv, 'T1')
+    k = xzget(nwe * no * no * nv * nv, 'T2')
+    k = xzget(nwe * n3, 'T3')
+    k = xzget(nwe * no * nv, 'Lambda1')
+    k = xzget(nwe * no * no * nv * nv, 'Lambda2')
+    k = xzget(nwe * n3, 'Lambda3')
+    if (nwe == 2) then
+      call xzden_z(w)
+    else
+      call xzden_d(w)
     end if
   end if
   call xzdry_end(peak)
@@ -138,13 +154,15 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   integer(8) :: f, floor_cc, floor_q, need_cc, need_q, free_bytes, per_vec, nfit, k8
   integer :: k
   character(len=8) :: arg
-  character(len=14) :: what
+  character(len=23) :: what
   real(8) :: frac
   integer :: larg
 
   what = 'CCSDT'
   if (with_lam) what = 'CCSDT, Lambda'
   if (with_lam .and. .not. with_cc) what = 'Lambda'
+  if (with_den) what = trim(what) // ', density'
+  if (with_den .and. .not. (with_cc .or. with_lam)) what = 'the density'
   f = no * nv * nvp                       ! elements of a half-expanded batch of one pair
   ! ---- the smallest and the target batch sizes
   plo(1) = min(nv, nqmax)
@@ -185,7 +203,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   floor_q = xzpeak_q(w)
   if (flooronly .and. max(floor_cc, floor_q) <= xzsize) return
   write(6, '(/,a,a,a)') '   Memory plan (words of 8 bytes; ', merge('real numbers   ', 'complex numbers', nwe == 1), ')'
-  if (.not. planq) write(6, '(a,a30,i16,a,f10.1,a)') '     the least that ', what // ' takes:', floor_cc, '  = ', &
+  if (.not. planq) write(6, '(a,a36,i16,a,f10.1,a)') '     the least that ', trim(what) // ' takes:', floor_cc, '  = ', &
     8d-6 * floor_cc, ' MB'
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     the least that (Q) takes:       ', floor_q, '  = ', &
     8d-6 * floor_q, ' MB'
@@ -261,7 +279,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   usefile = pfile
   nch = pchunk
   if (.not. planq) then
-  write(6, '(a,a30,i16,a,f10.1,a)') '     ', what // ' with this plan:   ', need_cc, '  = ', 8d-6 * need_cc, ' MB'
+  write(6, '(a,a51,i16,a,f10.1,a)') '     ', trim(what) // ' with this plan:', need_cc, '  = ', 8d-6 * need_cc, ' MB'
   end if
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with this plan:             ', need_q, '  = ', &
     8d-6 * need_q, ' MB'
@@ -270,7 +288,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   write(6, '(a,i8,a,i8)') '     occupied triples of a pp-ladder batch:       ', nbt, '  of ', nto
   write(6, '(a,i8,a,i8)') '     occupied pairs of a batch of pass 1, pass 2: ', nbp, '  of ', npo
   write(6, '(a,i8,a,i8)') '     first indices of a batch of W_vvvo terms:    ', nba, '  of ', nv
-  if (pslot < 2) then
+  if (.not. (with_cc .or. with_lam)) then
+  else if (pslot < 2) then
     write(6, '(a)') '     DIIS: none'
   else if (pfile) then
     write(6, '(a,i3,a,f10.1,a)') '     DIIS: ', pslot, ' vectors, T3 parts in the file XZDIIS (', &
