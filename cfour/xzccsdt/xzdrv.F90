@@ -198,6 +198,7 @@ subroutine xzdrv(w, maxcor)
     end if
     tcc = omp_get_wtime() - t0
     call xzdtable(1, ncyc)
+    call xzbdump()
     if (myrank > 0) call xztable(1, 'the CCSDT iterations on this rank', tcc, ncyc)
   end if
   if (docc .and. myrank == 0) then
@@ -274,6 +275,7 @@ subroutine xzdrv(w, maxcor)
     end if
     tlm = omp_get_wtime() - t0
     call xzdtable(2, ncyc)
+    call xzbdump()
     if (myrank > 0) call xztable(2, 'the iterations of the Lambda equations on this rank', tlm - tlamim, ncyc)
   end if
   if (with_lam .and. myrank == 0) then
