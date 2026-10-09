@@ -1045,7 +1045,7 @@ class GCCSDT(UCCSDT):
     _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'q_estimate', 'q_progress', 'rdm1_blocks', 'blocks_min',
                               'e_ql', 'e_ql5', 'e_tot_ql', 'zeta1', 'zeta2', 'zeta3', 'l1_ql', 'l2_ql', 'l3_ql',
                               'converged_zeta', 'converged_lambda_ql', 'ql_gradient_sectors', 'q_gradient_sectors',
-                              'zeta_stencil', 'response_stencil', 'ql_info'}
+                              'zeta_stencil', 'response_stencil', 'ql_info', 'eom', 'e_ee'}
 
     def _axial(self):
         '''The spinors of a linear molecule on the z axis adapted to m_j
@@ -1604,6 +1604,38 @@ class GCCSDT(UCCSDT):
         self.e_ql5, self.e_ql = float(e5), float(e)
         self.e_tot_ql = self.e_tot + self.e_ql
         return self.e_ql
+
+    def eom_ee(self, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None, nguess=None,
+               guess_tol=1e-4):
+        '''EOM-EE-CCSDT: the ``nroots`` lowest excitation energies of the
+        converged amplitudes and their right-hand vectors (zccsdt.cc.eom;
+        docs/eom.md).  Returns (energies in Hartree, zccsdt.cc.eom.Result);
+        the result is kept as self.eom, the energies as self.e_ee.
+
+        The states: all of them on the packed block; where the iterations
+        ran in the blocks of the symmetry labels (a linear molecule with
+        ``symmetry``), the totally symmetric ones - those with the m_j of
+        the ground state.  Spin is not a label here: the three components
+        of a triplet are three roots.
+
+        conv_tol     the norm of the residual (H R - omega R) of a normalized vector
+        max_space    vectors of the Davidson subspace at most (default 8 + 4 nroots;
+                     lowered to what max_memory or max_disk hold)
+        guess        [(r1[i,a], r2[(i<j),(a<b)])] to start from; default: the roots of
+                     the singles-doubles block from ``nguess`` (default nroots) unit
+                     vectors on the lowest single excitations, converged to guess_tol'''
+        from zccsdt import disk
+        from zccsdt.cc import eom
+        if self.t3 is None:
+            raise RuntimeError('%s.eom_ee(): no amplitudes (kernel() first)' % self.__class__.__name__)
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        with disk.limit(self.max_disk):
+            res = eom.kernel(eris, self.t1, self.t2, self.t3, nroots=nroots, conv_tol=conv_tol,
+                             max_space=max_space, max_cycle=max_cycle, guess=guess, nguess=nguess,
+                             guess_tol=guess_tol, opts=self._options(None, None),
+                             verbose=self.verbose >= logger.NOTE, stdout=self.stdout)
+        self.eom, self.e_ee = res, res.e
+        return res.e, res
 
     q_progress = 300.0      # seconds between the progress lines of (Q)
 

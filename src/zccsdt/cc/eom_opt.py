@@ -139,9 +139,11 @@ def _pass1(g, T, G_Pd, G_mQ, gpp, fov):
     return r1.T, r2, Xacc[:nvir].reshape(nvir * nocc, vm.npair), Yall[:, :, :nocc].transpose(2, 1, 0)
 
 
-def sigma(g, r1, r2p, R3=None, out=None):
+def sigma(g, r1, r2p, R3=None, out=None, sd=False):
     '''(sigma_1[i,a], sigma_2[(i<j),(a<b)], sigma_3 flat) for the vector
-    (r1, r2p, R3) - see the module; ``out``: a flat array for sigma_3.'''
+    (r1, r2p, R3) - see the module; ``out``: a flat array for sigma_3.
+    ``sd``: the singles-doubles block only - no R3 and none of the terms of
+    T3 in sigma_2 (the guess of zccsdt.cc.eom).'''
     om, vm, eng, dt, c = g.om, g.vm, g.eng, g.dtype, g.c
     nocc, nvir = om.n, vm.n
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
@@ -149,7 +151,8 @@ def sigma(g, r1, r2p, R3=None, out=None):
     foo, fov, fvv = fdr[:nocc, :nocc], fdr[:nocc, nocc:], fdr[nocc:, nocc:]
     oooo, ooov, oovo, oovv, ovvo, ovvv = (np.asarray(ge[k]) for k in ('oooo', 'ooov', 'oovo', 'oovv', 'ovvo', 'ovvv'))
     goovv_P, gpp, t2pp, t2P, t2mn, A = c['goovv_P'], c['goovv_pp'], c['t2pp'], c['t2P'], c['t2mn'], c['A']
-    with3 = g.with_t3
+    with3 = g.with_t3 and not sd
+    eng.io = None
     r1 = np.ascontiguousarray(r1, dtype=dt)
     r2p = np.ascontiguousarray(r2p, dtype=dt).reshape(om.npair, vm.npair)
     t_ = timer('eom.small'); t_.__enter__()
