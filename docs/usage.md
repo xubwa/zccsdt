@@ -135,6 +135,44 @@ With 320 GB of memory and 900 GB of disk the run keeps 7 of the 8 vectors
 in memory).  These are plans, computed from the sizes; neither calculation
 has been run.
 
+### Threads and sockets: the recommended way to run
+
+The kernels know nothing about the layout of the processor; how a run is
+placed on a node is the choice of whoever starts it.  The recommendation,
+from the measurements below:
+
+* **One process on one socket**, with as many threads as the socket has
+  cores and its memory next to them:
+  `OMP_NUM_THREADS=24 MKL_NUM_THREADS=24 numactl --cpunodebind=0 --membind=0 python run.py`
+  (under Slurm: ask for the cores of one socket).  Up to the cores of one
+  socket the CCSDT iteration speeds up well; a single process over two
+  sockets gains little.
+* **A second socket is used by a second process**, not by more threads: the
+  (Q) and (Q)_Lambda corrections of the native program are distributed over
+  MPI ranks, one rank per socket (`mpirun -np 2`, 24 threads each).  The
+  CCSDT iteration has no such mode; over both sockets it runs at the rate
+  given here.
+
+Measured (node with 2 x 24 cores, Xeon Gold 6248R; HBr, 26 + 120 spinors,
+real, dense T3; seconds per CCSDT iteration, and the kernels of the two T3
+passes timed alone):
+
+| threads | 8 | 16 | 24 | 48 |
+|---|---|---|---|---|
+| CCSDT iteration | 200.3 | 112.4 | 93.7 | 87.7 |
+| pass 2, ring product (GEMM) | 80.7 | 42.8 | 31.5 | 45.8 - 60.8 |
+| pass 2, gather of T3 | 5.1 | 4.0 | 3.7 | 3.1 |
+| pass 2, reduction into the residual | 5.1 | 3.0 | 2.5 | 2.8 |
+| copy of an array of the same size (GB/s) | 36.6 | 46.8 | 49.7 | 91.8 |
+
+The gather of T3 runs at 60 - 70 % of the copy rate of the node, which
+itself grows by a factor 1.36 only from 8 to 24 cores: this step is bound by
+the memory throughput of a socket and cannot be much faster.  The ring
+product is not bound by memory (0.36 GB moved per pair of occupied spinors
+in 0.07 - 0.25 s); it runs at 70, 66, 61 GFlop/s per core on 8, 16, 24 cores
+and at 33 on 48: the threaded BLAS does not use the second socket well.
+(The 48-thread kernel timings are without threads pinned to cores.)
+
 Results: `converged`, `e_hf`, `e_corr`, `e_tot`, `cycles`, `t1`, `t2`,
 `t3`, `plan_used`, `diis_plan_used`, `timings` (wall time per iteration), `peak_memory`, and
 after `ccsdt_q()` `e_q`, `e_q5`, `e_tot_q`; for GCCSDTQ in addition `t4`,
