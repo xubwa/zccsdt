@@ -15,7 +15,7 @@ Series (tag without _t<threads>):
   *_inter           48 threads with the memory interleaved over the sockets
   *_mkl1            ncc with MKL_NUM_THREADS=1
   *_passive, *_active   OMP_WAIT_POLICY set (the other runs: not set)
-  *_mem150          ncc with MEMORY_SIZE = 150 GB instead of 70
+  *_mem150          ncc with MEMORY_SIZE = 150 GB instead of 60
   *_again           a run of the start of the job once more at its end
 '''
 import os
@@ -85,8 +85,8 @@ def runs(name, geom, basis, frozen, ncore, win, nit_ncc, nit_zc, mem, zmem, qthr
 
 
 # O3 / cc-pVTZ, all electrons: 12 occupied, 78 virtual orbitals
-runs('o3_tz', 'o3.bohr', 'cc-pvtz', False, 0, (2, 5), 5, 5, 70, 70000, [4, 8, 16, 24, 48], 'socket', [2, 1], True, 8, True)
+runs('o3_tz', 'o3.bohr', 'cc-pvtz', False, 0, (2, 5), 5, 5, 60, 70000, [4, 8, 16, 24, 48], 'socket', [2, 1], True, 8, True)
 # benzene / cc-pVDZ, frozen core: 15 occupied, 93 virtual orbitals.  The
 # converged zccsdt run holds 8 pairs of DIIS vectors (69 GB) in memory: more
 # than one socket has with the rest, hence 'pref'
-runs('c6h6_dz', 'c6h6.bohr', 'cc-pvdz', True, 6, (2, 3), 3, 3, 70, 70000, [8, 16, 24, 48], 'pref', [], False, 24, False)
+runs('c6h6_dz', 'c6h6.bohr', 'cc-pvdz', True, 6, (2, 3), 3, 3, 60, 70000, [8, 16, 24, 48], 'pref', [], False, 24, False)

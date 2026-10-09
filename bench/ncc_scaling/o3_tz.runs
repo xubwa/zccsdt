@@ -1,47 +1,47 @@
 # o3_tz: runs of bench/ncc_scaling/slurm_scaling.sh (written by mkruns.py)
 # window 2 5
 # ncc, SYMMETRY=ON: CCSDT, 5 iterations
-ncc ncc_on_t1 o3.bohr cc-pvtz OFF ON T 10 5 70 1 socket n
-ncc ncc_on_t2 o3.bohr cc-pvtz OFF ON T 10 5 70 2 socket n
-ncc ncc_on_t4 o3.bohr cc-pvtz OFF ON T 10 5 70 4 socket n
-ncc ncc_on_t7 o3.bohr cc-pvtz OFF ON T 10 5 70 7 socket n
-ncc ncc_on_t8 o3.bohr cc-pvtz OFF ON T 10 5 70 8 socket n
-ncc ncc_on_t16 o3.bohr cc-pvtz OFF ON T 10 5 70 16 socket n
-ncc ncc_on_t23 o3.bohr cc-pvtz OFF ON T 10 5 70 23 socket n
-ncc ncc_on_t24 o3.bohr cc-pvtz OFF ON T 10 5 70 24 socket n
-ncc ncc_on_t47 o3.bohr cc-pvtz OFF ON T 10 5 70 47 both n
-ncc ncc_on_t48 o3.bohr cc-pvtz OFF ON T 10 5 70 48 both n
-ncc ncc_on_inter_t48 o3.bohr cc-pvtz OFF ON T 10 5 70 48 inter n
-ncc ncc_on_mkl1_t8 o3.bohr cc-pvtz OFF ON T 10 5 70 8 socket 1
-ncc ncc_on_mkl1_t24 o3.bohr cc-pvtz OFF ON T 10 5 70 24 socket 1
-ncc ncc_on_passive_t8 o3.bohr cc-pvtz OFF ON T 10 5 70 8 socket n PASSIVE
-ncc ncc_on_passive_t24 o3.bohr cc-pvtz OFF ON T 10 5 70 24 socket n PASSIVE
-ncc ncc_on_active_t24 o3.bohr cc-pvtz OFF ON T 10 5 70 24 socket n ACTIVE
+ncc ncc_on_t1 o3.bohr cc-pvtz OFF ON T 10 5 60 1 socket n
+ncc ncc_on_t2 o3.bohr cc-pvtz OFF ON T 10 5 60 2 socket n
+ncc ncc_on_t4 o3.bohr cc-pvtz OFF ON T 10 5 60 4 socket n
+ncc ncc_on_t7 o3.bohr cc-pvtz OFF ON T 10 5 60 7 socket n
+ncc ncc_on_t8 o3.bohr cc-pvtz OFF ON T 10 5 60 8 socket n
+ncc ncc_on_t16 o3.bohr cc-pvtz OFF ON T 10 5 60 16 socket n
+ncc ncc_on_t23 o3.bohr cc-pvtz OFF ON T 10 5 60 23 socket n
+ncc ncc_on_t24 o3.bohr cc-pvtz OFF ON T 10 5 60 24 socket n
+ncc ncc_on_t47 o3.bohr cc-pvtz OFF ON T 10 5 60 47 both n
+ncc ncc_on_t48 o3.bohr cc-pvtz OFF ON T 10 5 60 48 both n
+ncc ncc_on_inter_t48 o3.bohr cc-pvtz OFF ON T 10 5 60 48 inter n
+ncc ncc_on_mkl1_t8 o3.bohr cc-pvtz OFF ON T 10 5 60 8 socket 1
+ncc ncc_on_mkl1_t24 o3.bohr cc-pvtz OFF ON T 10 5 60 24 socket 1
+ncc ncc_on_passive_t8 o3.bohr cc-pvtz OFF ON T 10 5 60 8 socket n PASSIVE
+ncc ncc_on_passive_t24 o3.bohr cc-pvtz OFF ON T 10 5 60 24 socket n PASSIVE
+ncc ncc_on_active_t24 o3.bohr cc-pvtz OFF ON T 10 5 60 24 socket n ACTIVE
 # ncc, SYMMETRY=ON: CCSDT(Q) (CC_CONV=3: (Q) needs converged iterations; 24 threads: CC_CONV=10, the energies)
-ncc ncc_onq_t4 o3.bohr cc-pvtz OFF ON Q 3 200 70 4 socket n
-ncc ncc_onq_t8 o3.bohr cc-pvtz OFF ON Q 3 200 70 8 socket n
-ncc ncc_onq_t16 o3.bohr cc-pvtz OFF ON Q 3 200 70 16 socket n
-ncc ncc_onq_t24 o3.bohr cc-pvtz OFF ON Q 10 200 70 24 socket n
-ncc ncc_onq_t48 o3.bohr cc-pvtz OFF ON Q 3 200 70 48 both n
+ncc ncc_onq_t4 o3.bohr cc-pvtz OFF ON Q 3 200 60 4 socket n
+ncc ncc_onq_t8 o3.bohr cc-pvtz OFF ON Q 3 200 60 8 socket n
+ncc ncc_onq_t16 o3.bohr cc-pvtz OFF ON Q 3 200 60 16 socket n
+ncc ncc_onq_t24 o3.bohr cc-pvtz OFF ON Q 10 200 60 24 socket n
+ncc ncc_onq_t48 o3.bohr cc-pvtz OFF ON Q 3 200 60 48 both n
 ncc ncc_onq_mem150_t48 o3.bohr cc-pvtz OFF ON Q 3 200 150 48 both n
-ncc ncc_onq_passive_t24 o3.bohr cc-pvtz OFF ON Q 3 200 70 24 socket n PASSIVE
+ncc ncc_onq_passive_t24 o3.bohr cc-pvtz OFF ON Q 3 200 60 24 socket n PASSIVE
 # ncc, SYMMETRY=OFF: CCSDT, 5 iterations
-ncc ncc_off_t1 o3.bohr cc-pvtz OFF OFF T 10 5 70 1 socket n
-ncc ncc_off_t2 o3.bohr cc-pvtz OFF OFF T 10 5 70 2 socket n
-ncc ncc_off_t4 o3.bohr cc-pvtz OFF OFF T 10 5 70 4 socket n
-ncc ncc_off_t7 o3.bohr cc-pvtz OFF OFF T 10 5 70 7 socket n
-ncc ncc_off_t8 o3.bohr cc-pvtz OFF OFF T 10 5 70 8 socket n
-ncc ncc_off_t16 o3.bohr cc-pvtz OFF OFF T 10 5 70 16 socket n
-ncc ncc_off_t23 o3.bohr cc-pvtz OFF OFF T 10 5 70 23 socket n
-ncc ncc_off_t24 o3.bohr cc-pvtz OFF OFF T 10 5 70 24 socket n
-ncc ncc_off_t47 o3.bohr cc-pvtz OFF OFF T 10 5 70 47 both n
-ncc ncc_off_t48 o3.bohr cc-pvtz OFF OFF T 10 5 70 48 both n
-ncc ncc_off_inter_t48 o3.bohr cc-pvtz OFF OFF T 10 5 70 48 inter n
-ncc ncc_off_mkl1_t8 o3.bohr cc-pvtz OFF OFF T 10 5 70 8 socket 1
-ncc ncc_off_mkl1_t24 o3.bohr cc-pvtz OFF OFF T 10 5 70 24 socket 1
-ncc ncc_off_passive_t8 o3.bohr cc-pvtz OFF OFF T 10 5 70 8 socket n PASSIVE
-ncc ncc_off_passive_t24 o3.bohr cc-pvtz OFF OFF T 10 5 70 24 socket n PASSIVE
-ncc ncc_off_active_t24 o3.bohr cc-pvtz OFF OFF T 10 5 70 24 socket n ACTIVE
+ncc ncc_off_t1 o3.bohr cc-pvtz OFF OFF T 10 5 60 1 socket n
+ncc ncc_off_t2 o3.bohr cc-pvtz OFF OFF T 10 5 60 2 socket n
+ncc ncc_off_t4 o3.bohr cc-pvtz OFF OFF T 10 5 60 4 socket n
+ncc ncc_off_t7 o3.bohr cc-pvtz OFF OFF T 10 5 60 7 socket n
+ncc ncc_off_t8 o3.bohr cc-pvtz OFF OFF T 10 5 60 8 socket n
+ncc ncc_off_t16 o3.bohr cc-pvtz OFF OFF T 10 5 60 16 socket n
+ncc ncc_off_t23 o3.bohr cc-pvtz OFF OFF T 10 5 60 23 socket n
+ncc ncc_off_t24 o3.bohr cc-pvtz OFF OFF T 10 5 60 24 socket n
+ncc ncc_off_t47 o3.bohr cc-pvtz OFF OFF T 10 5 60 47 both n
+ncc ncc_off_t48 o3.bohr cc-pvtz OFF OFF T 10 5 60 48 both n
+ncc ncc_off_inter_t48 o3.bohr cc-pvtz OFF OFF T 10 5 60 48 inter n
+ncc ncc_off_mkl1_t8 o3.bohr cc-pvtz OFF OFF T 10 5 60 8 socket 1
+ncc ncc_off_mkl1_t24 o3.bohr cc-pvtz OFF OFF T 10 5 60 24 socket 1
+ncc ncc_off_passive_t8 o3.bohr cc-pvtz OFF OFF T 10 5 60 8 socket n PASSIVE
+ncc ncc_off_passive_t24 o3.bohr cc-pvtz OFF OFF T 10 5 60 24 socket n PASSIVE
+ncc ncc_off_active_t24 o3.bohr cc-pvtz OFF OFF T 10 5 60 24 socket n ACTIVE
 # zccsdt RCCSDT: 5 iterations
 zc zc_rhf_t1 rhf o3.bohr cc-pvtz 0 5 0 70000 1 socket
 zc zc_rhf_t2 rhf o3.bohr cc-pvtz 0 5 0 70000 2 socket
@@ -62,14 +62,14 @@ zc zc_rhfq_t24 rhf o3.bohr cc-pvtz 0 0 1 70000 24 socket
 zc zc_rhfq_t48 rhf o3.bohr cc-pvtz 0 2 1 70000 48 both
 zc zc_rhfq_passive_t24 rhf o3.bohr cc-pvtz 0 2 1 70000 24 socket PASSIVE
 # runs of the start once more: drift of the node over the job
-ncc ncc_on_again_t8 o3.bohr cc-pvtz OFF ON T 10 5 70 8 socket n
-ncc ncc_off_again_t8 o3.bohr cc-pvtz OFF OFF T 10 5 70 8 socket n
+ncc ncc_on_again_t8 o3.bohr cc-pvtz OFF ON T 10 5 60 8 socket n
+ncc ncc_off_again_t8 o3.bohr cc-pvtz OFF OFF T 10 5 60 8 socket n
 zc zc_rhf_again_t8 rhf o3.bohr cc-pvtz 0 5 0 70000 8 socket
 # zccsdt GCCSDT on the spin orbitals of the same RHF (real): 3 iterations
 zc zc_ghf_t8 ghf o3.bohr cc-pvtz 0 3 0 70000 8 socket
 zc zc_ghf_t24 ghf o3.bohr cc-pvtz 0 3 0 70000 24 socket
 # (Q) with few threads, last: more than an hour each
-ncc ncc_onq_t2 o3.bohr cc-pvtz OFF ON Q 3 200 70 2 socket n
+ncc ncc_onq_t2 o3.bohr cc-pvtz OFF ON Q 3 200 60 2 socket n
 zc zc_rhfq_t2 rhf o3.bohr cc-pvtz 0 2 1 70000 2 socket
-ncc ncc_onq_t1 o3.bohr cc-pvtz OFF ON Q 3 200 70 1 socket n
+ncc ncc_onq_t1 o3.bohr cc-pvtz OFF ON Q 3 200 60 1 socket n
 zc zc_rhfq_t1 rhf o3.bohr cc-pvtz 0 2 1 70000 1 socket
