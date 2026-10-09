@@ -146,6 +146,7 @@ module xzdata
   logical :: qdebug = .false.       ! print the parts of (Q) (XZ_QDEBUG)
   real(8) :: qparts(4) = 0d0
   logical :: qsampled = .false.     ! (Q) ran in sample mode: its energies are not (Q)
+  logical :: timing_run = .false.   ! XZ_NCYC: a fixed number of cycles, nothing is converged
 
   ! ---- wall and CPU times of the stages, by name, in the order of their
   !      first use.  Sets: 1 the CCSDT iterations, 2 the iterations of the

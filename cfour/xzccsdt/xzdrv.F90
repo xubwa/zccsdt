@@ -163,6 +163,11 @@ subroutine xzdrv(w, maxcor)
       call xzcc_d(w, nslot, usefile, nch, ecorr, converged, ncyc)
     end if
     tcc = omp_get_wtime() - t0
+    if (.not. converged .and. timing_run) then
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, XZ_NCYC: CCSDT stopped after ', maxcyc, &
+        ' cycles; the amplitudes and what follows are NOT converged.'
+      converged = .true.
+    end if
     if (.not. converged) then
       call get_environment_variable('XZ_DEBUG', length=larg)
       if (larg == 0) write(6, '(/,a,i5,a)') ' @XZCCSDT-F, CCSDT did not converge in ', maxcyc, &
@@ -201,6 +206,11 @@ subroutine xzdrv(w, maxcor)
       call xzlam_d(w, nslot, usefile, nch, converged, ncyc)
     end if
     tlm = omp_get_wtime() - t0
+    if (.not. converged .and. timing_run) then
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, XZ_NCYC: the Lambda equations stopped after ', maxcyc, &
+        ' cycles; lambda and what follows are NOT converged.'
+      converged = .true.
+    end if
     if (.not. converged) then
       write(6, '(/,a,i5,a)') ' @XZCCSDT-F, the Lambda equations of CCSDT did not converge in ', maxcyc, &
         ' cycles (CC_MAXCYC).'
@@ -359,6 +369,12 @@ subroutine xzjob()
   conv_e = 10d0 ** (-abs(iflags(4)) - 2)
   maxcyc = iflags(7)
   if (maxcyc <= 0) maxcyc = 50
+  ! a timing run: XZ_NCYC cycles of every iteration, converged or not
+  call get_environment_variable('XZ_NCYC', arg, larg)
+  if (larg > 0) then
+    read(arg(1:larg), *) maxcyc
+    timing_run = .true.
+  end if
   ndiis = 8
 end subroutine xzjob
 
