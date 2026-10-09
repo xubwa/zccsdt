@@ -59,10 +59,10 @@ Alternatives considered:
 | pp ladder + F_vv | per batch of triples I: `X[Q',(I,c)] = W(Q',Q) T[Q,(I,c)]`, then P(c/ab) reduction | C(o,3) n_Q^2 v ~ o^3 v^5/24 | o^3 v^5/24 |
 | ring | per occupied pair P: `Z[P] = W[(a,i),(d,m)] T[P](d m, Q)` | n_P (ov)^2 n_Q ~ o^4 v^4/4 | o^4 v^4/4 |
 | drive (T2 x W_vvvo, T2 x W_vooo) | GEMMs accumulated into the ring buffer Z (BLAS beta=1) | o^3 v^4/4 + o^4 v^3/4 | same |
-| hh ladder + F_oo | one operator O6[I,J] on packed T3: `R += O6 @ T3p` | C(o,3)^2 C(v,3) ~ o^6 v^3/216 | o^5 v^3/24 (ratio o/9) |
+| hh ladder + F_oo | o < 16: one operator O6[I,J] on packed T3, `R += O6 @ T3p`; else pair-driven, one GEMM with W'(ij,mn) per spectator index (2.3) | C(o,3)^2 C(v,3) ~ o^6 v^3/216; pair-driven o C(o-1,2)^2 C(v,3) ~ o^5 v^3/24 | o^5 v^3/24 (ratio o/9) |
 | pass 1: T3 -> W_vvvo, W_vooo, T1, T2 | two stacked GEMMs per batch of pairs, plus two matrix-vector passes | about o^3 v^4 | same order |
 | T1 dressing | slot by slot; packed vvvv dressed directly | o v^4/2 (vvvv) | -- |
-| CCSD part (T1/T2 residual) | reference code (Gauss-Stanton intermediates) | o^2 v^4 (ladder) | o^2 v^4/4 with packed pairs (not yet done) |
+| CCSD part (T1/T2 residual) and the two- and four-index intermediates | T1-dressed; ladder on packed pairs with the dressed packed vvvv; ring layout of t2 for the o^3 v^3 products (2.6) | o^2 v^4/4 (ladder) + 3 (ov)^3 (W_ovvo, ring, t2 x ovvv) + o^2 v^4 (t2 x ovvv of W_vvvo) | -- |
 
 ### 2.1 pp ladder (o^3 v^5), F_vv folded
 
@@ -105,15 +105,74 @@ the output-sized temporary and its page faults.
 ### 2.3 hh ladder and F_oo (o^5 v^3)
 
 Both act only on the occupied indices of T3. Together they form a linear
-operator on antisymmetric 3-index tensors. Its matrix
-`O6[I, J]` (C(o,3) x C(o,3)) is built by applying the operator to the packed
-basis (`occ_operator`). The terms then reduce to one GEMM on the packed
-T3, `R += O6 @ T3p`, with N = C(v,3).
+operator on antisymmetric 3-index tensors,
 
-This does o/9 times the minimal flops (1.1x for o = 10, 1.6x for o = 14),
-but needs no gather, no reduction and no transpose. CFOUR evaluates this
-term with level-1 DAXPY loops. For o larger than about 25, a pair-driven
-GEMM would be cheaper.
+    (O t)[ijk] = P(k/ij) 1/2 sum_mn W[mn,ij] t[mnk] - P(i/jk) sum_m F[m,i] t[mjk],
+
+which `t3kern.OccOperator` applies to the packed T3 (or to the block of a
+symmetry label: O does not couple the blocks) in one of two forms.
+
+**The matrix on packed triples** (fewer than 16 occupied spinors, and
+arrays in a mapped file). `O6[I, J]`, C(o,3) x C(o,3), and one GEMM,
+`R += O6 @ T3p`, with N = C(v,3). This does o/9 times the minimal flops
+(1.1x for o = 10, 1.6x for o = 14), but needs no gather, no reduction and no
+transpose. CFOUR evaluates this term with level-1 DAXPY loops.
+
+The matrix is written down element by element
+(`t3pack.occ_operator_direct`, kernel `zc_occ_operator`): with the triple
+I = (k; P) written as (free index; pair) in its three ways,
+`O6[I, (k; P')] += s s' W[P', P]` for the pairs P' without k, and
+`O6[I, (m; P)] -= s s' F[m, k]` for the m outside P, s and s' being the
+signs of the two decompositions: 3 (C(o,2) + o) terms per row. Until
+October 2026 it was built by applying the operator to the packed basis with
+einsum (`t3pack.occ_operator`, kept as the reference of the tests): o^8
+work and temporaries of C(o,3) o^3 elements that the memory plan did not
+count. That never showed with 8 to 10 occupied spinors; with 26 it was
+1.4 s per iteration on two cores, whatever the number of virtual spinors
+(more than half of an iteration of 26 + 28 spinors in label blocks, a tenth
+at 26 + 120), and it took the peak memory of 26 + 120 in blocks to 6.6 GB
+where the plan counted 5.4 GB. Now: 5 ms, within the plan (4.9 GB at that
+commit).
+
+**Pair-driven** (16 occupied spinors and more). With the triples written as
+(spectator k; pair P),
+
+    R[(k; P), A] += sum_P' W'[P, P'] T[(k; P'), A],
+    W'[(i<j), (m<n)] = W[mn,ij] - 1/2 (F[m,i] d_nj - F[n,i] d_mj - F[m,j] d_ni + F[n,j] d_mi)
+
+(each F term is met from two spectators, hence the half; the same folding
+as F_vv into the pp operator). The kernel `zc_t3_hhpair` shares the columns
+of T3 among the threads in chunks of 96; for a chunk and one spectator after
+the other it copies the rows that contain the spectator (C(o-1,2) x 96, in
+cache), multiplies with the matrix of that spectator (a sequential GEMM)
+and adds the result to the rows of R. The matrices of all spectators
+(`zc_t3_hhpair_w`, signs folded in) take 9/o of the memory of O6. That is
+o/9 of the flops of the matrix form, for reading T3 and writing R three
+times instead of once. The transposed operator (Lambda equations) is the
+same with W' transposed.
+
+Measured (`bench/hh_ladder.py`, random data, real, T3 of 2 GB; one node with
+2 x 24 cores Xeon Gold 6248R, job 31780775; seconds for one application,
+matrix / pair-driven):
+
+| o | 8 threads | 16 | 24 | 48 |
+|---|---|---|---|---|
+| 8  | 0.12 / 0.27 | 0.09 / 0.15 | 0.08 / 0.11 | 0.15 / 0.16 |
+| 12 | 0.26 / 0.33 | 0.13 / 0.17 | 0.10 / 0.12 | 0.11 / 0.14 |
+| 14 | 0.37 / 0.40 | 0.20 / 0.21 | 0.14 / 0.14 | 0.12 / 0.15 |
+| 16 | 0.57 / 0.48 | 0.32 / 0.25 | 0.22 / 0.18 | 0.18 / 0.17 |
+| 20 | 1.02 / 0.67 | 0.57 / 0.40 | 0.39 / 0.32 | 0.29 / 0.23 |
+| 26 | 2.10 / 1.19 | 1.06 / 0.65 | 0.80 / 0.48 | 0.61 / 0.36 |
+| 30 | 3.25 / 1.52 | 1.63 / 0.85 | 1.15 / 0.58 | 0.80 / 0.42 |
+
+The crossover is between 14 and 16 occupied spinors at every thread count
+(`t3kern.HH_PAIR_MIN_OCC = 16`, environment `ZCCSDT_HH_PAIR_MIN_OCC`), and
+the gain at 26 is 1.6 to 1.8 where the flop count says 2.9: the rest is
+the three passes over T3 and R. With the T3 of 26 + 120 spinors (5.8 GB,
+dense layout): 6.1 / 3.5 s on 8 threads, 3.1 / 1.9 on 16, 2.3 / 1.5 on 24,
+1.8 / 1.0 on 48. In the blocks of the labels of HBr both forms take the
+same time (0.13 to 0.05 s per iteration at 26 + 120: the blocks are small);
+the pair-driven form is used there too, for its memory.
 
 ### 2.4 Pass 1: T3 -> T1, T2 and the T3 dressing of W_vvvo, W_vooo
 
@@ -146,6 +205,152 @@ It is applied slot by slot, ket slots first (`dress_block`). Each step is a
 contiguous GEMM on blocks that differ only in that slot's source space.
 The full n^4 tensor and the n^5 transformation of the starting point are
 gone.
+
+The GEMMs accumulate in the dressed block (`_add_contract_slot`,
+`zccsdt.blas.gemm` with beta = 1): the last slot and the first are one
+product, the second slot is one product per leading index, and the third is
+moved to the end and back by the threaded transposing copy
+(`ccsdt_opt.transposed`, kernel `zc_axpby4`). The numpy form
+(`blk + np.matmul(...)`) made a temporary of the size of every result, added
+it on one thread and, for a slot in the middle, ran a stack of small
+products one after the other. `dress_fock` takes `sum_ia <ri||sa> t1[i,a]`
+from the stored blocks as they are; it used to make a negated, transposed
+copy of the whole ovvv block for the vv part.
+
+### 2.6 CCSD part and the intermediates
+
+The T1/T2 residuals (`ccsd_residual_packed`) and W_vooo, W_ovvo, F_oo, F_vv,
+W_oooo are small next to the T3 terms - 5 % of an iteration in the dense
+layout - but they were written with einsum and fancy indexing, which run on
+one thread wherever they copy, transpose, gather or scatter an o^2 v^2
+array. In the blocks of a symmetry label, where the T3 terms shrink by an
+order of magnitude and these do not, they were 30 to 40 % of an iteration
+and did not get faster with more cores. They now follow the patterns of the
+packed spinor CCSD (`zccsdt.zccsd.amps`): every layout is written by an
+OpenMP kernel, every product is a GEMM of the kernel library, one-body
+terms act on packed pairs. (The kernels of `zccsd` themselves do not fit:
+they are complex only, for pairs i>j in tril order - the pairs here follow
+the symmetry labels - and for the bare-integral equations with an AO-driven
+ladder, while the CCSDT step has T1-dressed integrals and its ladder
+operator in memory. The kernels are in `csrc/t3pack.c`, real and complex.)
+
+| Term | Before | Now |
+|---|---|---|
+| t2 gathers `t2[:, :, (a<b)]`, `<mn\|\|(e<f)>`, packed ovvv of the pass-1 operand | fancy indexing | `t3pack.pack_last2` (`zc_pack_last2`) |
+| W_ovvo += `<mn\|\|de> t2[i,n,a,e]` | einsum (transposed copies of both operands on one thread) | t2 in the ring layout `A[(i a),(k c)]` once per step (`transposed`), one GEMM `X = G_ring A^T` |
+| F_oo, F_vv (T2 parts) | two einsums | partial traces of X: `F_oo[m,i] += 1/2 sum_d X[(m d),(i d)]`, `F_vv[a,d] -= 1/2 sum_m X[(m d),(m a)]` |
+| operator of the T3 ring term `[(a i),(d m)]`, of the CCSD ring term `1/2 (g + W)[(k c),(j b)]` | numpy transposes of W_ovvo `[m,a,d,i]` | both from X in the ring layout by `zc_axpby4`; W_ovvo in its own order is not formed |
+| W_vooo: `<mn\|\|ie> t2[j,n,b,e]`, `<mb\|\|ef> t2[i,j,e,f]` | einsum | GEMM with A; GEMM on the arrays as stored |
+| CCSD ring term, P(ij) P(ab) of `X[(i a),(j b)]` | four fancy gathers of an (ov)^2 array | `t3pack.add_asym_pack4` (`zc_asym_pack4`) |
+| P(ab) F_bc t_ijac | two fancy gathers | `t3pack.add_asym_last2` |
+| -P(ij) F_kj t_ikab | einsum on `t2[:, :, (a<b)]` and two fancy gathers | a matrix on the packed occupied pairs (`occ_pair_one_body`) added to W_klij: no extra product |
+| R1: `f_kc t_ikac`, `g_klic t_klac` | einsum | matrix-vector product and o small GEMMs with A |
+| `<ab\|\|ij>` dressed in the ket with Bv | stacked `np.matmul(t1, Bv)` and fancy gathers | `zc_vvoo_ket`, one virtual pair per thread |
+| new T2 = t2 + A(R2) / D | four fancy scatters, an o^2 v^2 denominator array, two temporaries | `t3pack.t2_update` (`zc_t2_update`), one pass |
+| DIIS: pack and unpack of T2, first \|dT3\| | fancy indexing, numpy in chunks | `pack_last2`, `unpack_pairs`, `diff_norm2` |
+
+The o^2 v^4 product of W_vvvo (`sum_mf <mb||ef> t2[m,i,a,f]`, a GEMM per
+occupied index m on ovvv as stored) was threaded before and is unchanged;
+the stage of W_vvvo, of which it is the largest part, is what is left of
+the intermediates (0.6 to 0.75 s of 1.1 to 1.2 s at 26 + 120). It, like
+every array of this section, does not use the symmetry labels: the
+integrals and T2 are dense, so the label blocks gain nothing here.
+
+### 2.7 Label blocks: products too small for a threaded BLAS
+
+In the blocks of the labels (`t3engine.SpinBlockT3`) the passes run over
+groups of occupied pairs, of virtual pairs and of blocks of rows, and what
+is one large GEMM in the dense layout becomes thousands of products of a
+millisecond. Called one after the other, each with the threads of the BLAS,
+they do not scale: with 26 + 120 spinors pass 2 took 4.8, 4.7 and 7.8 s on
+16, 24 and 48 cores. Two changes:
+
+- `zccsdt.blas.gemm_tasks` (`zc_gemm_tasks`): a list of products of parts
+  of three arrays in one parallel region. Every product is split into
+  pieces of 96 columns, a piece is one sequential GEMM, and the threads take
+  the pieces of all products from one queue. The ring products of a pair
+  group, the drive products of a block (their operand for all pairs of the
+  batch is built at once) and the products of pass 1 go through it.
+- The batch of pass 2 is sized by the memory it is allowed
+  (`_pass2_batch`): as many occupied pairs as two thirds of `mem_mb` hold in
+  the block layout. The batch of the dense layout - three pairs at 26 + 120,
+  43 MB of the 2000 MB allowed - made 1861 groups of gathers, products and
+  reductions per iteration; now 192, in a work array of 1.3 GB, which the
+  memory plan counts (and shrinks with `max_memory`: 473 MB under 5.5 GB,
+  T3 then in the scratch file).
+
+### 2.8 Measured: 26 + 120 spinors, before and after
+
+HBr, X2C, cc-pVQZ-DK, 10 spinors frozen, the lowest 120 virtual spinors,
+real arithmetic; `bench/bench_plan.sh`, 4 iterations, one node with 2 x 24
+cores (Xeon Gold 6248R), threads bound to cores; seconds per iteration
+(cores busy); the stage timers are averages over all four iterations.
+Before: 940d92a; after: d81db42 (both in one job, 31781047, node c360).
+
+Label blocks:
+
+| Stage | | 8 threads | 16 | 24 | 48 |
+|---|---|---|---|---|---|
+| whole iteration | before | 16.4 (4.7) | 13.2 (7.1) | 13.1 (9.4) | 17.0 (15.3) |
+| | after | 10.9 (6.7) | 7.1 (11.9) | 6.8 (16.9) | 6.6 (26.5) |
+| pass 2 | before | 5.95 (5.2) | 4.77 (8.2) | 4.75 (10.6) | 7.91 (16.5) |
+| | after | 4.43 (7.4) | 2.74 (13.8) | 2.21 (20.1) | 2.31 (33.5) |
+| intermediates | before | 4.86 (3.4) | 4.16 (4.5) | 4.21 (6.2) | 4.43 (10.2) |
+| | after | 1.95 (6.5) | 1.21 (10.6) | 1.13 (14.9) | 1.07 (22.3) |
+| T1 dressing | before | 1.20 (2.1) | 1.24 (3.9) | 1.37 (7.4) | 1.51 (11.4) |
+| | after | 0.47 (4.4) | 0.43 (8.4) | 0.53 (14.2) | 0.64 (17.9) |
+| pass 1 | before | 1.21 (5.5) | 0.92 (8.8) | 0.88 (11.6) | 1.22 (16.1) |
+| | after | 1.25 (5.6) | 0.91 (9.3) | 0.82 (12.2) | 1.01 (17.0) |
+| pp ladder | before | 1.65 (7.5) | 0.96 (14.5) | 0.76 (20.6) | 0.69 (30.4) |
+| | after | 1.65 (7.5) | 0.97 (14.4) | 1.24 (19.8) | 0.67 (31.5) |
+| DIIS | before | 0.67 (5.0) | 0.61 (8.0) | 0.56 (11.7) | 0.86 (21.3) |
+| | after | 0.74 (4.7) | 0.57 (8.4) | 0.58 (11.4) | 0.82 (21.5) |
+| peak memory / GB | before | 6.6 | 7.0 | 7.3 | 8.0 |
+| | after | 6.0 | 6.5 | 6.6 | 7.1 |
+
+(The pp ladder is unchanged; its 1.24 s on 24 threads comes from one slow
+iteration of that run, 8.0 s after 6.2 and 6.4.)
+
+The parts of pass 2 after the change, on 24 / 48 threads: ring products
+0.98 / 0.78 s (23 / 44 cores busy), reduction 0.59 / 0.75, gathers
+0.29 / 0.34, drive terms 0.29 / 0.37. Of pass 1: products 0.33 / 0.45
+(13 / 18 cores busy), gathers 0.25 / 0.27, accumulation 0.16 / 0.18 on two
+cores. The DIIS step of these runs still had its serial parts (unpacking
+T2 0.15 s, the first norm 0.11 to 0.16 s averaged over the iterations),
+which fb95bd3 gave to the threads; that is not in the table.
+
+Dense layout (same job; the passes and the pp ladder are unchanged, and
+their times on 48 threads differ by a quarter between two runs of the same
+code - 36.6 and 46.4 s for pass 2 in job 31780775):
+
+| Stage | | 24 threads | 48 |
+|---|---|---|---|
+| hh ladder + F_oo | before (job 31780775, c197) | 2.39 | 1.57 |
+| | after (same job) | 1.38 | 0.92 |
+| intermediates | before | 4.53 (6.7) | 3.85 (12.2) |
+| | after | 1.16 (15.4) | 0.92 (24.7) |
+| T1 dressing | before | 1.40 (7.9) | 1.32 (14.4) |
+| | after | 0.35 (15.1) | 0.39 (19.5) |
+| whole iteration | before | 94.1 | 85.9 |
+| | after | 87.9 | 86.5 |
+
+What the dense iteration spends on 48 threads (job 31781047): the ring
+GEMMs of pass 2 30.8 s of its 40 (one product of a 3120 x 3120 operator
+with a 3120 x 7140 block per occupied pair: 30 Gflop/s per core where 16
+threads reach 60, so it is the product itself, not the gathers around it,
+that stops scaling), reduction 5.3, gathers 2.6, drive 1.6; pass 1: its
+two stacked GEMMs 8.8 s for about 4 10^12 flops (a third of the rate of
+the ring GEMMs: one of them sums over 185640 elements for a 360 x 146
+result), gathers 2.8, matrix-vector passes 2.5. The DIIS step of a dense
+iteration (6.4 to 6.7 s there) was 1.7 s the norm of the first iteration on
+one core, averaged over four iterations (threaded since fb95bd3), 1.5 s
+the error vector and about 3 s the copy of the new T3 into the vector
+storage: both write a T3-sized array into pages of the scratch file that
+did not exist before, which does not get faster with more threads (the step
+took 5.1, 4.7, 4.8 and 6.4 s on 8, 16, 24 and 48 threads before) and
+ends when the subspace is full (measured apart, vectors of 1 GB, 8 threads:
+0.55 to 0.93 s per update while the subspace fills against 0.14 to 0.38 s
+in memory, 0.38 s for both afterwards).
 
 ## 3. Memory, and when it is short
 
@@ -280,9 +485,14 @@ Timings under memory limits are in `docs/benchmarks.md`.
 
 ## 4. Open items
 
-- **CCSD part.** The T2 ladder could reuse the packed W(ab,de)
-  (o^2 v^4/4 instead of o^2 v^4). Some intermediates are still built with
-  generic einsum.
+- **Intermediates without the symmetry labels.** The CCSD part and the
+  intermediates (2.6) work on dense integrals and a dense T2 whatever the
+  layout of T3. In label blocks the o^2 v^4 product of W_vvvo and the
+  (ov)^3 products are then a tenth of an iteration that the labels could
+  cut by the number of classes.
+- **The Lambda equations and the density** still build their small
+  intermediates with einsum (`lambda_opt`, timer `small`; only the hh
+  operator was changed there).
 - **Pass 1 matrix-vector passes.** r1 and rA could be fused into the C
   gather.
 - **Memory.** Without `packed_vvvv=True` the integral container holds the
