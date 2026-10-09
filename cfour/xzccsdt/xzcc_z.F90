@@ -7,5 +7,6 @@
 #include "xzcc.inc"
 #include "xzlam.inc"
 #include "xzlblk.inc"
+#include "xzden.inc"
 #include "xzq.inc"
 #include "xzqs.inc"

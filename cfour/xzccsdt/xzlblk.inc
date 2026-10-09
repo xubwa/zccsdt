@@ -134,7 +134,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
             qlo, nq, nr * nq, w(gkt(gq) + NW * gr0(it) * nq))
         end do
         end do
-        call xztoc(2, 'pass 1: gather')
+        call xztoc(tcur, 'pass 1: gather')
         ! the densities: one task per (gQ, P), each product in the buffer of
         ! its thread and added to the block of gP - gQ
         do ig = 0, ngq - 1
@@ -164,7 +164,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           end do
         end do
         end do
-        call xztoc(2, 'pass 1: density')
+        call xztoc(tcur, 'pass 1: density')
         ! the stacked products, per gQ and class of d (and of m)
         do it = 1, ntask
           sm = tsd(it) - (gp - tgq(it))
@@ -203,7 +203,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           call N(xzbp1yadd)(no, nv, npo, nb, vcoff(sd + 1) - vcoff(sd), vcoff(sy + 1) - vcoff(sy), &
                             ocoff(sy + 1) - ocoff(sy), p0, vcoff(sd), vcoff(sy), ocoff(sy), w(tky(it)), yall)
         end do
-        call xztoc(2, 'pass 1: stacked GEMMs')
+        call xztoc(tcur, 'pass 1: stacked GEMMs')
       end if
       call xzrel(mk)
     end do
