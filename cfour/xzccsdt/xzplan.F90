@@ -139,6 +139,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   integer :: k
   character(len=8) :: arg
   character(len=14) :: what
+  real(8) :: frac
   integer :: larg
 
   what = 'CCSDT'
@@ -149,9 +150,15 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   plo(1) = min(nv, nqmax)
   phi(1) = nqmax
   plo(2) = 1
-  phi(2) = max(1_8, min(nto, 1300000000_8 / (2 * 8 * nwe * nvp * nv)))
+  ! (in blocks of the labels a batch holds the allowed part only: the
+  ! targets in triples and pairs grow by the dense fraction of T3, so that the
+  ! buffers stay at their sizes in bytes and a batch of the passes has enough
+  ! pairs for its tasks)
+  frac = 1d0
+  if (ncls > 1 .and. nto > 0 .and. nvt > 0) frac = min(1d0, max(1d-3, dble(n3) / (dble(nto) * dble(nvt))))
+  phi(2) = max(1_8, min(nto, int(1.3d9 / (2d0 * 8 * nwe * nvp * nv * frac), 8)))
   plo(3) = 1
-  phi(3) = max(1_8, min(npo, 2000000000_8 / (3 * 8 * nwe * f)))
+  phi(3) = max(1_8, min(npo, int(2d9 / (3d0 * 8 * nwe * f * frac), 8)))
   plo(4) = 1
   phi(4) = max(1_8, nv / 8)
   plo(5) = 3

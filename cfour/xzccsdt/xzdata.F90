@@ -163,19 +163,18 @@ module xzdata
 
 contains
 
-  ! The hh ladder and F_oo of dense T3 through occupied pairs (xzhhapply) or
-  ! with the operator on occupied triples (xzo6)?  Operation counts per
-  ! virtual triple: C(o,2)**2 o against C(o,3)**2, a ratio (o-2)**2 / (9 o);
-  ! with the gather and the reduction of the pair form it wins from about 17
-  ! occupied spinors (measured: docs/native.md).  XZ_HH=pair|o6 overrides.
-  ! In blocks of the labels the operator on triples is used (its products
-  ! are below 1 % of an iteration there).
+  ! The hh ladder and F_oo of dense T3 with the operator on occupied triples
+  ! (xzo6, one GEMM: the default) or through occupied pairs (xzwpair,
+  ! xzhhapply: XZ_HH=pair).  The pair form has (o-2)**2 / (9 o) times fewer
+  ! operations, but its gather and reduction are bound by the memory: measured
+  ! for 26 occupied spinors it is faster on 8 threads and slower on 16 and
+  ! more (docs/native.md), so it is an option.  In blocks of the labels the
+  ! operator on triples is used in any case.
   logical function xzhhpair()
     character(len=8) :: arg
     integer :: larg
     if (hhset == 0) then
       hhset = 1
-      if ((no - 2) ** 2 > 12 * no) hhset = 2
       call get_environment_variable('XZ_HH', arg, larg)
       if (larg > 0) then
         if (arg(1:1) == 'p') hhset = 2
@@ -190,6 +189,21 @@ contains
   integer(8) function xzhhcols()
     xzhhcols = max(1_8, min(nvt, 512_8))
   end function xzhhcols
+
+  ! The tasks of a parallel loop that are too large for it: with nth threads
+  ! a task of more than three fair shares of the work (cost: operation
+  ! counts) would run on one core while the others wait.  The loops over
+  ! tasks run these first, one after the other with threaded kernels and a
+  ! threaded BLAS, and the rest in parallel with the BLAS sequential inside.
+  subroutine xzbig(n, cost, big)
+    use omp_lib
+    integer(8), intent(in) :: n
+    real(8), intent(in) :: cost(n)
+    logical, intent(out) :: big(n)
+    real(8) :: share
+    share = sum(cost(1:n)) / omp_get_max_threads()
+    big(1:n) = cost(1:n) > 3d0 * share
+  end subroutine xzbig
 
   ! the clocks start
   subroutine xztic()

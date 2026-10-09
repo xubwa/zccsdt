@@ -36,7 +36,9 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   integer(8) :: lst(0:npg-1), gkl(0:npg-1), gkt(0:npg-1)
   integer(8), dimension(npg * ncls) :: tgq, tsd, tr0, tks, tkg, tkx, tkgy, tky, ggq, gsd, gr0
   integer(8) :: ngath
-  logical :: par
+  real(8) :: cost(npg * max(ncls, nbp))
+  logical :: big(npg * max(ncls, nbp))
+  integer :: phase
   ZT :: one, zero
   one = 1
   zero = 0
@@ -105,9 +107,16 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
       if (.not. xzdry .and. ngq > 0) then
         call xztic()
         ! the gathers: one task per (gQ, class of d)
-        par = 4 * ngath >= nth
-        !$omp parallel do schedule(dynamic) if(par) private(it, gq, sd, sm, delta, nr, qlo, nq, nd, nm)
         do it = 1, ngath
+          sm = gsd(it) - (gp - ggq(it))
+          cost(it) = dble(vcoff(gsd(it) + 1) - vcoff(gsd(it))) * (ocoff(sm + 1) - ocoff(sm)) &
+                     * (vpoff(ggq(it) + 1) - vpoff(ggq(it)))
+        end do
+        call xzbig(ngath, cost, big)
+        do phase = 1, 2
+        !$omp parallel do schedule(dynamic) if(phase == 2) private(it, gq, sd, sm, delta, nr, qlo, nq, nd, nm)
+        do it = 1, ngath
+          if (big(it) .neqv. (phase == 1)) cycle
           gq = ggq(it)
           sd = gsd(it)
           delta = gp - gq
@@ -124,13 +133,20 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
             w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
             qlo, nq, nr * nq, w(gkt(gq) + NW * gr0(it) * nq))
         end do
+        end do
         call xztoc(2, 'pass 1: gather')
         ! the densities: one task per (gQ, P), each product in the buffer of
         ! its thread and added to the block of gP - gQ
-        par = 4 * ngq * nb >= nth
-        !$omp parallel do collapse(2) schedule(dynamic) if(par) private(ig, k, gq, delta, nr, qlo, nq, me)
+        do ig = 0, ngq - 1
+          gq = lst(ig)
+          cost(ig * nb + 1:ig * nb + nb) = dble(ndel(gp - gq)) ** 2 * (vpoff(gq + 1) - vpoff(gq))
+        end do
+        call xzbig(ngq * nb, cost, big)
+        do phase = 1, 2
+        !$omp parallel do collapse(2) schedule(dynamic) if(phase == 2) private(ig, k, gq, delta, nr, qlo, nq, me)
         do ig = 0, ngq - 1
           do k = 0, nb - 1
+            if (big(ig * nb + k + 1) .neqv. (phase == 1)) cycle
             gq = lst(ig)
             delta = gp - gq
             nr = ndel(delta)
@@ -147,11 +163,21 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
             !$omp end critical (xzlbdens)
           end do
         end do
+        end do
         call xztoc(2, 'pass 1: density')
         ! the stacked products, per gQ and class of d (and of m)
-        par = 4 * ntask >= nth
-        !$omp parallel do schedule(dynamic) if(par) private(it, gq, sd, sm, sy, delta, nr, qlo, nq, nd, nm, ne, nj)
         do it = 1, ntask
+          sm = tsd(it) - (gp - tgq(it))
+          sy = gp - tsd(it)
+          cost(it) = dble(vcoff(tsd(it) + 1) - vcoff(tsd(it))) * (ocoff(sm + 1) - ocoff(sm)) &
+                     * (vpoff(tgq(it) + 1) - vpoff(tgq(it))) &
+                     * (8 + vcoff(sy + 1) - vcoff(sy) + ocoff(sy + 1) - ocoff(sy))
+        end do
+        call xzbig(ntask, cost, big)
+        do phase = 1, 2
+        !$omp parallel do schedule(dynamic) if(phase == 2) private(it, gq, sd, sm, sy, delta, nr, qlo, nq, nd, nm, ne, nj)
+        do it = 1, ntask
+          if (big(it) .neqv. (phase == 1)) cycle
           gq = tgq(it)
           sd = tsd(it)
           delta = gp - gq
@@ -169,6 +195,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           call N(xzbp1xy)(no, nv, npo, nvp, nb, nd, nm, nq, ne, nj, p0, vcoff(sd), ocoff(sm), qlo, &
                           vcoff(sy), ocoff(sy), gpd, gmq, w(tks(it)), w(tkg(it)), w(tkx(it)), w(tkgy(it)), &
                           w(tky(it)), xacc)
+        end do
         end do
         do it = 1, ntask
           sd = tsd(it)

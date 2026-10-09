@@ -35,7 +35,9 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
   ZT :: gpd(*), gmq(*), gpp(0:nvp-1, 0:npo-1), fov(*), xacc(*), yall(*), r1c(*), ra(0:nvp-1, 0:npo-1)
   integer(8) :: gp, gq, p0, nb, sd, sm, sy, nd, nm, nq, qlo, ne, nj, m0, it, ntask
   integer(8), dimension(ncls * ncls) :: tsd, tsm, tkt, tkg, tkx, tkgy, tky, tkacc, tkra
-  logical :: par
+  real(8) :: cost(ncls * ncls)
+  logical :: big(ncls * ncls)
+  integer :: phase
 
   if (.not. xzdry) then
     call zc_vzero_d(NW * ny * no * nvp, xacc)
@@ -81,11 +83,20 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
       end do
       if (.not. xzdry .and. ntask > 0) then
         call xztoc(tcur, 'pass 1: other')
-        ! (with a quarter as many tasks as threads the loop is still better
-        ! than a threaded BLAS on products of this size)
-        par = 4 * ntask >= omp_get_max_threads()
-        !$omp parallel do schedule(dynamic) if(par) private(it, sd, sm, sy, gq, nd, nm, qlo, nq, ne, nj)
+        ! (the large tasks first, with threaded kernels: xzbig)
         do it = 1, ntask
+          sy = gp - tsd(it)
+          gq = gp + tsm(it) - tsd(it)
+          cost(it) = 8
+          if (tkg(it) >= 0) cost(it) = 8 + vcoff(sy + 1) - vcoff(sy) + ocoff(sy + 1) - ocoff(sy)
+          cost(it) = cost(it) * (vcoff(tsd(it) + 1) - vcoff(tsd(it))) * (ocoff(tsm(it) + 1) - ocoff(tsm(it))) &
+                     * (vpoff(gq + 1) - vpoff(gq))
+        end do
+        call xzbig(ntask, cost, big)
+        do phase = 1, 2
+        !$omp parallel do schedule(dynamic) if(phase == 2) private(it, sd, sm, sy, gq, nd, nm, qlo, nq, ne, nj)
+        do it = 1, ntask
+          if (big(it) .neqv. (phase == 1)) cycle
           sd = tsd(it)
           sm = tsm(it)
           gq = gp + sm - sd
@@ -106,6 +117,7 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
           end if
           if (tkacc(it) >= 0) call N(xzbp1r)(no, nv, nvp, nb, nd, nm, nq, vcoff(sd), ocoff(sm), &
             w(tkt(it)), gpp(qlo, p0), fov, w(tkacc(it)), r1c, w(tkra(it)))
+        end do
         end do
         ! what the tasks share
         do it = 1, ntask
@@ -448,7 +460,9 @@ subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, 
   integer(8) :: tg(0:3*nto-1, 0:3)                             ! targets: base, index, pair, (sign)
   integer(8) :: gq, off, k, g, nt, r, ig, ngq
   integer(8) :: lst(0:npg-1)
-  logical :: par
+  real(8) :: cost(npg * nb)
+  logical :: big(npg * nb)
+  integer :: phase
   call xztoc(tcur, 'pass 2: other')
   zoff = -1
   off = 0
@@ -466,16 +480,23 @@ subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, 
     lst(ngq) = gq
     ngq = ngq + 1
   end do
-  ! one task per (gQ, P): the gather of T[(d, m)][Q] and the products; with
-  ! few tasks for the threads the loop is serial and the kernels threaded
-  par = 4 * ngq * nb >= omp_get_max_threads()
-  !$omp parallel do collapse(2) schedule(dynamic) if(par) private(ig, k, gq)
+  ! one task per (gQ, P): the gather of T[(d, m)][Q] and the products; the
+  ! large tasks first, with threaded kernels (xzbig)
+  do ig = 0, ngq - 1
+    gq = lst(ig)
+    cost(ig * nb + 1:ig * nb + nb) = dble(ndel(gp - gq)) * nqg(gq) * (ndel(gp - gq) + 64)
+  end do
+  call xzbig(ngq * nb, cost, big)
+  do phase = 1, 2
+  !$omp parallel do collapse(2) schedule(dynamic) if(phase == 2) private(ig, k, gq)
   do ig = 0, ngq - 1
     do k = 0, nb - 1
+      if (big(ig * nb + k + 1) .neqv. (phase == 1)) cycle
       gq = lst(ig)
       call N(xzbp2task)(w, kt3, gp, gq, p0 + k, nqg(gq), wd, adrv, bd, npart, nu, u0, vp, &
                         t(0, omp_get_thread_num()), z(zoff(gq, k)))
     end do
+  end do
   end do
   call xztoc(tcur, 'pass 2: gather, products')
   ! the reduction: per group of triples, the occupied triples with a pair in
