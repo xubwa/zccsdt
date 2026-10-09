@@ -608,11 +608,32 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     end if
   end if
 
-  ! ---- the Gram matrix of l3 and T3 (rank 0: only the residuals of rank 1 and 2 need it)
+  ! ---- the Gram matrix of l3 and T3 (rank 0: only the residuals of rank 1
+  !      and 2 need it; with slices every rank makes the rows of its triples)
+  if (.not. xzdry .and. slices) then
+    tsg = omp_get_wtime()
+    call xztic()
+    call zc_vzero_d(NW * nto * nto, w(kg))
+    do g = 0, ntg - 1
+      ni = otoff(g + 1) - otoff(g)
+      na = vtoff(g + 1) - vtoff(g)
+      if (ni == 0 .or. na == 0) cycle
+      call xzslrows(g, i0, nb)
+      if (nb <= i0) cycle
+      call N(zc_gemm)(0_4, 1_4, nb - i0, ni, na, one, w(kl3 + NW * (boff(g) + i0 * na)), na, &
+                      w(jt3 + NW * boff(g)), na, zero, w(kg + NW * ((otoff(g) + i0) * nto + otoff(g))), nto)
+    end do
+    call xztoc(2, 'Gram matrix')
+    dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
+    call xzmpi_sum0_w(w(kg), NW * nto * nto)
+    call xztoc(2, 'MPI: sum of the Gram matrix')
+  end if
   if (.not. xzdry .and. myrank == 0) then
     tsg = omp_get_wtime()
     call xztic()
-    if (dense) then
+    if (slices) then
+      ! (made above)
+    else if (dense) then
       call N(zc_gemm)(0_4, 1_4, nto, nto, nvt, one, w(kl3), nvt, w(jt3), nvt, zero, w(kg), nto)
     else
       call zc_vzero_d(NW * nto * nto, w(kg))
