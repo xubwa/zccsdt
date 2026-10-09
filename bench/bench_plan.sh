@@ -12,7 +12,8 @@
 # usage (in a Slurm job with a whole node): bench/bench_plan.sh OUT.jsonl
 # environment: BP_GEOM, BP_BASIS, BP_FROZEN, BP_NVIR (keep the lowest N virtual spinors), BP_MODES="blocks dense", BP_THREADS="48 24 8",
 #              BP_NITER=4, BP_FRACTION="0.05" ("" or "none": no (Q)), BP_ITER=1 (0: no iterations), BP_FULLQ="", BP_REAL=1, BP_TAG, BP_DRY=1 (print the list only),
-#              BP_NUMA=interleave, BP_LOGDIR (keep the output of every measurement there)
+#              BP_NUMA=interleave, BP_LOGDIR (keep the output of every measurement there),
+#              BP_INCORE=1 (the DIIS vectors in memory; give such runs a BP_TAG)
 set -u
 out=$1
 : "${BP_GEOM:?}" "${BP_BASIS:?}"

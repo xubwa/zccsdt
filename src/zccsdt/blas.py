@@ -124,6 +124,37 @@ def gemm(A, B, C=None, alpha=1.0, beta=0.0):
     return C
 
 
+def gemm_tasks(tasks, A, B, C, alpha=1.0, beta=0.0, cols=96):
+    '''A list of products in one parallel region,
+    C_t = alpha A_t B_t + beta C_t, with tasks[t] = (m, n, k, offset of A_t,
+    lda, offset of B_t, ldb, offset of C_t, ldc): the matrices are row-major
+    parts of the C-contiguous arrays A, B, C (same dtype; offsets in
+    elements).  Each product is split into pieces of about ``cols`` columns,
+    one sequential GEMM each, which the threads share: for many products too
+    small for a threaded BLAS.  The C_t must not overlap.'''
+    tasks = np.ascontiguousarray(tasks, dtype=np.int64).reshape(-1, 9)
+    dtype = C.dtype
+    assert A.dtype == dtype and B.dtype == dtype
+    assert A.flags.c_contiguous and B.flags.c_contiguous and C.flags.c_contiguous
+    lib = _clib()
+    if lib is not None and hasattr(lib, 'zc_gemm_tasks_d') and dtype in _SFX:
+        al, be = np.array(alpha, dtype=dtype), np.array(beta, dtype=dtype)
+        p = lambda x: ctypes.c_void_p(x.ctypes.data)          # noqa: E731
+        getattr(lib, 'zc_gemm_tasks_' + _SFX[np.dtype(dtype)])(
+            ctypes.c_int64(len(tasks)), p(tasks), p(A), p(B), p(C), p(al), p(be),
+            ctypes.c_int64(cols))
+        return C
+    a, b, c = A.reshape(-1), B.reshape(-1), C.reshape(-1)
+    for m, n, k, ao, lda, bo, ldb, co, ldc in tasks.tolist():
+        if m == 0 or n == 0:
+            continue
+        At = np.lib.stride_tricks.as_strided(a[ao:], (m, k), (lda * a.itemsize, a.itemsize))
+        Bt = np.lib.stride_tricks.as_strided(b[bo:], (k, n), (ldb * b.itemsize, b.itemsize))
+        Ct = np.lib.stride_tricks.as_strided(c[co:], (m, n), (ldc * c.itemsize, c.itemsize))
+        Ct[...] = alpha * (At @ Bt) + beta * Ct
+    return C
+
+
 def gemm_slices(A, B, C, alpha=1.0, beta=0.0):
     '''C[i] = alpha * A @ B[:, i, :] + beta * C[i] for all i, in place: A
     (m, k), B (k, nb, n) and C (nb, m, n) C-contiguous float64.  The slices

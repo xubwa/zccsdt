@@ -92,6 +92,8 @@ def main():
     cc.verbose, cc.symmetry, cc.real_spinors = 3, a.mode == 'blocks', bool(a.real)
     cc.conv_tol, cc.conv_tol_normt = 1e-12, 1e-10
     cc.max_cycle = a.niter if a.what == 'iter' else 2
+    if os.environ.get('BP_INCORE'):     # the DIIS vectors in memory, not in the scratch file (give such runs a tag)
+        cc.incore_complete = True
     marks = [(time.perf_counter(), time.process_time())]
     cc.callback = lambda info: marks.append((time.perf_counter(), time.process_time()))
     snap = timing.snapshot()
@@ -100,7 +102,8 @@ def main():
     cc.kernel()
     watch.stop()
     stages = {'/'.join(str(x) for x in path): [round(w, 3), round(c, 3), int(k)]
-              for path, (w, c, k) in timing.since(snap).items() if len(path) <= 2}
+              for path, (w, c, k) in timing.since(snap).items()
+              if len(path) <= int(os.environ.get('BP_DEPTH', 2))}        # (BP_DEPTH=3: the parts of the stages too)
     wall, cpu = np.diff([m[0] for m in marks]), np.diff([m[1] for m in marks])
     rest = slice(1, None) if len(wall) > 1 else slice(0, None)
     eris = cc._eris

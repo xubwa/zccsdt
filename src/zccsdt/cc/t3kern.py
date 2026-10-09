@@ -116,6 +116,114 @@ def occ_operator(O6, T3p, R, cols=0, io=None):
         _io(io), _p(R))
 
 
+# The hh ladder and F_oo: from this many occupied spinors on, pair-driven
+# (measured, docs/factorization.md 2.3); below, the matrix on packed triples.
+HH_PAIR_MIN_OCC = int(os.environ.get('ZCCSDT_HH_PAIR_MIN_OCC', 16))
+HH_PAIR_COLS = int(os.environ.get('ZCCSDT_HH_PAIR_COLS', 96))
+
+
+def hh_lists(om, rows=None):
+    '''For the block lo <= I < hi of the occupied triples (``rows``; default
+    all) and every spectator index k, the triples of the block that contain
+    k: (koff, krow, kpair, ksgn, woff) with the entries koff[k] <= e <
+    koff[k+1] holding the local row krow[e] = tri[k, P] - lo, the pair
+    kpair[e] = P and the sign ksgn[e] = sgn[k, P]; woff[k]: where the matrix
+    of spectator k starts in the array of all of them (woff[-1]: its
+    length).  Kept on the map.'''
+    lo, hi = (0, om.ntri) if rows is None else rows
+    cache = om.__dict__.setdefault('_hh_lists', {})
+    if (lo, hi) not in cache:
+        mask = (om.sgn != 0) & (om.tri >= lo) & (om.tri < hi)
+        ks, Ps = np.nonzero(mask)                           # (sorted by k, then P)
+        koff = np.searchsorted(ks, np.arange(om.n + 1)).astype(np.int64)
+        nk = np.diff(koff)
+        woff = np.concatenate(([0], np.cumsum(nk * nk))).astype(np.int64)
+        cache[lo, hi] = (koff, np.ascontiguousarray(om.tri[ks, Ps] - lo, dtype=np.int64),
+                         np.ascontiguousarray(Ps, dtype=np.int64),
+                         np.ascontiguousarray(om.sgn[ks, Ps], dtype=np.int8), woff)
+    return cache[lo, hi]
+
+
+class OccOperator:
+    '''The hh ladder and the F_oo term of the T3 equation,
+      (O t)[ijk] = P(k/ij) 1/2 sum_mn W[m,n,i,j] t[mnk] - P(i/jk) sum_m F[m,i] t[mjk]
+    (``trans``: its transpose, as in the Lambda equations), applied to blocks
+    of packed arrays, R[lo:hi] += O[lo:hi, lo:hi] T[lo:hi], in one of two forms
+    (docs/factorization.md 2.3):
+
+      'matrix'  O on packed triples, C(o,3)^2, written down directly
+                (t3pack.occ_operator_direct), and one GEMM;
+      'pair'    the triples as (spectator; pair): a GEMM with W[(ij), (mn)]
+                per spectator on gathered rows, o / 9 of the flops, T3 read
+                three times instead of once.
+
+    ``mode`` None: 'pair' from HH_PAIR_MIN_OCC occupied spinors on.  Arrays
+    in a mapped file (``io``) always take the matrix, whose GEMM touches
+    column blocks of a chosen size.'''
+
+    def __init__(self, om, W, F, dtype, trans=False, mode=None):
+        self.om, self.dtype, self.trans = om, np.dtype(dtype), trans
+        self.W = np.ascontiguousarray(W, dtype=dtype)
+        self.F = np.ascontiguousarray(F, dtype=dtype)
+        if mode is None:
+            mode = 'pair' if om.n >= HH_PAIR_MIN_OCC else 'matrix'
+        if not (USE_C and hasattr(_lib, 'zc_t3_hhpair_d')) \
+                or self.dtype not in (np.float64, np.complex128):
+            mode = 'matrix'
+        self.mode = mode
+        self._mat, self._wk = {}, {}
+
+    def matrix(self, rows=None):
+        '''O[lo:hi, lo:hi] (``rows`` = (lo, hi); default: all of it).'''
+        from zccsdt.cc import t3pack
+        key = (0, self.om.ntri) if rows is None else tuple(rows)
+        if key not in self._mat:
+            O = t3pack.occ_operator_direct(self.om, self.W, self.F, key, self.dtype)
+            self._mat = {key: np.ascontiguousarray(O.T) if self.trans else O}   # (one block is kept)
+        return self._mat[key]
+
+    def pair_matrices(self, rows=None):
+        key = (0, self.om.ntri) if rows is None else tuple(rows)
+        if key not in self._wk:
+            om = self.om
+            koff, krow, kpair, ksgn, woff = hh_lists(om, key)
+            Wk = np.empty(int(woff[-1]), dtype=self.dtype)
+            getattr(_lib, 'zc_t3_hhpair_w_' + _sfx(self.dtype))(
+                _p(Wk), _p(woff), _i(om.n), _p(koff), _p(kpair), _p(ksgn), _p(om.pa_c),
+                _p(om.pb_c), _p(self.W), _p(self.F), ctypes.c_int(int(self.trans)))
+            self._wk = {key: Wk}
+        return self._wk[key]
+
+    def nbytes(self, rows=None):
+        '''Bytes of what apply() allocates for the block ``rows``.'''
+        lo, hi = (0, self.om.ntri) if rows is None else rows
+        if self.mode == 'matrix':
+            return (hi - lo) ** 2 * self.dtype.itemsize
+        koff, woff = hh_lists(self.om, (lo, hi))[0], hh_lists(self.om, (lo, hi))[4]
+        nthr = int(os.environ.get('OMP_NUM_THREADS') or len(os.sched_getaffinity(0)))
+        return int(woff[-1] + 2 * nthr * HH_PAIR_COLS * np.diff(koff).max(initial=0)) \
+            * self.dtype.itemsize
+
+    def apply(self, T, R, rows=None, cols=0, io=None):
+        '''R += O[rows, rows] @ T for T, R of shape (hi - lo, N), C-contiguous.
+        ``cols``: the columns per GEMM of the matrix form (0: all).'''
+        if T.shape[0] == 0 or T.shape[1] == 0:
+            return R
+        if self.mode == 'matrix' or io is not None:
+            O = self.matrix(rows)
+            if USE_C:
+                occ_operator(O, T, R, cols, io)
+            else:
+                R += O @ T
+            return R
+        koff, krow, _, _, woff = hh_lists(self.om, rows)
+        Wk = self.pair_matrices(rows)
+        getattr(_lib, 'zc_t3_hhpair_' + _sfx(self.dtype))(
+            _p(T), _p(R), _i(T.shape[0]), _i(T.shape[1]), _i(self.om.n), _p(koff), _p(krow),
+            _p(Wk), _p(woff), _i(HH_PAIR_COLS))
+        return R
+
+
 def zero(a):
     '''a[...] = 0 for a C-contiguous float64 / complex128 array, threaded.'''
     from zccsdt.cc import t3pack

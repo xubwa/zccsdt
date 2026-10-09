@@ -320,6 +320,42 @@ def occ_operator(om, apply):
     return LB[:, p, q, s].T                       # O[I, J]
 
 
+def occ_apply(t, Woooo, Foo):
+    '''(L t)[J,i,j,k] = P(k/ij) 1/2 sum_mn W[m,n,i,j] t[J,m,n,k]
+                      - P(i/jk) sum_m F[m,i] t[J,m,j,k]:
+    the hh ladder and the F_oo term of the T3 equation on full tensors (the
+    reference of occ_operator_direct).'''
+    x = 0.5 * np.einsum('mnij,Jmnk->Jijk', Woooo, t, optimize=True)
+    out = x - x.transpose(0, 3, 2, 1) - x.transpose(0, 1, 3, 2)
+    y = np.einsum('mi,Jmjk->Jijk', Foo, t, optimize=True)
+    out -= y - y.transpose(0, 2, 1, 3) - y.transpose(0, 3, 2, 1)
+    return out
+
+
+def occ_operator_direct(om, Woooo, Foo, rows=None, dtype=None):
+    '''The matrix O[I, J] of occ_apply on packed occupied triples, written
+    down element by element (3 (C(o,2) + o) terms per row, C kernel) instead
+    of applied to the packed basis (occ_operator, o^8 work and o^6-sized
+    temporaries).  ``rows`` = (lo, hi): the diagonal block of the triples
+    lo <= I < hi only (a block of the symmetry labels).'''
+    dtype = np.dtype(np.result_type(Woooo, Foo) if dtype is None else dtype)
+    lo, hi = (0, om.ntri) if rows is None else rows
+    if not (USE_C and hasattr(_lib, 'zc_occ_operator_d')) or dtype not in (np.float64, np.complex128):
+        O = occ_operator(om, lambda t: occ_apply(t, Woooo, Foo))
+        return np.ascontiguousarray(O[lo:hi, lo:hi], dtype=dtype)
+    n = hi - lo
+    O = np.empty((n, n), dtype=dtype)
+    loc = np.full(om.ntri, -1, dtype=np.int64)
+    loc[lo:hi] = np.arange(n)
+    W = np.ascontiguousarray(Woooo, dtype=dtype)
+    F = np.ascontiguousarray(Foo, dtype=dtype)
+    getattr(_lib, 'zc_occ_operator_' + _sfx(dtype))(
+        _p(O), _I64(n), _p(np.arange(lo, hi, dtype=np.int64)), _p(loc), _I64(om.n),
+        _I64(om.npair), _I64(om.ntri), _p(om.tri_c), _p(om.sgn_c), _p(om.free_c),
+        _p(om.pair_c), _p(om.pa_c), _p(om.pb_c), _p(W), _p(F))
+    return O
+
+
 def add_reduce_pair_first(R, X, vm, rows, pairs=None):
     '''R[rows] += P(c/ab) X, with X[Q, I, c] (pair-major, as produced by the
     ladder GEMM on gather_vir_half).  ``pairs`` = (q0, q1): X holds the pair
@@ -415,8 +451,9 @@ def axpby(out, inp, alpha=1.0, beta=1.0):
     (beta = 0 overwrites).  The first two axes are split over threads and the
     last axis is the inner loop, so order the axes accordingly.'''
     assert out.shape == inp.shape and out.ndim <= 4
+    # (small arrays: numpy on this thread costs less than waking the others)
     if not (USE_C and hasattr(_lib, 'zc_axpby4_d') and inp.dtype == out.dtype
-            and out.dtype in (np.float64, np.complex128)):
+            and out.dtype in (np.float64, np.complex128)) or out.size < 65536:
         if beta == 0:
             out[...] = alpha * inp
         else:
@@ -426,15 +463,148 @@ def axpby(out, inp, alpha=1.0, beta=1.0):
         return out
     pad = 4 - out.ndim
     isz = out.itemsize
-    n = np.array((1,) * pad + out.shape, dtype=np.int64)
-    os_ = np.array((0,) * pad + tuple(x // isz for x in out.strides), dtype=np.int64)
-    is_ = np.array((0,) * pad + tuple(x // isz for x in inp.strides), dtype=np.int64)
+    # (unit axes after the first one: a 2-D array is split over its rows)
+    k = 1 if out.ndim >= 2 else 0
+
+    def padded(t, fill):
+        return np.array(t[:k] + (fill,) * pad + t[k:], dtype=np.int64)
+    n = padded(out.shape, 1)
+    os_ = padded(tuple(x // isz for x in out.strides), 0)
+    is_ = padded(tuple(x // isz for x in inp.strides), 0)
     al = np.array(alpha, dtype=out.dtype)
     be = np.array(beta, dtype=out.dtype)
     getattr(_lib, 'zc_axpby4_' + _sfx(out.dtype))(
         ctypes.c_void_p(out.ctypes.data), ctypes.c_void_p(inp.ctypes.data), _p(n),
         _p(os_), _p(is_), _p(al), _p(be))
     return out
+
+
+class _Pairs:
+    '''The pairs p<q of n indices in numpy.triu_indices order, with what the
+    pair kernels read of a TripleMap (no tables of triples).'''
+
+    def __init__(self, n):
+        self.n = n
+        pi, pj = np.triu_indices(n, 1)
+        self.pairs = np.stack((pi, pj), axis=1)
+        self.npair = len(pi)
+        self.pa_c = np.ascontiguousarray(pi, dtype=np.int64)
+        self.pb_c = np.ascontiguousarray(pj, dtype=np.int64)
+
+
+def lex_pairs(n):
+    '''_Pairs(n), cached.'''
+    key = ('pairs', n)
+    if key not in _CACHE:
+        _CACHE[key] = _Pairs(n)
+    return _CACHE[key]
+
+
+def unpack_pairs(packed, om, vm):
+    '''The antisymmetric x[i,j,a,b] of its packed block [(i<j), (a<b)]
+    (pairs of ``om`` and ``vm``), written by the threads of t2_update.'''
+    packed = np.ascontiguousarray(packed).reshape(om.npair, vm.npair)
+    zero = np.zeros((om.n, om.n, vm.n, vm.n), dtype=packed.dtype)
+    return t2_update(zero, packed, om, vm, np.full(om.n, 0.5), np.zeros(vm.n))
+
+
+def diff_norm2(a, b):
+    '''sum |a - b|^2 of two arrays of the same shape and dtype, threaded and
+    without a temporary (None: no kernel for these arrays).'''
+    if not (_ccsd_c(a, b) and hasattr(_lib, 'zc_vdiffnorm2_d')):
+        return None
+    res = np.zeros(1)
+    getattr(_lib, 'zc_vdiffnorm2_' + _sfx(a.dtype))(_I64(a.size), _p(a), _p(b), _p(res))
+    return float(res[0])
+
+
+def _ccsd_c(*arrays):
+    return USE_C and hasattr(_lib, 'zc_pack_last2_d') and all(
+        a.flags.c_contiguous and a.dtype == arrays[0].dtype for a in arrays) \
+        and arrays[0].dtype in (np.float64, np.complex128)
+
+
+def pack_last2(Y, vm):
+    '''Y[..., a, b] for the pairs (a, b) of ``vm``: (..., npair), threaded.'''
+    Y = np.asarray(Y)
+    lead = Y.shape[:-2]
+    out = np.empty(lead + (vm.npair,), dtype=Y.dtype)
+    if _ccsd_c(Y):
+        getattr(_lib, 'zc_pack_last2_' + _sfx(Y.dtype))(
+            _p(out), _p(Y), _I64(int(np.prod(lead))), _I64(vm.n), _I64(vm.npair),
+            _p(vm.pa_c), _p(vm.pb_c), _p(np.ones(1, dtype=Y.dtype)), ctypes.c_int(0))
+    else:
+        out[...] = Y[..., vm.pairs[:, 0], vm.pairs[:, 1]]
+    return out
+
+
+def add_asym_last2(R, Y, vm, alpha=1.0):
+    '''R[..., Q] += alpha (Y[..., a, b] - Y[..., b, a]) for the pairs Q = (a, b).'''
+    if _ccsd_c(R, Y):
+        getattr(_lib, 'zc_pack_last2_' + _sfx(R.dtype))(
+            _p(R), _p(Y), _I64(R.size // max(vm.npair, 1)), _I64(vm.n), _I64(vm.npair),
+            _p(vm.pa_c), _p(vm.pb_c), _p(np.array([alpha], dtype=R.dtype)), ctypes.c_int(1))
+    else:
+        a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+        R += alpha * (Y[..., a, b] - Y[..., b, a])
+    return R
+
+
+def add_asym_pack4(R, X, om, vm, axes=(0, 1, 2, 3), alpha=1.0):
+    '''R[P, Q] += alpha (x[i,j,a,b] - x[j,i,a,b] - x[i,j,b,a] + x[j,i,b,a]) for
+    P = (i, j) of ``om`` and Q = (a, b) of ``vm``, where x is the 4-index
+    array X with its axes ``axes`` taken as (i, j, a, b) (no transposed copy).'''
+    if _ccsd_c(R, X):
+        st = [X.strides[ax] // X.itemsize for ax in axes]
+        getattr(_lib, 'zc_asym_pack4_' + _sfx(R.dtype))(
+            _p(R), _p(X), _I64(om.npair), _I64(vm.npair), _p(om.pa_c), _p(om.pb_c),
+            _p(vm.pa_c), _p(vm.pb_c), *[_I64(s) for s in st],
+            _p(np.array([alpha], dtype=R.dtype)))
+    else:
+        x = X.transpose(axes)
+        i, j = om.pairs[:, 0][:, None], om.pairs[:, 1][:, None]
+        a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+        R += alpha * (x[i, j, a, b] - x[j, i, a, b] - x[i, j, b, a] + x[j, i, b, a])
+    return R
+
+
+def t2_update(t2, R, om, vm, eo, ev):
+    '''t2 + A(R) / D: the Jacobi step of T2 from the packed residual R[(i<j),
+    (a<b)], with A(R) its antisymmetric (o, o, v, v) array and
+    D[i,j,a,b] = (eo[i] - ev[a]) + (eo[j] - ev[b]).'''
+    dt = np.result_type(t2, R)
+    t2 = np.ascontiguousarray(t2, dtype=dt)
+    R = np.ascontiguousarray(R, dtype=dt)
+    if _ccsd_c(t2, R):
+        out = np.empty_like(t2)
+        getattr(_lib, 'zc_t2_update_' + _sfx(dt))(
+            _p(out), _p(t2), _p(R), _I64(om.n), _I64(vm.n), _I64(om.npair), _I64(vm.npair),
+            _p(om.pa_c), _p(om.pb_c), _p(vm.pa_c), _p(vm.pb_c),
+            _p(np.ascontiguousarray(eo, dtype=np.float64)),
+            _p(np.ascontiguousarray(ev, dtype=np.float64)))
+        return out
+    i, j = om.pairs[:, 0][:, None], om.pairs[:, 1][:, None]
+    a, b = vm.pairs[:, 0], vm.pairs[:, 1]
+    d = R / ((eo[i] - ev[a]) + (eo[j] - ev[b]))
+    out = t2.copy()
+    out[i, j, a, b] += d
+    out[j, i, a, b] -= d
+    out[i, j, b, a] -= d
+    out[j, i, b, a] += d
+    return out
+
+
+def vvoo_ket_add(G, B, t1, om):
+    '''G[Q, P] += Y[Q, i, j] - Y[Q, j, i] for the pairs P = (i, j) of ``om``,
+    Y[Q, i, j] = sum_e t1[i, e] B[Q, e, j], one Q at a time (threads over Q).'''
+    if _ccsd_c(G, B, np.ascontiguousarray(t1, dtype=G.dtype)):
+        getattr(_lib, 'zc_vvoo_ket_' + _sfx(G.dtype))(
+            _p(G), _p(B), _p(np.ascontiguousarray(t1, dtype=G.dtype)), _I64(G.shape[0]),
+            _I64(t1.shape[1]), _I64(t1.shape[0]), _I64(om.npair), _p(om.pa_c), _p(om.pb_c))
+    else:
+        Y = np.matmul(t1, B)
+        G += Y[:, om.pairs[:, 0], om.pairs[:, 1]] - Y[:, om.pairs[:, 1], om.pairs[:, 0]]
+    return G
 
 
 def flip_pairs(m):

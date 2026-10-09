@@ -142,6 +142,58 @@ void zc_gemm_z(int ta, int tb, int64_t m, int64_t n, int64_t k,
     gemm_z(ta, tb, m, n, k, *alpha, a, lda, b, ldb, *beta, c, ldc);
 }
 
+/* A list of products in one parallel region (the passes over the blocks of a
+ * symmetry label make thousands of products of a millisecond each, which a
+ * threaded BLAS does not run at its rate, least of all on many cores):
+ *   C_t = alpha A_t B_t + beta C_t,  t < ntask,
+ * with tasks[t] = (m, n, k, offset of A_t in a, lda, offset of B_t in b, ldb,
+ * offset of C_t in c, ldc), offsets in elements, all matrices row-major.
+ * Every product is split over its columns into pieces of about ``cols``
+ * columns; a piece is one sequential GEMM, and the threads take the pieces
+ * of all tasks from one queue. */
+#define DEFINE_GEMM_TASKS(T, SFX)                                              \
+void zc_gemm_tasks_##SFX(int64_t ntask, const int64_t *tasks, const T *a,      \
+                         const T *b, T *c, const T *alpha, const T *beta,      \
+                         int64_t cols)                                         \
+{                                                                              \
+    if (cols <= 0) cols = 96;                                                  \
+    int64_t total = 0;                                                         \
+    for (int64_t t = 0; t < ntask; t++) {                                      \
+        const int64_t *q = tasks + 9 * t;                                      \
+        if (q[0] > 0 && q[1] > 0) total += (q[1] + cols - 1) / cols;           \
+    }                                                                          \
+    if (total == 0) return;                                                    \
+    int64_t *piece = malloc(sizeof(int64_t) * 2 * total);                      \
+    int64_t np = 0;                                                            \
+    for (int64_t t = 0; t < ntask; t++) {                                      \
+        const int64_t *q = tasks + 9 * t;                                      \
+        if (q[0] <= 0 || q[1] <= 0) continue;                                  \
+        const int64_t n = (q[1] + cols - 1) / cols;                            \
+        for (int64_t j = 0; j < n; j++) {                                      \
+            piece[2 * np] = t;                                                 \
+            piece[2 * np + 1] = j * q[1] / n;                                  \
+            np++;                                                              \
+        }                                                                      \
+    }                                                                          \
+    _Pragma("omp parallel for schedule(dynamic, 1)")                           \
+    for (int64_t p = 0; p < np; p++) {                                         \
+        const int64_t *q = tasks + 9 * piece[2 * p];                           \
+        const int64_t c0 = piece[2 * p + 1];                                   \
+        const int64_t c1 = (p + 1 < np && piece[2 * p + 2] == piece[2 * p])    \
+                           ? piece[2 * p + 3] : q[1];                          \
+        if (q[2] > 0)                                                          \
+            gemm_##SFX(0, 0, q[0], c1 - c0, q[2], *alpha, a + q[3], q[4],      \
+                       b + q[5] + c0, q[6], *beta, c + q[7] + c0, q[8]);       \
+        else                                                                   \
+            for (int64_t i = 0; i < q[0]; i++)                                 \
+                for (int64_t j = c0; j < c1; j++)                              \
+                    c[q[7] + i * q[8] + j] *= *beta;                           \
+    }                                                                          \
+    free(piece);                                                               \
+}
+DEFINE_GEMM_TASKS(double, d)
+DEFINE_GEMM_TASKS(double complex, z)
+
 /* Batched GEMM over slices: C_i = alpha op(A) B_i + beta C_i for i < nb, with
  * B_i = b + i sb (k x n, leading dimension ldb) and C_i = c + i sc (m x n,
  * leading dimension ldc).  One slice per thread, BLAS sequential inside. */
@@ -430,6 +482,89 @@ void zc_t3_occop_##SFX(const T *O6, const T *T3p, int64_t nto, int64_t nvt,    \
                    R + c0, nvt);                                               \
         for (int64_t it = 0; it < nto && tmap; it++)                           \
             unmap(T3p + it * nvt + c0, sizeof(T) * nc);                        \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* ---- hh ladder + F_oo, pair-driven (docs/factorization.md 2.3): the same    \
+ * operator as zc_t3_occop without its C(o,3) x C(o,3) matrix.  With the       \
+ * occupied triples written as (spectator k; pair P),                          \
+ *   R[(k; P), A] += sum_{P'} W'[P, P'] T[(k; P'), A],                         \
+ *   W'[(i<j), (m<n)] = W[m,n,i,j] - 1/2 (F[m,i] d_nj - F[n,i] d_mj            \
+ *                                        - F[m,j] d_ni + F[n,j] d_mi)         \
+ * (each F term is met from two spectators, hence the half).  For every        \
+ * spectator k the rows of the block of T3 that contain k are listed:          \
+ * entries koff[k] <= e < koff[k+1] with the row krow[e] (local), its pair     \
+ * kpair[e] and the sign ksgn[e] of (k; pair) -> triple.                        \
+ *                                                                             \
+ * zc_t3_hhpair_w: the matrices of all spectators, one after the other,        \
+ * Wk[woff[k] + x n_k + y] = s_x W'[P_x, P_y] s_y (the signs folded in; with   \
+ * ``trans`` the transposed operator, W'[P_y, P_x]: the Lambda equations).     \
+ * W: (no, no, no, no) as W[m,n,i,j]; F: (no, no) as F[m,i]. */                 \
+void zc_t3_hhpair_w_##SFX(T *Wk, const int64_t *woff, int64_t no,              \
+                          const int64_t *koff, const int64_t *kpair,           \
+                          const int8_t *ksgn, const int64_t *pa,               \
+                          const int64_t *pb, const T *W, const T *F, int trans) \
+{                                                                              \
+    _Pragma("omp parallel for schedule(dynamic, 1)")                           \
+    for (int64_t k = 0; k < no; k++) {                                         \
+        const int64_t e0 = koff[k], n = koff[k + 1] - e0;                      \
+        T *w = Wk + woff[k];                                                   \
+        for (int64_t x = 0; x < n; x++)                                        \
+        for (int64_t y = 0; y < n; y++) {                                      \
+            const int64_t Pi = kpair[e0 + (trans ? y : x)];                    \
+            const int64_t Pm = kpair[e0 + (trans ? x : y)];                    \
+            const int64_t i = pa[Pi], j = pb[Pi], m = pa[Pm], nn = pb[Pm];     \
+            T v = W[((m * no + nn) * no + i) * no + j];                        \
+            if (nn == j) v -= 0.5 * F[m * no + i];                             \
+            if (m == j) v += 0.5 * F[nn * no + i];                             \
+            if (nn == i) v += 0.5 * F[m * no + j];                             \
+            if (m == i) v -= 0.5 * F[nn * no + j];                             \
+            w[x * n + y] = (double)(ksgn[e0 + x] * ksgn[e0 + y]) * v;          \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* R[row, A] += the operator on T3 (both (nrow, ncol), a block of the packed   \
+ * arrays): the threads share the columns in chunks of nc; a thread gathers,   \
+ * for one spectator after the other, the rows of its chunk that contain it    \
+ * (n_k x nc, in cache), multiplies with Wk (a GEMM of its own) and adds the   \
+ * result to the rows of R.  T3 and R are read and written once per           \
+ * spectator of a row, i.e. three times, a chunk at a time. */                 \
+void zc_t3_hhpair_##SFX(const T *T3, T *R, int64_t nrow, int64_t ncol,         \
+                        int64_t no, const int64_t *koff, const int64_t *krow,  \
+                        const T *Wk, const int64_t *woff, int64_t nc)          \
+{                                                                              \
+    (void)nrow;                                                                \
+    int64_t nmax = 0;                                                          \
+    for (int64_t k = 0; k < no; k++)                                           \
+        if (koff[k + 1] - koff[k] > nmax) nmax = koff[k + 1] - koff[k];        \
+    if (nmax == 0 || ncol == 0) return;                                        \
+    if (nc <= 0) nc = 64;                                                      \
+    const int64_t nchunk = (ncol + nc - 1) / nc;                               \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *Y = malloc(sizeof(T) * 2 * nmax * nc);                              \
+        T *Z = Y + nmax * nc;                                                  \
+        _Pragma("omp for schedule(dynamic, 1)")                                \
+        for (int64_t ch = 0; ch < nchunk; ch++) {                              \
+            const int64_t c0 = ch * nc;                                        \
+            const int64_t n1 = (c0 + nc <= ncol) ? nc : ncol - c0;             \
+            for (int64_t k = 0; k < no; k++) {                                 \
+                const int64_t e0 = koff[k], n = koff[k + 1] - e0;              \
+                if (n == 0) continue;                                          \
+                for (int64_t x = 0; x < n; x++)                                \
+                    memcpy(Y + x * n1, T3 + krow[e0 + x] * ncol + c0,          \
+                           sizeof(T) * n1);                                    \
+                gemm_##SFX(0, 0, n, n1, n, 1.0, Wk + woff[k], n, Y, n1, 0.0,   \
+                           Z, n1);                                             \
+                for (int64_t x = 0; x < n; x++) {                              \
+                    T *r = R + krow[e0 + x] * ncol + c0;                       \
+                    const T *z = Z + x * n1;                                   \
+                    for (int64_t c = 0; c < n1; c++) r[c] += z[c];             \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        free(Y);                                                               \
     }                                                                          \
 }                                                                              \
                                                                                \

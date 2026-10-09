@@ -82,8 +82,8 @@ def init_amps(eris):
 def _parts(t1, t2, t3):
     '''Amplitudes as a list of flat parts for DIIS (t2 packed over i<j, a<b
     in triu order).'''
-    (m, n), (d, e) = np.triu_indices(t1.shape[0], 1), np.triu_indices(t1.shape[1], 1)
-    t2p = t2[m[:, None], n[:, None], d, e]
+    om, vm = t3pack.lex_pairs(t1.shape[0]), t3pack.lex_pairs(t1.shape[1])
+    t2p = t3pack.pack_last2(np.ascontiguousarray(t2[om.pa_c, om.pb_c]), vm)
     parts = [t1.ravel(), t2p.ravel()]
     if t3 is not None:
         parts.append(t3)
@@ -92,21 +92,17 @@ def _parts(t1, t2, t3):
 
 def _from_parts(parts, nocc, nvir, with_t3):
     '''Inverse of _parts; keeps the dtype (real stays real).'''
-    (m, n), (d, e) = np.triu_indices(nocc, 1), np.triu_indices(nvir, 1)
     t1 = parts[0].reshape(nocc, nvir)
-    p = parts[1].reshape(len(m), len(d))
-    m, n = m[:, None], n[:, None]
-    t2 = np.zeros((nocc, nocc, nvir, nvir), dtype=p.dtype)
-    t2[m, n, d, e] = p
-    t2[n, m, d, e] = -p
-    t2[m, n, e, d] = -p
-    t2[n, m, e, d] = p
+    t2 = t3pack.unpack_pairs(parts[1], t3pack.lex_pairs(nocc), t3pack.lex_pairs(nvir))
     t3 = parts[2] if with_t3 else None
     return t1, t2, t3
 
 
 def _diff_norm(a, b, chunk=1 << 22):
     '''||a - b|| of two flat arrays without a temporary of their size.'''
+    s = t3pack.diff_norm2(a, b) if isinstance(a, np.ndarray) and isinstance(b, np.ndarray) else None
+    if s is not None:
+        return np.sqrt(s)
     s = 0.0
     for i in range(0, a.size, chunk):
         d = a[i:i + chunk] - b[i:i + chunk]

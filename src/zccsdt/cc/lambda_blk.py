@@ -504,6 +504,10 @@ class BlockL3:
             if L.nI[g] == 0 or L.nA[g] == 0:
                 continue
             I = slice(om.tri_off[g], om.tri_off[g + 1])
+            if isinstance(O6, t3kern.OccOperator):
+                O6.apply(L.block(L3, g), L.block(R, g), (int(I.start), int(I.stop)),
+                         t3engine.occ_cols(L.nI[g], dtype.itemsize, self.mem_mb))
+                continue
             Og = np.ascontiguousarray(O6[I, I], dtype=dtype)
             t3kern.occ_operator(Og, L.block(L3, g), L.block(R, g),
                                 t3engine.occ_cols(L.nI[g], dtype.itemsize, self.mem_mb))
