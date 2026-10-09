@@ -157,6 +157,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   logical, intent(out) :: usefile
   logical, intent(in) :: flooronly
   integer :: nthr0
+  integer(8) :: bpr
   integer(8), external :: xzpeak_cc, xzpeak_q
   integer(8) :: f, floor_cc, floor_q, need_cc, need_q, free_bytes, per_vec, nfit, k8
   integer :: k
@@ -184,6 +185,15 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   phi(2) = max(1_8, min(nto, int(1.3d9 / (2d0 * 8 * nwe * nvp * nv * frac), 8)))
   plo(3) = 1
   phi(3) = max(1_8, min(npo, int(2d9 / (3d0 * 8 * nwe * f * frac), 8)))
+  ! (with more than one rank the batches are what is dealt out: at least
+  ! bpr of them per rank, XZ_BPR, so that the cost model can balance the ranks)
+  if (nrank > 1) then
+    bpr = 8
+    call get_environment_variable('XZ_BPR', arg, larg)
+    if (larg > 0) read(arg(1:larg), *) bpr
+    phi(2) = max(1_8, min(phi(2), nto / (max(bpr, 1_8) * nrank)))
+    phi(3) = max(1_8, min(phi(3), npo / (max(bpr, 1_8) * nrank)))
+  end if
   plo(4) = 1
   phi(4) = max(1_8, nv / 8)
   plo(5) = 3

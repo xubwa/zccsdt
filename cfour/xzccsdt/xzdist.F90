@@ -280,24 +280,29 @@ contains
   ! The seconds of the ranks in the stages of the iterations (set 1: the T3
   ! equation, 2: the Lambda equations), printed by rank 0.
   subroutine xzdtable(set, ncyc)
+    use xzmem, only: xzpeak
+    use xzkern, only: xz_rss
     integer, intent(in) :: set
     integer(8), intent(in) :: ncyc
-    real(8) :: mine(nds + 2), all(nds + 2, 0:nrank - 1), rate
-    integer(8) :: r
+    real(8) :: mine(nds + 4), all(nds + 4, 0:nrank - 1), rate
+    integer(8) :: r, kb(2)
     if (nrank == 1) return
     mine(1:nds) = dsec(:, set)
     mine(nds + 1) = dwords(set)
     mine(nds + 2) = 0d0
+    call xz_rss(kb)
+    mine(nds + 3) = 8d-6 * xzpeak
+    mine(nds + 4) = 1d-3 * kb(1)
     all = 0d0
-    call xzmpi_gather(mine, all, int(nds + 2, 8))
+    call xzmpi_gather(mine, all, int(nds + 4, 8))
     if (myrank > 0) return
     write(6, '(/,a,a,a,i4,a)') '   The ranks in the ', merge('CCSDT ', 'Lambda', set == 1), ' iterations (seconds of ', &
       ncyc, ' cycles)'
     write(6, '(a)') '     rank    pass 1  sweep+ladder    pass 2  sums of pass 1  sum of residual  amplitudes' // &
-      '   rank 0 alone     step'
+      '   rank 0 alone     step   work array/MB   peak resident/MB'
     do r = 0, nrank - 1
-      write(6, '(i9,f10.2,f14.2,f10.2,f16.2,f17.2,f12.2,f15.2,f9.2)') r, all(1, r), all(2, r), all(3, r), &
-        all(4, r), all(5, r), all(6, r), all(8, r), all(7, r)
+      write(6, '(i9,f10.2,f14.2,f10.2,f16.2,f17.2,f12.2,f15.2,f9.2,f16.1,f19.1)') r, all(1, r), all(2, r), &
+        all(3, r), all(4, r), all(5, r), all(6, r), all(8, r), all(7, r), all(nds + 3, r), all(nds + 4, r)
     end do
     rate = 0d0
     if (maxval(all(6, 1:)) > 0d0) rate = 8d-9 * all(nds + 1, 1) / maxval(all(6, 1:))

@@ -42,12 +42,11 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     ! a rank other than 0: no DIIS vectors, one region for its part of the residual
     call N(xzdiis_alloc)(0_8, .false., nch)
     if (.not. xzdry) then
-      call N(xzccwork)(w, kt1n, kt2n)
+      call N(xzccwork)(w, kt1n, kt2n, ncyc)
       call N(xzdiis_close)()
       call xzrel(m0)
       ecorr = 0d0
       converged = .true.
-      ncyc = 0
       return
     end if
   else
@@ -165,7 +164,7 @@ end subroutine
 ! The iterations of a rank other than 0: as long as rank 0 says "one more",
 ! its amplitudes into T1, T2, T3 of this rank and the part of this rank of
 ! the step (xzstep leaves out what only rank 0 does).
-subroutine N(xzccwork)(w, kt1n, kt2n)
+subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
   use xzdata
   use xzmem
   use xzkern
@@ -174,8 +173,9 @@ subroutine N(xzccwork)(w, kt1n, kt2n)
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: kt1n, kt2n
+  integer(8), intent(out) :: icyc
   integer(8), external :: N(xzdiis_target)
-  integer(8) :: kr3, icyc
+  integer(8) :: kr3
   real(8) :: ctl(2), tsg, t0
   icyc = 0
   write(6, '(/,a)') '  CCSDT iterations: the batches of this rank'

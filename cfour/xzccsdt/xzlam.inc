@@ -104,7 +104,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   write(6, '(/,a,f10.2,a)') '   intermediates of the Lambda equations: ', tlamim, ' s'
   if (ldbg > 0) call N(xzlamdump)(w, dbg(1:ldbg))
   if (myrank > 0) then
-    call N(xzlamwork)(w, kl1n, kl2n)
+    call N(xzlamwork)(w, kl1n, kl2n, ncyc)
     call N(xzdiis_close)()
     call xzrel(m0)
     converged = .true.
@@ -169,7 +169,7 @@ end subroutine
 ! ---------------------------------------------------------------------------
 ! The Lambda iterations of a rank other than 0: lambda of rank 0 into l1, l2,
 ! l3 of this rank and its part of the step, as long as rank 0 says "one more".
-subroutine N(xzlamwork)(w, kl1n, kl2n)
+subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
   use xzdata
   use xzmem
   use xzkern
@@ -178,8 +178,9 @@ subroutine N(xzlamwork)(w, kl1n, kl2n)
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: kl1n, kl2n
+  integer(8), intent(out) :: icyc
   integer(8), external :: N(xzdiis_target)
-  integer(8) :: kr3, icyc, ov
+  integer(8) :: kr3, ov
   real(8) :: ctl(2), tsg, t0
   ov = no * nv
   icyc = 0
