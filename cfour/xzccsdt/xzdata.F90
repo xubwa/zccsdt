@@ -126,6 +126,7 @@ module xzdata
   integer(8) :: nbt = 1             ! occupied triples of a batch of the pp ladder
   integer(8) :: nba = 1             ! first virtual indices of a batch of the W_vvvo terms
   integer(8) :: ncb = 0             ! columns of a product of the occupied operator
+  integer :: hhset = 0              ! the hh ladder of dense T3: 1 operator on triples, 2 through pairs
 
   ! ---- batch sizes of (Q)
   integer(8) :: qc22 = 1            ! columns (cd) of a product [(ab)][(cd)]
@@ -146,20 +147,109 @@ module xzdata
   logical :: qdebug = .false.       ! print the parts of (Q) (XZ_QDEBUG)
   real(8) :: qparts(4) = 0d0
   logical :: qsampled = .false.     ! (Q) ran in sample mode: its energies are not (Q)
+  logical :: timing_run = .false.   ! XZ_NCYC: a fixed number of cycles, nothing is converged
 
-  ! ---- wall times of the stages of the iterations (seconds)
-  integer, parameter :: ntime = 16
-  real(8) :: tstage(ntime) = 0d0
-  character(len=28), parameter :: tname(ntime) = [character(len=28) :: &
-    'T1 dressing', 'pass-1 operands', 'pass 1', 'W_vvvo', 'intermediates', &
-    'dressed <ab||cd> rows', 'pp ladder: gather', 'pp ladder: GEMM', 'pp ladder: reduction', &
-    'CCSD part', 'occupied operator', 'pass 2', 'hh ladder, F_oo', 'T3 update', 'DIIS', 'energy']
+  ! ---- wall and CPU times of the stages, by name, in the order of their
+  !      first use.  Sets: 1 the CCSDT iterations, 2 the iterations of the
+  !      Lambda equations, 3 the intermediates of the Lambda equations (once)
+  integer, parameter :: ntset = 3, ntmax = 64
+  character(len=28) :: tnam(ntmax, ntset) = ' '
+  real(8) :: twal(ntmax, ntset) = 0d0, tcpu(ntmax, ntset) = 0d0
+  logical :: tpart(ntmax, ntset) = .false.      ! a part of another entry: wall only, not summed
+  integer :: ntim(ntset) = 0
+  real(8) :: tic_w = 0d0, tic_c = 0d0
+  integer :: tcur = 1                           ! the set of the step that runs
+  real(8) :: tlamim = 0d0                       ! the intermediates of the Lambda equations
 
-  ! ---- wall times of the stages of the Lambda equations
-  integer, parameter :: nltime = 12
-  real(8) :: tlam(nltime) = 0d0
-  character(len=28), parameter :: lname(nltime) = [character(len=28) :: &
-    'intermediates (once)', 'pass 1: gather', 'pass 1: stacked GEMMs', 'pass 1: density', &
-    'Gram matrix', 'pass 2', 'ladder: gather', 'ladder: GEMM', 'ladder: reduction, small', &
-    'hh ladder, F_oo', 'residuals of rank 1, 2', 'update, DIIS']
+contains
+
+  ! The hh ladder and F_oo of dense T3 with the operator on occupied triples
+  ! (xzo6, one GEMM: the default) or through occupied pairs (xzwpair,
+  ! xzhhapply: XZ_HH=pair).  The pair form has (o-2)**2 / (9 o) times fewer
+  ! operations, but its gather and reduction are bound by the memory: measured
+  ! for 26 occupied spinors it is faster on 8 threads and slower on 16 and
+  ! more (docs/native.md), so it is an option.  In blocks of the labels the
+  ! operator on triples is used in any case.
+  logical function xzhhpair()
+    character(len=8) :: arg
+    integer :: larg
+    if (hhset == 0) then
+      hhset = 1
+      call get_environment_variable('XZ_HH', arg, larg)
+      if (larg > 0) then
+        if (arg(1:1) == 'p') hhset = 2
+        if (arg(1:1) == 'o') hhset = 1
+      end if
+      if (no < 3) hhset = 1
+    end if
+    xzhhpair = hhset == 2 .and. ncls == 1
+  end function xzhhpair
+
+  ! columns of T3 per product of the pair form
+  integer(8) function xzhhcols()
+    xzhhcols = max(1_8, min(nvt, 512_8))
+  end function xzhhcols
+
+  ! The tasks of a parallel loop that are too large for it: with nth threads
+  ! a task of more than three fair shares of the work (cost: operation
+  ! counts) would run on one core while the others wait.  The loops over
+  ! tasks run these first, one after the other with threaded kernels and a
+  ! threaded BLAS, and the rest in parallel with the BLAS sequential inside.
+  subroutine xzbig(n, cost, big)
+    use omp_lib
+    integer(8), intent(in) :: n
+    real(8), intent(in) :: cost(n)
+    logical, intent(out) :: big(n)
+    real(8) :: share
+    share = sum(cost(1:n)) / omp_get_max_threads()
+    big(1:n) = cost(1:n) > 3d0 * share
+  end subroutine xzbig
+
+  ! the clocks start
+  subroutine xztic()
+    use xzkern
+    call xz_clocks(tic_w, tic_c)
+  end subroutine xztic
+
+  integer function xztslot(set, name)
+    integer, intent(in) :: set
+    character(len=*), intent(in) :: name
+    integer :: k
+    do k = 1, ntim(set)
+      if (tnam(k, set) == name) then
+        xztslot = k
+        return
+      end if
+    end do
+    ntim(set) = min(ntim(set) + 1, ntmax)
+    xztslot = ntim(set)
+    tnam(xztslot, set) = name
+  end function xztslot
+
+  ! the wall and CPU time (all threads of the process) since the last xztic
+  ! or xztoc go to the stage `name'; the clocks start again
+  subroutine xztoc(set, name)
+    use xzkern
+    integer, intent(in) :: set
+    character(len=*), intent(in) :: name
+    integer :: k
+    real(8) :: w1, c1
+    call xz_clocks(w1, c1)
+    k = xztslot(set, name)
+    twal(k, set) = twal(k, set) + w1 - tic_w
+    tcpu(k, set) = tcpu(k, set) + c1 - tic_c
+    tic_w = w1
+    tic_c = c1
+  end subroutine xztoc
+
+  ! a wall time measured inside a kernel: a part of the stage that the call is in
+  subroutine xztpart(set, name, wall)
+    integer, intent(in) :: set
+    character(len=*), intent(in) :: name
+    real(8), intent(in) :: wall
+    integer :: k
+    k = xztslot(set, name)
+    twal(k, set) = twal(k, set) + wall
+    tpart(k, set) = .true.
+  end subroutine xztpart
 end module xzdata

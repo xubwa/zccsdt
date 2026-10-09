@@ -15,8 +15,9 @@ working memory is the work array that CFOUR's `CRAPSI` allocates
 `lambda_blk.py`, `quadruples_lambda.py`; docs/factorization.md, docs/lambda.md),
 which is the reference of every number below.
 
-State of this document: the program at the commit that adds the Lambda
-equations and (Q)_Lambda (section 11).  What is measured says so (job, node);
+State of this document: the program at the commit that reworks the threading
+of the iterations (section 12; the Lambda equations and (Q)_Lambda: section
+11).  What is measured says so (job, node);
 what is not done is listed at the end.  In short: CCSDT, (Q), the Lambda
 equations of CCSDT and (Q)_Lambda - dense or in the blocks of symmetry
 labels, complex or real, (Q) and (Q)_Lambda over MPI ranks with restart - are
@@ -334,7 +335,7 @@ must fit in the work array.
 Test hooks (environment): `XZ_MAXCOR=n` uses only n words of the work array;
 `XZ_PLAN="nqs nbt nbp nba qxv qc22 qc13 qrows"` gives the batch sizes
 (0: as planned), `XZ_DIIS=m8|f8|m0` the place (memory / file) and number of
-the DIIS vectors.
+the DIIS vectors.  `XZ_NCYC`, `XZ_START`, `XZ_HH`: section 12.
 
 Measured (H2O / 6-31G, login node): the same energies to 1e-12 with the work
 array at its floor (2022176 words: DIIS in the file, one pair per batch),
@@ -701,8 +702,9 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
 
 - Lambda: the residuals of rank 1 and 2 and the o v^3-sized operands in
   blocks of the labels (they are dense, as in the Python program: with
-  labels they are most of the memory and of the time of an iteration,
-  section 11); l3, T3 or the residual in a mapped scratch file; the Lambda
+  labels they are most of the memory of an iteration, and were 39 % of its
+  time before their loops became GEMMs - section 12: now a sixth at 26 +
+  120); l3, T3 or the residual in a mapped scratch file; the Lambda
   equations with constant terms (lambda of CCSDT(Q), the equations of the
   first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); densities.
 - (Q) over ranks on separate nodes was not timed (section 8); a smaller
@@ -1267,3 +1269,222 @@ an interrupted `(q)`, whose checkpoint is not taken.  `[q]_l` writes the
 fifth-order energy to `TOTENERG`.  `XZ_QSAMPLE=0.3`: 21 of 70 quadruples
 (HBr), the estimate printed, no `TOTENERG`.  CCSDT, [Q] and (Q) of the six
 cases after the changes: the numbers of section 7.
+
+## 12. Threads: where an iteration goes, and what was changed
+
+Measured on HBr with 10 frozen spinors (26 occupied spinors), m_j-adapted
+real spinors with labels written from Python (`bench/cfour/labelled_run.py`;
+120 virtual spinors: the 120 of lowest energy of cc-pVQZ-DK), whole nodes
+(`sbatch -p parallel -N 1 -n 1 -c 48 --mem=180G`, two sockets of Xeon Gold
+6248R, `MEMORY_SIZE=150 GB`), three cycles per run (`XZ_NCYC=3`: nothing
+converged, the tables of the stages printed).  The nodes of this partition
+differ by up to 40 % among themselves in these runs (the same binary, 26 +
+120 in blocks on 8 threads: 10.8 s per cycle on c011 and c195, 16.0 s on
+c306), so every comparison below is of binaries run one after the other in
+one job on one node, the old one first.
+
+**The timers.**  Every stage of the amplitude step, of the Lambda
+intermediates and of a Lambda iteration has a named timer (`xztic`, `xztoc`
+of `xzdata.F90`): wall time and the CPU time of all threads of the process;
+the output has both and their ratio.  That ratio is **not** the number of
+cores that work: a thread of the OpenMP runtime that waits spins for
+`KMP_BLOCKTIME` (200 ms) and counts as busy, so the ratio is close to the
+number of threads in every stage of a short iteration.  With
+`KMP_BLOCKTIME=0` it is the cores that work (and the run is a few per cent
+slower); the serial or unbalanced stages below were found that way and by
+the wall time of a stage against the number of threads.
+
+**Before** (commit 51c6773: the program of section 11 with the timers).
+Nothing of size was serial - the loops of `xzimd.inc` had OpenMP directives -
+but in blocks the passes over T3 did not scale: a pass was a sequence of
+hundreds of small gathers and GEMMs per batch, each a parallel region of its
+own, and from 24 to 48 threads an iteration got slower.  The operator on the
+occupied triples, which is 30 % of an iteration of the Python program at
+this size, was never the problem here: it is built by a threaded loop in
+3 ms for 26 occupied spinors, and its products are 1 % of an iteration in
+blocks and 4 % of a dense one (26 + 78).
+
+**Changes** (commits 6d73752, 1b7270d, 3bc2a40):
+
+- *Passes in blocks as tasks* (`xzblk.inc`, `xzlblk.inc`).  Pass 1: the
+  combinations of classes (d, m) of a batch; pass 2: one (group of Q, pair
+  P); pass 1 of the Lambda equations: the gathers per (group, class), the
+  densities per (group, pair) with a buffer per thread, the stacked products
+  per (group, class).  A task gathers its own block of T3 or l3 and does its
+  products with the BLAS sequential inside; what two tasks add to the same
+  place (`yall`, `ra`, the densities) is added after the loop or under a
+  lock.  A task of more than three fair shares of the work of its loop runs
+  before the loop, alone, with threaded kernels (`xzbig`).
+- *Batches of the passes in blocks*: the targets in pairs and triples grow
+  by the dense fraction of T3, so that the buffers keep their size in bytes
+  (33 pairs per batch instead of 3 for 26 + 120).  Without this a batch of
+  26 + 160 had one pair, pass 2 a few huge tasks, and the tasks alone were a
+  regression there (24 threads, job 31780679: pass 2 5.9 s before, 14.6 s).
+- *Element loops that are now GEMMs or vector loops*: the dressed
+  `<ab||ij>` (tau `<oo||oo>` as a GEMM), W_vooo (`sum_ne ~<mn||ie> t2`, o^4
+  v^2, one GEMM), F_vv of T3 and G_vv, G_oo of the Lambda equations (one
+  GEMM each on t2 and l2 as stored), the Lambda_1 residual (its o^2 v^3 sums
+  as vector operations over a, threaded over i), the Lambda_2 residual (Y1
+  with `~<jo||mb>`, o^4 v^2, a GEMM); the dressed Fock matrix threaded.
+- *Not kept as the default: the hh ladder through occupied pairs*
+  (`xzwpair`, `xzhhapply`; `XZ_HH=pair`): T3 gathered by occupied pair in
+  chunks of columns, one GEMM with `W(mn,ij) - 1/2 (F_mi d_nj - ...)`, the
+  three terms of a triple added to the residual; (o - 2)^2 / (9 o) times
+  fewer operations than the operator on triples.  Measured in dense mode (v
+  = 78, job 31780679, c195, seconds per cycle in the stage):
+
+  | o | 8 threads: triples | pairs | 48 threads: triples | pairs |
+  |---|---|---|---|---|
+  | 10 | 0.005 | 0.050 | 0.005 | 0.060 |
+  | 14 | 0.045 | 0.145 | 0.010 | 0.180 |
+  | 18 | 0.220 | 0.335 | 0.045 | 0.290 |
+  | 22 | 0.690 | 0.670 | 0.180 | 0.450 |
+  | 26 | 1.710 | 1.305 | 0.645 | 0.820 |
+  | 30 | 4.110 | 2.830 | 1.255 | 1.295 |
+
+  The gather and the reduction of the pair form are bound by the memory and
+  do not scale; the one GEMM of the operator on triples does.  It wins on 8
+  threads from 22 occupied spinors and on 48 threads nowhere up to 30.
+- *Not done: the CCSD kernels of `csrc/zccsd_kernels.c`.*  They are for
+  complex elements only and for pairs in numpy's `tril` order; the native
+  CCSD part runs in real arithmetic for these cases, on pairs in its own
+  (grouped) order, and its large terms are already one GEMM each (ladder on
+  the dressed `<ab||cd>` slabs, W_klij, the ring).  It is 2 to 4 % of an
+  iteration in blocks.
+
+**Before and after, one node** (job 31781558, c306: the binary of 51c6773,
+then the final one, alternating, twice; 26 + 120 in blocks, seconds per
+cycle; the second repetition agrees within 1 %):
+
+| threads | 8 | 16 | 24 | 48 | 8 -> 24 |
+|---|---|---|---|---|---|
+| CCSDT, before | 15.97 | 9.63 | 7.87 | 8.75 | 2.03 |
+| CCSDT, after | 11.38 | 6.36 | 5.04 | 4.19 | 2.26 |
+| ratio | 1.40 | 1.51 | 1.56 | 2.09 | |
+| Lambda, before | 25.01 | 15.70 | 12.98 | 14.66 | 1.93 |
+| Lambda, after | 14.95 | 8.88 | 7.28 | 6.29 | 2.05 |
+| ratio | 1.67 | 1.77 | 1.78 | 2.33 | |
+
+The same job, 26 + 160 in blocks (8 / 24 / 48 threads): CCSDT 49.26 / 26.61
+/ 31.10 s before, 32.12 / 14.28 / 11.87 s after; Lambda 77.84 / 44.41 /
+59.59 s before, 41.53 / 19.53 / 16.63 s after.  26 + 78 (24 / 48 threads):
+CCSDT 2.24 / 2.88 -> 1.44 / 1.31 s, Lambda 3.51 / 3.75 -> 2.24 / 2.15 s.
+An earlier job with the same alternation on a faster node (31781091, c011,
+the state of 85a86b0, before the batch targets): CCSDT 10.84 / 7.18 / 5.99 /
+5.45 s before, 8.62 / 5.34 / 4.97 / 4.09 s after.
+
+The stages of the amplitude step, 26 + 120 in blocks (job 31781558, seconds
+per cycle; stages below 0.1 s left out):
+
+| stage | before: 8 | 16 | 24 | 48 | after: 8 | 16 | 24 | 48 |
+|---|---|---|---|---|---|---|---|---|
+| pass 1 (gather, products) | 2.53 | 2.05 | 1.97 | 2.76 | 1.49 | 1.09 | 1.05 | 0.97 |
+| pass 2: gather, products | 5.60 (with the reduction) | 3.36 | 2.75 | 3.15 | 2.67 | 1.55 | 1.22 | 0.90 |
+| pass 2: reduction | | | | | 1.07 | 0.58 | 0.41 | 0.29 |
+| pp ladder: gather | 0.34 | 0.19 | 0.13 | 0.14 | 0.37 | 0.19 | 0.15 | 0.13 |
+| pp ladder: GEMM | 1.23 | 0.81 | 0.54 | 0.36 | 1.25 | 0.81 | 0.51 | 0.28 |
+| pp ladder: reduction | 0.82 | 0.45 | 0.33 | 0.28 | 0.78 | 0.40 | 0.30 | 0.21 |
+| W_vvvo: t2 with `<ov||vv>` | 1.60 | 0.47 | 0.31 | 0.31 | 1.56 | 0.45 | 0.31 | 0.33 |
+| dressed `<ab||ij>` | 0.93 | 0.49 | 0.32 | 0.19 | < 0.1 | | | |
+| W_ovvo, F_vv, F_oo | 0.59 | 0.35 | 0.32 | 0.39 | 0.19 | 0.10 | 0.08 | 0.20 |
+| W_vooo | 0.26 | 0.15 | 0.11 | 0.08 | < 0.1 | | | |
+| dressing: `<ov||vo>`, `<ov||oo>` | 0.34 | 0.19 | 0.14 | 0.10 | 0.34 | 0.19 | 0.14 | 0.10 |
+| dressing: Fock | 0.23 | 0.21 | 0.22 | 0.22 | < 0.1 | | | |
+| CCSD part | 0.32 | 0.19 | 0.14 | 0.21 | 0.32 | 0.19 | 0.16 | 0.18 |
+| hh ladder, F_oo | 0.27 | 0.09 | 0.06 | 0.06 | 0.26 | 0.09 | 0.06 | 0.04 |
+| DIIS | 0.27 | 0.19 | 0.17 | 0.16 | 0.28 | 0.20 | 0.17 | 0.16 |
+| total | 15.97 | 9.63 | 7.87 | 8.75 | 11.38 | 6.36 | 5.04 | 4.19 |
+
+and of a Lambda iteration:
+
+| stage | before: 8 | 16 | 24 | 48 | after: 8 | 16 | 24 | 48 |
+|---|---|---|---|---|---|---|---|---|
+| pass 1: gather | 1.56 | 1.15 | 0.98 | 1.25 | 1.32 | 0.91 | 0.85 | 0.66 |
+| pass 1: density | 3.25 | 1.98 | 1.76 | 1.67 | 1.86 | 1.13 | 1.13 | 1.31 |
+| pass 1: stacked GEMMs | 2.54 | 2.21 | 2.00 | 3.46 | 1.05 | 0.78 | 0.73 | 0.80 |
+| pass 2 (with its reduction) | 6.35 | 3.96 | 3.41 | 4.06 | 4.14 | 2.33 | 1.70 | 1.30 |
+| ladder: gather, GEMM, reduction | 2.79 | 1.70 | 1.22 | 1.37 | 2.83 | 1.66 | 1.12 | 0.86 |
+| R1, R2: densities | 0.68 | 0.37 | 0.26 | 0.22 | 0.19 | 0.10 | 0.07 | 0.06 |
+| R1 | 4.80 | 2.76 | 2.08 | 1.48 | 1.10 | 0.65 | 0.66 | 0.39 |
+| R2 (a, b, the GEMMs on pairs) | 1.72 | 0.90 | 0.65 | 0.58 | 1.12 | 0.61 | 0.41 | 0.34 |
+| total | 25.01 | 15.70 | 12.98 | 14.66 | 14.95 | 8.88 | 7.28 | 6.29 |
+
+**What limits the gain from 8 to 24 threads (2.3 for CCSDT, 2.1 for
+Lambda).**  Pass 1 (1.49 -> 1.05 s): its tasks are the pairs of classes of a
+batch, a few of them (both indices of the largest class) hold most of the
+work, and their products have one small dimension (the spinors of a class),
+which a threaded BLAS does not speed up either - with `KMP_BLOCKTIME=0` and
+48 threads 17 cores work in this stage, 40 in the products of pass 2.  The
+density of the Lambda pass 1 (1.86 -> 1.13 s, no gain beyond 16 threads):
+tasks of one GEMM each that add their product under one lock.  DIIS (0.28 ->
+0.17 s): sums over vectors of the size of T3, bound by the memory.  The
+gathers and reductions of the pp ladder and of pass 2 gain 2.4 to 2.6, the
+GEMMs of the pp ladder 2.4.  **Not done:** pass 1 with its large tasks split
+over the pairs of the batch; the densities without the lock.
+
+**Dense mode** is the kernels of `csrc/ccsdt_t3.c` and was not changed: 26
++ 78, 48 threads, 11.8 s per cycle before and 12.1 s after (job 31780679,
+with the pair form of the hh ladder, which was then the default); 26 + 120
+on 24 threads 68.8 and 66.4 s (job 31781091).  Its stages are GEMMs with
+one small dimension and gathers, bound by the memory on two sockets: pass 1
+of 26 + 78 takes 2.4 s on 24 threads and 2.3 s on 48.
+
+**Memory on two sockets.**  All arrays are regions of one work array, whose
+pages lie where the thread that wrote them first ran - the integrals where
+the reader ran.  Measured with the unchanged program and `numactl
+--interleave=all` (48 threads): 26 + 120 dense 63.5 -> 53.1 s per cycle
+(job 31780679, c195; 66.0 -> 54.0 s with the binary of 1b7270d); 26 + 78
+dense 10.68 -> 9.93 s, with `OMP_PROC_BIND=spread OMP_PLACES=cores` alone
+10.08 s, with both 9.16 s, the Lambda iteration 16.18 -> 13.80 s with both
+(job 31780541, c380); in blocks the binding gives 1.33 -> 1.18 s and the
+interleaving nothing (26 + 78), and 26 + 160 in blocks is not faster
+interleaved (24.9 -> 24.5 s, before the batch targets).  So for dense
+calculations on a whole node:
+
+    export OMP_PROC_BIND=spread OMP_PLACES=cores
+    numactl --interleave=all xzccsdt ccsdt
+
+**Not done:** the pages of the regions touched first in parallel by the
+program itself (or its memory policy set at the start), which would make the
+wrapper unnecessary.
+
+**Validation after these changes.**  The cases of sections 7 and 11 (H2O /
+6-31G, the frozen + vircut case, HBr dense, the labelled HBr case in its four
+modes, with phases and shuffled): CCSDT, [Q], (Q), [Q]_L, (Q)_L and the
+cycles as in the tables, to the 12 decimals printed, with the final commit
+(login node, 4 threads; the labelled case also on 16 and 48 threads); the
+same with `XZ_HH=pair`; one pair and one triple per batch, 2 and 3, the DIIS
+vectors in the file, and the Lambda equations with the work array at the
+floor of the plan (H2O: 2893968 words, the labelled HBr case 2339480; the
+floors grew by 1 %: a second work array of W_vooo and the buffers per thread
+of the passes, which make the plan depend on the number of threads).  HBr
+/ cc-pVTZ-DK, 10 frozen (26 + 78), labelled, converged (`CC_CONV=9`; job
+31780679, 48 threads, the binary of 1b7270d - not rerun with the last
+commit), the native program in blocks, dense, and the Python program on the
+same files (CCSDT and (Q) in blocks, Lambda on the packed block):
+
+| | native, blocks | native, dense | Python |
+|---|---|---|---|
+| E(CCSDT) | -2605.269299541794 | -2605.269299541794 | -2605.269299541794 |
+| E(CCSDT[Q]) | -2605.268881367147 | -2605.268881367147 | -2605.268881367147 |
+| E(CCSDT(Q)) | -2605.269257610951 | -2605.269257610951 | -2605.269257610951 |
+| E(CCSDT[Q]_L) | -2605.268884407884 | -2605.268884407884 | -2605.268884407884 |
+| E(CCSDT(Q)_L) | -2605.269268719850 | -2605.269268719850 | -2605.269268719850 |
+| cycles, CCSDT / Lambda | 20 / 18 | 20 / 18 | 20 / 18 |
+| CCSDT, s per cycle | 1.09 | 11.7 | 12.3 |
+| Lambda, s per cycle | 1.76 | 18.4 | 100.9 |
+
+(the Python CCSDT of this job read the files as complex arrays; its own
+numbers for real integrals are in docs/benchmarks.md.)
+
+**Other additions.**  `XZ_NCYC=n`: n cycles of every iteration, then on as
+if converged, with a warning (timing runs).  `XZ_START=ccsd`: T1 and T2 of
+CFOUR's `xx2cccsd` as the start, from its files `t1guess` (`t1(a, i)`) and
+`t2guess` (`t2(ab, ij)` on a <= b, i <= j, the diagonals zero) of the run
+directory - one unformatted sequential record each, complex, CFOUR's order
+of the active spinors; without the files, with other sizes, or with complex
+amplitudes in real arithmetic, the second-order start stays, with a warning.
+Measured (login node): the correlation energy of the start is the CCSD
+energy that `xx2cccsd` prints (H2O / 6-31G: -0.135423693022), and CCSDT then
+takes 17, 15 and 17 cycles instead of 17, 17 and 18 (H2O, the frozen +
+vircut case, HBr / cc-pVDZ-DK), to the same energy within the threshold.

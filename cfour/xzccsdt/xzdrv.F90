@@ -131,6 +131,8 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f12.1,a,i16,a)') '   T3 on i<j<k, a<b<c: ', 8d-6 * nwe * n3, ' MB (', n3, ' amplitudes)'
   if (ncls > 1) write(6, '(a,f8.2,a,f8.2,a)') '   of the dense arrays: T3 ', 100d0 * n3 / (nto * nvt), &
     ' %, <ab||cd> ', 100d0 * nvv / (nvp * nvp), ' %'
+  write(6, '(a,a)') '   hh ladder and F_oo of T3: ', merge('through occupied pairs (as in CCSD)   ', &
+    'one operator on the occupied triples  ', xzhhpair())
   write(6, '(a,f10.2,a)') '   integrals read and sorted: ', tread, ' s'
   flush(6)
 
@@ -163,6 +165,11 @@ subroutine xzdrv(w, maxcor)
       call xzcc_d(w, nslot, usefile, nch, ecorr, converged, ncyc)
     end if
     tcc = omp_get_wtime() - t0
+    if (.not. converged .and. timing_run) then
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, XZ_NCYC: CCSDT stopped after ', maxcyc, &
+        ' cycles; the amplitudes and what follows are NOT converged.'
+      converged = .true.
+    end if
     if (.not. converged) then
       call get_environment_variable('XZ_DEBUG', length=larg)
       if (larg == 0) write(6, '(/,a,i5,a)') ' @XZCCSDT-F, CCSDT did not converge in ', maxcyc, &
@@ -172,7 +179,7 @@ subroutine xzdrv(w, maxcor)
       call errex
     end if
     write(6, '(a,i4,a)') '   CCSDT converged in ', ncyc, ' cycles.'
-    call xztimes(tcc, ncyc)
+    call xztable(1, 'the CCSDT iterations', tcc, ncyc)
     ! the amplitudes for the steps that follow, here or in a later run
     t0 = omp_get_wtime()
     if (nwe == 2) then
@@ -201,6 +208,11 @@ subroutine xzdrv(w, maxcor)
       call xzlam_d(w, nslot, usefile, nch, converged, ncyc)
     end if
     tlm = omp_get_wtime() - t0
+    if (.not. converged .and. timing_run) then
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, XZ_NCYC: the Lambda equations stopped after ', maxcyc, &
+        ' cycles; lambda and what follows are NOT converged.'
+      converged = .true.
+    end if
     if (.not. converged) then
       write(6, '(/,a,i5,a)') ' @XZCCSDT-F, the Lambda equations of CCSDT did not converge in ', maxcyc, &
         ' cycles (CC_MAXCYC).'
@@ -208,7 +220,8 @@ subroutine xzdrv(w, maxcor)
       call errex
     end if
     write(6, '(a,i4,a)') '   The Lambda equations converged in ', ncyc, ' cycles.'
-    call xzltimes(tlm, ncyc)
+    call xztable(3, 'the intermediates of the Lambda equations', tlamim, 0_8)
+    call xztable(2, 'the iterations of the Lambda equations', tlm - tlamim, ncyc)
     t0 = omp_get_wtime()
     if (nwe == 2) then
       call xzlamb_z(w, 'w', ecorr)
@@ -358,6 +371,12 @@ subroutine xzjob()
   conv_e = 10d0 ** (-abs(iflags(4)) - 2)
   maxcyc = iflags(7)
   if (maxcyc <= 0) maxcyc = 50
+  ! a timing run: XZ_NCYC cycles of every iteration, converged or not
+  call get_environment_variable('XZ_NCYC', arg, larg)
+  if (larg > 0) then
+    read(arg(1:larg), *) maxcyc
+    timing_run = .true.
+  end if
   ndiis = 8
 end subroutine xzjob
 
@@ -678,42 +697,44 @@ subroutine xzlayout(w, status)
 end subroutine xzlayout
 
 ! ---------------------------------------------------------------------------
-! The wall times of the stages of the iterations.
-subroutine xztimes(tcc, ncyc)
+! The wall and CPU times of the stages of set `set' (xzdata), of ncyc cycles
+! that took ttot seconds: per stage the wall time, its share, the CPU time of
+! all threads and their ratio, the cores that were busy.
+subroutine xztable(set, title, ttot, ncyc)
   use xzdata
   implicit none
-  real(8), intent(in) :: tcc
+  integer, intent(in) :: set
+  character(len=*), intent(in) :: title
+  real(8), intent(in) :: ttot
   integer(8), intent(in) :: ncyc
   integer :: k
-  real(8) :: tsum
-  write(6, '(/,a,i4,a)') '   Wall times of the CCSDT iterations (', ncyc, ' cycles)'
+  real(8) :: tsum, csum
+  if (ncyc > 0) then
+    write(6, '(/,a,a,a,i4,a)') '   Times of ', title, ' (', ncyc, ' cycles): wall, share, CPU of all threads, cores busy'
+  else
+    write(6, '(/,a,a,a)') '   Times of ', title, ': wall, share, CPU of all threads, cores busy'
+  end if
   tsum = 0d0
-  do k = 1, ntime
-    write(6, '(5x,a28,f12.2,a,f6.1,a)') tname(k), tstage(k), ' s', 100d0 * tstage(k) / max(tcc, 1d-9), ' %'
-    tsum = tsum + tstage(k)
+  csum = 0d0
+  do k = 1, ntim(set)
+    if (tpart(k, set)) then
+      write(6, '(5x,a28,f12.2,a,f6.1,a)') tnam(k, set), twal(k, set), ' s', 100d0 * twal(k, set) / max(ttot, 1d-9), &
+        ' %   (inside a kernel)'
+    else
+      write(6, '(5x,a28,f12.2,a,f6.1,a,f12.2,a,f6.1)') tnam(k, set), twal(k, set), ' s', &
+        100d0 * twal(k, set) / max(ttot, 1d-9), ' %', tcpu(k, set), ' s', tcpu(k, set) / max(twal(k, set), 1d-9)
+      tsum = tsum + twal(k, set)
+      csum = csum + tcpu(k, set)
+    end if
   end do
-  write(6, '(5x,a28,f12.2,a)') 'other', tcc - tsum, ' s'
-  write(6, '(5x,a28,f12.2,a,f10.2,a)') 'total', tcc, ' s;  per cycle ', tcc / max(ncyc, 1_8), ' s'
-end subroutine xztimes
-
-! ---------------------------------------------------------------------------
-! The wall times of the stages of the Lambda equations.
-subroutine xzltimes(tlm, ncyc)
-  use xzdata
-  implicit none
-  real(8), intent(in) :: tlm
-  integer(8), intent(in) :: ncyc
-  integer :: k
-  real(8) :: tsum
-  write(6, '(/,a,i4,a)') '   Wall times of the Lambda equations (', ncyc, ' cycles)'
-  tsum = 0d0
-  do k = 1, nltime
-    write(6, '(5x,a28,f12.2,a,f6.1,a)') lname(k), tlam(k), ' s', 100d0 * tlam(k) / max(tlm, 1d-9), ' %'
-    tsum = tsum + tlam(k)
-  end do
-  write(6, '(5x,a28,f12.2,a)') 'other', tlm - tsum, ' s'
-  write(6, '(5x,a28,f12.2,a,f10.2,a)') 'total', tlm, ' s;  per cycle ', (tlm - tlam(1)) / max(ncyc, 1_8), ' s'
-end subroutine xzltimes
+  write(6, '(5x,a28,f12.2,a)') 'other', ttot - tsum, ' s'
+  if (ncyc > 0) then
+    write(6, '(5x,a28,f12.2,a,f10.2,a,f6.1)') 'total', ttot, ' s;  per cycle ', ttot / ncyc, &
+      ' s;  cores busy in the stages ', csum / max(tsum, 1d-9)
+  else
+    write(6, '(5x,a28,f12.2,a,f6.1)') 'total', ttot, ' s;  cores busy in the stages ', csum / max(tsum, 1d-9)
+  end if
+end subroutine xztable
 
 ! n words to the file `name' (comparisons with the Python program)
 subroutine xzdumpw(name, n, x)

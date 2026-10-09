@@ -30,6 +30,7 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
   ZT :: s
 
   ! f + sum_ia <r i||s a> t1[i][a]
+  !$omp parallel do private(m, j, i, a, e, s)
   do m = 0, no - 1
     do j = 0, no - 1
       s = 0
@@ -51,6 +52,7 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
       fov(e, m) = s
     end do
   end do
+  !$omp parallel do private(b, j, i, a, s)
   do b = 0, nv - 1
     do j = 0, no - 1
       s = 0
@@ -64,8 +66,9 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
   end do
   ! - sum_ia <ib||ea> t1[i][a], from <ib||de> on d<e
   pvv = 0
-  do i = 0, no - 1
-    do b = 0, nv - 1
+  !$omp parallel do private(b, i, q)
+  do b = 0, nv - 1
+    do i = 0, no - 1
       do q = 0, nvp - 1
         pvv(vpa(q), b) = pvv(vpa(q), b) - gq(q, b, i) * t1(vpb(q), i)
         pvv(vpb(q), b) = pvv(vpb(q), b) + gq(q, b, i) * t1(vpa(q), i)
@@ -374,7 +377,11 @@ end subroutine
 ! ---------------------------------------------------------------------------
 ! The dressed <ab||ij> on i<j, a<b without its sum_ef ~<ab||ef> t1 t1 part
 ! (which the ladder brings): r2[P][Q].
-subroutine N(xzvvoo)(no, nv, npo, nvp, t1, tau, gpp, ooov, oooo, bv, opa, opb, vpa, vpb, r2)
+!   <ij||ab>* - P(ab) sum_m t1[m][a] <ij||mb>* + sum_{m<n} tau1[mn][ab] <mn||ij>
+!   + P(ij) sum_e bv[Q][e][j] t1[i][e]
+! wkl: work [K][P] (pairs of occupied spinors squared).
+subroutine N(xzvvoo)(no, nv, npo, nvp, t1, tau, gpp, ooov, oooo, bv, opa, opb, vpa, vpb, r2, wkl)
+  use xzkern
   implicit none
   integer(8), intent(in) :: no, nv, npo, nvp
   ZT, intent(in) :: t1(0:nv-1, 0:no-1)
@@ -384,26 +391,46 @@ subroutine N(xzvvoo)(no, nv, npo, nvp, t1, tau, gpp, ooov, oooo, bv, opa, opb, v
   ZT, intent(in) :: bv(0:no-1, 0:nv-1, 0:nvp-1)                ! [Q][e][i]
   integer(8), intent(in) :: opa(0:npo-1), opb(0:npo-1), vpa(0:nvp-1), vpb(0:nvp-1)
   ZT, intent(out) :: r2(0:nvp-1, 0:npo-1)
-  integer(8) :: p, q, pp, i, j, a, b, m, e
-  ZT :: s
-  !$omp parallel do collapse(2) private(p, q, pp, i, j, a, b, m, e, s)
+  ZT :: wkl(0:npo-1, 0:npo-1)                                  ! [K][P]
+  ZT :: x(0:no-1, 0:no-1)
+  integer(8) :: p, q, kk, i, j, a, b, m, e
+  ZT :: s, one
+  one = 1
+  !$omp parallel do private(p, q, i, j, a, b, m, s)
   do p = 0, npo - 1
+    i = opa(p)
+    j = opb(p)
     do q = 0, nvp - 1
-      i = opa(p)
-      j = opb(p)
       a = vpa(q)
       b = vpb(q)
       s = CONJ(gpp(q, p))
       do m = 0, no - 1
         s = s - t1(a, m) * CONJ(ooov(b, m, j, i)) + t1(b, m) * CONJ(ooov(a, m, j, i))
       end do
-      do pp = 0, npo - 1
-        s = s + tau(q, pp) * oooo(j, i, opb(pp), opa(pp))
-      end do
-      do e = 0, nv - 1
-        s = s + bv(j, e, q) * t1(e, i) - bv(i, e, q) * t1(e, j)
-      end do
       r2(q, p) = s
+    end do
+  end do
+  ! sum_K <K||P> tau1[K][Q]
+  if (npo > 0) then
+    !$omp parallel do private(kk, p)
+    do kk = 0, npo - 1
+      do p = 0, npo - 1
+        wkl(p, kk) = oooo(opb(p), opa(p), opb(kk), opa(kk))
+      end do
+    end do
+    call N(zc_gemm)(1_4, 0_4, npo, nvp, npo, one, wkl, npo, tau, nvp, one, r2, nvp)
+  end if
+  ! x[i][j] = sum_e t1[i][e] bv[Q][e][j] of one Q, antisymmetrized
+  !$omp parallel do private(q, p, i, e, x)
+  do q = 0, nvp - 1
+    do i = 0, no - 1
+      x(:, i) = 0
+      do e = 0, nv - 1
+        x(:, i) = x(:, i) + bv(:, e, q) * t1(e, i)
+      end do
+    end do
+    do p = 0, npo - 1
+      r2(q, p) = r2(q, p) + x(opb(p), opa(p)) - x(opa(p), opb(p))
     end do
   end do
 end subroutine
@@ -503,8 +530,9 @@ end subroutine
 ! wo[m][a][P] of the T3 drive term, P = (i<j):
 !   - ~<ma||ij> - tmp[m][a][i][j] + tmp[m][a][j][i] - sum_Q D[m][a][Q] t2[P][Q] + yall[P][a][m]
 !   tmp[m][b][i][j] = sum_ne ~<mn||ie> t2[j][n][b][e]
-! tmp: work no**3 * nv.
-subroutine N(xzwo)(no, nv, npo, nvp, t2, t2pp, ooovd, ovood, d, yall, opa, opb, wo, tmp)
+! as one product c[(m, i)][(b, j)] = a[(m, i)][(n, e)] b2[(n, e)][(b, j)].
+! c, a: work no**3 * nv each; b2: work (no nv)**2.
+subroutine N(xzwo)(no, nv, npo, nvp, t2, t2pp, ooovd, ovood, d, yall, opa, opb, wo, c, a, b2)
   use xzkern
   implicit none
   integer(8), intent(in) :: no, nv, npo, nvp
@@ -516,35 +544,44 @@ subroutine N(xzwo)(no, nv, npo, nvp, t2, t2pp, ooovd, ovood, d, yall, opa, opb, 
   ZT, intent(in) :: yall(0:no+nv-1, 0:nv-1, 0:npo-1)           ! [P][d][y]
   integer(8), intent(in) :: opa(0:npo-1), opb(0:npo-1)
   ZT, intent(out) :: wo(0:npo-1, 0:nv-1, 0:no-1)               ! [m][a][P]
-  ZT :: tmp(0:no-1, 0:no-1, 0:nv-1, 0:no-1)                    ! [m][b][i][j]
+  ZT :: c(0:no-1, 0:nv-1, 0:no-1, 0:no-1)                      ! [m][i][b][j]
+  ZT :: a(0:nv-1, 0:no-1, 0:no-1, 0:no-1)                      ! [m][i][n][e]
+  ZT :: b2(0:no-1, 0:nv-1, 0:nv-1, 0:no-1)                     ! [n][e][b][j]
   integer(8) :: m, b, i, j, n, e, p
-  ZT :: s, mone, zero
+  ZT :: one, mone, zero
+  one = 1
   mone = -1
   zero = 0
-  !$omp parallel do collapse(2) private(m, b, i, j, n, e, s)
+  !$omp parallel do collapse(2) private(m, i, n, e)
   do m = 0, no - 1
-    do b = 0, nv - 1
-      do i = 0, no - 1
-        do j = 0, no - 1
-          s = 0
-          do n = 0, no - 1
-            do e = 0, nv - 1
-              s = s + ooovd(e, i, n, m) * t2(e, b, n, j)
-            end do
-          end do
-          tmp(j, i, b, m) = s
+    do i = 0, no - 1
+      do n = 0, no - 1
+        do e = 0, nv - 1
+          a(e, n, i, m) = ooovd(e, i, n, m)
         end do
       end do
     end do
   end do
+  !$omp parallel do collapse(2) private(n, e, b, j)
+  do n = 0, no - 1
+    do e = 0, nv - 1
+      do b = 0, nv - 1
+        do j = 0, no - 1
+          b2(j, b, e, n) = t2(e, b, n, j)
+        end do
+      end do
+    end do
+  end do
+  call N(zc_gemm)(0_4, 0_4, no * no, nv * no, no * nv, one, a, no * nv, b2, nv * no, zero, c, nv * no)
   ! - sum_Q D[(m, a)][Q] t2pp[P][Q]
   call N(zc_gemm)(0_4, 1_4, no * nv, npo, nvp, mone, d, nvp, t2pp, nvp, zero, wo, npo)
+  !$omp parallel do collapse(2) private(m, b, p, i, j)
   do m = 0, no - 1
     do b = 0, nv - 1
       do p = 0, npo - 1
         i = opa(p)
         j = opb(p)
-        wo(p, b, m) = wo(p, b, m) - ovood(j, i, b, m) - tmp(j, i, b, m) + tmp(i, j, b, m) &
+        wo(p, b, m) = wo(p, b, m) - ovood(j, i, b, m) - c(j, b, i, m) + c(i, b, j, m) &
                       + yall(m, b, p)
       end do
     end do
@@ -574,9 +611,10 @@ subroutine N(xzweff)(no, nv, nvp, t2, t2p, oovv, oovvp, ovvod, foo, fvv, weff, f
   ZT :: b2(0:no-1, 0:nv-1, 0:nv-1, 0:no-1)                     ! [(n, e)][(a, i)]
   ZT :: x2(0:no-1, 0:nv-1, 0:nv-1, 0:no-1)                     ! [(m, d)][(a, i)]
   integer(8) :: m, n, d, e, a, i, f, q
-  ZT :: s, one, zero
+  ZT :: s, one, zero, mhalf
   one = 1
   zero = 0
+  mhalf = -0.5d0
   !$omp parallel do collapse(2) private(m, n, d, e)
   do m = 0, no - 1
     do d = 0, nv - 1
@@ -608,20 +646,10 @@ subroutine N(xzweff)(no, nv, nvp, t2, t2p, oovv, oovvp, ovvod, foo, fvv, weff, f
       end do
     end do
   end do
-  !$omp parallel do collapse(2) private(a, d, m, n, f, s)
-  do a = 0, nv - 1
-    do d = 0, nv - 1
-      s = 0
-      do m = 0, no - 1
-        do n = 0, no - 1
-          do f = 0, nv - 1
-            s = s + t2(f, a, n, m) * oovv(f, d, n, m)
-          end do
-        end do
-      end do
-      fevv(d, a) = fvv(d, a) - 0.5d0 * s
-    end do
-  end do
+  ! sum_mnf t2[m][n][a][f] <mn||df> = sum_mnf t2[m][n][f][a] <mn||fd>: one product
+  fevv = fvv
+  call N(zc_gemm)(1_4, 0_4, nv, nv, no * no * nv, mhalf, t2, nv, oovv, nv, one, fevv, nv)
+  !$omp parallel do private(m, i, n, q, s)
   do m = 0, no - 1
     do i = 0, no - 1
       s = 0
@@ -799,6 +827,84 @@ subroutine N(xzo6)(no, npo, nto, ofree, opair, wkl, feoo, o6)
         end do
       end do
       o6(jt, it) = v
+    end do
+  end do
+end subroutine
+
+! ---------------------------------------------------------------------------
+! The same operator on occupied pairs, as CCSD does its hh term:
+!   (L t)[i][j][k] = P(k/ij) sum_{m<n} wp[(mn)][(ij)] t[m][n][k]
+!   wp[(mn)][(ij)] = W[m][n][i][j] - 1/2 (F[m][i] d(n,j) - F[m][j] d(n,i) - F[n][i] d(m,j) + F[n][j] d(m,i))
+! (every index of a triple is in two of its three pairs: the F term with 1/2).
+subroutine N(xzwpair)(no, npo, opa, opb, wkl, feoo, wp)
+  implicit none
+  integer(8), intent(in) :: no, npo
+  integer(8), intent(in) :: opa(0:npo-1), opb(0:npo-1)
+  ZT, intent(in) :: wkl(0:npo-1, 0:npo-1)                      ! [K][P]
+  ZT, intent(in) :: feoo(0:no-1, 0:no-1)                       ! [m][i]
+  ZT, intent(out) :: wp(0:npo-1, 0:npo-1)                      ! [K][P]
+  integer(8) :: kk, p, m, n, i, j
+  ZT :: v
+  !$omp parallel do private(kk, p, m, n, i, j, v)
+  do kk = 0, npo - 1
+    m = opa(kk)
+    n = opb(kk)
+    do p = 0, npo - 1
+      i = opa(p)
+      j = opb(p)
+      v = 0
+      if (n == j) v = v + feoo(i, m)
+      if (n == i) v = v - feoo(j, m)
+      if (m == j) v = v - feoo(i, n)
+      if (m == i) v = v + feoo(j, n)
+      wp(p, kk) = wkl(p, kk) - 0.5d0 * v
+    end do
+  end do
+end subroutine
+
+! ---------------------------------------------------------------------------
+! r3[I][A] += P(k/ij) sum_K op(wp)[K][(ij)] t3[K + k][A] on the packed T3, in
+! chunks of nc columns A: the rows of T3 gathered by occupied pair,
+! tg[K][k][A] = +- t3[K + k][A], one product with the operator on pairs, and
+! the three terms of every triple added to the residual.
+!   ta        1: wp[K][P] as it is (the T3 equation); 0: its transpose (Lambda)
+!   tg, x     work npo * no * nc each
+subroutine N(xzhhapply)(ta, no, npo, nto, nvt, nc, otri, osgn, ofree, opair, wp, t3, r3, tg, x)
+  use xzkern
+  implicit none
+  integer(4), intent(in) :: ta
+  integer(8), intent(in) :: no, npo, nto, nvt, nc
+  integer(8), intent(in) :: otri(0:npo-1, 0:no-1)
+  integer(1), intent(in) :: osgn(0:npo-1, 0:no-1)
+  integer(8), intent(in) :: ofree(0:nto-1, 0:2), opair(0:nto-1, 0:2)
+  ZT, intent(in) :: wp(0:npo-1, 0:npo-1)
+  ZT, intent(in) :: t3(0:nvt-1, 0:nto-1)
+  ZT, intent(inout) :: r3(0:nvt-1, 0:nto-1)
+  ZT :: tg(0:nc-1, 0:no-1, 0:npo-1)                            ! [K][k][A]
+  ZT :: x(0:nc-1, 0:no-1, 0:npo-1)                             ! [P][k][A]
+  integer(8) :: c0, n, p, k, it
+  ZT :: one, zero
+  one = 1
+  zero = 0
+  do c0 = 0, nvt - 1, nc
+    n = min(nc, nvt - c0)
+    !$omp parallel do collapse(2) private(p, k)
+    do p = 0, npo - 1
+      do k = 0, no - 1
+        if (osgn(p, k) > 0) then
+          tg(0:n - 1, k, p) = t3(c0:c0 + n - 1, otri(p, k))
+        else if (osgn(p, k) < 0) then
+          tg(0:n - 1, k, p) = -t3(c0:c0 + n - 1, otri(p, k))
+        else
+          tg(0:n - 1, k, p) = 0
+        end if
+      end do
+    end do
+    call N(zc_gemm)(ta, 0_4, npo, no * nc, npo, one, wp, npo, tg, no * nc, zero, x, no * nc)
+    !$omp parallel do private(it)
+    do it = 0, nto - 1
+      r3(c0:c0 + n - 1, it) = r3(c0:c0 + n - 1, it) + x(0:n - 1, ofree(it, 0), opair(it, 0)) &
+                              - x(0:n - 1, ofree(it, 1), opair(it, 1)) + x(0:n - 1, ofree(it, 2), opair(it, 2))
     end do
   end do
 end subroutine
