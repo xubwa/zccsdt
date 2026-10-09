@@ -134,6 +134,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     end if
     kr3 = N(xzdiis_target)()
     call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    call xzrebal(1)
     tsg = omp_get_wtime()
     call xztic()
     call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms)
@@ -212,6 +213,7 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
     dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
     kr3 = N(xzdiis_target)()
     call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    call xzrebal(1)
     if (slices) then
       ! DIIS on the slice of this rank, then the slices of the new T3 of all ranks
       tsg = omp_get_wtime()

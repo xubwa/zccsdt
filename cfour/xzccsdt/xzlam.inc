@@ -137,6 +137,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     end if
     kr3 = N(xzdiis_target)()
     call N(xzlamstep)(w, jl1, jl2, jl3, kl1n, kl2n, kr3, ldbg > 0 .and. icyc == 1)
+    call xzrebal(2)
     if (ldbg > 0 .and. icyc == 1) then
       call xzdumpw(dbg(1:ldbg) // '.l1n', NW * ov, w(kl1n))
       call xzdumpw(dbg(1:ldbg) // '.l2n', NW * ov * ov, w(kl2n))
@@ -209,6 +210,7 @@ subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
     dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
     kr3 = N(xzdiis_target)()
     call N(xzlamstep)(w, jl1, jl2, jl3, kl1n, kl2n, kr3, .false.)
+    call xzrebal(2)
     if (slices) then
       tsg = omp_get_wtime()
       call xztic()
@@ -590,6 +592,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     if (nrank > 1) then
       ! what the batches of all ranks made, on every rank
       tsg = omp_get_wtime()
+      tint(1) = tint(1) + tsg - tst
       call xztic()
       call xzmpi_barrier()
       call xztoc(2, 'MPI: waiting for the ranks')
@@ -601,6 +604,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
       call xzmpi_allsum_w(w(kd1), NW * ov)
       call xztoc(2, 'MPI: sums of pass 1')
       dsec(4, 2) = dsec(4, 2) + omp_get_wtime() - tsg
+      tsync = omp_get_wtime()
     end if
   end if
 
@@ -711,6 +715,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
       ! the parts of the residual of l3 and of what the ladder adds to the
       ! residuals of rank 1 and 2, summed onto rank 0
       tsg = omp_get_wtime()
+      tint(2) = tint(2) + tsg - tsync
       call xztic()
       call xzmpi_barrier()
       call xztoc(2, 'MPI: waiting for the ranks')

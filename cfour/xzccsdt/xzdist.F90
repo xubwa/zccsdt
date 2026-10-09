@@ -44,7 +44,7 @@ module xzdist
   logical :: distk(ndk) = .true.              ! XZ_DIST: which kinds are dealt out (else all to rank 0)
   real(8) :: rplan(16) = 0d0                  ! the plan of rank 0: words of a worker, the 8 batch sizes
   integer(8) :: maxthr = 0                    ! the largest number of threads of a rank
-  ! ---- slices (XZ_SLICES=1, more than one rank): every rank owns a range of
+  ! ---- slices (more than one rank; XZ_SLICES=0: off): every rank owns a range of
   !      rows of T3 - the elements soff(r) <= e < soff(r + 1) of the stored
   !      array, cut at rows -, gets the residual of its rows from all ranks,
   !      does the operator on occupied triples, the Jacobi step and DIIS on
@@ -69,6 +69,22 @@ module xzdist
   real(8) :: dsec(nds, 2) = 0d0
   real(8) :: dwords(2) = 0d0                  ! words of amplitudes sent to the ranks (per receiving rank)
   real(8), private :: tb0 = 0d0
+  ! ---- the speeds of the ranks, measured (xzrebal).  The nodes of a
+  !      partition are not equally fast, the two sockets of a node need not
+  !      be, and what a rank does besides its batches (the intermediates; in
+  !      the mode without slices what only rank 0 does) takes its time too.
+  !      The ranks meet twice in a step: for the sums of pass 1, and for the
+  !      residual after the sweep and pass 2.  A batch goes to the rank that
+  !      is done with it first: roff seconds of other work before the
+  !      meeting, then its batches at rspeed.
+  real(8), allocatable :: rspeed(:, :)        ! (rank, kind): model cost per second (1 before a measurement)
+  real(8), allocatable :: roff(:, :)          ! (rank, kind): seconds before its batches of this kind
+  real(8), allocatable :: rload(:, :)         ! (rank, kind): model cost of its batches
+  real(8) :: ksec(ndk) = 0d0                  ! seconds of this rank in its batches, per kind, since the last xzrebal
+  real(8) :: tint(2) = 0d0                    ! seconds of this rank up to the two meetings, since the last xzrebal
+  real(8) :: tsync = 0d0                      ! (the end of the first meeting)
+  real(8) :: rebtol = 0.03d0                  ! deal again when the last rank arrives this far after the mean
+  integer(8) :: nrebal(2) = 0                 ! how often the batches were dealt again
   ! constants of the cost model: the part of a batch that does not grow with the summed index
   ! (gathers, reductions), in units of one more summed index of its products
   real(8) :: cg1 = 8d0, cg2 = 64d0, cg3 = 16d0, cg4 = 16d0, cg5 = 96d0, cg6 = 16d0
@@ -96,8 +112,11 @@ contains
   subroutine xzbtoc(start)
     use omp_lib
     integer(8), intent(in) :: start
+    real(8) :: t
     if (dkind == 0 .or. .not. allocated(bsec)) return
-    bsec(start, dkind) = bsec(start, dkind) + omp_get_wtime() - tb0
+    t = omp_get_wtime() - tb0
+    bsec(start, dkind) = bsec(start, dkind) + t
+    ksec(dkind) = ksec(dkind) + t
   end subroutine
 
   ! The cost of one pair (kinds 1, 2, 4, 5) or one triple (3, 6) of the
@@ -172,9 +191,10 @@ contains
 
   ! The batches of all kinds and their ranks (called by every rank when the
   ! plan is there).  rank 0 prints the balance that the model expects.
-  subroutine xzdeal()
+  subroutine xzdeal(only)
     use xzdata
-    integer :: kind
+    integer, intent(in), optional :: only       ! 1: the kinds of the T3 equation again, 2: those of Lambda
+    integer :: kind, kk
     integer(8) :: n, g, s, nb, step, r, k, best, nbat, rk
     integer(8), allocatable :: lst(:)
     real(8), allocatable :: load(:)
@@ -184,13 +204,21 @@ contains
     logical :: triples
 
     n = max(npo, nto, 1_8)
-    if (allocated(bown)) deallocate(bown, bnum, bcost, bsec)
-    allocate(bown(0:n - 1, ndk), bnum(0:n - 1, ndk), bcost(0:n - 1, ndk), bsec(0:n - 1, ndk))
     allocate(lst(n), load(0:nrank - 1))
+    if (.not. present(only)) then
+    if (allocated(bown)) deallocate(bown, bnum, bcost, bsec, rspeed, rload, roff)
+    allocate(bown(0:n - 1, ndk), bnum(0:n - 1, ndk), bcost(0:n - 1, ndk), bsec(0:n - 1, ndk))
+    allocate(rspeed(0:nrank - 1, ndk), rload(0:nrank - 1, ndk), roff(0:nrank - 1, ndk))
+    roff = 0d0
+    tint = 0d0
     bown = -1
     bnum = 0
     bcost = 0d0
     bsec = 0d0
+    rspeed = 1d0
+    rload = 0d0
+    ksec = 0d0
+    nrebal = 0
     ! XZ_DIST: the kinds that are dealt out, as digits ("123456": all, the default; "0": none)
     distk = .true.
     call get_environment_variable('XZ_DIST', arg, larg)
@@ -203,11 +231,24 @@ contains
     call get_environment_variable('XZ_R0LOAD', arg, larg)
     if (larg > 0) read(arg(1:larg), *, end=10, err=10) r0extra
 10  continue
-    if (myrank == 0 .and. nrank > 1) then
+    ! XZ_REBAL=x: deal again when the slowest rank is the fraction x above the mean (0: never)
+    call get_environment_variable('XZ_REBAL', arg, larg)
+    if (larg > 0) read(arg(1:larg), *, end=11, err=11) rebtol
+11  continue
+    end if
+    if (myrank == 0 .and. nrank > 1 .and. .not. present(only)) then
       write(6, '(/,a,i4,a)') '   The iterations over ', nrank, ' ranks: batches of pairs and triples by the cost model'
       write(6, '(a)') '     loop        batches   slowest rank above the mean   share of rank 0'
     end if
-    do kind = 1, ndk
+    ! (the ladder before pass 2: the two end at the same meeting, and pass 2
+    ! starts on a rank when its ladder is done)
+    do kk = 1, ndk
+      kind = kk
+      if (mod(kk, 3) == 2) kind = kk + 1
+      if (mod(kk, 3) == 0) kind = kk - 1
+      if (present(only)) then
+        if ((kind - 1) / 3 + 1 /= only) cycle
+      end if
       triples = kind == 3 .or. kind == 6
       step = merge(nbt, nbp, triples)
       nbat = 0
@@ -248,19 +289,27 @@ contains
         lst(r + 1) = s
       end do
       load = 0d0
-      ! (what rank 0 does alone counts as load of rank 0)
+      ! (XZ_R0LOAD: a load of rank 0 by hand, a fraction of the loop)
       if (nrank > 1) load(0) = r0extra(merge(1, 2, kind <= 3)) * tot
+      ! each batch to the rank that is done with it first: the seconds before
+      ! its batches (pass 2: with those of its ladder), then its batches at
+      ! its speed
       do k = 1, nbat
         best = 0
         if (distk(kind)) then
           do rk = 1, nrank - 1
-            if (load(rk) < load(best)) best = rk
+            if (roff(rk, kind) + (load(rk) + bcost(lst(k), kind)) / rspeed(rk, kind) < &
+                roff(best, kind) + (load(best) + bcost(lst(k), kind)) / rspeed(best, kind)) best = rk
           end do
         end if
         bown(lst(k), kind) = best
         load(best) = load(best) + bcost(lst(k), kind)
       end do
-      if (myrank == 0 .and. nrank > 1) then
+      rload(:, kind) = load
+      if (nrank > 1) rload(0, kind) = load(0) - r0extra(merge(1, 2, kind <= 3)) * tot
+      ! (pass 2 of a rank starts when its ladder is done)
+      if (triples) roff(:, kind - 1) = roff(:, kind) + rload(:, kind) / rspeed(:, kind)
+      if (myrank == 0 .and. nrank > 1 .and. .not. present(only)) then
         worst = maxval(load) / max(sum(load) / nrank, 1d-300) - 1d0
         write(6, '(5x,a10,i9,f18.2,a,f18.2,a)') dkname(kind), nbat, 100d0 * worst, ' %', &
           100d0 * (load(0) - r0extra(merge(1, 2, kind <= 3)) * tot) / max(tot, 1d-300), ' %'
@@ -278,6 +327,9 @@ contains
     integer :: larg
     slices = .false.
     if (nrank == 1) return
+    ! (the default with more than one rank; XZ_SLICES=0: rank 0 sends T3,
+    ! takes the sum of the residual and holds the DIIS vectors alone)
+    slices = .true.
     call get_environment_variable('XZ_SLICES', arg, larg)
     if (larg > 0) slices = arg(1:1) /= '0'
     if (.not. slices) return
@@ -383,6 +435,60 @@ contains
     end do
   end subroutine
 
+  ! After a step (called by every rank): the seconds of the ranks in their
+  ! batches of the three loops of the set (1: T3 equation, 2: Lambda) and up
+  ! to the two meetings go to rank 0.  If at one of the meetings the last
+  ! rank came more than rebtol (of the mean) after the mean, rank 0 sends
+  ! what it measured - per rank the model cost per second in each loop and
+  ! the seconds of everything else before each meeting - and the batches of
+  ! the set are dealt again for the next step.
+  subroutine xzrebal(set)
+    integer, intent(in) :: set
+    real(8) :: mine(5), all(5, 0:nrank - 1), msg(1 + 5 * nrank), worst
+    integer :: k, kind, k1, k2, k3
+    integer(8) :: r
+    if (nrank == 1) return
+    k1 = 3 * set - 2          ! pass 1
+    k2 = 3 * set - 1          ! pass 2
+    k3 = 3 * set              ! ladder
+    mine(1:3) = ksec(k1:k3)
+    mine(4:5) = tint
+    ksec(k1:k3) = 0d0
+    tint = 0d0
+    all = 0d0
+    call xzmpi_gather(mine, all, 5_8)
+    msg = 0d0
+    if (myrank == 0 .and. rebtol > 0d0) then
+      worst = 0d0
+      do k = 4, 5
+        if (sum(all(k, :)) > 0d0) worst = max(worst, maxval(all(k, :)) * nrank / sum(all(k, :)) - 1d0)
+      end do
+      if (worst > rebtol .and. minval(all(1:3, :)) > 0d0 .and. minval(rload(:, k1:k3)) > 0d0) then
+        msg(1) = 1d0
+        do r = 0, nrank - 1
+          ! speeds in the three loops
+          msg(2 + 5 * r) = rload(r, k1) / all(1, r)
+          msg(3 + 5 * r) = rload(r, k2) / all(2, r)
+          msg(4 + 5 * r) = rload(r, k3) / all(3, r)
+          ! the rest before the two meetings
+          msg(5 + 5 * r) = max(0d0, all(4, r) - all(1, r))
+          msg(6 + 5 * r) = max(0d0, all(5, r) - all(2, r) - all(3, r))
+        end do
+      end if
+    end if
+    call xzmpi_bcast(msg, 8_8 * (1 + 5 * nrank))
+    if (msg(1) /= 1d0) return
+    do r = 0, nrank - 1
+      rspeed(r, k1) = msg(2 + 5 * r)
+      rspeed(r, k2) = msg(3 + 5 * r)
+      rspeed(r, k3) = msg(4 + 5 * r)
+      roff(r, k1) = msg(5 + 5 * r)
+      roff(r, k3) = msg(6 + 5 * r)
+    end do
+    call xzdeal(set)
+    nrebal(set) = nrebal(set) + 1
+  end subroutine
+
   ! XZ_BCOST=file: the batches of this rank, their model cost and their
   ! seconds, to file.<rank> (what the cost model is checked against)
   subroutine xzbdump()
@@ -444,6 +550,15 @@ contains
       100d0 * (maxval(all(3, :)) / max(sum(all(3, :)) / nrank, 1d-30) - 1d0), ' %'
     rate = 0d0
     if (maxval(all(6, 1:)) > 0d0) rate = 8d-9 * all(nds + 1, 1) / maxval(all(6, 1:))
+    if (nrebal(set) > 0) then
+      write(6, '(a,i4,a)') '     the batches were dealt again ', nrebal(set), &
+        ' times (by the measured speeds); at the end, rank by rank'
+      write(6, '(a,*(f7.3))') '       speed in pass 1 (mean 1):      ', rspeed(:, 3 * set - 2) * nrank / sum(rspeed(:, 3 * set - 2))
+      write(6, '(a,*(f7.3))') '       speed in pass 2:               ', rspeed(:, 3 * set - 1) * nrank / sum(rspeed(:, 3 * set - 1))
+      write(6, '(a,*(f7.3))') '       speed in the ladder:           ', rspeed(:, 3 * set) * nrank / sum(rspeed(:, 3 * set))
+      write(6, '(a,*(f7.2))') '       other work before the sums / s:', roff(:, 3 * set - 2)
+      write(6, '(a,*(f7.2))') '       before the residual / s:       ', roff(:, 3 * set)
+    end if
     write(6, '(a,f10.2,a,f8.3,a)') '     amplitudes to a rank: ', 8d-9 * all(nds + 1, 1), ' GB in all, ', rate, &
       ' GB/s into the slowest receiver (all ranks receive at once)'
     if (maxval(all(5, :)) > 0d0) write(6, '(a,f10.2,a,f8.3,a)') '     the residual: ', &
