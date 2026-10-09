@@ -433,6 +433,89 @@ void zc_t3_occop_##SFX(const T *O6, const T *T3p, int64_t nto, int64_t nvt,    \
     }                                                                          \
 }                                                                              \
                                                                                \
+/* ---- hh ladder + F_oo, pair-driven (docs/factorization.md 2.3): the same    \
+ * operator as zc_t3_occop without its C(o,3) x C(o,3) matrix.  With the       \
+ * occupied triples written as (spectator k; pair P),                          \
+ *   R[(k; P), A] += sum_{P'} W'[P, P'] T[(k; P'), A],                         \
+ *   W'[(i<j), (m<n)] = W[m,n,i,j] - 1/2 (F[m,i] d_nj - F[n,i] d_mj            \
+ *                                        - F[m,j] d_ni + F[n,j] d_mi)         \
+ * (each F term is met from two spectators, hence the half).  For every        \
+ * spectator k the rows of the block of T3 that contain k are listed:          \
+ * entries koff[k] <= e < koff[k+1] with the row krow[e] (local), its pair     \
+ * kpair[e] and the sign ksgn[e] of (k; pair) -> triple.                        \
+ *                                                                             \
+ * zc_t3_hhpair_w: the matrices of all spectators, one after the other,        \
+ * Wk[woff[k] + x n_k + y] = s_x W'[P_x, P_y] s_y (the signs folded in; with   \
+ * ``trans`` the transposed operator, W'[P_y, P_x]: the Lambda equations).     \
+ * W: (no, no, no, no) as W[m,n,i,j]; F: (no, no) as F[m,i]. */                 \
+void zc_t3_hhpair_w_##SFX(T *Wk, const int64_t *woff, int64_t no,              \
+                          const int64_t *koff, const int64_t *kpair,           \
+                          const int8_t *ksgn, const int64_t *pa,               \
+                          const int64_t *pb, const T *W, const T *F, int trans) \
+{                                                                              \
+    _Pragma("omp parallel for schedule(dynamic, 1)")                           \
+    for (int64_t k = 0; k < no; k++) {                                         \
+        const int64_t e0 = koff[k], n = koff[k + 1] - e0;                      \
+        T *w = Wk + woff[k];                                                   \
+        for (int64_t x = 0; x < n; x++)                                        \
+        for (int64_t y = 0; y < n; y++) {                                      \
+            const int64_t Pi = kpair[e0 + (trans ? y : x)];                    \
+            const int64_t Pm = kpair[e0 + (trans ? x : y)];                    \
+            const int64_t i = pa[Pi], j = pb[Pi], m = pa[Pm], nn = pb[Pm];     \
+            T v = W[((m * no + nn) * no + i) * no + j];                        \
+            if (nn == j) v -= 0.5 * F[m * no + i];                             \
+            if (m == j) v += 0.5 * F[nn * no + i];                             \
+            if (nn == i) v += 0.5 * F[m * no + j];                             \
+            if (m == i) v -= 0.5 * F[nn * no + j];                             \
+            w[x * n + y] = (double)(ksgn[e0 + x] * ksgn[e0 + y]) * v;          \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+/* R[row, A] += the operator on T3 (both (nrow, ncol), a block of the packed   \
+ * arrays): the threads share the columns in chunks of nc; a thread gathers,   \
+ * for one spectator after the other, the rows of its chunk that contain it    \
+ * (n_k x nc, in cache), multiplies with Wk (a GEMM of its own) and adds the   \
+ * result to the rows of R.  T3 and R are read and written once per           \
+ * spectator of a row, i.e. three times, a chunk at a time. */                 \
+void zc_t3_hhpair_##SFX(const T *T3, T *R, int64_t nrow, int64_t ncol,         \
+                        int64_t no, const int64_t *koff, const int64_t *krow,  \
+                        const T *Wk, const int64_t *woff, int64_t nc)          \
+{                                                                              \
+    (void)nrow;                                                                \
+    int64_t nmax = 0;                                                          \
+    for (int64_t k = 0; k < no; k++)                                           \
+        if (koff[k + 1] - koff[k] > nmax) nmax = koff[k + 1] - koff[k];        \
+    if (nmax == 0 || ncol == 0) return;                                        \
+    if (nc <= 0) nc = 64;                                                      \
+    const int64_t nchunk = (ncol + nc - 1) / nc;                               \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *Y = malloc(sizeof(T) * 2 * nmax * nc);                              \
+        T *Z = Y + nmax * nc;                                                  \
+        _Pragma("omp for schedule(dynamic, 1)")                                \
+        for (int64_t ch = 0; ch < nchunk; ch++) {                              \
+            const int64_t c0 = ch * nc;                                        \
+            const int64_t n1 = (c0 + nc <= ncol) ? nc : ncol - c0;             \
+            for (int64_t k = 0; k < no; k++) {                                 \
+                const int64_t e0 = koff[k], n = koff[k + 1] - e0;              \
+                if (n == 0) continue;                                          \
+                for (int64_t x = 0; x < n; x++)                                \
+                    memcpy(Y + x * n1, T3 + krow[e0 + x] * ncol + c0,          \
+                           sizeof(T) * n1);                                    \
+                gemm_##SFX(0, 0, n, n1, n, 1.0, Wk + woff[k], n, Y, n1, 0.0,   \
+                           Z, n1);                                             \
+                for (int64_t x = 0; x < n; x++) {                              \
+                    T *r = R + krow[e0 + x] * ncol + c0;                       \
+                    const T *z = Z + x * n1;                                   \
+                    for (int64_t c = 0; c < n1; c++) r[c] += z[c];             \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        free(Y);                                                               \
+    }                                                                          \
+}                                                                              \
+                                                                               \
 /* R[I, A] = T3p[I, A] + R[I, A] / (eo[I] - ev[A])  (new T3 written over R) */ \
 void zc_t3_update_##SFX(const T *T3p, T *R, int64_t nto, int64_t nvt,          \
                         const double *eo, const double *ev, const int64_t *io) \

@@ -110,6 +110,43 @@ def test_occ_operator():
 
 
 @pytest.mark.parametrize('cplx', [False, True])
+@pytest.mark.parametrize('o, labels, ncls', [
+    (5, None, None), (8, None, None), (12, None, None), (8, [0] * 4 + [1] * 4, None),
+    (9, [0, 0, 1, 1, 1, 2, 2, 2, 2], 3), (12, [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3], 4)])
+def test_occ_operator_forms(o, labels, ncls, cplx):
+    '''The operator of the hh ladder and F_oo: its matrix written down
+    directly and the pair-driven form against the matrix obtained by
+    applying the operator to the packed basis; the transposed operator; dense
+    and in the blocks of a label.'''
+    from zccsdt.cc import t3kern
+    rng = np.random.default_rng(4)
+    om = t3pack.TripleMap(o) if labels is None else t3pack.TripleMap(o, labels, ncls)
+    W = _asym_pair(_asym_pair(_rand((o,) * 4, rng, cplx), 0), 2)
+    F = _rand((o, o), rng, cplx)
+    O = t3pack.occ_operator(om, lambda t: t3pack.occ_apply(t, W, F))
+    np.testing.assert_allclose(t3pack.occ_operator_direct(om, W, F), O, atol=1e-12)
+    blocks = [(0, om.ntri)] if labels is None else \
+        [(int(om.tri_off[g]), int(om.tri_off[g + 1])) for g in range(om.ntg)]
+    for lo, hi in blocks:
+        np.testing.assert_allclose(t3pack.occ_operator_direct(om, W, F, (lo, hi)),
+                                   O[lo:hi, lo:hi], atol=1e-12)
+    if not t3kern.USE_C:
+        return
+    for trans in (False, True):
+        ref = O.T if trans else O
+        for mode in ('matrix', 'pair'):
+            op = t3kern.OccOperator(om, W, F, W.dtype, trans=trans, mode=mode)
+            assert op.mode == mode
+            for lo, hi in blocks:
+                if hi == lo:
+                    continue
+                T, R0 = _rand((hi - lo, 203), rng, cplx), _rand((hi - lo, 203), rng, cplx)
+                R = op.apply(T, R0.copy(), (lo, hi))
+                np.testing.assert_allclose(R, R0 + ref[lo:hi, lo:hi] @ T, atol=1e-12, rtol=1e-12)
+                assert op.nbytes((lo, hi)) > 0
+
+
+@pytest.mark.parametrize('cplx', [False, True])
 def test_pair_antisym_add(cplx, impl):
     rng = np.random.default_rng(5)
     n, nx, ny = 6, 4, 3

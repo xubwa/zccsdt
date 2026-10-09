@@ -320,6 +320,42 @@ def occ_operator(om, apply):
     return LB[:, p, q, s].T                       # O[I, J]
 
 
+def occ_apply(t, Woooo, Foo):
+    '''(L t)[J,i,j,k] = P(k/ij) 1/2 sum_mn W[m,n,i,j] t[J,m,n,k]
+                      - P(i/jk) sum_m F[m,i] t[J,m,j,k]:
+    the hh ladder and the F_oo term of the T3 equation on full tensors (the
+    reference of occ_operator_direct).'''
+    x = 0.5 * np.einsum('mnij,Jmnk->Jijk', Woooo, t, optimize=True)
+    out = x - x.transpose(0, 3, 2, 1) - x.transpose(0, 1, 3, 2)
+    y = np.einsum('mi,Jmjk->Jijk', Foo, t, optimize=True)
+    out -= y - y.transpose(0, 2, 1, 3) - y.transpose(0, 3, 2, 1)
+    return out
+
+
+def occ_operator_direct(om, Woooo, Foo, rows=None, dtype=None):
+    '''The matrix O[I, J] of occ_apply on packed occupied triples, written
+    down element by element (3 (C(o,2) + o) terms per row, C kernel) instead
+    of applied to the packed basis (occ_operator, o^8 work and o^6-sized
+    temporaries).  ``rows`` = (lo, hi): the diagonal block of the triples
+    lo <= I < hi only (a block of the symmetry labels).'''
+    dtype = np.dtype(np.result_type(Woooo, Foo) if dtype is None else dtype)
+    lo, hi = (0, om.ntri) if rows is None else rows
+    if not (USE_C and hasattr(_lib, 'zc_occ_operator_d')) or dtype not in (np.float64, np.complex128):
+        O = occ_operator(om, lambda t: occ_apply(t, Woooo, Foo))
+        return np.ascontiguousarray(O[lo:hi, lo:hi], dtype=dtype)
+    n = hi - lo
+    O = np.empty((n, n), dtype=dtype)
+    loc = np.full(om.ntri, -1, dtype=np.int64)
+    loc[lo:hi] = np.arange(n)
+    W = np.ascontiguousarray(Woooo, dtype=dtype)
+    F = np.ascontiguousarray(Foo, dtype=dtype)
+    getattr(_lib, 'zc_occ_operator_' + _sfx(dtype))(
+        _p(O), _I64(n), _p(np.arange(lo, hi, dtype=np.int64)), _p(loc), _I64(om.n),
+        _I64(om.npair), _I64(om.ntri), _p(om.tri_c), _p(om.sgn_c), _p(om.free_c),
+        _p(om.pair_c), _p(om.pa_c), _p(om.pb_c), _p(W), _p(F))
+    return O
+
+
 def add_reduce_pair_first(R, X, vm, rows, pairs=None):
     '''R[rows] += P(c/ab) X, with X[Q, I, c] (pair-major, as produced by the
     ladder GEMM on gather_vir_half).  ``pairs`` = (q0, q1): X holds the pair

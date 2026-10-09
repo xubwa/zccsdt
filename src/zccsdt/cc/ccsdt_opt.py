@@ -1309,7 +1309,9 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None):
         t_.__exit__(None, None, None)
         t_ = timer('imd.O6'); t_.__enter__()
         Weff_oooo = ge['oooo'] + einsum('mnP,ijP->mnij', goovv_P, t2P)
-        O6 = t3pack.occ_operator(om, lambda t: _occ_apply(t, Weff_oooo, Feff_oo))
+        # (the operator of the hh ladder and F_oo: its matrix on packed triples
+        # or the pair-driven form, see t3kern.OccOperator)
+        O6 = t3kern.OccOperator(om, Weff_oooo, Feff_oo, dtype)
         t_.__exit__(None, None, None)
 
     # ---- T3 residual: ring + drive, pp ladder (+F_vv), hh ladder (+F_oo)
@@ -1374,11 +1376,4 @@ def _unpack_pairs(packed, om, vm):
     return r2
 
 
-def _occ_apply(t, Woooo, Foo):
-    '''(L t)[J,i,j,k] = P(k/ij) 1/2 sum_mn W[m,n,i,j] t[J,m,n,k]
-                      - P(i/jk) sum_m F[m,i] t[J,m,j,k].'''
-    x = 0.5 * einsum('mnij,Jmnk->Jijk', Woooo, t)
-    out = x - x.transpose(0, 3, 2, 1) - x.transpose(0, 1, 3, 2)
-    y = einsum('mi,Jmjk->Jijk', Foo, t)
-    out -= y - y.transpose(0, 2, 1, 3) - y.transpose(0, 3, 2, 1)
-    return out
+_occ_apply = t3pack.occ_apply

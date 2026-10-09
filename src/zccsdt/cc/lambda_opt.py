@@ -341,7 +341,9 @@ class DenseL3:
         L3 = self.view(L3)
         if not self.size:
             return
-        if t3kern.USE_C:
+        if isinstance(O6, t3kern.OccOperator):
+            O6.apply(L3, R, None, t3engine.occ_cols(self.om.ntri, self.dtype.itemsize, self.mem_mb))
+        elif t3kern.USE_C:
             t3kern.occ_operator(O6, L3, R, t3engine.occ_cols(self.om.ntri, self.dtype.itemsize,
                                                              self.mem_mb))
         else:
@@ -486,8 +488,8 @@ def make_intermediates(eris, t1, t2, T3p, mem_mb=2000.0, blocks=False):
         Woooo = ge['oooo'] + einsum('mnP,ijP->mnij', goovv_P, t2P)
         im.Woooo_P = np.ascontiguousarray(Woooo[:, :, mm, nn])          # [i, j, P(mn)]
         im.Woooo_pp = np.ascontiguousarray(im.Woooo_P[mm, nn])          # [P(ij), P(mn)]
-        O6 = t3pack.occ_operator(om, lambda t: ccsdt_opt._occ_apply(t, Woooo, im.Foo))
-        im.O6T = np.ascontiguousarray(O6.T, dtype=dtype)
+        # (the transposed operator of the hh ladder and F_oo, t3kern.OccOperator)
+        im.O6T = t3kern.OccOperator(om, Woooo, im.Foo, dtype, trans=True)
         im.WL = np.ascontiguousarray(im.Wov.transpose(2, 0, 1, 3)).reshape(nvir * nocc, -1)
         # [(m, e), (j, b)] and [i, (g, f, m)] of Wov[k, e, c, m]
         im.Wov_mejb = np.ascontiguousarray(im.Wov.transpose(3, 1, 0, 2)).reshape(nvir * nocc, -1)

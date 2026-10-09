@@ -210,7 +210,10 @@ class DenseT3:
                     X = gemm(Wpp, T.reshape(vm.npair, -1))
                     t3pack.add_reduce_pair_first(R, X, vm, rows)
         with timer('hh_ladder'):
-            if t3kern.USE_C:
+            if isinstance(O6, t3kern.OccOperator):
+                O6.apply(T3p, R, None, occ_cols(om.ntri, np.dtype(dtype).itemsize, self.mem_mb),
+                         self.io)
+            elif t3kern.USE_C:
                 t3kern.occ_operator(O6, T3p, R,
                                     occ_cols(om.ntri, np.dtype(dtype).itemsize, self.mem_mb),
                                     self.io)
@@ -612,7 +615,8 @@ class SpinBlockT3:
             for g in L.stored:
                 I = slice(om.tri_off[g], om.tri_off[g + 1])
                 A = slice(vm.tri_off[g], vm.tri_off[g + 1])
-                Rd[I, A] += O6[I, I] @ L.block(T3, g)
+                Og = O6.matrix((I.start, I.stop)) if isinstance(O6, t3kern.OccOperator) else O6[I, I]
+                Rd[I, A] += Og @ L.block(T3, g)
         return L.from_dense(Rd)
 
     def _rows(self, delta):
@@ -886,6 +890,12 @@ def _spin_block_c_methods():
                 if L.nI[g] == 0 or L.nA[g] == 0:
                     continue
                 I = slice(om.tri_off[g], om.tri_off[g + 1])
+                if isinstance(O6, t3kern.OccOperator):
+                    Tg, Rg = L.block(T3, g), L.block(R, g)
+                    O6.apply(Tg, Rg, (int(I.start), int(I.stop)),
+                             occ_cols(L.nI[g], np.dtype(dtype).itemsize, self.mem_mb),
+                             None if self.io is None else scratch.io_desc(Tg, Rg))
+                    continue
                 Og = np.ascontiguousarray(O6[I, I], dtype=dtype)
                 if t3kern.USE_C:
                     Tg, Rg = L.block(T3, g), L.block(R, g)

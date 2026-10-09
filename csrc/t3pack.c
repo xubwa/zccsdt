@@ -1651,3 +1651,52 @@ void zc_breduce_ppl_rows_##SFX(T *R, const int64_t *Rbase, const int64_t *Rcol, 
 }
 DEFINE_BLOCKED(double, d)
 DEFINE_BLOCKED(double complex, z)
+
+
+/* ---- The occupied operator of the T3 equation (hh ladder + F_oo) as a
+ * matrix on packed occupied triples, written down directly
+ * (zccsdt/cc/t3pack.py occ_operator_direct; docs/factorization.md 2.3):
+ *   (O t)[ijk] = P(k/ij) sum_{m<n} W[m,n,i,j] t[mnk] - P(i/jk) sum_m F[m,i] t[mjk]
+ * For the rows I = rows[a] (nI of the nto triples; loc[I] = a, -1 for the
+ * triples that are not rows) and the columns J = rows[b]:
+ *   O[a, b] += sgn_r(I) sgn[k, P] W[P; pair_r(I)]   k = free_r(I), J = tri[k, P]
+ *   O[a, b] -= sgn_r(I) sgn[m, Q] F[m, free_r(I)]   Q = pair_r(I), J = tri[m, Q]
+ * W: (no, no, no, no) as W[m, n, i, j]; F: (no, no) as F[m, i]; O: (nI, nI),
+ * overwritten.  otri, osgn: (no, npo); ofree, opair: (3, nto); pa, pb: the
+ * two indices of a pair.  The work is 3 (npo + no) per row. */
+#define DEFINE_OCCOP(T, SFX)                                                   \
+void zc_occ_operator_##SFX(T *O, int64_t nI, const int64_t *rows,              \
+                           const int64_t *loc, int64_t no, int64_t npo,        \
+                           int64_t nto, const int64_t *otri, const int8_t *osgn, \
+                           const int64_t *ofree, const int64_t *opair,         \
+                           const int64_t *pa, const int64_t *pb,               \
+                           const T *W, const T *F)                             \
+{                                                                              \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t a = 0; a < nI; a++) {                                         \
+        T *o = O + a * nI;                                                     \
+        const int64_t It = rows[a];                                             \
+        memset(o, 0, sizeof(T) * nI);                                          \
+        for (int r = 0; r < 3; r++) {                                          \
+            const int64_t k = ofree[r * nto + It], Q = opair[r * nto + It];      \
+            const int64_t p = pa[Q], q = pb[Q];                                \
+            const double sr = (r == 1) ? -1.0 : 1.0;                           \
+            for (int64_t P = 0; P < npo; P++) {                                \
+                const int8_t s = osgn[k * npo + P];                            \
+                if (!s) continue;                                              \
+                const int64_t b = loc[otri[k * npo + P]];                      \
+                if (b < 0) continue;                                           \
+                o[b] += (sr * s) * W[((pa[P] * no + pb[P]) * no + p) * no + q]; \
+            }                                                                  \
+            for (int64_t m = 0; m < no; m++) {                                 \
+                const int8_t s = osgn[m * npo + Q];                            \
+                if (!s) continue;                                              \
+                const int64_t b = loc[otri[m * npo + Q]];                      \
+                if (b < 0) continue;                                           \
+                o[b] -= (sr * s) * F[m * no + k];                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_OCCOP(double, d)
+DEFINE_OCCOP(double complex, z)
