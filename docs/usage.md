@@ -462,6 +462,12 @@ mycc = zccsdt.CCSDT(mf).run()            # GHF or X2C reference (GCCSDT)
 e, res = mycc.eom_ee(nroots=4)           # excitation energies / Hartree, zccsdt.cc.eom.Result
 e_ip, _ = mycc.eom_ip(nroots=2)          # ionization energies
 e_ea, _ = mycc.eom_ea(nroots=2)          # E(N+1) - E(N)
+
+# a linear molecule (X2C spinors adapted to m_j, T3 in the blocks of the labels 2 m_j):
+e, res = mycc.eom_ee(nroots=3, shift=2)              # the states whose operator changes the sum of the labels by 2
+e, res = mycc.eom_ee(nroots=3, shift=[0, 2, 4])      # {shift: energies}, {shift: Result}: one eigenproblem each
+e, res = mycc.eom_ee(nroots=2, shift='all')          # every shift a single excitation can make; -D taken from +D
+e_ip, r = mycc.eom_ip(nroots=2, shift=-1)            # an electron removed from a spinor of label +1
 ```
 
 Equation-of-motion CCSDT on the converged amplitudes: the lowest
@@ -489,26 +495,60 @@ table in Hartree and eV with the shares.
 
 **Which states.**  After a ground state on the packed block: all of them.
 After one in the blocks of the symmetry labels (a linear molecule with
-`symmetry`, the default): the totally symmetric states, those with the m_j
-of the ground state; set `mycc.symmetry = False` before `kernel()` for the
-others (states with a label of their own in the blocks are not implemented,
-`docs/eom.md` 6).  The solver finds the lowest roots; the three components
-of a triplet count as three, and with more near-degenerate states than
-`nroots` which of them come out depends on the guess.
+`symmetry`, the default): the states of one **label shift** - the
+excitation operator changes the sum of the labels of the spinors (2 m_j,
+the numbers the output lists as the labels) by `shift`: `r1[i,a]` where
+`l_a - l_i = shift`, `r2`, `r3` likewise with the sums.  Default 0: the
+totally symmetric states, those with the m_j of the ground state.  The
+program only adds labels; in the usual terms `shift = 2 (Omega' - Omega)`,
+so for a closed shell shift 0 has the 0+ and 0- states, +-2 the states of
+Omega = 1, +-4 those of Omega = 2.  The lowest excited state of HBr is in
+shift +-4 and has no totally symmetric partner: with shift 0 alone it is
+not found.
+
+| Option of `eom_ee` | | |
+|---|---|---|
+| `shift` | None | a number; a list of numbers; `'all'` (every shift a single excitation can make, by \|D\|).  With more than one shift the call returns `({shift: energies}, {shift: Result})`, `nroots` roots of each (`nroots` may be a list); each shift is solved by itself in the blocks of that shift (`res.r3[k]`: flat in the layout `zccsdt.cc.t3shift.ShiftLayout`; `res.r1`, `res.r2` dense with zeros outside the shift) |
+| `partners` | False | For a reference that is symmetric under time reversal (a closed shell) the states of -D are the time-reversed states of +D with the same energies: of a pair +-D in the list the first is computed and the other gets its energies (a `Result` without vectors, `partner_of` set).  True: both are computed |
+
+A shift no single excitation has gives a `ValueError` (the guess starts
+from singles); an odd shift for labels 2 m_j, which are odd, too.  The
+solver finds the lowest roots of a shift; with more near-degenerate states
+than `nroots` which of them come out depends on the guess (`nguess`).
+
+*Without the blocks* a shift selects states too, at the cost of the packed
+block: with `mycc.symmetry = False` for a linear molecule, and for spin
+orbitals of pure spin (an RHF or UHF reference as GHF), whose label is
+2 m_s - `shift=2` gives the M_S = 1 components of the triplets, each
+triplet once, `shift=0` the singlets and the M_S = 0 components of the
+triplets.  Without `shift` the packed block gives all states and the three
+components of a triplet are three roots.  Labels with a modulus (the
+fermion irreps of a point group) have neither blocks nor shifts in CCSDT.
 
 **Cost and memory.**  A sigma vector is two T3 residuals: 2.1 CCSDT
-iterations measured for H2O / cc-pVTZ (`docs/benchmarks.md`), with 14 sigma
+iterations measured for H2O / cc-pVTZ on the packed block, @@EE_RATIO@@
+in the blocks of the labels (`docs/benchmarks.md`), with 13 to 18 sigma
 vectors per root to 1e-6.  The operands of the ground state and of one sigma vector are kept
 in memory (about twice the pp operator, seven arrays of o v^3, T3, the
 batch buffers); the vectors of the subspace - 2 `max_space` of the size of
-T3 - go to a scratch file if `max_memory` does not hold them.  A ground
+T3, in blocks of the size of the blocks of the shift - go to a scratch
+file if `max_memory` does not hold them.  A ground
 state that needed the sliced pp operator or T3 in a scratch file cannot
 run EOM yet (`MemoryError` with the numbers).
 
-**EOM-IP and EOM-EA** take the options of `eom_ee`.  They run the EE code
-with one ghost spinor (`docs/eom.md` 5): correct and checked against a
-dense reference and PySCF, but at the cost of an EE calculation and on the
-packed block - the implementation with short vectors is not written.
+**EOM-IP and EOM-EA** take the options of `eom_ee`.  The vectors are short
+- `r[i]`, `r[(i<j), a]`, `r[(i<j<k), (a<b)]` for IP, `r[a]`, `r[i, (a<b)]`,
+`r[(i<j), (a<b<c)]` for EA (`docs/eom.md` 5) - and the result is kept as
+`mycc.eom_ip_result` / `eom_ea_result`.
+
+| Option | | |
+|---|---|---|
+| `shift` | None | None: all states, on the packed layout (whatever the layout of the ground state).  In the blocks of the labels of a linear molecule: the label of the electron - **minus the label of the spinor it is removed from** (IP), the label of the spinor it is attached to (EA): the change of the sum of the labels of the state.  A number, a list, or `'all'`, as for `eom_ee`; `partners` likewise |
+| `short` | True | False: the EE problem with a ghost spinor at its full length on the packed block, at the cost of an EE calculation - the route the short vectors are checked against |
+
+The vectors of a `Result` carry the ghost index (the last virtual spinor
+for IP, the first occupied one for EA); `res.short.strip(res, k)` returns
+root k without it.  @@IP_COST@@
 
 **EOM-CCSD** on CCSD amplitudes: `zccsdt.cc.eom.kernel(eris, t1, t2, None,
 nroots=..)` with the amplitudes of `zccsdt.cc.solver.kernel(eris, 'ccsd')`;

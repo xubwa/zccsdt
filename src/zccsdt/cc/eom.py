@@ -27,6 +27,7 @@ T3); the 2 max_space vectors of the subspace are in memory if they fit in
 '''
 
 import ctypes
+import os
 import time
 from dataclasses import dataclass
 
@@ -38,6 +39,9 @@ from zccsdt.timing import timer
 
 HARTREE_EV = 27.211386245988
 CHUNK = 1 << 21
+# False: the collapse, the preconditioner and the projected matrix with numpy on one
+# thread, as the first version had them (ZCCSDT_EOM_NUMPY=1; to measure the difference)
+THREADED = not os.environ.get('ZCCSDT_EOM_NUMPY')
 
 
 # ------------------------------------------------------------------- vectors
@@ -49,6 +53,8 @@ def vdot(x, y):
 
 def mdot(a, xs):
     '''[<a|x> for x in xs] in one pass over a (threaded).'''
+    if not THREADED:
+        return np.array([vdot(a, x) for x in xs])
     out = 0
     for p in range(len(a)):
         if a[p].size:
@@ -75,7 +81,7 @@ def transform(vecs, Q):
     for p in range(len(vecs[0])):
         size = vecs[0][p].size
         dt = vecs[0][p].dtype
-        f = diis._vec_c('vtransform', dt) if size else None
+        f = diis._vec_c('vtransform', dt) if size and THREADED else None
         if f is not None and all(v[p].flags.c_contiguous and v[p].dtype == dt for v in vecs):
             # (the threaded kernel: blocks of 256 elements of all vectors at a time)
             q = np.ascontiguousarray(Q, dtype=dt)
@@ -513,7 +519,7 @@ def make_precond(g, with_t3, floor=1e-3, shift=None):
                     continue
                 blk = x[2][where].reshape(shape)
                 f = diis._vec_c('vprecond', blk.dtype)
-                if f is not None and blk.flags.c_contiguous:
+                if f is not None and blk.flags.c_contiguous and THREADED:
                     f(t3pack._p(blk), ctypes.c_int64(shape[0]), ctypes.c_int64(shape[1]),
                       t3pack._p(np.ascontiguousarray(eo3[I])), t3pack._p(np.ascontiguousarray(ev3[A])),
                       t3pack._p(np.array([omega], dtype=blk.dtype)), ctypes.c_double(floor))

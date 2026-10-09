@@ -7,13 +7,16 @@
 #SBATCH -A lcheng24
 #SBATCH --partition=parallel
 #SBATCH --mem=90G
-#SBATCH --exclusive
 # EOM-CCSDT of HBr in the blocks of the symmetry labels (bench/eom2_bench.py):
-# states with a label shift, IP with short vectors; a node of its own, the
-# threads on the cores of one socket and the memory of that socket.
+# states with a label shift, IP with short vectors; 24 cores of one node, the
+# threads on the cores of one socket and the memory of that socket where the
+# job has them (the other jobs of the node are listed).
 #   usage: sbatch -o LOGDIR/%x-%j.out --export=ALL,ZC_ROOT=$SNAP bench/slurm_eom2.sh
 #   ZC_ROOT   snapshot of the repository (with src/zccsdt/lib/*.so)
-#   E2_RUNS   the runs, "case:parts" separated by blanks (default "tz:ee,ip qz:ee,ip")
+#   E2_RUNS   the runs, "case:parts" separated by blanks (default "tz:ee,ip tz:ee:numpy qz:ee,ip");
+#             a third field "numpy": the vector operations of the solver in numpy on one
+#             thread (ZCCSDT_EOM_NUMPY=1), as before the threaded kernels.  The case qz
+#             (26 + 120) takes about an hour and 35 GB.
 #   E2_THREADS (default 24), and the variables of bench/eom2_bench.py
 cd ${ZC_ROOT:?snapshot of the repository}
 ROOT=$(pwd)
@@ -45,11 +48,14 @@ lscpu | grep 'Model name'; lscpu | grep -E "NUMA node[0-9]"; free -g | sed -n 2p
 echo "cpus of the job: $(taskset -cp $$ | sed 's/.*: //')  load $(cut -d' ' -f1-3 /proc/loadavg)"
 echo "other jobs on this node:"; squeue -w "$(hostname)" -h -o "  %i %u %j %C cores" 2>/dev/null | grep -v " ${SLURM_JOB_ID:-none} " || true
 filter() { grep --line-buffered -v -i -E "plugins found|site-packages/pyscf|shciscf|PYSCF_EXT_PATH"; }
-runs=${E2_RUNS:-tz:ee,ip qz:ee,ip}
+runs=${E2_RUNS:-tz:ee,ip tz:ee:numpy qz:ee,ip}
 for run in $runs; do
+  IFS=: read -r case parts mode <<< "$run"
+  np=; [ "$mode" = numpy ] && np=1
   echo "=== $(date '+%F %T')  ${run}  load $(cut -d' ' -f1-3 /proc/loadavg)"
+  ZCCSDT_EOM_NUMPY=$np \
   OMP_NUM_THREADS=$n MKL_NUM_THREADS=$n OPENBLAS_NUM_THREADS=$n OMP_PROC_BIND=close OMP_PLACES=cores OMP_WAIT_POLICY=PASSIVE \
-    "${bind[@]}" python -u bench/eom2_bench.py "${run%%:*}" "${run#*:}" 2>&1 | filter
+    "${bind[@]}" python -u bench/eom2_bench.py "$case" "$parts" 2>&1 | filter
 done
 find "$S" -delete
 echo "done $(date)  load $(cut -d' ' -f1-3 /proc/loadavg)"

@@ -79,7 +79,8 @@ class Ground:
         return eom._shifter(self.eng)
 
     def masks(self, shift):
-        '''([i,a], [(i<j),(a<b)]) True where an element has the label shift.'''
+        '''([i,a], [(i<j),(a<b)]) True where an element has the label shift
+        (classes of the maps; spin blocks: the number of beta indices).'''
         key = ('_mask', int(shift))
         if key not in self.c:
             om, vm = self.om, self.vm
@@ -282,10 +283,16 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
                     blk += t3shift.one_body_pairs(dFvv, vm, h + s, h, 0.5, dt)
         dWpp.append(blk)
     t_.__exit__(None, None, None)
-    if sh is not None:
+    # With labels in use the rank-1 and rank-2 parts are masked to the shift (0 for the
+    # totally symmetric vectors): they are dense arrays, the integrals are symmetric to the
+    # rounding of the SCF only, and what the rounding puts into other shifts would grow in a
+    # Davidson iteration - the states of other shifts lie lower (HBr, 26 + 120: after 28
+    # iterations of the singles-doubles stage the roots of the shifts +-2 and +-4 came up).
+    labelled = om.spins is not None
+    if labelled:
         m1, m2 = g.masks(s)
     if not with3:
-        if sh is not None:
+        if labelled:
             s1 *= m1
             s2 *= m2
         return s1, s2, None
@@ -361,4 +368,7 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
     del dWv
     with timer('eom.t3'):
         eng.residual(g.T3, dWringT, r2mn, c['Wv'], c['Wo'], r2P, dWpp, dO6, out=S3, clear=False)
+    if labelled:
+        s1 *= m1
+        s2 *= m2
     return s1, s2, S3.reshape(-1)

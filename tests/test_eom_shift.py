@@ -170,6 +170,12 @@ def test_sigma_with_a_label_shift(lih):
         if s == 0:
             e = eom_opt.sigma(gb, r1, _p2(r2, omb, vmb), r3)
             assert abs(e[2] - sb[2]).max() < 1e-12 and abs(e[0] - sb[0]).max() < 1e-10 and abs(e[1] - sb[1]).max() < 1e-10
+            # the totally symmetric sigma vector has nothing in other shifts, whatever the rounding
+            # of the integrals and whatever the vector has there (else the lower states of other
+            # shifts grow in the Davidson iterations)
+            assert not e[0][~m1].any() and not e[1][~m2].any()
+            bad = eom_opt.sigma(gb, r1 + 1e-3 * ~m1, _p2(r2, omb, vmb), None, sd=True)
+            assert not bad[0][~m1].any() and not bad[1][~m2].any()
         # complex spinors: every element with its phases
         sc = eom_opt.sigma(gc_, r1 * f1, _p2(r2 * f2, omb, vmb), _phase3(L, r3, po, pv), shift=s)
         assert sc[2].dtype == np.complex128
@@ -255,6 +261,25 @@ def test_roots_of_every_shift_hbr(hbr):
         res = eom.kernel(ec, a.t1 * f1, a.t2 * f2, t3c, nroots=len(eb[d]), conv_tol=1e-9, shift=eom.class_shift(ec, d))
         assert res.converged.all() and res.r3[0].dtype == np.complex128 and abs(res.r3[0].imag).max() > 1e-6
         assert abs(res.e - eb[d]).max() < 1e-10 and abs(res.e_imag).max() < 1e-10
+
+
+def test_shifted_vectors_in_a_scratch_file(hbr, monkeypatch, tmp_path):
+    '''The vectors of a shift (EE) and the short vectors of IP as mapped
+    arrays of a scratch file, with a subspace of 7 vectors: the same roots
+    (the collapse in place and the passes take the mapped arrays).'''
+    from zccsdt.scratch import is_mapped
+    monkeypatch.setenv('ZCCSDT_TMPDIR', str(tmp_path))
+    cc = hbr[True]
+    eris = cc._eris
+    sh = eom.ghost_short(eris, cc.t1, cc.t2, cc.t3, 'ip')
+    for args, s in (((eris, cc.t1, cc.t2, cc.t3), eom.class_shift(eris, 2)),
+                    ((sh.eris, sh.t1, sh.t2, sh.t3), sh.class_shift(1))):
+        p = eom.plan_for(args[0], np.float64, 2, opts=solver.Options(incore_complete=True), shift=s)
+        ref = eom.kernel(*args, nroots=2, conv_tol=1e-8, plan=p, shift=s)
+        pm = eom.Plan(p.nroots, 7, True, p.need, p.fixed, p.vectors, p.vectors, p.max_space)
+        res = eom.kernel(*args, nroots=2, conv_tol=1e-8, plan=pm, shift=s)
+        assert is_mapped(res.r3[0]) and not is_mapped(ref.r3[0]) and res.converged.all()
+        assert abs(res.e - ref.e).max() < 1e-8 and res.ncollapse > ref.ncollapse
 
 
 def test_plan_and_memory_with_a_shift():
