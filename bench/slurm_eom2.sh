@@ -45,7 +45,8 @@ lscpu | grep 'Model name'; lscpu | grep -E "NUMA node[0-9]"; free -g | sed -n 2p
 echo "cpus of the job: $(taskset -cp $$ | sed 's/.*: //')  load $(cut -d' ' -f1-3 /proc/loadavg)"
 echo "other jobs on this node:"; squeue -w "$(hostname)" -h -o "  %i %u %j %C cores" 2>/dev/null | grep -v " ${SLURM_JOB_ID:-none} " || true
 filter() { grep --line-buffered -v -i -E "plugins found|site-packages/pyscf|shciscf|PYSCF_EXT_PATH"; }
-for run in ${E2_RUNS:-"tz:ee,ip qz:ee,ip"}; do
+runs=${E2_RUNS:-tz:ee,ip qz:ee,ip}
+for run in $runs; do
   echo "=== $(date '+%F %T')  ${run}  load $(cut -d' ' -f1-3 /proc/loadavg)"
   OMP_NUM_THREADS=$n MKL_NUM_THREADS=$n OPENBLAS_NUM_THREADS=$n OMP_PROC_BIND=close OMP_PLACES=cores OMP_WAIT_POLICY=PASSIVE \
     "${bind[@]}" python -u bench/eom2_bench.py "${run%%:*}" "${run#*:}" 2>&1 | filter

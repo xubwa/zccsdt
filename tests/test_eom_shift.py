@@ -192,8 +192,6 @@ def test_roots_of_every_shift_lih(lih):
     assert eom.label_shifts(a._eris) == [-4, -2, 0, 2, 4] and eom.time_reversal_symmetric(a._eris)
     with pytest.raises(ValueError, match='multiples of 2'):
         eom.class_shift(a._eris, 1)
-    with pytest.raises(ValueError, match='labels in use'):
-        b.eom_ee(nroots=1, shift=2)
     eb, rb = a.eom_ee(nroots=[4, 4, 4, 2, 2], conv_tol=1e-9, shift=[0, 2, -2, 4, -4], partners=True, nguess=6)
     assert a.eom is rb and a.e_ee is eb and all(r.converged.all() and r.partner_of is None for r in rb.values())
     assert [rb[d].r3[0].size for d in (0, 2, -2, 4, -4)] == [868, 704, 704, 368, 368]
@@ -218,6 +216,10 @@ def test_roots_of_every_shift_lih(lih):
     assert e1 is r1.e and abs(e1 - eb[4]).max() < 1e-8 and a.eom is r1
     ea, ra = a.eom_ee(nroots=1, conv_tol=1e-7, shift='all')
     assert sorted(ea) == [-4, -2, 0, 2, 4] and ra[-2].partner_of == 2 and ra[4].partner_of is None
+    # on the packed block (symmetry off) a shift selects the states by masks
+    es, rs = b.eom_ee(nroots=2, conv_tol=1e-9, shift=2)
+    assert rs.converged.all() and rs.r3[0].size == 3264 and abs(es - eb[2][:2]).max() < 1e-10
+    assert np.count_nonzero(rs.r3[0]) <= 704 and rs.shift is None and rs.label_shift == 2
     # EOM-CCSD (the same amplitudes in both layouts) with a shift
     eb_ = a._eris
     ed, t3d = a._dense_view()

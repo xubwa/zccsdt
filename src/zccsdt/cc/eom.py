@@ -26,6 +26,7 @@ T3); the 2 max_space vectors of the subspace are in memory if they fit in
 (counted against ``max_disk``); max_space is lowered to what fits.
 '''
 
+import ctypes
 import time
 from dataclasses import dataclass
 
@@ -46,6 +47,15 @@ def vdot(x, y):
     return sum(diis._dot(a, b) for a, b in zip(x, y) if a.size)
 
 
+def mdot(a, xs):
+    '''[<a|x> for x in xs] in one pass over a (threaded).'''
+    out = 0
+    for p in range(len(a)):
+        if a[p].size:
+            out = out + diis._mdot(a[p], [x[p] for x in xs])
+    return np.atleast_1d(out)
+
+
 def lincomb(out, terms):
     '''out = sum c * x over terms = [(c, x)]; out may be one of the x.'''
     cs = [c for c, _ in terms]
@@ -64,6 +74,14 @@ def transform(vecs, Q):
     Qt = np.ascontiguousarray(Q.T)
     for p in range(len(vecs[0])):
         size = vecs[0][p].size
+        dt = vecs[0][p].dtype
+        f = diis._vec_c('vtransform', dt) if size else None
+        if f is not None and all(v[p].flags.c_contiguous and v[p].dtype == dt for v in vecs):
+            # (the threaded kernel: blocks of 256 elements of all vectors at a time)
+            q = np.ascontiguousarray(Q, dtype=dt)
+            ptrs = (ctypes.c_void_p * n)(*[v[p].ctypes.data for v in vecs])
+            f(ctypes.c_int64(size), ctypes.c_int64(n), ctypes.c_int64(m), ptrs, t3pack._p(q))
+            continue
         step = max(1, CHUNK // n)
         for c0 in range(0, size, step):
             blk = np.stack([v[p][c0:c0 + step] for v in vecs])
@@ -161,11 +179,11 @@ def davidson(apply, precond, guesses, store, nroots, conv_tol=1e-6, max_space=20
         n = len(V)
         Gn = np.zeros((n, n), dtype=store.dtype)
         Gn[:n0, :n0] = G
-        for j in range(n0, n):
-            for i in range(n):
-                Gn[i, j] = vdot(V[i], S[j])
-            for i in range(n0):
-                Gn[j, i] = vdot(V[j], S[i])
+        with timer('eom.vectors'):
+            for j in range(n0, n):          # (one pass over the new vector for a column, one for a row)
+                Gn[:, j] = np.conj(mdot(S[j], V))
+                if n0:
+                    Gn[j, :n0] = mdot(V[j], S[:n0])
         G = Gn
         ew, ev = scipy.linalg.eig(G)
         if prev is not None:        # the roots that the previous ones have become
@@ -283,7 +301,7 @@ def _orthogonalize(t, basis, lindep, store=None):
     lincomb(t, [(1.0 / n0, t)])
     for _ in range(2):
         if basis:
-            c = [vdot(b, t) for b in basis]
+            c = np.conj(mdot(t, basis))
             lincomb(t, [(1.0, t)] + [(-ck, b) for ck, b in zip(c, basis)])
     nrm = float(np.sqrt(abs(vdot(t, t))))
     if nrm < lindep:
@@ -494,6 +512,12 @@ def make_precond(g, with_t3, floor=1e-3, shift=None):
                 if not shape[0] or not shape[1]:
                     continue
                 blk = x[2][where].reshape(shape)
+                f = diis._vec_c('vprecond', blk.dtype)
+                if f is not None and blk.flags.c_contiguous:
+                    f(t3pack._p(blk), ctypes.c_int64(shape[0]), ctypes.c_int64(shape[1]),
+                      t3pack._p(np.ascontiguousarray(eo3[I])), t3pack._p(np.ascontiguousarray(ev3[A])),
+                      t3pack._p(np.array([omega], dtype=blk.dtype)), ctypes.c_double(floor))
+                    continue
                 step = max(1, CHUNK // shape[1])
                 for r0 in range(0, shape[0], step):
                     den = omega - (ev3[A][None, :] - eo3[I][r0:r0 + step, None])
@@ -540,12 +564,41 @@ def class_shift(eris, label_shift):
     return int(label_shift) // step
 
 
-def time_reversal_symmetric(eris, tol=1e-7):
+class Sector:
+    '''The vectors of one label shift on the packed block, by masks: the
+    elements of r1[i,a], r2[(i<j),(a<b)] and of the packed rank-3 part
+    whose labels (``labels``: one integer per spinor that adds, occupied
+    then virtual - 2 m_j, 2 m_s) change by ``shift``.  The sigma vector
+    maps such a vector to one of the same shift; project() removes what
+    the rounding puts elsewhere.'''
+
+    def __init__(self, om, vm, labels, shift):
+        lab = np.asarray(labels, dtype=np.int64)
+        assert om.spins is None and len(lab) == om.n + vm.n
+        lo, lv = lab[:om.n], lab[om.n:]
+        self.shift = int(shift)
+        self.m1 = lv[None, :] - lo[:, None] == shift
+        self.m2 = lv[vm.pairs].sum(axis=1)[None, :] - lo[om.pairs].sum(axis=1)[:, None] == shift
+        self.lo3, self.lv3 = lo[om.triples].sum(axis=1), lv[vm.triples].sum(axis=1)
+        self.n3 = int(sum((self.lv3 == shift + x).sum() * n for x, n in zip(*np.unique(self.lo3, return_counts=True))))
+
+    def project(self, x):
+        x[0] *= self.m1.ravel()
+        x[1] *= self.m2.ravel()
+        if len(x) > 2 and x[2].size:
+            blk = x[2].reshape(len(self.lo3), len(self.lv3))
+            step = max(1, CHUNK // max(len(self.lv3), 1))
+            for r0 in range(0, len(self.lo3), step):
+                blk[r0:r0 + step] *= self.lv3[None, :] == self.shift + self.lo3[r0:r0 + step, None]
+        return x
+
+
+def time_reversal_symmetric(eris, tol=1e-7, labels=None):
     '''Do the spinors come in pairs of labels l, -l with equal energies,
     occupied and virtual ones apart - the mark of a closed shell that is
     symmetric under time reversal?  Then the states of the label shifts D
     and -D are each other's time-reversed images, with equal energies.'''
-    lab = getattr(eris, 'labels', None)
+    lab = getattr(eris, 'labels', None) if labels is None else labels
     if lab is None:
         return False
     lab = np.asarray(lab)
@@ -574,10 +627,10 @@ def partner(res, label_shift, nroots=None):
     return out
 
 
-def label_shifts(eris):
+def label_shifts(eris, labels=None):
     '''The changes of the sum of the labels that a single excitation can
     make (the shifts with singles), sorted.'''
-    lab = np.asarray(eris.labels)
+    lab = np.asarray(eris.labels if labels is None else labels)
     no = eris.nocc
     return sorted({int(x) for x in (lab[None, no:] - lab[:no, None]).ravel()})
 
@@ -744,7 +797,7 @@ def ghost_short(eris, t1, t2, t3=None, kind='ip'):
 
 def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None,
            nguess=None, guess_tol=1e-4, opts=None, mem_mb=2000.0, verbose=False, plan=None, ground=None,
-           stdout=None, singles=None, name='EE', shift=None):
+           stdout=None, singles=None, name='EE', shift=None, sector=None):
     '''EOM-EE-CCSDT for converged amplitudes (t3 flat in the layout of the
     engine of ``eris``; None: EOM-EE-CCSD for CCSD amplitudes): the
     ``nroots`` lowest excitation energies and right-hand vectors.
@@ -761,6 +814,12 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     maps: class_shift()) - r1[i,a] where l_a - l_i = shift, the rank-3
     part in the blocks of t3shift.ShiftLayout; default: the totally
     symmetric states, in the layout of t3.
+    ``sector`` = (labels, D): on the packed block (no labels in use),
+    the states whose excitation operator changes the sum of the labels
+    ``labels`` (one integer per spinor) by D - the guess is taken from the
+    singles with l_a - l_i = D and every sigma vector is projected on the
+    elements of that shift (Sector): the other components of a degenerate
+    level, which have other shifts, are not computed.
     ``conv_tol``: the norm of the residual of a normalized vector.
     ``opts``: solver.Options for max_memory, max_disk, incore_complete.
     Returns a Result.'''
@@ -792,12 +851,20 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
                                         for x, r, c in zip(w, res, conv)), sec))
         return log
 
+    sec = None
+    if sector is not None:
+        if shift is not None or g.om.spins is not None:
+            raise ValueError('sector: for the packed block; in the blocks of the labels the states are chosen by shift')
+        sec = Sector(g.om, g.vm, sector[0], sector[1])
+
     def apply_for(with_r3):
         def apply(x, y):
             s1, s2, _ = eom_opt.sigma(g, x[0].reshape(nocc, nvir), x[1], x[2] if with_r3 else None,
                                       out=y[2] if with_r3 else None, sd=not with_r3, shift=shift)
             y[0][:] = s1.ravel()
             y[1][:] = s2.ravel()
+            if sec is not None:
+                sec.project(y)
         return apply
 
     say('EOM-%s-%s: %d roots, vectors of %d + %d + %d elements, %s' % (
@@ -806,6 +873,9 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
         m1, m2 = g.masks(shift)
         say('  label shift: %d classes; %d singles, %d doubles and %d triples have it'
             % (shift, m1.sum(), m2.sum(), sizes[2]))
+    if sec is not None:
+        say('  label shift %+d on the packed block: %d singles, %d doubles and %d triples have it'
+            % (sec.shift, sec.m1.sum(), sec.m2.sum(), sec.n3 if with3 else 0))
     say('  ' + plan.text())
     if g.change > 1e-5:
         say('  warning: the amplitudes are not converged (a Jacobi step changes them by %.1e)' % g.change)
@@ -814,7 +884,7 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     first = None
     t0 = time.perf_counter()
     if guess is None:
-        allowed = symmetric_singles(eris, shift or 0)
+        allowed = symmetric_singles(eris, shift or 0) if sec is None else sec.m1
         if singles is not None:
             allowed = allowed & np.asarray(singles, bool)
         idx = singles_guess(g, nguess or nroots, allowed)
@@ -834,6 +904,8 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
         start = first.vectors
     else:
         start = [[np.array(a, dtype=dtype).ravel(), np.array(b, dtype=dtype).ravel()] for a, b in guess]
+        if sec is not None:
+            start = [sec.project(x) for x in start]
         nroots = min(nroots, len(start))
     times['guess'] = time.perf_counter() - t0
     if not with3:

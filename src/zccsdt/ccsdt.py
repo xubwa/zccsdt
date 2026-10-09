@@ -1624,6 +1624,13 @@ class GCCSDT(UCCSDT):
         three roots (in a linear molecule in different shifts, unless two
         of them have the same).
 
+                     On the packed block (``symmetry`` off, or spin orbitals of pure
+                     spin from an RHF / UHF reference, whose label is 2 m_s) a shift
+                     selects the states too - by projection, at the cost of the packed
+                     block: the guess and every sigma vector are restricted to the
+                     elements of the shift (shift 2 of a closed shell: the M_S = 1
+                     components of the triplets, each state once; shift 0: the singlets
+                     and the M_S = 0 components).
         shift        a number, or a list of them (or 'all': every shift a single
                      excitation can make): then ``nroots`` roots of each (nroots may be
                      a list too), and the return value is ({shift: energies}, {shift:
@@ -1645,29 +1652,34 @@ class GCCSDT(UCCSDT):
             raise RuntimeError('%s.eom_ee(): no amplitudes (kernel() first)' % self.__class__.__name__)
         eris = self._eris if self._eris is not None else self.ao2mo()
 
-        def run(n, cls):
+        def run(n, cls, sector=None):
             with disk.limit(self.max_disk):
                 return eom.kernel(eris, self.t1, self.t2, self.t3, nroots=n, conv_tol=conv_tol,
                                   max_space=max_space, max_cycle=max_cycle, guess=guess, nguess=nguess,
                                   guess_tol=guess_tol, opts=self._options(None, None),
-                                  verbose=self.verbose >= logger.NOTE, stdout=self.stdout, shift=cls)
+                                  verbose=self.verbose >= logger.NOTE, stdout=self.stdout, shift=cls, sector=sector)
         if shift is None:
             res = run(nroots, None)
             self.eom, self.e_ee = res, res.e
             return res.e, res
+        from zccsdt.cc import t3pack
+        blocks = t3pack.classes_of(eris) is not None        # in the blocks of the labels, or by masks
+        labels = np.asarray(eris.labels) if blocks else self._state_labels(eris)
+        if labels is None:
+            raise ValueError('%s.eom_ee(shift=): no symmetry labels for the states - a linear molecule on the z '
+                             'axis (2 m_j) or spin orbitals of pure spin (2 m_s) have them' % self.__class__.__name__)
         many = isinstance(shift, (list, tuple, str))
         if isinstance(shift, str):
             if shift != 'all':
                 raise ValueError("shift: a number, a list of numbers or 'all'")
-            eom.class_shift(eris, 0)            # (the labels must be in use)
-            shifts = sorted(eom.label_shifts(eris), key=lambda d: (abs(d), -d))
+            shifts = sorted(eom.label_shifts(eris, labels), key=lambda d: (abs(d), -d))
         else:
             shifts = [int(d) for d in (shift if many else [shift])]
         counts = list(nroots) if isinstance(nroots, (list, tuple)) else [nroots] * len(shifts)
         if len(counts) != len(shifts):
             raise ValueError('nroots: one number, or one per shift')
-        classes = [eom.class_shift(eris, d) for d in shifts]
-        paired = not partners and eom.time_reversal_symmetric(eris)
+        classes = [eom.class_shift(eris, d) if blocks else None for d in shifts]
+        paired = not partners and eom.time_reversal_symmetric(eris, labels=labels)
         out = {}
         for d, cls, n in zip(shifts, classes, counts):
             if d in out:
@@ -1681,7 +1693,7 @@ class GCCSDT(UCCSDT):
             if self.verbose >= logger.NOTE:
                 print('EOM-EE: label shift %+d' % d, file=self.stdout, flush=True)
             # (shift 0: the layout of T3 and the engine as it is)
-            out[d] = run(n, cls if cls else None)
+            out[d] = run(n, cls if cls else None) if blocks else run(n, None, (labels, d))
             out[d].label_shift = d
         if not many:
             res = out[shifts[0]]
@@ -1689,6 +1701,25 @@ class GCCSDT(UCCSDT):
             return res.e, res
         self.eom, self.e_ee = out, {d: r.e for d, r in out.items()}
         return self.e_ee, out
+
+    def _state_labels(self, eris):
+        '''A label per active spinor that adds (occupied, then virtual), by
+        which states can be told apart on the packed block: 2 m_j of the
+        spinors of a linear molecule, 2 m_s of spin orbitals of pure spin;
+        None if there is none.'''
+        lab = getattr(eris, 'labels', None)
+        if lab is not None:
+            return None if getattr(eris, 'modulus', 0) else np.asarray(lab)
+        if isinstance(self._scf, _Given) or self._kind() != 'ghf':
+            return None
+        C = np.asarray(self.mo_coeff)
+        nao = C.shape[0] // 2
+        _, o, v, _ = self._active()
+        cols = np.concatenate((o, v))
+        a, b = np.linalg.norm(C[:nao, cols], axis=0), np.linalg.norm(C[nao:, cols], axis=0)
+        if not np.all((a < 1e-8) | (b < 1e-8)):
+            return None
+        return np.where(b < 1e-8, 1, -1).astype(np.int64)
 
     def eom_ip(self, nroots=3, shift=None, partners=False, short=True, **kwargs):
         '''EOM-IP-CCSDT: the ``nroots`` lowest ionization energies (Hartree)

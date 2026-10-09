@@ -1833,3 +1833,55 @@ void zc_vvoo_ket_##SFX(T *G, const T *B, const T *t1, int64_t nq, int64_t nv,  \
 }
 DEFINE_CCSDPACK(double, d)
 DEFINE_CCSDPACK(double complex, z)
+
+/* ---- vector helpers of the EOM Davidson solver (zccsdt.cc.eom) ----
+ * zc_vtransform: the first m of the n vectors x[j] (array of pointers, len
+ *   elements each) become sum_j x[j] q[j * m + k], k < m, in place, in
+ *   blocks of EB elements (threads over the blocks; no array of the size of
+ *   a vector is made).
+ * zc_vprecond: x[I, A] /= omega + eo[I] - ev[A] for the nI x nA block x,
+ *   denominators of absolute value below ``floor`` replaced by ``floor``. */
+#include <math.h>
+#define DEFINE_EOMVEC(T, SFX, ABS)                                             \
+void zc_vtransform_##SFX(int64_t len, int64_t n, int64_t m, T **x, const T *q) \
+{                                                                              \
+    enum { EB = 256 };                                                         \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *buf = malloc(sizeof(T) * (m * EB + 1));                             \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t b0 = 0; b0 < len; b0 += EB) {                             \
+            const int64_t nb = b0 + EB < len ? EB : len - b0;                  \
+            for (int64_t k = 0; k < m; k++) {                                  \
+                T *o = buf + k * EB;                                           \
+                for (int64_t i = 0; i < nb; i++) o[i] = 0;                     \
+                for (int64_t j = 0; j < n; j++) {                              \
+                    const T c = q[j * m + k];                                  \
+                    const T *xj = x[j] + b0;                                   \
+                    for (int64_t i = 0; i < nb; i++) o[i] += c * xj[i];        \
+                }                                                              \
+            }                                                                  \
+            for (int64_t k = 0; k < m; k++)                                    \
+                memcpy(x[k] + b0, buf + k * EB, sizeof(T) * nb);               \
+        }                                                                      \
+        free(buf);                                                             \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+void zc_vprecond_##SFX(T *x, int64_t nI, int64_t nA, const double *eo,         \
+                       const double *ev, const T *omega, double floor)         \
+{                                                                              \
+    const T w = *omega;                                                        \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t io = 0; io < nI; io++) {                                      \
+        T *r = x + io * nA;                                                    \
+        const T wi = w + eo[io];                                               \
+        for (int64_t ia = 0; ia < nA; ia++) {                                  \
+            T den = wi - ev[ia];                                               \
+            if (ABS(den) < floor) den = floor;                                 \
+            r[ia] /= den;                                                      \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_EOMVEC(double, d, fabs)
+DEFINE_EOMVEC(double complex, z, cabs)
