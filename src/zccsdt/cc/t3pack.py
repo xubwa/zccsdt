@@ -479,6 +479,45 @@ def axpby(out, inp, alpha=1.0, beta=1.0):
     return out
 
 
+class _Pairs:
+    '''The pairs p<q of n indices in numpy.triu_indices order, with what the
+    pair kernels read of a TripleMap (no tables of triples).'''
+
+    def __init__(self, n):
+        self.n = n
+        pi, pj = np.triu_indices(n, 1)
+        self.pairs = np.stack((pi, pj), axis=1)
+        self.npair = len(pi)
+        self.pa_c = np.ascontiguousarray(pi, dtype=np.int64)
+        self.pb_c = np.ascontiguousarray(pj, dtype=np.int64)
+
+
+def lex_pairs(n):
+    '''_Pairs(n), cached.'''
+    key = ('pairs', n)
+    if key not in _CACHE:
+        _CACHE[key] = _Pairs(n)
+    return _CACHE[key]
+
+
+def unpack_pairs(packed, om, vm):
+    '''The antisymmetric x[i,j,a,b] of its packed block [(i<j), (a<b)]
+    (pairs of ``om`` and ``vm``), written by the threads of t2_update.'''
+    packed = np.ascontiguousarray(packed).reshape(om.npair, vm.npair)
+    zero = np.zeros((om.n, om.n, vm.n, vm.n), dtype=packed.dtype)
+    return t2_update(zero, packed, om, vm, np.full(om.n, 0.5), np.zeros(vm.n))
+
+
+def diff_norm2(a, b):
+    '''sum |a - b|^2 of two arrays of the same shape and dtype, threaded and
+    without a temporary (None: no kernel for these arrays).'''
+    if not (_ccsd_c(a, b) and hasattr(_lib, 'zc_vdiffnorm2_d')):
+        return None
+    res = np.zeros(1)
+    getattr(_lib, 'zc_vdiffnorm2_' + _sfx(a.dtype))(_I64(a.size), _p(a), _p(b), _p(res))
+    return float(res[0])
+
+
 def _ccsd_c(*arrays):
     return USE_C and hasattr(_lib, 'zc_pack_last2_d') and all(
         a.flags.c_contiguous and a.dtype == arrays[0].dtype for a in arrays) \

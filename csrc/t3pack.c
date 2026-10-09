@@ -165,6 +165,28 @@ void zc_vdot_##SFX(int64_t n, const T *a, const T *b, T *res)                  \
     for (int t = 0; t < nt && t < 256; t++) s += part[t];                      \
     *res = s;                                                                  \
 }                                                                              \
+/* *res = sum |a - b|^2, per-thread partial sums (no array of the size) */     \
+void zc_vdiffnorm2_##SFX(int64_t n, const T *a, const T *b, double *res)       \
+{                                                                              \
+    double part[256] = {0};                                                    \
+    int nt = 1;                                                                \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        int id = omp_get_thread_num();                                         \
+        _Pragma("omp single")                                                  \
+        nt = omp_get_num_threads();                                            \
+        double acc = 0;                                                        \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t i = 0; i < n; i++) {                                      \
+            const T d = a[i] - b[i];                                           \
+            acc += creal(CONJ(d) * d);                                         \
+        }                                                                      \
+        if (id < 256) part[id] = acc;                                          \
+    }                                                                          \
+    double s = 0;                                                              \
+    for (int t = 0; t < nt && t < 256; t++) s += part[t];                      \
+    *res = s;                                                                  \
+}                                                                              \
 /* out = sum_k c[k] * x[k] for k < nk (x: array of pointers) */                \
 void zc_vlincomb_##SFX(int64_t n, int64_t nk, const T **x, const T *c, T *out) \
 {                                                                              \

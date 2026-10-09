@@ -141,6 +141,20 @@ def test_ccsd_pack_kernels(cplx, labels, impl):
     eia = eo[:, None] - ev[None, :]
     ref = t2 + ccsdt_opt._unpack_pairs(R0, om, vm) / (eia[:, None, :, None] + eia[None, :, None, :])
     np.testing.assert_allclose(t3pack.t2_update(t2, R0, om, vm, eo, ev), ref, atol=1e-13)
+    # the antisymmetric array of a packed one, pairs in triu order (the DIIS
+    # vector of the solver), and the norm of a difference
+    lo, lv = t3pack.lex_pairs(o), t3pack.lex_pairs(v)
+    Rl = _rand((lo.npair, lv.npair), rng, cplx)
+    np.testing.assert_array_equal(t3pack.unpack_pairs(Rl.ravel(), lo, lv),
+                                  ccsdt_opt._unpack_pairs(Rl, lo, lv))
+    np.testing.assert_array_equal(
+        t3pack.pack_last2(np.ascontiguousarray(t2[lo.pa_c, lo.pb_c]), lv),
+        t2[lo.pairs[:, 0][:, None], lo.pairs[:, 1][:, None], lv.pairs[:, 0], lv.pairs[:, 1]])
+    d2 = t3pack.diff_norm2(t2, Y)
+    if impl == 'c':
+        assert abs(d2 - np.linalg.norm(t2 - Y) ** 2) < 1e-10 * d2
+    else:
+        assert d2 is None
     # the ket dressing of <ab||ij> with t1
     t1, B = _rand((o, v), rng, cplx), _rand((vm.npair, v, o), rng, cplx)
     G0 = _rand((vm.npair, om.npair), rng, cplx)
