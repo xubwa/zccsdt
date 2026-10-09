@@ -52,7 +52,9 @@ cleanup() {
 }
 trap cleanup EXIT
 SQUEUE=$(command -v squeue || echo /cm/shared/apps/slurm/current/bin/squeue)
-cd "$ZC_ROOT" || exit 1
+# the tree runs from the local disk of the node
+cp -r "$ZC_ROOT" $scratch/root
+cd $scratch/root || exit 1
 export PYTHONPATH=src:$HOME/apps/socutils-git-env:$PYTHONPATH PYTHONDONTWRITEBYTECODE=1
 QUIET="pyscf plugins|site-packages/pyscf|shciscf/pyscf|PYSCF_EXT_PATH|omp_set_nested"
 
@@ -67,7 +69,7 @@ WEOF
 chmod +x $scratch/bin/xncc
 
 echo "job $SLURM_JOB_ID  host $(hostname)  $(date)  cpus $(taskset -cp $$ | sed 's/.*: //')  mem ${SLURM_MEM_PER_NODE} MB"
-echo "root $ZC_ROOT  revision $(cat $ZC_ROOT/REVISION 2> /dev/null)  cfour $cfour_bin"
+echo "root $PWD (copy of $ZC_ROOT)  revision $(cat REVISION 2> /dev/null)  cfour $cfour_bin"
 lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Socket|NUMA node[0-9]'
 numactl -H | grep -E 'cpus|size|free'
 df -h /tmp | tail -1
