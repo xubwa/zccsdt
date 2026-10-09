@@ -162,6 +162,10 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     if (nrank > 1) then
       ! what the batches of all ranks made, on every rank
       tsg = omp_get_wtime()
+      call xzmpi_barrier()
+      call xztoc(1, 'MPI: waiting for the ranks')
+      dsec(9, 1) = dsec(9, 1) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
       call xzmpi_allsum_w(w(kxacc), NW * ny * no * nvp)
       call xzmpi_allsum_w(w(kyall), NW * npo * nv * ny)
       call xzmpi_allsum_w(w(kr1c), NW * ov)
@@ -372,6 +376,10 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     if (nrank > 1 .and. .not. slices) then
       ! the parts of the residual of T3, summed onto rank 0
       tsg = omp_get_wtime()
+      call xzmpi_barrier()
+      call xztoc(1, 'MPI: waiting for the ranks')
+      dsec(10, 1) = dsec(10, 1) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
       call xzmpi_sum0_w(w(kr3), NW * n3)
       call xztoc(1, 'MPI: sum of the residual')
       dsec(5, 1) = dsec(5, 1) + omp_get_wtime() - tsg
@@ -387,6 +395,10 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
       call N(xzslocc)(w, kt3, kr3, w(ko6))
       call xztoc(1, 'hh ladder, F_oo')
       dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call xzmpi_barrier()
+      call xztoc(1, 'MPI: waiting for the ranks')
+      dsec(10, 1) = dsec(10, 1) + omp_get_wtime() - tsg
       tsg = omp_get_wtime()
       call xzmpi_slices_add(w(kr3), swoff, w(kex))
       call xztoc(1, 'MPI: residual to its rows')

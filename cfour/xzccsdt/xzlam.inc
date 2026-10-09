@@ -591,6 +591,10 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
       ! what the batches of all ranks made, on every rank
       tsg = omp_get_wtime()
       call xztic()
+      call xzmpi_barrier()
+      call xztoc(2, 'MPI: waiting for the ranks')
+      dsec(9, 2) = dsec(9, 2) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
       call xzmpi_allsum_w(w(lbdrv), NW * ny * no * nvp)
       call xzmpi_allsum_w(w(kyall), NW * npo * nv * ny)
       call xzmpi_allsum_w(w(kdr), NW * ov2)
@@ -708,6 +712,10 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
       ! residuals of rank 1 and 2, summed onto rank 0
       tsg = omp_get_wtime()
       call xztic()
+      call xzmpi_barrier()
+      call xztoc(2, 'MPI: waiting for the ranks')
+      dsec(10, 2) = dsec(10, 2) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
       if (.not. slices) call xzmpi_sum0_w(w(kr3), NW * n3)
       call xzmpi_sum0_w(w(kr2q), NW * npo * nvp)
       call xzmpi_sum0_w(w(kr1x), NW * ov)

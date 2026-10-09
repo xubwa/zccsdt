@@ -28,7 +28,7 @@
 ! sent: the serial program.
 !
 module xzdist
-  use xzpar, only: myrank, nrank, xzmpi_bcast, xzmpi_bcast_w, xzmpi_send_w, xzmpi_recv_w, &
+  use xzpar, only: myrank, nrank, xzmpi_bcast, xzmpi_bcast_w, xzmpi_send_w, xzmpi_recv_w, xzmpi_barrier, &
                    xzmpi_sum0_w, xzmpi_allsum_w, xzmpi_gather, xzmpi_max, xzmpi_sum, xzmpi_chunk, &
                    xzmpi_slices_add, xzmpi_slices_put
   implicit none
@@ -59,10 +59,13 @@ module xzdist
   real(8) :: r0extra(2) = 0d0                 ! XZ_R0LOAD: what rank 0 does alone, as a fraction of the
                                               ! distributed work of an iteration (T3 equation, Lambda)
   ! seconds of this rank, (stage, 1 T3 equation / 2 Lambda): 1 pass 1, 2 the
-  ! sweep with the pp ladder, 3 pass 2, 4 sums of pass 1 (and waiting for the
-  ! others), 5 sum of the residual (and waiting), 6 amplitudes from rank 0,
-  ! 7 the whole step, 8 what only rank 0 does
-  integer, parameter :: nds = 8
+  ! sweep with the pp ladder, 3 pass 2, 4 sums of pass 1, 5 sum of the
+  ! residual (with slices: the residual to the owners of its rows),
+  ! 6 amplitudes from rank 0 (the slices of the ranks), 7 the whole step,
+  ! 8 what only rank 0 does (with slices: what a rank does on its rows),
+  ! 9, 10 waiting for the other ranks before the sums of pass 1 and before
+  ! the sum of the residual
+  integer, parameter :: nds = 10
   real(8) :: dsec(nds, 2) = 0d0
   real(8) :: dwords(2) = 0d0                  ! words of amplitudes sent to the ranks (per receiving rank)
   real(8), private :: tb0 = 0d0
@@ -409,8 +412,10 @@ contains
   subroutine xzdtable(set, ncyc)
     use xzmem, only: xzpeak
     use xzkern, only: xz_rss
+    use xzdata, only: nwe, n3
     integer, intent(in) :: set
     integer(8), intent(in) :: ncyc
+    real(8) :: nrw
     real(8) :: mine(nds + 4), all(nds + 4, 0:nrank - 1), rate
     integer(8) :: r, kb(2)
     if (nrank == 1) return
@@ -423,19 +428,27 @@ contains
     all = 0d0
     call xzmpi_gather(mine, all, int(nds + 4, 8))
     if (myrank > 0) return
+    nrw = dble(nwe * n3)
     write(6, '(/,a,a,a,i4,a)') '   The ranks in the ', merge('CCSDT ', 'Lambda', set == 1), ' iterations (seconds of ', &
       ncyc, ' cycles)'
-    write(6, '(a)') '     rank    pass 1  sweep+ladder    pass 2  sums of pass 1  sum of residual  amplitudes' // &
-      '   rank 0 alone     step   work array/MB   peak resident/MB'
+    write(6, '(a)') '     rank    pass 1  sweep+ladder    pass 2   waiting  sums of pass 1   waiting  sum of residual' // &
+      '  amplitudes  ' // merge('on its rows ', 'rank 0 alone', slices) // '     step   work array/MB   peak resident/MB'
     do r = 0, nrank - 1
-      write(6, '(i9,f10.2,f14.2,f10.2,f16.2,f17.2,f12.2,f15.2,f9.2,f16.1,f19.1)') r, all(1, r), all(2, r), &
-        all(3, r), all(4, r), all(5, r), all(6, r), all(8, r), all(7, r), all(nds + 3, r), all(nds + 4, r)
+      write(6, '(i9,f10.2,f14.2,f10.2,f10.2,f16.2,f10.2,f17.2,f12.2,f14.2,f9.2,f16.1,f19.1)') r, all(1, r), &
+        all(2, r), all(3, r), all(9, r), all(4, r), all(10, r), all(5, r), all(6, r), all(8, r), all(7, r), &
+        all(nds + 3, r), all(nds + 4, r)
     end do
+    write(6, '(a,3(f8.2,a))') '     the slowest rank above the mean: pass 1 ', &
+      100d0 * (maxval(all(1, :)) / max(sum(all(1, :)) / nrank, 1d-30) - 1d0), ' %, sweep and ladder ', &
+      100d0 * (maxval(all(2, :)) / max(sum(all(2, :)) / nrank, 1d-30) - 1d0), ' %, pass 2 ', &
+      100d0 * (maxval(all(3, :)) / max(sum(all(3, :)) / nrank, 1d-30) - 1d0), ' %'
     rate = 0d0
     if (maxval(all(6, 1:)) > 0d0) rate = 8d-9 * all(nds + 1, 1) / maxval(all(6, 1:))
     write(6, '(a,f10.2,a,f8.3,a)') '     amplitudes to a rank: ', 8d-9 * all(nds + 1, 1), ' GB in all, ', rate, &
-      ' GB/s (the slowest receiver; rank 0 sends to all at once)'
-    write(6, '(a)') '     (sums: the time from the end of the rank''s own batches to the end of the sum,'
-    write(6, '(a)') '      i.e. waiting for the slowest rank and the transfer)'
+      ' GB/s into the slowest receiver (all ranks receive at once)'
+    if (maxval(all(5, :)) > 0d0) write(6, '(a,f10.2,a,f8.3,a)') '     the residual: ', &
+      8d-9 * ncyc * nrw, ' GB per rank in all, ', 8d-9 * ncyc * nrw / maxval(all(5, :)), &
+      merge(' GB/s (every rank sends and receives its share at once)', &
+            ' GB/s (the sum of all ranks onto rank 0)               ', slices)
   end subroutine
 end module xzdist
