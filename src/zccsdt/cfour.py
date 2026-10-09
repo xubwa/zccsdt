@@ -269,9 +269,9 @@ def read_dgcosym(directory, table=None):
     block 2k is 2 m_j = -(2k - 1).  None if the file is not there or has one
     block only (no %dglin: no symmetry).
 
-    This is a conversion to be asked for, not something read_labels() does:
-    the labels of a run are those of the file ``xzlabels`` (write_labels()),
-    and the programs give them no meaning beyond adding up.'''
+    read_labels() uses this (with the definition of the SCF) when a run
+    directory has no ``xzlabels``.  The programs give labels no meaning
+    beyond adding up, and check them against the integrals.'''
     path = os.path.join(directory, 'dgcosym')
     if not os.path.isfile(path):
         return None
@@ -290,11 +290,14 @@ def read_dgcosym(directory, table=None):
 
 
 def read_labels(directory):
-    '''(labels of all spinors, modulus) of the file ``xzlabels`` of a run
-    directory (write_labels()); None if the file is not there.'''
+    '''(labels of all spinors, modulus) of a run directory: those of the
+    file ``xzlabels`` (write_labels()) if it is there; else 2 m_j from the
+    blocks of CFOUR's own ``dgcosym`` (read_dgcosym(), modulus 0) if the SCF
+    was done in more than one block (%dglin); else None.'''
     path = os.path.join(directory, LABELS)
     if not os.path.isfile(path):
-        return None
+        mj = read_dgcosym(directory)
+        return None if mj is None else (mj, 0)
     with open(path) as f:
         numbers = [int(x) for line in f if not line.lstrip().startswith('#') for x in line.split()]
     if len(numbers) < 2 or len(numbers) != numbers[0] + 2:

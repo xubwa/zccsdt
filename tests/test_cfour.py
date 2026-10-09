@@ -442,13 +442,15 @@ def test_labels_from_dgcosym(tmp_path):
             f.write(n.tobytes() + x.tobytes() + n.tobytes())
     assert cfour.read_dgcosym(d) is None
     record(blocks)
-    assert cfour.read_labels(d) is None
+    lab, mod = cfour.read_labels(d)             # no xzlabels: the blocks of dgcosym
+    assert mod == 0 and lab.tolist() == [1, 1, -1, -1, 3, -3, 1, -1, 5, -5]
     assert cfour.read_dgcosym(d).tolist() == [1, 1, -1, -1, 3, -3, 1, -1, 5, -5]
     other = {1: -1, 2: 1, 3: -3, 4: 3, 5: -5, 6: 5}
     assert cfour.read_dgcosym(d, other).tolist() == [-1, -1, 1, 1, -3, 3, -1, 1, -5, 5]
     assert cfour.read_dgcosym(d, [0, 2, 4, 6, 8, 10]).tolist() == [0, 0, 2, 2, 4, 6, 0, 2, 8, 10]
-    cfour.write_labels(d, cfour.read_dgcosym(d))
+    cfour.write_labels(d, np.arange(10), 4)     # xzlabels has precedence
     lab, mod = cfour.read_labels(d)
-    assert mod == 0 and lab.tolist() == [1, 1, -1, -1, 3, -3, 1, -1, 5, -5]
-    record(np.ones(10, dtype=np.int64))
-    assert cfour.read_dgcosym(d) is None
+    assert mod == 4 and lab.tolist() == list(range(10))
+    os.remove(tmp_path / 'xzlabels')
+    record(np.ones(10, dtype=np.int64))         # one block: no symmetry
+    assert cfour.read_dgcosym(d) is None and cfour.read_labels(d) is None
