@@ -311,6 +311,20 @@ Label blocks:
 (The pp ladder is unchanged; its 1.24 s on 24 threads comes from one slow
 iteration of that run, 8.0 s after 6.2 and 6.4.)
 
+With the lowest 160 virtual spinors (26 + 160, same job), whole iteration
+and its three stages that changed:
+
+| Stage | | 8 threads | 16 | 24 | 48 |
+|---|---|---|---|---|---|
+| whole iteration | before | 39.7 (5.4) | 30.1 (8.3) | 28.7 (11.1) | 37.5 (17.6) |
+| | after | 28.8 (7.1) | 17.8 (13.1) | 15.5 (18.1) | 16.3 (29.3) |
+| pass 2 | before | 15.4 (5.8) | 11.5 (9.0) | 11.3 (11.7) | 18.2 (17.3) |
+| | after | 11.5 (7.5) | 6.7 (14.3) | 5.3 (20.4) | 5.5 (31.6) |
+| intermediates | before | 9.30 (4.2) | 7.75 (6.0) | 7.17 (8.1) | 8.01 (14.9) |
+| | after | 4.86 (6.8) | 3.16 (12.3) | 2.80 (16.8) | 3.06 (28.7) |
+| T1 dressing | before | 2.76 (2.2) | 2.63 (3.6) | 2.87 (6.4) | 2.97 (9.1) |
+| | after | 1.11 (4.6) | 1.03 (8.1) | 1.23 (13.6) | 1.28 (20.0) |
+
 The parts of pass 2 after the change, on 24 / 48 threads: ring products
 0.98 / 0.78 s (23 / 44 cores busy), reduction 0.59 / 0.75, gathers
 0.29 / 0.34, drive terms 0.29 / 0.37. Of pass 1: products 0.33 / 0.45
@@ -351,6 +365,33 @@ took 5.1, 4.7, 4.8 and 6.4 s on 8, 16, 24 and 48 threads before) and
 ends when the subspace is full (measured apart, vectors of 1 GB, 8 threads:
 0.55 to 0.93 s per update while the subspace fills against 0.14 to 0.38 s
 in memory, 0.38 s for both afterwards).
+
+**The DIIS vectors in the scratch file slow the other stages of a dense
+iteration down.** The same job ran the dense case once more with the
+vectors in memory (`incore_complete`; `BP_INCORE=1` of the benchmark):
+
+| | 24 threads | 48 |
+|---|---|---|
+| whole iteration, vectors in the scratch file | 87.9 | 86.5 |
+| whole iteration, vectors in memory | 76.4 | 53.9 |
+| pass 2, file / memory | 42.7 / 37.9 | 46.4 / 26.9 |
+| DIIS, file / memory | 4.75 / 1.17 | 6.65 / 1.65 |
+| peak memory / GB after four iterations, file / memory | 22.1 / 42.5 | 22.6 / 43.0 |
+
+With the file the iterations of the 48-thread runs took 65.6, 97.6 and
+96.3 s (69.6, 100.7, 87.5 before the changes): the second is fast, the
+later ones are not. In memory: 54.4, 53.5, 53.9 s. So most of what looked
+like a dense pass 2 that does not scale from 24 to 48 cores is an effect
+of the file-backed vectors on everything that runs after them - 11.6 GB of
+new page-cache pages per iteration while the subspace fills. Why (the
+buffers of the passes no longer getting huge pages once the page cache has
+taken the free memory apart is the guess) was not looked into, and neither
+was a run long enough to fill the subspace. The default is unchanged: the
+vectors go to the scratch file first (`zccsdt.disk.plan_diis`), and eight
+of them with their error vectors are 93 GB here. In label blocks the
+effect is small (26 + 120, same commit, job 31781047: 6.84 / 6.64 s per
+iteration on 24 / 48 threads with the file, 5.85 / 6.20 in memory; pass 2
+the same).
 
 ## 3. Memory, and when it is short
 
