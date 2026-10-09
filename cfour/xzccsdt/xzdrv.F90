@@ -19,7 +19,7 @@ subroutine xzdrv(w, maxcor)
   use xzmem
   use xzkern
   use xzpar
-  use xzpland, only: planq
+  use xzpland, only: planq, pneedq
   use omp_lib
   implicit none
   integer(8), intent(in) :: maxcor
@@ -42,7 +42,7 @@ subroutine xzdrv(w, maxcor)
     xzsize = min(xzsize, nmax)
   end if
   call xzjob()
-  call xzsizes()
+  if (.not. sizes_set) call xzsizes()
   call xz_blas_info(nthr, ilp64)
 
   write(6, '(/,a)') '  ' // repeat('=', 78)
@@ -59,7 +59,18 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,i14,a,f10.1,a)') '   work array (MAXCOR): ', maxcor, ' words = ', 8d-6 * maxcor, ' MB'
   write(6, '(a,i4,a,i2)') '   threads: ', nthr, '   BLAS integers: bytes ', 4 + 4 * ilp64
   if (xzmpi_enabled() == 1) write(6, '(a,i5,a,i5,a)') '   MPI: rank ', myrank, ' of ', nrank, &
-    ' ((Q) is parallel over the ranks; each has a work array of this size)'
+    ' ((Q) is parallel over the ranks; the other ranks take the work array that their (Q) needs)'
+  ! (Q) reads T3 (and Lambda3) where the files are mapped unless XZ_QMAP=0
+  t3shared = with_q
+  call get_environment_variable('XZ_QMAP', arg, larg)
+  if (larg > 0 .and. arg(1:1) == '0') t3shared = .false.
+  if (with_q .and. .not. t3shared) write(6, '(a)') '   XZ_QMAP=0: (Q) with a private copy of T3 in the work array of every rank'
+  if (t3shared .and. xz_fs_local('.' // c_null_char) == 0) then
+    write(6, '(a)') ' @XZCCSDT-W, the run directory is on a network file system: (Q) maps the file XZAMPS there'
+    write(6, '(a)') '             (one copy of T3 in the page cache of every node; pages are read over the network'
+    write(6, '(a)') '             when they are first needed or after the system has dropped them).  XZ_QMAP=0 reads'
+    write(6, '(a)') '             T3 into the work array of every rank instead.'
+  end if
   if (ilp64 /= 1) then
     write(6, '(a)') ' @XZCCSDT-F, the kernels were not compiled for the 8-byte integers of this BLAS.'
     call errex
@@ -157,6 +168,12 @@ subroutine xzdrv(w, maxcor)
 
   ! ---- the memory plan
   call xzplan(w, nslot, usefile, nch, .false.)
+  ! (the other ranks allocate what (Q) takes with this plan: xzrankmem)
+  if (myrank == 0 .and. nrank > 1 .and. with_q) then
+    sync = [dble(pneedq), 0d0]
+    call xzmpi_bcast(sync, 16_8)
+    sync = 0d0
+  end if
 
   ! ---- CCSDT (rank 0), or the amplitudes of an earlier run
   tcc = 0d0
@@ -193,6 +210,11 @@ subroutine xzdrv(w, maxcor)
     end if
     write(6, '(/,a,f10.1,a,f8.2,a)') '   amplitudes written to the file XZAMPS (', &
       8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
+    ! (Q) follows at once: T3 leaves the work array, the file is mapped as on the other ranks
+    if (t3shared .and. .not. with_lam) then
+      call xzrel(jt3 - xzbase)
+      call xzmapt3(w, 'XZAMPS', nwe * (no * nv + no * no * nv * nv), nwe * n3, jt3)
+    end if
   else
     if (nwe == 2) then
       call xzamps_z(w, 'r', ecorr)
@@ -805,3 +827,115 @@ subroutine xzwrec(name, n, rec)
     call errex
   end if
 end subroutine xzwrec
+
+! ---------------------------------------------------------------------------
+! The cost model of the tasks of (Q) (xzpar.F90), in units of one virtual
+! quadruple of a sector:
+!   qc(M)  an occupied quadruple of total class M: the virtual quadruples
+!          a<b<c<d of total class M (one class: all of them)
+!   xc(K)  Xv for a pair (x, l) of total class K: gxv times the elements of
+!          its products (<bc||ef> on (bc), e times t2 on f, d)
+! Measured (docs/native.md, section 14): with qc the times of the groups
+! that hold nine tenths of (Q) are met within 5 % (6 threads) to 13 % (24
+! threads) in blocks (HBr, 26 + 78), where one cost for every quadruple is
+! off by up to 21 %; gxv is 0.0017 to 0.0025 there and 0.0005 for dense
+! real T3 - Xv is at most 2 % of the work, so its constant matters little.
+subroutine xzqmodel(qc, xc)
+  use xzdata
+  implicit none
+  real(8), intent(out) :: qc(0:4 * maxcls), xc(0:2 * maxcls)
+  real(8), parameter :: gxv = 0.0012d0
+  real(8) :: ways(0:4, 0:4 * maxcls), new(0:4, 0:4 * maxcls), bin(0:4)
+  integer(8) :: c, n, t, m, s, k, ke, q2, kf, kd, tt
+  ways = 0d0
+  ways(0, 0) = 1d0
+  do c = 0, ncls - 1
+    n = vcoff(c + 1) - vcoff(c)
+    bin(0) = 1d0
+    do m = 1, 4
+      bin(m) = bin(m - 1) * dble(n - m + 1) / dble(m)
+      if (m > n) bin(m) = 0d0
+    end do
+    new = 0d0
+    do t = 0, 4
+      do s = 0, 4 * (ncls - 1)
+        if (ways(t, s) == 0d0) cycle
+        do m = 0, 4 - t
+          if (s + c * m > 4 * (ncls - 1)) cycle
+          new(t + m, s + c * m) = new(t + m, s + c * m) + ways(t, s) * bin(m)
+        end do
+      end do
+    end do
+    ways = new
+  end do
+  qc = 0d0
+  qc(0:4 * (ncls - 1)) = ways(4, 0:4 * (ncls - 1))
+  xc = 0d0
+  do k = 0, 2 * (ncls - 1)
+    do ke = 0, ncls - 1
+      tt = ke + k
+      if (tt >= ntg) cycle
+      if (vtoff(tt + 1) == vtoff(tt)) cycle
+      do q2 = 0, npg - 1
+        kf = q2 - ke
+        kd = k - kf
+        if (kf < 0 .or. kf >= ncls .or. kd < 0 .or. kd >= ncls) cycle
+        xc(k) = xc(k) + gxv * dble(vpoff(q2 + 1) - vpoff(q2)) * dble(vcoff(ke + 1) - vcoff(ke)) &
+                * dble(vcoff(kd + 1) - vcoff(kd)) * dble(vcoff(kf + 1) - vcoff(kf))
+      end do
+    end do
+  end do
+end subroutine xzqmodel
+
+! ---------------------------------------------------------------------------
+! The words of the work array of a rank other than 0 (called before it is
+! allocated): what (Q) takes with the plan of rank 0, which that rank sends
+! when it has read the integrals and made its plan.  A job without (Q) on
+! these ranks: nothing.
+subroutine xzrankmem(maxcor)
+  use xzdata
+  use xzpar
+  implicit none
+  integer(8), intent(inout) :: maxcor
+  real(8) :: sync(2)
+  call xzjob()
+  if (.not. with_q) then
+    maxcor = 4096
+    return
+  end if
+  ! (the broadcasts in the order of rank 0: the sizes, then its plan)
+  call xzsizes()
+  sizes_set = .true.
+  sync = 0d0
+  call xzmpi_bcast(sync, 16_8)
+  maxcor = min(maxcor, int(sync(1), 8) + 4096)
+end subroutine xzrankmem
+
+! ---------------------------------------------------------------------------
+! T3 (or Lambda3) of the file `name' where the file is mapped, read-only:
+! j3 = the index in w of its first word.  The file holds the header (56
+! bytes), nskip words (T1, T2) and n3w words of T3, stored as the program
+! uses them (xzamps, xzlamb), so nothing is converted.  The pages are those
+! of the page cache: one copy for all the ranks of a node.
+subroutine xzmapt3(w, name, nskip, n3w, j3)
+  use xzkern
+  implicit none
+  real(8) :: w(*)
+  character(len=*), intent(in) :: name
+  integer(8), intent(in) :: nskip, n3w
+  integer(8), intent(out) :: j3
+  integer(8) :: addr, nbytes, diff
+  addr = xz_map_file(name // c_null_char, nbytes, 1_8)
+  if (addr == 0 .or. nbytes /= 56 + 8 * (nskip + n3w)) then
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', name, ' could not be mapped (or has another length than its header says).'
+    write(6, '(a,i16,a,i16)') '   bytes mapped: ', nbytes, '   expected: ', 56 + 8 * (nskip + n3w)
+    write(6, '(a)') '   XZ_QMAP=0 reads T3 into the work array of every rank instead.'
+    call errex
+  end if
+  diff = addr + 56 + 8 * nskip - loc(w(1))
+  if (mod(diff, 8_8) /= 0) then
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, the map of the file ', name, ' is not aligned with the work array; use XZ_QMAP=0.'
+    call errex
+  end if
+  j3 = diff / 8 + 1
+end subroutine xzmapt3

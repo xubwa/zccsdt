@@ -62,11 +62,16 @@ subroutine N(xzq)(w, eq5, eq6)
   integer(8) :: it, want, nold, nmine, lastl, nlimit, nx, nqnow, nstop
   integer(8) :: slot(0:no-1), xnew(0:no-1), nnew
   logical :: need(0:no-1), first
-  real(8) :: e(2), e1(2), t0, tq(7), tstart, cq, cx, costmine, costleft, costdone, tloop, ttask, txv
-  real(8) :: estimate, part(6), tot(6), tmx(2)
+  real(8) :: e(2), e1(2), t0, tq(7), tstart, costmine, costleft, costdone, tloop, ttask, txv
+  real(8) :: estimate, part(6), tot(6), tmx(2), tq0(7), qcm(0:4 * maxcls), xcm(0:2 * maxcls), xvextra, worst
+  integer(8) :: nxvs(2), nseen, nrk(16), kb4(4)
+  real(8) :: rk(8)
+  real(8), allocatable :: rkall(:, :)
+  integer :: ios
+  logical :: qcost
   integer(8), external :: N(xzqslot)
   integer :: ldbg
-  character(len=32) :: arg
+  character(len=256) :: arg
 
   eq5 = 0d0
   eq6 = 0d0
@@ -171,16 +176,32 @@ subroutine N(xzq)(w, eq5, eq6)
   end if
 
   ! ---- the tasks (xzpar.F90): the list, what an earlier run has finished
-  cq = dble(nvp) * dble(nvp) * dble(4 * nv + 4 * no + 6) + dble(nv) * dble(nvt) * dble(6 * no + 3 * nv) &
-       + 12d0 * dble(na4)
-  cx = dble(nvp) * dble(nv) ** 3 + 3d0 * dble(nv) * dble(nvt)
   want = 0
-  if (nrank > 1) want = 8 * nrank
   call get_environment_variable('XZ_QTASKS', arg, ldbg)
   if (ldbg > 0) read(arg, *) want
   qkind = '(Q)'
   if (q_left) qkind = '(Q)_L'
-  call xzq_build(no, want, cq, cx)
+  call xzqmodel(qcm, xcm)
+  call xzq_costs(no, ncls, ocls, qcm, xcm)
+  ! (XZ_QRANKS="n1 n2 ..": what the list would be for these numbers of ranks)
+  call get_environment_variable('XZ_QRANKS', arg, ldbg)
+  if (ldbg > 0 .and. myrank == 0) then
+    nrk = 0
+    read(arg, *, iostat=ios) nrk
+    n = nrank
+    do i = 1, 16
+      if (nrk(i) < 1) exit
+      nrank = nrk(i)
+      call xzq_build(no, want)
+      call xzq_xvstat(no, nxvs, xvextra, worst)
+      write(6, '(a,i5,a,i6,a,i6,a,i6,a,f6.2,a,f6.2,a)') '   XZ_QRANKS: ', nrank, ' ranks: ', ntask, ' tasks, Xv ', &
+        nxvs(2), ' of ', nxvs(1), ' pairs; the slowest rank ', 100d0 * worst, ' % above the mean; repeated Xv ', &
+        100d0 * xvextra, ' % of the work'
+    end do
+    nrank = n
+  end if
+  call xzq_build(no, want)
+  call xzq_xvstat(no, nxvs, xvextra, worst)
   qsample = 0d0
   call get_environment_variable('XZ_QSAMPLE', arg, ldbg)
   if (ldbg > 0) read(arg, *) qsample
@@ -189,7 +210,10 @@ subroutine N(xzq)(w, eq5, eq6)
   call get_environment_variable('XZ_QSTOP', arg, ldbg)
   if (ldbg > 0) read(arg, *) nstop
   nold = 0
+  ! (all ranks read the checkpoints of an earlier run before any of them writes one)
+  call xzmpi_barrier()
   if (qsample == 0d0) call xzq_restore(no, nv, nwe, ncls, nold)
+  call xzmpi_barrier()
   costmine = 0d0
   costleft = 0d0
   nmine = 0
@@ -206,11 +230,24 @@ subroutine N(xzq)(w, eq5, eq6)
   end if
   write(6, '(a,i6,a,i5,a,i6,a,i5)') '   tasks: ', ntask, '   ranks: ', nrank, '   tasks of this rank: ', nmine, &
     '   rank ', myrank
+  write(6, '(a,i6,a,i6,a,i6,a)') '   groups (one largest index l, one Xv): ', no - 3, ';  Xv(x, l): ', nxvs(1), &
+    ' pairs, ', nxvs(2), ' formed over all ranks'
+  if (nrank > 1) write(6, '(a,f6.2,a,f6.2,a)') '   cost model: the slowest rank ', 100d0 * worst, &
+    ' % above the mean; the repeated Xv ', 100d0 * xvextra, ' % of the work'
   if (nold > 0) write(6, '(a,i6,a)') '   restart: ', nold, ' tasks were finished by an earlier run (files XZQCHK.*)'
   if (qsample > 0d0) write(6, '(a,f7.4,a)') '   XZ_QSAMPLE: the fraction ', qsample, &
     ' of the quadruples of every task is done; the energies are not those of (Q)'
   flush(6)
 
+  call get_environment_variable('XZ_QCOST', arg, ldbg)
+  qcost = ldbg > 0 .and. myrank == 0
+  if (qcost) then
+    open(unit=78, file=arg(1:ldbg), form='formatted', status='replace')
+    write(78, '(a,4i8)') 'sizes ', no, nv, ncls, nwe
+    write(78, '(a,64i6)') 'ocls ', ocls(0:no - 1)
+    write(78, '(a,400i4)') 'vcls ', vcls(0:nv - 1)
+    tq0 = tq
+  end if
   first = .true.
   lastl = -1
   costdone = 0d0
@@ -228,6 +265,7 @@ subroutine N(xzq)(w, eq5, eq6)
     ndone = 0
     nlimit = tnq(it)
     if (qsample > 0d0) nlimit = max(1_8, int(qsample * dble(tnq(it)), 8))
+    nseen = 0
     ! Xv for the x in i0 .. l-1: all at once if they fit, else in three parts
     nx = l - ti0(it)
     size = nx
@@ -273,9 +311,21 @@ subroutine N(xzq)(w, eq5, eq6)
                                                       w(jvvvv), w(kxv), w(kwx), w(kmx))
           tq(2) = tq(2) + omp_get_wtime() - t0
           txv = txv + omp_get_wtime() - t0
+          if (qcost) then
+            write(78, '(a,i4,i6,es12.4)') 'xv ', l, nnew, omp_get_wtime() - t0
+            do n = 0, nnew - 1
+              write(78, '(a,2i4)') 'x ', xnew(n), l
+            end do
+            tq0 = tq
+          end if
           do i = lo1, hi1 - 1
             do j = max(i + 1, lo2), hi2 - 1
               do k = max(j + 1, lo3), hi3 - 1
+                ! (a sample: nlimit of the quadruples of the task, evenly spread)
+                nseen = nseen + 1
+                if (nlimit < tnq(it)) then
+                  if ((nseen * nlimit) / tnq(it) == ((nseen - 1) * nlimit) / tnq(it)) cycle
+                end if
                 if (ncls == 1) then
                   call N(xzquad)(w, i, j, k, l, na4, w(jotri), w(josgn), w(kt2pp), w(kt2p), w(kt2px), w(kxo), &
                                  w(kev4), w(kz), w(krt3), w(krtt), w(kw22), w(kw13), w(kla), w(kra), w(klb), &
@@ -290,7 +340,12 @@ subroutine N(xzq)(w, eq5, eq6)
                 end if
                 e = e + e1
                 ndone = ndone + 1
-                if (ndone >= nlimit) exit groups
+                if (qcost) then
+                  ! (XZ_QCOST: the times of every quadruple, for the cost model of the tasks)
+                  write(78, '(4i4,i5,3es12.4)') i, j, k, l, ocls(i) + ocls(j) + ocls(k) + ocls(l), &
+                    tq(3) - tq0(3), tq(4) - tq0(4), tq(5) - tq0(5)
+                  tq0 = tq
+                end if
               end do
             end do
           end do
@@ -301,8 +356,7 @@ subroutine N(xzq)(w, eq5, eq6)
     nqnow = nqnow + ndone
     if (qsample > 0d0) then
       ! what the whole task would take: Xv as it was, the quadruples in proportion
-      estimate = estimate + txv + (tsec(it) - txv) * dble(tnq(it)) / dble(ndone)
-      slot = -1
+      estimate = estimate + txv + (tsec(it) - txv) * dble(tnq(it)) / dble(max(ndone, 1_8))
     else
       if (ndone /= tnq(it)) then
         write(6, '(a,i6,2i12)') ' @XZCCSDT-F, (Q): quadruples done and expected in task ', it, ndone, tnq(it)
@@ -327,7 +381,10 @@ subroutine N(xzq)(w, eq5, eq6)
       t0 * (costleft - costdone) / max(costdone, 1d-30), ' s'
     flush(6)
   end do
+  ! (the memory of the process while the arrays of (Q) are still in use)
+  call xz_rss4(kb4)
   call xzrel(m0)
+  if (qcost) close(78)
 
   ! ---- the sum over the ranks
   part = 0d0
@@ -355,13 +412,26 @@ subroutine N(xzq)(w, eq5, eq6)
   write(6, '(5x,a28,f12.2,a)') 'reductions', tq(5), ' s'
   write(6, '(5x,a28,f12.2,a)') 'energy', tq(6), ' s'
   write(6, '(5x,a28,f12.2,a)') 'total of this rank', part(4), ' s'
+  ! what every rank did and holds: its own (anonymous) memory and the pages
+  ! of mapped files that it has touched (shared with the ranks of its node)
+  rk = [part(4), tq(2), tq(1), dble(nmine), part(6), 1d-3 * kb4(2), 1d-3 * kb4(3), 1d-3 * kb4(1)]
+  allocate(rkall(8, 0:nrank - 1))
+  call xzmpi_gather(rk, rkall, 8_8)
   if (myrank == 0) then
+    write(6, '(/,a)') '    rank   tasks  quadruples     total/s      Xv/s      Xo/s   own memory/MB' // &
+      '   mapped files/MB   peak resident/MB'
+    do n = 0, nrank - 1
+      write(6, '(i8,i8,i12,f12.2,2f10.2,f16.1,f18.1,f19.1)') n, nint(rkall(4, n), 8), nint(rkall(5, n), 8), &
+        rkall(1, n), rkall(2, n), rkall(3, n), rkall(6, n), rkall(7, n), rkall(8, n)
+    end do
+    if (nrank > 1) write(6, '(a,f10.2,a,f12.1,a)') '    all ranks: Xv ', sum(rkall(2, :)), ' s;  own memory ', &
+      sum(rkall(6, :)), ' MB'
     if (nrank > 1) write(6, '(5x,a28,f12.2,a,f8.2)') 'slowest rank', tmx(1), ' s;  sum over ranks / slowest ', &
       tot(4) / max(tmx(1), 1d-30)
     if (qsampled) then
       write(6, '(/,a,i10,a,i10,a)') '   sample: ', nint(tot(6), 8), ' of ', nquad, ' quadruples done'
       write(6, '(a,f12.1,a)') '   estimated wall time of the whole (Q), slowest rank: ', tmx(2) + tq(1), ' s'
-      write(6, '(a)') '   (from above: Xv was formed for every task in full)'
+      write(6, '(a)') '   (Xv formed as in the whole calculation; the quadruples of a task in proportion)'
     else if (nint(tot(3), 8) /= nquad) then
       write(6, '(a,2i12)') ' @XZCCSDT-F, (Q): occupied quadruples done and expected: ', nint(tot(3), 8), nquad
       call errex

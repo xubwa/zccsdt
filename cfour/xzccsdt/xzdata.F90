@@ -68,6 +68,11 @@ module xzdata
   logical :: with_lam = .false.     ! the Lambda equations are
   logical :: q_left = .false.       ! (Q) with lambda on the left: (Q)_Lambda
   logical :: with_den = .false.     ! the density and the orbital gradient of CCSDT are (xzden.inc)
+  ! (Q) reads T3 (and Lambda3) where the files XZAMPS (XZLAMB) are mapped,
+  ! read-only: one copy in the page cache of a node for all its ranks, not
+  ! in the work array (XZ_QMAP=0: a private copy in the work array)
+  logical :: t3shared = .false.
+  logical :: sizes_set = .false.    ! xzsizes was called (a rank other than 0, before its work array)
   logical :: den_active = .false.   ! XZ_DEN_ACTIVE: the files of the active spinors alone (a test hook)
   real(8) :: conv_e = 1d-9, conv_t = 1d-7
   integer(8) :: maxcyc = 50

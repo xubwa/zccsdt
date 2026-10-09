@@ -2,11 +2,14 @@
  * xzutil.c -- what the Fortran scheduler of xzccsdt asks the system:
  * free disk space, the resident set of the process, the BLAS it is linked to.
  */
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/statvfs.h>
+#include <sys/vfs.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -77,4 +80,75 @@ void xz_stdout(const int64_t *quiet)
         close(saved);
         saved = -1;
     }
+}
+
+/* The file `path' mapped into the address space, read-only and shared: the
+ * pages are those of the page cache of the node, one copy for all the
+ * processes that map the file.  Returns the address of its first byte (0:
+ * failed) and its length in *nbytes.  populate != 0: the page tables are
+ * filled now (the file is read if the cache does not hold it), so that no
+ * thread of a kernel waits for a page later. */
+int64_t xz_map_file(const char *path, int64_t *nbytes, const int64_t *populate)
+{
+    struct stat st;
+    void *p;
+    int fd = open(path, O_RDONLY);
+    *nbytes = 0;
+    if (fd < 0)
+        return 0;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        return 0;
+    }
+    p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED | (*populate ? MAP_POPULATE : 0), fd, 0);
+    close(fd);
+    if (p == MAP_FAILED)
+        return 0;
+    *nbytes = (int64_t)st.st_size;
+    return (int64_t)(intptr_t)p;
+}
+
+/* 1 if the file system of `path' is one of the node (a disk or memory), 0 if
+ * it is served over a network (NFS, Lustre, GPFS, BeeGFS, CIFS, Ceph, AFS,
+ * a FUSE mount), -1 if that cannot be asked */
+int64_t xz_fs_local(const char *path)
+{
+    struct statfs s;
+    if (statfs(path, &s) != 0)
+        return -1;
+    switch ((unsigned long)s.f_type) {
+    case 0x6969UL:        /* NFS */
+    case 0x0BD00BD0UL:    /* Lustre */
+    case 0x47504653UL:    /* GPFS */
+    case 0x19830326UL:    /* BeeGFS */
+    case 0xFF534D42UL:    /* CIFS */
+    case 0xFE534D42UL:    /* SMB2 */
+    case 0x517BUL:        /* SMB */
+    case 0x00C36400UL:    /* Ceph */
+    case 0x5346414FUL:    /* AFS */
+    case 0x65735546UL:    /* FUSE */
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+/* kB of the process: kb[0] peak resident set, kb[1] resident anonymous
+ * memory (its own), kb[2] resident pages of mapped files (shared with the
+ * other processes that map them), kb[3] resident shared memory */
+void xz_rss4(int64_t *kb)
+{
+    char line[256];
+    FILE *f = fopen("/proc/self/status", "r");
+    kb[0] = kb[1] = kb[2] = kb[3] = -1;
+    if (!f)
+        return;
+    while (fgets(line, sizeof line, f)) {
+        long long v;
+        if (sscanf(line, "VmHWM: %lld", &v) == 1) kb[0] = v;
+        if (sscanf(line, "RssAnon: %lld", &v) == 1) kb[1] = v;
+        if (sscanf(line, "RssFile: %lld", &v) == 1) kb[2] = v;
+        if (sscanf(line, "RssShmem: %lld", &v) == 1) kb[3] = v;
+    }
+    fclose(f);
 }

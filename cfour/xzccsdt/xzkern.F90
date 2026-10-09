@@ -41,6 +41,26 @@ module xzkern
       integer(c_int64_t) :: nbytes
     end function
 
+    ! the file mapped read-only and shared: its address (0: failed), its bytes
+    function xz_map_file(path, nbytes, populate) bind(C) result(addr)
+      import
+      character(kind=c_char) :: path(*)
+      integer(c_int64_t) :: nbytes, populate, addr
+    end function
+
+    ! 1: the file system of the directory is one of the node, 0: a network file system, -1: unknown
+    function xz_fs_local(path) bind(C) result(l)
+      import
+      character(kind=c_char) :: path(*)
+      integer(c_int64_t) :: l
+    end function
+
+    ! kB of the process: peak resident set; resident now: anonymous, mapped files, shared memory
+    subroutine xz_rss4(kb) bind(C)
+      import
+      integer(c_int64_t) :: kb(4)
+    end subroutine
+
     ! kB of the process: (1) peak resident set, (2) resident set now
     subroutine xz_rss(kb) bind(C)
       import
