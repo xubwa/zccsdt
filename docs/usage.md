@@ -153,25 +153,47 @@ from the measurements below:
   CCSDT iteration has no such mode; over both sockets it runs at the rate
   given here.
 
-Measured (node with 2 x 24 cores, Xeon Gold 6248R; HBr, 26 + 120 spinors,
-real, dense T3; seconds per CCSDT iteration, and the kernels of the two T3
-passes timed alone):
+Measured on one node (c695: 2 x 24 cores, Xeon Gold 6248R, 188 GB; HBr,
+X2C, cc-pVQZ-DK, 10 spinors frozen: 26 occupied spinors, the lowest 120 or
+160 virtual ones; real spinors; job 31778971, commit 3272c33 for the Python
+program, the build of a5045bf for the native one).  Seconds per CCSDT
+iteration, threads bound to cores, up to 24 on one socket with its memory:
 
-| threads | 8 | 16 | 24 | 48 |
-|---|---|---|---|---|
-| CCSDT iteration | 200.3 | 112.4 | 93.7 | 87.7 |
-| pass 2, ring product (GEMM) | 80.7 | 42.8 | 31.5 | 45.8 - 60.8 |
-| pass 2, gather of T3 | 5.1 | 4.0 | 3.7 | 3.1 |
-| pass 2, reduction into the residual | 5.1 | 3.0 | 2.5 | 2.8 |
-| copy of an array of the same size (GB/s) | 36.6 | 46.8 | 49.7 | 91.8 |
+| threads | 1 | 2 | 4 | 8 | 16 | 24 | 48 |
+|---|---|---|---|---|---|---|---|
+| dense, 26 + 120, DIIS vectors in memory | 1418 | | | 188.0 | 103.8 | 80.6 | 60.1 |
+| speedup | 1 | | | 7.5 | 13.7 | 17.6 | 23.6 |
+| label blocks, 26 + 120 | 63.6 | 34.2 | 18.6 | 10.8 | 6.8 | 7.0 | 7.2 |
+| speedup | 1 | 1.86 | 3.42 | 5.9 | 9.4 | 9.1 | 8.8 |
+| native program, label blocks, 26 + 160 | 172.7 | 91.3 | 48.4 | 27.2 | 16.1 | 13.1 | 12.0 |
+| speedup | 1 | 1.89 | 3.57 | 6.3 | 10.8 | 13.2 | 14.4 |
 
-The gather of T3 runs at 60 - 70 % of the copy rate of the node, which
-itself grows by a factor 1.36 only from 8 to 24 cores: this step is bound by
-the memory throughput of a socket and cannot be much faster.  The ring
-product is not bound by memory (0.36 GB moved per pair of occupied spinors
-in 0.07 - 0.25 s); it runs at 70, 66, 61 GFlop/s per core on 8, 16, 24 cores
-and at 33 on 48: the threaded BLAS does not use the second socket well.
-(The 48-thread kernel timings are without threads pinned to cores.)
+(One thread runs at a higher clock rate than all cores together, so the
+efficiencies are somewhat pessimistic.)  The parts of a dense iteration,
+speedup from 1 thread to 8 / 24 / 48: pass 2 7.6 / 18.4 / 24.4, pp ladder
+8.0 / 20.7 / 30.2, pass 1 6.6 / 13.2 / 15.8.
+
+What limits it, measured on the same node with the kernels of the passes
+timed alone:
+
+* The gather of T3 and the reduction into the residual are bound by the
+  memory throughput of a socket.  A plain copy of an array of the same size
+  moves 36.6, 46.8, 49.7 GB/s on 8, 16, 24 cores of one socket (91.8 on
+  both): the throughput of a socket is nearly reached at 16 cores.  The
+  gather runs at 60 - 70 % of that rate.
+* The ring product of pass 2 is not bound by memory; it runs at 70, 66, 61
+  GFlop/s per core on 8, 16, 24 cores.
+* **The DIIS file and the last cores.**  With the DIIS vectors in the
+  scratch file a dense iteration on all 48 cores takes 87.2 s instead of
+  60.1 s (on 24 cores 86.0 against 80.6 s).  The time is lost in the matrix
+  products of the two passes that follow the DIIS step (pass 1: 3.6 times
+  slower, pass 2: 1.3 times; the pp ladder, later in the iteration, is not
+  affected, nor are the gathers).  With the file on a memory file system the
+  loss is gone (products as with the vectors in memory), with 44 threads
+  instead of 48 it is not: it is the write-back of the 12 GB that a DIIS
+  step leaves in the file, which goes on while the next passes run.  On one
+  socket, with the other one idle, it costs 7 %.  `incore_complete = True`
+  keeps the vectors in memory (43 GB instead of 23 GB at the peak here).
 
 Results: `converged`, `e_hf`, `e_corr`, `e_tot`, `cycles`, `t1`, `t2`,
 `t3`, `plan_used`, `diis_plan_used`, `timings` (wall time per iteration), `peak_memory`, and
