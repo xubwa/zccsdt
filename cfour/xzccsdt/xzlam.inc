@@ -208,7 +208,7 @@ subroutine N(xzlamim)(w)
   implicit none
   real(8) :: w(*)
   integer(8) :: ms, md, m1, m2, ov, ov2
-  integer(8) :: kfoo, kfvo, kfvv, kpvv, kft, kooood, kovvod, kovood, kk, ktmp, kt2pp, ktau, ktt
+  integer(8) :: kfoo, kfvo, kfvv, kpvv, kft, kooood, kovvod, kovood, kk, ktmp, ktmp2, kt2pp, ktau, ktt
   integer(8) :: kyall, kr1c, kra, kwo, ka2, kb2, kx2, kd, kbuf, kwv, kg2, kyb, ku, kxb
   integer(8) :: kgq, kgh, kpib, ktv, kz, h, lo, nqh, i0, nb, kvq
   logical :: dense
@@ -220,6 +220,7 @@ subroutine N(xzlamim)(w)
   ov = no * nv
   ov2 = ov * ov
   dense = ncls == 1
+  tcur = 3
   ms = xzmark()
   kfoo = xzget(NW * no * no, 'F_oo')
   kfvo = xzget(NW * ov, 'F_vo')
@@ -231,6 +232,7 @@ subroutine N(xzlamim)(w)
   kovood = xzget(NW * no * no * ov, 'dressed <ov||oo>')
   kk = xzget(NW * ov2, 'work of the dressing')
   ktmp = xzget(NW * no * no * ov, 'work of W_vooo')
+  ktmp2 = xzget(NW * no * no * ov, 'work of W_vooo 2')
   kt2pp = xzget(NW * npo * nvp, 'T2 [P][Q]')
   ktau = xzget(NW * npo * nvp, 'tau1')
   ktt = xzget(NW * npo * nvp, 'T2 + tau1')
@@ -296,7 +298,7 @@ subroutine N(xzlamim)(w)
                   w(kxb), w(kyb))
     call xztoc(3, 'W_vvvo')
     call N(xzwo)(no, nv, npo, nvp, w(jt2), w(kt2pp), w(looovd), w(kovood), w(kd), w(kyall), &
-                 w(jopa), w(jopb), w(kwo), w(ktmp))
+                 w(jopa), w(jopb), w(kwo), w(ktmp), w(ktmp2), w(kb2))
     call N(xzweff)(no, nv, nvp, w(jt2), w(lt2p), w(joovv), w(joovvp), w(kovvod), w(kfoo), w(kfvv), &
                    w(lwov), w(lfvv), w(lfoo), w(ka2), w(kb2), w(kx2))
     call xztoc(3, 'W_vooo, W_ovvo, F')
@@ -406,6 +408,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   ov2 = ov * ov
   kk = 2 * ny
   dense = ncls == 1
+  tcur = 2
   m0 = xzmark()
   kl2p = xzget(NW * no * no * nvp, 'L2 [i][j][Q]')
   kl2pp = xzget(NW * npo * nvp, 'L2 [P][Q]')
@@ -556,8 +559,8 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   ky2x = xzget(NW * nv * nv * ov, 'Y2 on both orders of its pair')
   ky1u = xzget(NW * no * no * ov, 'Y1 on both orders of its pair')
   km = xzget(NW * ov2, 'R2 part [(i, a)][(j, b)]')
-  ka2 = xzget(NW * ov2, 'work A')
-  kb2 = xzget(NW * ov2, 'work B')
+  ka2 = xzget(NW * max(ov2, no * no * ov), 'work A')
+  kb2 = xzget(NW * max(ov2, no * no * ov), 'work B')
   kyab = xzget(NW * npo * nv * nv, 'R2 part [P][a][b]')
   if (.not. xzdry) then
     call xztic()
@@ -987,6 +990,7 @@ end subroutine
 !   goo[m][o] = 1/2 sum_nef l2[m][n][e][f] t2[n][o][e][f] - goo3[m][o] / 12
 !   dov[j][h] = d1[h][j] - sum_{i,Q} y2[h][i][Q] t2[j][i][Q]
 subroutine N(xzldens)(no, nv, nvp, l2, t2, t2p, y2, dr, d1, goo3, gvv3, gvv, goo, dov)
+  use xzkern
   implicit none
   integer(8), intent(in) :: no, nv, nvp
   ZT, intent(in) :: l2(0:nv-1, 0:nv-1, 0:no-1, 0:no-1), t2(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)
@@ -998,8 +1002,14 @@ subroutine N(xzldens)(no, nv, nvp, l2, t2, t2p, y2, dr, d1, goo3, gvv3, gvv, goo
   ZT, intent(out) :: gvv3(0:nv-1, 0:nv-1), gvv(0:nv-1, 0:nv-1), goo(0:no-1, 0:no-1)
   ZT, intent(out) :: dov(0:nv-1, 0:no-1)                       ! [j][h]
   integer(8) :: a, g, i, e, m, n, f, o, j, h, q
-  ZT :: s
-  !$omp parallel do collapse(2) private(e, g, i, m, n, f, s)
+  ZT :: s, mhalf, zero
+  mhalf = -0.5d0
+  zero = 0
+  ! 1/2 sum_mnf l2[m][n][e][f] t2[m][n][f][g] = -1/2 sum_mnf l2[m][n][f][e] t2[m][n][f][g]
+  call N(zc_gemm)(1_4, 0_4, nv, nv, no * no * nv, mhalf, l2, nv, t2, nv, zero, gvv, nv)
+  ! 1/2 sum_nef l2[m][n][e][f] t2[n][o][e][f] = -1/2 sum_nef l2[m][n][e][f] t2[o][n][e][f]
+  call N(zc_gemm)(0_4, 1_4, no, no, no * nv * nv, mhalf, l2, no * nv * nv, t2, no * nv * nv, zero, goo, no)
+  !$omp parallel do collapse(2) private(e, g, i, s)
   do e = 0, nv - 1
     do g = 0, nv - 1
       s = 0
@@ -1007,31 +1017,10 @@ subroutine N(xzldens)(no, nv, nvp, l2, t2, t2p, y2, dr, d1, goo3, gvv3, gvv, goo
         s = s + dr(i, g, i, e)
       end do
       gvv3(g, e) = 4d0 * s
-      s = 0
-      do m = 0, no - 1
-        do n = 0, no - 1
-          do f = 0, nv - 1
-            s = s + l2(f, e, n, m) * t2(g, f, n, m)
-          end do
-        end do
-      end do
-      gvv(g, e) = 0.5d0 * s - gvv3(g, e) / 12d0
+      gvv(g, e) = gvv(g, e) - gvv3(g, e) / 12d0
     end do
   end do
-  !$omp parallel do collapse(2) private(m, o, n, e, f, s)
-  do m = 0, no - 1
-    do o = 0, no - 1
-      s = 0
-      do n = 0, no - 1
-        do e = 0, nv - 1
-          do f = 0, nv - 1
-            s = s + l2(f, e, n, m) * t2(f, e, o, n)
-          end do
-        end do
-      end do
-      goo(o, m) = 0.5d0 * s - goo3(o, m) / 12d0
-    end do
-  end do
+  goo = goo - goo3 / 12d0
   !$omp parallel do collapse(2) private(j, h, i, q, s)
   do j = 0, no - 1
     do h = 0, nv - 1
@@ -1096,7 +1085,7 @@ subroutine N(xzlr1)(no, nv, npo, nvp, l1, l2, l2p, fov, fvv, foo, wov, gmq, gpd,
     end do
   end do
 
-  !$omp parallel do collapse(2) private(i, a, e, m, j, h, g, o, f, p, s)
+  !$omp parallel do private(i, a, e, m, j, h, g, o, f, p, s)
   do i = 0, no - 1
     do a = 0, nv - 1
       s = fov(a, i) + r1x(i, a) - pmv(a, i)
@@ -1118,12 +1107,6 @@ subroutine N(xzlr1)(no, nv, npo, nvp, l1, l2, l2p, fov, fvv, foo, wov, gmq, gpd,
           s = s + l2(e, a, opb(p), opa(p)) * gpd(e, p, nv + i)
         end do
       end do
-      ! G_vv with ~<ei||ag>, and F_vv with Y2
-      do g = 0, nv - 1
-        do e = 0, nv - 1
-          s = s + gvv(g, e) * vx(a, i, e, g) + 0.5d0 * fvv(g, e) * y2x(a, i, e, g)
-        end do
-      end do
       do j = 0, no - 1
         do h = 0, nv - 1
           s = s + dov(h, j) * oovv(h, a, j, i)
@@ -1132,14 +1115,7 @@ subroutine N(xzlr1)(no, nv, npo, nvp, l1, l2, l2p, fov, fvv, foo, wov, gmq, gpd,
           s = s - goo(j, m) * ooovd(a, m, j, i)
         end do
       end do
-      ! the density of l3 and T3 with ~<eo||ah> and with <ij||gm>
-      do g = 0, nv - 1
-        do e = 0, nv - 1
-          do o = 0, no - 1
-            s = s + dr(o, g, i, e) * vx(a, o, e, g)
-          end do
-        end do
-      end do
+      ! the density of l3 and T3 with <ij||gm>
       do m = 0, no - 1
         do g = 0, nv - 1
           do j = 0, no - 1
@@ -1147,7 +1123,7 @@ subroutine N(xzlr1)(no, nv, npo, nvp, l1, l2, l2p, fov, fvv, foo, wov, gmq, gpd,
           end do
         end do
       end do
-      ! Y1 and Y2 with W_ovvo
+      ! Y1 with W_ovvo
       do m = 0, no - 1
         do e = 0, nv - 1
           do o = 0, no - 1
@@ -1155,14 +1131,22 @@ subroutine N(xzlr1)(no, nv, npo, nvp, l1, l2, l2p, fov, fvv, foo, wov, gmq, gpd,
           end do
         end do
       end do
-      do g = 0, nv - 1
-        do f = 0, nv - 1
-          do m = 0, no - 1
-            s = s - wov(m, g, f, i) * y2x(a, m, f, g)
-          end do
+      r1(a, i) = s
+    end do
+    ! the sums over two virtual indices, all a at once:
+    ! G_vv with ~<ei||ag>, F_vv with Y2
+    do g = 0, nv - 1
+      do e = 0, nv - 1
+        r1(:, i) = r1(:, i) + gvv(g, e) * vx(:, i, e, g) + (0.5d0 * fvv(g, e)) * y2x(:, i, e, g)
+      end do
+    end do
+    ! the density of l3 and T3 with ~<eo||ah>, and Y2 with W_ovvo
+    do g = 0, nv - 1
+      do e = 0, nv - 1
+        do o = 0, no - 1
+          r1(:, i) = r1(:, i) + dr(o, g, i, e) * vx(:, o, e, g) - wov(o, g, e, i) * y2x(:, o, e, g)
         end do
       end do
-      r1(a, i) = s
     end do
   end do
   ! l2 with W_vvvo: sum_{j,Q} l2[i][j][Q] gmq[(j, Q)][no + a]
@@ -1285,27 +1269,25 @@ subroutine N(xzlr2b)(no, nv, npo, nvp, l1, l2, fov, wov, vx, oovv, ooovd, dr, y2
   ZT :: b2(0:nv-1, 0:no-1, 0:no-1, 0:nv-1)
   ZT, intent(inout) :: r2(0:nvp-1, 0:npo-1)
   integer(8) :: i, a, j, b, k, c, m, o, g, p, q, ov
-  ZT :: s, one, zero
+  ZT :: s, one, zero, mone
   one = 1
   zero = 0
+  mone = -1
   ov = no * nv
-  ! l1 f, and Y1 with ~<jo||bm> = - ~<jo||mb>
-  !$omp parallel do collapse(2) private(i, a, j, b, m, o, s)
+  ! l1 f, and Y1 with ~<jo||bm> = - ~<jo||mb>:
+  !   a2[(i, a)][(m, o)] = y1u[i][m][a][o],  b2[(m, o)][(j, b)] = ~<jo||mb>
+  !$omp parallel do collapse(2) private(i, a, j, b)
   do i = 0, no - 1
     do a = 0, nv - 1
       do j = 0, no - 1
         do b = 0, nv - 1
-          s = l1(a, i) * fov(b, j)
-          do m = 0, no - 1
-            do o = 0, no - 1
-              s = s - y1u(o, a, m, i) * ooovd(b, m, o, j)
-            end do
-          end do
-          m4(b, j, a, i) = s
+          m4(b, j, a, i) = l1(a, i) * fov(b, j)
         end do
       end do
     end do
   end do
+  call N(xzly1ops)(no, nv, y1u, ooovd, a2, b2)
+  call N(zc_gemm)(0_4, 0_4, ov, ov, no * no, mone, a2, no * no, b2, ov, one, m4, ov)
   ! l2 with W_ovvo: a2[(i, a)][(k, c)] = l2[i][k][a][c],  b2[(k, c)][(j, b)] = wov[j][c][b][k]
   !$omp parallel do collapse(2) private(i, a, k, c)
   do i = 0, no - 1
@@ -1333,6 +1315,35 @@ subroutine N(xzlr2b)(no, nv, npo, nvp, l1, l2, fov, wov, vx, oovv, ooovd, dr, y2
       a = vpa(q)
       b = vpb(q)
       r2(q, p) = r2(q, p) + m4(b, j, a, i) - m4(b, i, a, j) - m4(a, j, b, i) + m4(a, i, b, j)
+    end do
+  end do
+end subroutine
+
+! a[(i, a)][(m, o)] = y1u[i][m][a][o],  b[(m, o)][(j, b)] = ~<jo||mb>
+subroutine N(xzly1ops)(no, nv, y1u, ooovd, a, b)
+  implicit none
+  integer(8), intent(in) :: no, nv
+  ZT, intent(in) :: y1u(0:no-1, 0:nv-1, 0:no-1, 0:no-1)        ! [i][m][a][n]
+  ZT, intent(in) :: ooovd(0:nv-1, 0:no-1, 0:no-1, 0:no-1)      ! [j][o][m][b]
+  ZT, intent(out) :: a(0:no-1, 0:no-1, 0:nv-1, 0:no-1)         ! [i][a][m][o]
+  ZT, intent(out) :: b(0:nv-1, 0:no-1, 0:no-1, 0:no-1)         ! [m][o][j][b]
+  integer(8) :: i, c, m, o, j
+  !$omp parallel do collapse(2) private(i, c, m, o)
+  do i = 0, no - 1
+    do c = 0, nv - 1
+      do m = 0, no - 1
+        do o = 0, no - 1
+          a(o, m, c, i) = y1u(o, c, m, i)
+        end do
+      end do
+    end do
+  end do
+  !$omp parallel do collapse(2) private(m, o, j)
+  do m = 0, no - 1
+    do o = 0, no - 1
+      do j = 0, no - 1
+        b(:, j, o, m) = ooovd(:, m, o, j)
+      end do
     end do
   end do
 end subroutine

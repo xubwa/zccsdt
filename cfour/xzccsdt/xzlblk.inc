@@ -17,7 +17,10 @@
 ! and per class of d and of m the two stacked products of pass 1 of the T3
 ! equation with L (xzbp1xy):
 !   xacc[e|j][m][Q] += sum_{P,d} gpd[e|j][P][d] L,   yall[P][d][j|e] += sum_{m,Q} L gmq[m][Q][j|e]
-! xacc, dr and d1 are added to; yall is zeroed here.
+! xacc, dr and d1 are added to; yall is zeroed here.  A batch is gathered
+! for all gQ first; then the densities of one (gQ, P) and the stacked
+! products of one (gQ, class of d) are the tasks of two parallel loops, with
+! the BLAS sequential inside.
 subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   use xzdata
   use xzmem
@@ -29,13 +32,22 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   ZT :: gpd(*), gmq(*), xacc(*), yall(*), dr(*), d1(*)
   ZT, intent(in) :: l2pp(0:nvp-1, 0:npo-1)
   integer(8) :: gp, gq, p0, nb, delta, nr, nq, qlo, sd, sm, sy, nd, nm, ne, nj, r0, k
-  integer(8) :: m0, mk, ms, kdd, kd0, kl, kt, kg, kx, kgy, ky
-  real(8) :: t0
-  ZT :: one
+  integer(8) :: m0, mk, kdd, kd0, kdw, nth, nrmax, ig, ngq, it, ntask, me
+  integer(8) :: lst(0:npg-1), gkl(0:npg-1), gkt(0:npg-1)
+  integer(8), dimension(npg * ncls) :: tgq, tsd, tr0, tks, tkg, tkx, tkgy, tky
+  logical :: par
+  ZT :: one, zero
   one = 1
+  zero = 0
+  nth = omp_get_max_threads()
+  nrmax = 0
+  do delta = 1 - ncls, ncls - 1
+    nrmax = max(nrmax, ndel(delta))
+  end do
   m0 = xzmark()
   kdd = xzget(NW * nwd, 'densities of pass 1')
   kd0 = xzget(NW * ndel(0), 'density of L2 with T3')
+  kdw = xzget(NW * nth * (nrmax * nrmax + nrmax), 'densities of pass 1, per thread')
   if (.not. xzdry) then
     call zc_vzero_d(NW * npo * nv * ny, yall)
     call zc_vzero_d(NW * nwd, w(kdd))
@@ -44,46 +56,19 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   do gp = 0, npg - 1
     do p0 = opoff(gp), opoff(gp + 1) - 1, nbp
       nb = min(nbp, opoff(gp + 1) - p0)
+      mk = xzmark()
+      ngq = 0
+      ntask = 0
       do gq = 0, npg - 1
         delta = gp - gq
         if (abs(delta) >= ncls) cycle
         nr = ndel(delta)
-        qlo = vpoff(gq)
-        nq = vpoff(gq + 1) - qlo
+        nq = vpoff(gq + 1) - vpoff(gq)
         if (nr == 0 .or. nq == 0) cycle
-        mk = xzmark()
-        kl = xzget(NW * nb * nr * nq, 'pass-1 batch of L3')
-        kt = xzget(NW * nb * nr * nq, 'pass-1 batch of T3')
-        if (.not. xzdry) then
-          call xztic()
-          r0 = 0
-          do sd = 0, ncls - 1
-            sm = sd - delta
-            if (sm < 0 .or. sm >= ncls) cycle
-            nd = vcoff(sd + 1) - vcoff(sd)
-            nm = ocoff(sm + 1) - ocoff(sm)
-            if (nd > 0 .and. nm > 0) then
-              call N(zc_bgather2)(w(kl3), w(jobase), w(josig), w(jotri), w(josgn), npo, w(jvci), &
-                w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
-                qlo, nq, nr * nq, w(kl + NW * r0 * nq))
-              call N(zc_bgather2)(w(kt3), w(jobase), w(josig), w(jotri), w(josgn), npo, w(jvci), &
-                w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
-                qlo, nq, nr * nq, w(kt + NW * r0 * nq))
-            end if
-            r0 = r0 + nd * nm
-          end do
-          call xztoc(2, 'pass 1: gather')
-          call xztic()
-          do k = 0, nb - 1
-            call N(zc_gemm)(0_4, 1_4, nr, nr, nq, one, w(kl + NW * k * nr * nq), nq, &
-                            w(kt + NW * k * nr * nq), nq, one, w(kdd + NW * wdoff(delta)), nr)
-            if (delta == 0) call N(zc_gemm)(0_4, 0_4, nr, 1_8, nq, one, w(kt + NW * k * nr * nq), nq, &
-                                            l2pp(qlo, p0 + k), 1_8, one, w(kd0), 1_8)
-          end do
-          call xztoc(2, 'pass 1: density')
-        end if
-        ! the stacked products, per class of d and of m
-        call xztic()
+        lst(ngq) = gq
+        ngq = ngq + 1
+        gkl(gq) = xzget(NW * nb * nr * nq, 'pass-1 batch of L3')
+        gkt(gq) = xzget(NW * nb * nr * nq, 'pass-1 batch of T3')
         r0 = 0
         do sd = 0, ncls - 1
           sm = sd - delta
@@ -95,30 +80,113 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
             ne = vcoff(sy + 1) - vcoff(sy)
             nj = ocoff(sy + 1) - ocoff(sy)
             if (ne + nj > 0) then
-              ms = xzmark()
-              kg = xzget(NW * (ne + nj) * nb * nd, 'pass-1 operand')
-              kx = xzget(NW * (ne + nj) * nm * nq, 'pass-1 product')
-              kgy = xzget(NW * nm * nq * (ne + nj), 'pass-1 operand')
-              ky = xzget(NW * nb * nd * (ne + nj), 'pass-1 product')
-              if (.not. xzdry) then
-                ! L[(P, d)][(m, Q)] of these classes, in the storage of T
-                call N(xzlbsub)(nb, nr, nq, r0, nd * nm, w(kl), w(kt))
-                call N(xzbp1xy)(no, nv, npo, nvp, nb, nd, nm, nq, ne, nj, p0, vcoff(sd), ocoff(sm), qlo, &
-                                vcoff(sy), ocoff(sy), gpd, gmq, w(kt), w(kg), w(kx), w(kgy), w(ky), &
-                                xacc, yall)
-              end if
-              call xzrel(ms)
+              ntask = ntask + 1
+              tgq(ntask) = gq
+              tsd(ntask) = sd
+              tr0(ntask) = r0
+              tks(ntask) = xzget(NW * nb * nd * nm * nq, 'pass-1 batch of L3, a class')
+              tkg(ntask) = xzget(NW * (ne + nj) * nb * nd, 'pass-1 operand')
+              tkx(ntask) = xzget(NW * (ne + nj) * nm * nq, 'pass-1 product')
+              tkgy(ntask) = xzget(NW * nm * nq * (ne + nj), 'pass-1 operand')
+              tky(ntask) = xzget(NW * nb * nd * (ne + nj), 'pass-1 product')
             end if
           end if
           r0 = r0 + nd * nm
         end do
-        if (.not. xzdry) call xztoc(2, 'pass 1: stacked GEMMs')
-        call xzrel(mk)
       end do
+      if (.not. xzdry .and. ngq > 0) then
+        call xztic()
+        do ig = 0, ngq - 1
+          gq = lst(ig)
+          delta = gp - gq
+          nr = ndel(delta)
+          qlo = vpoff(gq)
+          nq = vpoff(gq + 1) - qlo
+          r0 = 0
+          do sd = 0, ncls - 1
+            sm = sd - delta
+            if (sm < 0 .or. sm >= ncls) cycle
+            nd = vcoff(sd + 1) - vcoff(sd)
+            nm = ocoff(sm + 1) - ocoff(sm)
+            if (nd > 0 .and. nm > 0) then
+              call N(zc_bgather2)(w(kl3), w(jobase), w(josig), w(jotri), w(josgn), npo, w(jvci), &
+                w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
+                qlo, nq, nr * nq, w(gkl(gq) + NW * r0 * nq))
+              call N(zc_bgather2)(w(kt3), w(jobase), w(josig), w(jotri), w(josgn), npo, w(jvci), &
+                w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, w(jrows + ocoff(sm)), &
+                qlo, nq, nr * nq, w(gkt(gq) + NW * r0 * nq))
+            end if
+            r0 = r0 + nd * nm
+          end do
+        end do
+        call xztoc(2, 'pass 1: gather')
+        ! the densities: one task per (gQ, P), each product in the buffer of
+        ! its thread and added to the block of gP - gQ
+        par = ngq * nb >= nth
+        !$omp parallel do collapse(2) schedule(dynamic) if(par) private(ig, k, gq, delta, nr, qlo, nq, me)
+        do ig = 0, ngq - 1
+          do k = 0, nb - 1
+            gq = lst(ig)
+            delta = gp - gq
+            nr = ndel(delta)
+            qlo = vpoff(gq)
+            nq = vpoff(gq + 1) - qlo
+            me = kdw + NW * omp_get_thread_num() * (nrmax * nrmax + nrmax)
+            call N(zc_gemm)(0_4, 1_4, nr, nr, nq, one, w(gkl(gq) + NW * k * nr * nq), nq, &
+                            w(gkt(gq) + NW * k * nr * nq), nq, zero, w(me), nr)
+            if (delta == 0) call N(zc_gemm)(0_4, 0_4, nr, 1_8, nq, one, w(gkt(gq) + NW * k * nr * nq), nq, &
+                                            l2pp(qlo, p0 + k), 1_8, zero, w(me + NW * nrmax * nrmax), 1_8)
+            !$omp critical (xzlbdens)
+            call N(xzlbacc)(nr * nr, w(me), w(kdd + NW * wdoff(delta)))
+            if (delta == 0) call N(xzlbacc)(nr, w(me + NW * nrmax * nrmax), w(kd0))
+            !$omp end critical (xzlbdens)
+          end do
+        end do
+        call xztoc(2, 'pass 1: density')
+        ! the stacked products, per gQ and class of d (and of m)
+        par = ntask >= nth
+        !$omp parallel do schedule(dynamic) if(par) private(it, gq, sd, sm, sy, delta, nr, qlo, nq, nd, nm, ne, nj)
+        do it = 1, ntask
+          gq = tgq(it)
+          sd = tsd(it)
+          delta = gp - gq
+          sm = sd - delta
+          sy = gp - sd
+          nr = ndel(delta)
+          qlo = vpoff(gq)
+          nq = vpoff(gq + 1) - qlo
+          nd = vcoff(sd + 1) - vcoff(sd)
+          nm = ocoff(sm + 1) - ocoff(sm)
+          ne = vcoff(sy + 1) - vcoff(sy)
+          nj = ocoff(sy + 1) - ocoff(sy)
+          ! L[(P, d)][(m, Q)] of these classes
+          call N(xzlbsub)(nb, nr, nq, tr0(it), nd * nm, w(gkl(gq)), w(tks(it)))
+          call N(xzbp1xy)(no, nv, npo, nvp, nb, nd, nm, nq, ne, nj, p0, vcoff(sd), ocoff(sm), qlo, &
+                          vcoff(sy), ocoff(sy), gpd, gmq, w(tks(it)), w(tkg(it)), w(tkx(it)), w(tkgy(it)), &
+                          w(tky(it)), xacc)
+        end do
+        do it = 1, ntask
+          sd = tsd(it)
+          sy = gp - sd
+          call N(xzbp1yadd)(no, nv, npo, nb, vcoff(sd + 1) - vcoff(sd), vcoff(sy + 1) - vcoff(sy), &
+                            ocoff(sy + 1) - ocoff(sy), p0, vcoff(sd), vcoff(sy), ocoff(sy), w(tky(it)), yall)
+        end do
+        call xztoc(2, 'pass 1: stacked GEMMs')
+      end if
+      call xzrel(mk)
     end do
   end do
   if (.not. xzdry) call N(xzlbdr)(w(kdd), w(kd0), dr, d1)
   call xzrel(m0)
+end subroutine
+
+! y += x
+subroutine N(xzlbacc)(n, x, y)
+  implicit none
+  integer(8), intent(in) :: n
+  ZT, intent(in) :: x(n)
+  ZT, intent(inout) :: y(n)
+  y = y + x
 end subroutine
 
 ! sub[P][r][Q] = l[P][r0 + r][Q] for r < n

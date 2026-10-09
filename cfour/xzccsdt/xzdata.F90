@@ -157,6 +157,7 @@ module xzdata
   logical :: tpart(ntmax, ntset) = .false.      ! a part of another entry: wall only, not summed
   integer :: ntim(ntset) = 0
   real(8) :: tic_w = 0d0, tic_c = 0d0
+  integer :: tcur = 1                           ! the set of the step that runs
   real(8) :: tlamim = 0d0                       ! the intermediates of the Lambda equations
 
 contains

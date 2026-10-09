@@ -37,7 +37,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   integer(8), intent(in) :: kt1, kt2, kt3, kt1n, kt2n, kr3
   integer(8) :: m0, m1, m2, md, ov, ov2
   integer(8) :: kfoo, kfov, kfvo, kfvv, kpvv, kfevv, kfeoo, kft
-  integer(8) :: kooovd, kooood, kovvod, kovood, kk, ktmp
+  integer(8) :: kooovd, kooood, kovvod, kovood, kk, ktmp, ktmp2
   integer(8) :: kt2p, kt2pp, ktau, ktt
   integer(8) :: kgpd, kyall, kr1c, kr1v, kra, kr2, klad, kwkl
   integer(8) :: kweff, kwo, kadrv, ko6, kwring, ka2, kb2, kx2
@@ -53,6 +53,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   ov = no * nv
   ov2 = ov * ov
   dense = ncls == 1
+  tcur = 1
   m0 = xzmark()
 
   ! ---- the arrays of the size of T2 and smaller
@@ -70,6 +71,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   kovood = xzget(NW * no * no * ov, 'dressed <ov||oo>')
   kk = xzget(NW * ov2, 'work of the dressing')
   ktmp = xzget(NW * no * no * ov, 'work of W_vooo')
+  ktmp2 = xzget(NW * no * no * ov, 'work of W_vooo 2')
   kt2p = xzget(NW * no * no * nvp, 'T2 [i][j][Q]')
   kt2pp = xzget(NW * npo * nvp, 'T2 [P][Q]')
   ktau = xzget(NW * npo * nvp, 'tau1')
@@ -157,7 +159,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
                  w(jopa), w(jopb), w(jvpa), w(jvpb), w(kwv), w(kg2), w(kyb))
     call xztoc(1, 'W_vvvo: bare, tau, t1')
     call N(xzvvoo)(no, nv, npo, nvp, w(kt1), w(ktau), w(jgpp), w(jooov), w(joooo), w(kwv), &
-                   w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2))
+                   w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2), w(kwkl))
     call xztoc(1, 'dressed <ab||ij>')
     ! the T3 part: wv[Q][(e, i)] += xacc[(e, i)][Q]
     call N(zc_add_transposed)(w(kwv), w(kxacc), nvp, ov, ov, nvp, one)
@@ -167,7 +169,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
                   w(kxb), w(kyb))
     call xztoc(1, 'W_vvvo: t2 <ov||vv>')
     call N(xzwo)(no, nv, npo, nvp, w(kt2), w(kt2pp), w(kooovd), w(kovood), w(kd), w(kyall), &
-                 w(jopa), w(jopb), w(kwo), w(ktmp))
+                 w(jopa), w(jopb), w(kwo), w(ktmp), w(ktmp2), w(kb2))
     call xztoc(1, 'W_vooo')
     call N(xzweff)(no, nv, nvp, w(kt2), w(kt2p), w(joovv), w(joovvp), w(kovvod), w(kfoo), w(kfvv), &
                    w(kweff), w(kfevv), w(kfeoo), w(ka2), w(kb2), w(kx2))
