@@ -3601,6 +3601,196 @@ operations, 504 GFLOP/s), the reductions onto a<b<c<d<e 88 s, the operands
 The CCSDTQ column is from the shared node (8 threads, not a benchmark),
 where every version was run; the (Q) column is from benchmark nodes.
 
+## Thread scaling on one node: HBr with 26 correlated spinors (2026-10-08/09)
+
+**Setup of every table of this section** unless it says otherwise.  HBr,
+r = 1.4145 Angstrom, X2C-1e spinor Hartree-Fock, cc-pVQZ-DK uncontracted as
+PySCF gives it; the 10 lowest spinors (Br 1s 2s 2p) frozen: **26 occupied
+spinors correlated**; virtual spinors: the lowest **120** of them ("26 +
+120", `BP_NVIR=120`), or the lowest **160** ("26 + 160").  Real spinors
+adapted to m_j ("real"), T3 in blocks of the 2 m_j labels ("blocks": 11.4 %
+of the dense T3 at 26 + 160, 1.59 against 13.93 GB) or without the labels
+("dense"); "complex": the spinors as the SCF leaves them, no labels.  One
+node of the cluster's `parallel` partition, 2 x 24 cores Xeon Gold 6248R,
+188 GB, whole node allocated; up to 24 threads on the cores of one socket
+with the memory of that socket (`numactl --physcpubind --membind`), 48 on
+both.  Programs: the Python program (`bench/bench_step.py` through
+`bench/bench_plan.sh`, one measurement per process) and the native program
+`xzccsdt` on integral files with labels (`bench/cfour/labelled_run.py`).
+Times are wall seconds per CCSDT iteration, the first iteration left out.
+(Q) times marked "sample" are extrapolated from the quadruples of 0.5 % or
+1 % of the occupied quadruples (`ccsdt_q(fraction=)`, `XZ_QSAMPLE`); the
+one full (Q) is said to be full.  Ratios across thread counts are taken on
+one node only.
+
+### Speedup from one thread (node c695, job 31778971)
+
+Python program at 3272c33, native program at the code of a5045bf.
+
+| threads | 1 | 2 | 4 | 8 | 16 | 24 | 48 |
+|---|---|---|---|---|---|---|---|
+| Python, dense, real, 26 + 120, DIIS vectors in memory | 1418 | | | 188.0 | 103.8 | 80.6 | 60.1 |
+| speedup | 1 | | | 7.5 | 13.7 | 17.6 | 23.6 |
+| Python, blocks, real, 26 + 120 | 63.6 | 34.2 | 18.6 | 10.8 | 6.8 | 7.0 | 7.2 |
+| speedup | 1 | 1.86 | 3.42 | 5.9 | 9.4 | 9.1 | 8.8 |
+| native, blocks, real, 26 + 160 | 172.7 | 91.3 | 48.4 | 27.2 | 16.1 | 13.1 | 12.0 |
+| speedup | 1 | 1.89 | 3.57 | 6.3 | 10.8 | 13.2 | 14.4 |
+
+Stages of the dense iteration (26 + 120, DIIS vectors in memory), seconds:
+
+| stage | 1 | 8 | 16 | 24 | 48 | speedup 1 → 24 | 1 → 48 |
+|---|---|---|---|---|---|---|---|
+| pass 2 (ring and drive terms) | 750.6 | 98.8 | 55.0 | 40.8 | 30.8 | 18.4 | 24.4 |
+| pp ladder | 465.0 | 58.0 | 29.5 | 22.5 | 15.4 | 20.7 | 30.2 |
+| pass 1 | 128.0 | 19.5 | 11.9 | 9.7 | 8.1 | 13.2 | 15.8 |
+| hh ladder | 26.4 | 3.9 | 2.1 | 1.5 | 1.0 | 17 | 25 |
+| intermediates, T1 dressing | 15.1 | 2.7 | 1.8 | 1.7 | 1.7 | 9 | 9 |
+| DIIS | 9.6 | 2.0 | 1.2 | 1.0 | 1.2 | 10 | 8 |
+
+Dense is 22 times blocks on one thread (1418 against 63.6 s) and 11.5 times
+on 24 (80.6 against 7.0 s): the dense products scale better than the many
+small ones of the blocks.
+
+### What limits the speedup (c695, the kernels of the passes timed alone)
+
+`passbench.py` / `mb.py` of the session (random data of the size 26 + 120,
+real; a batch of 48 occupied pairs), seconds for one pass over all 325
+pairs:
+
+| threads | 8 | 16 | 24 | 48 (threads not pinned) |
+|---|---|---|---|---|
+| pass 2: ring product (GEMM) | 80.7 | 42.8 | 31.5 | 45.8 - 60.8 |
+| pass 2: gather of T3 | 5.1 | 4.0 | 3.7 | 3.1 |
+| pass 2: reduction into the residual | 5.1 | 3.0 | 2.5 | 2.8 |
+| pass 2: drive product | 4.9 | 3.4 | 2.1 | 1.6 |
+| pass 1: products | 11.5 | 7.2 | 5.2 | 5.1 |
+| pass 1: gather of T3 | 5.1 | 4.0 | 3.7 | 3.5 |
+| copy of an array of the size of a batch, GB/s | 36.6 | 46.8 | 49.7 | 91.8 |
+| gather, GB/s (share of the copy rate) | 22.0 (60 %) | 31.1 (66 %) | 34.7 (70 %) | 52.6 (57 %) |
+| ring product, GFlop/s per core | 70 | 66 | 61 | |
+
+The memory throughput of a socket is nearly reached at 16 cores (the copy
+gains 1.36 from 8 to 24 cores); the gathers and reductions are bound by it.
+The products are not.  A buffer allocated anew for every call costs the
+gather 30 % (0.0135 against 0.0103 s per pair on 24 threads).  Interleaved
+memory (`numactl --interleave=all`) changes nothing in the Python program
+(dense, 48 threads: 349.8 against 350.9 s for 4 iterations).
+
+**The DIIS file and the last cores** (26 + 120 dense real, 3272c33, 5
+iterations, 48 threads; seconds summed over the 5):
+
+| DIIS vectors | pass 1 products | pass 2 products | pp ladder products | DIIS | iterations 2 - 5 |
+|---|---|---|---|---|---|
+| scratch file on the local disk | 60.2 | 148.1 | 72.5 | 26.9 | 72 - 103 s |
+| in memory (`incore_complete`) | 16.8 | 110.4 | 71.9 | 6.3 | 60 - 63 s |
+| scratch file on a memory file system | 18.7 | 110.4 | 71.2 | 18.1 | 62 - 72 s |
+| scratch file on the local disk, 44 threads | 35.9 | 141.0 | 65.4 | 26.4 | 63 - 98 s |
+
+The products of the two passes that follow a DIIS step are slowed by the
+write-back of the 12 GB the step leaves in the file; on a memory file
+system the loss is gone.  Per iteration: 87.2 s with the file against 60.1
+s in memory on 48 threads, 86.0 against 80.6 s on 24 (the other socket
+idle).  The memory of the process is spread evenly over the two sockets in
+both cases and more than 55 GB per socket are free.  The default (the file
+first) was not changed.
+
+### The changes of 2026-10-08 to the block mode, before and after on one node
+
+Python (job 31781047, node c360; before = 940d92a, after = d81db42; blocks,
+real): the hh ladder without the serial construction of the occupied
+operator, the CCSD part / intermediates / T1 dressing on threaded kernels,
+the small products of the passes as one task list, the pass-2 batch sized
+for the block layout.
+
+| threads | 8 | 16 | 24 | 48 |
+|---|---|---|---|---|
+| 26 + 120 before | 16.4 | 13.2 | 13.1 | 17.0 |
+| 26 + 120 after | 10.9 | 7.1 | 6.8 | 6.6 |
+| 26 + 160 before | 39.7 | 30.1 | 28.7 | 37.5 |
+| 26 + 160 after | 28.8 | 17.8 | 15.5 | 16.3 |
+
+Native program (job 31781558, node c306; before = 51c6773, after = 3bc2a40,
+the two binaries alternating, two repetitions within 1 %; blocks, real):
+the block passes as parallel tasks with batches sized by the dense fraction
+of T3, element loops as GEMMs.
+
+| threads | 8 | 16 | 24 | 48 |
+|---|---|---|---|---|
+| CCSDT, 26 + 120 before | 15.97 | 9.63 | 7.87 | 8.75 |
+| CCSDT, 26 + 120 after | 11.38 | 6.36 | 5.04 | 4.19 |
+| Lambda, 26 + 120 before | 25.01 | 15.70 | 12.98 | 14.66 |
+| Lambda, 26 + 120 after | 14.95 | 8.88 | 7.28 | 6.29 |
+| CCSDT, 26 + 160 before | 49.26 | | 26.61 | 31.10 |
+| CCSDT, 26 + 160 after | 32.12 | | 14.28 | 11.87 |
+| Lambda, 26 + 160 before | 77.84 | | 44.41 | 59.59 |
+| Lambda, 26 + 160 after | 41.53 | | 19.53 | 16.63 |
+
+The nodes of the partition differ by up to 40 % for the same binary (the
+old one, 26 + 120 blocks, 8 threads: 10.8 s on c011 and c195, 16.0 s on
+c306): only numbers of one job are compared.
+
+### Native program and Python program, 26 + 160, blocks, real (c695)
+
+Native at 940d92a, Python at 63d2338 / 90bdc4e (both before the changes of
+the previous subsection), the same node.
+
+| | 8 threads | 24 | 48 |
+|---|---|---|---|
+| CCSDT iteration, native | 36.4 | 21.3 | 29.2 |
+| CCSDT iteration, Python | 39.7 | 28.9 | 37.8 |
+| Lambda iteration, native | | 34.4 | 47.9 |
+| (Q), sample, native (min) | 21.5 | 11.0 | 14.7 |
+| (Q), sample, Python (min) | 43.1 | 27.5 | 33.0 |
+| (Q)_Lambda, sample, native (min) | | 13.8 | 18.1 |
+
+(Q) of the native program over MPI ranks on the one node, 0.5 % sample:
+
+| ranks x threads | 1 x 48 | 2 x 24 | 4 x 12 | 6 x 8 |
+|---|---|---|---|---|
+| whole (Q), minutes | 15.0 | 8.1 | 6.1 | 6.8 |
+
+(every rank forms the Xv intermediates of its tasks again: that is what
+6 x 8 loses.)
+
+### Dense against blocks, and complex against real
+
+Full (Q), not a sample (job 31777527, node c059, 26 + 160, real, 48
+threads, Python at 63d2338): blocks 1724 s, dense 7984 s (4.63 times);
+iteration dense / blocks 7.49; E_corr of the two differs by 7e-15, E[Q] and
+E(Q) by less than 1e-16; E(Q) = 0.000121282968.  On 24 threads the (Q) in
+blocks takes 1740 s.  (Q) samples, 26 + 120, Python (c695, minutes for the
+whole (Q)): dense 45.3 (48 threads), 47.9 (24); blocks 15.2, 11.7, 12.9 on
+48, 24, 16: the quadruples are done one after the other, with threads
+inside each only.
+
+Dense iteration at 26 + 160 with the stages (c695, 63d2338, DIIS vectors in
+the file): 304.9 s on 24 threads, 237.6 s on 48 (pass 2 125.6 / 96.5, pp
+ladder 93.8 / 59.4, pass 1 31.6 / 32.5, DIIS 16.4 / 17.2).
+
+Complex against real, 26 + 120, no labels, DIIS vectors in the file (c695,
+3272c33): complex 685.5 s on 8 threads and 276.0 s on 24; real 200.3 s (at
+63d2338) and 86.0 s: **3.4 and 3.2**.  With `incore_complete` the complex
+run stops in the plan: 8 vectors with T3 take 186.9 GB, 135 GB are left.
+
+### CFOUR's CCSD routine against the CCSD part of the native program
+
+`cfour/x2ccc_probe` (docs/native_x2ccc.md): `hbarso` of xx2cccsd with the
+routines of `libx2ccc`, called on the integral files and amplitudes of the
+native program; new T1 and T2 of one CCSD step agree to 1e-14 or better
+(H2O / 6-31G, HBr 26 + 78, 26 + 60, 26 + 120).  Job 31781783, node c261,
+complex dense, `ABCDTYPE=STANDARD` (`<ab||cd>` in memory), the two codes
+alternating, seconds per step:
+
+| | 26 + 78, 8 threads | 24 | 26 + 120, 8 threads | 24 |
+|---|---|---|---|---|
+| CFOUR `hbarso` | 0.743 | 0.506 | 2.584 | 1.645 |
+| native CCSD part (85a86b0) | 1.003 | 0.485 | 3.625 | 1.698 |
+| native CCSD part (940d92a) | 1.782 | 0.907 | 5.681 | 2.922 |
+
+The CCSD-only work is 0.3 % of a dense complex CCSDT iteration at 26 + 78
+(110.3 s on 8 threads, 45.0 s on 24).  The factors 2.7 - 6 of the section
+"Two-component CCSD(T)" are against xx2cccsd with `ABCDTYPE=AOBASIS`.
+
 ## Correctness references
 
 | Reference | Agreement | Test |
