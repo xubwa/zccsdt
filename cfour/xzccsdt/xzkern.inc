@@ -233,6 +233,25 @@
       ZT :: res(*)
     end subroutine
 
+    ! ---- vectors of the EOM solver (csrc/t3pack.c): the first m of the n
+    !      vectors x (addresses) become sum_j x[j] q[j][k]; x[I][A] /= omega +
+    !      eo[I] - ev[A], denominators below floor replaced by it
+    subroutine N(zc_vtransform)(len, n, m, x, q) bind(C)
+      import
+      integer(c_int64_t), value :: len, n, m
+      integer(c_intptr_t) :: x(*)
+      ZT :: q(*)
+    end subroutine
+
+    subroutine N(zc_vprecond)(x, ni, na, eo, ev, omega, floor) bind(C)
+      import
+      integer(c_int64_t), value :: ni, na
+      type(*), dimension(*) :: x
+      real(c_double) :: eo(*), ev(*)
+      ZT :: omega
+      real(c_double), value :: floor
+    end subroutine
+
     subroutine N(zc_tn_reduce)(r, nout, sr, n, k1, k2, b0, b1, c0, c1, x, s1, s2, so, scale) bind(C)
       import
       integer(c_int64_t), value :: nout, sr, b0, b1, c0, c1, s1, s2, so

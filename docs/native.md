@@ -1,9 +1,9 @@
 # xzccsdt: the native program in CFOUR's two-component chain
 
 `cfour/xzccsdt` is a program without Python for spinor CCSDT, CCSDT(Q) and
-CCSDT(Q)_Lambda energies, for lambda of CCSDT and for the one-particle density
+CCSDT(Q)_Lambda energies, for lambda of CCSDT, for the one-particle density
 and orbital gradient of CCSDT that CFOUR's `xx2czvec` turns into the relaxed
-density.  It runs as a member of CFOUR's X2CSO chain, after `xjoda`,
+density, and for the excitation energies of EOM-EE-CCSDT.  It runs as a member of CFOUR's X2CSO chain, after `xjoda`,
 `xsox2catm`, `xsox2chf` (and `xx2camf` for X2CAMF) and `xx2cvtran` with
 `ABCDTYPE=STANDARD`, in their directory:
 
@@ -14,8 +14,9 @@ programs, the kernels are the C kernels of this repository (`csrc/`), and all
 working memory is the work array that CFOUR's `CRAPSI` allocates
 (`MEMORY_SIZE` of the ZMAT).  The algorithms are those of the Python program
 (`src/zccsdt/cc/ccsdt_opt.py`, `quadruples.py`, `t3engine.py`, `lambda_opt.py`,
-`lambda_blk.py`, `quadruples_lambda.py`; docs/factorization.md, docs/lambda.md),
-which is the reference of every number below.
+`lambda_blk.py`, `quadruples_lambda.py`, `eom_opt.py`, `t3shift.py`;
+docs/factorization.md, docs/lambda.md, docs/eom.md), which is the reference
+of every number below.
 
 State of this document: the program at the commit that runs the CCSDT
 iterations and the Lambda iterations over MPI ranks (section 15; (Q) over
@@ -28,7 +29,9 @@ labels, complex or real, the iterations and (Q), (Q)_Lambda over MPI ranks,
 (Q) with restart - are there and validated against the Python program; so is the density stage of
 CCSDT with the files for `xx2czvec`, frozen and dropped spinors included
 (section 13), validated against the Python hand-over of section 10 and
-through `xx2czvec` and `xsox2cprop`.
+through `xx2czvec` and `xsox2cprop`.  Excited states: EOM-EE-CCSDT (`eom`,
+`ccsdt_eom`) in all four modes, in blocks for the states of a label shift,
+with CFOUR's solver design and input - section 16; one MPI rank.
 
 ## 1. Build and run
 
@@ -67,7 +70,12 @@ Lambda equations of CCSDT for the amplitudes of `XZAMPS` (written to
 `ccsdt(q)_l`, `ccsdt[q]_l` for CCSDT, Lambda and the correction in one run
 (section 11); `density` for the unrelaxed density and the orbital gradient of
 CCSDT from `XZAMPS` and `XZLAMB`, written as the files of `xx2czvec`;
-`ccsdt_density` for CCSDT, Lambda and the density in one run (section 13).  Without the argument: `CALC` of the ZMAT as joda stored it (`CALC=CCSDT`, `CCSDT[Q]`,
+`ccsdt_density` for CCSDT, Lambda and the density in one run (section 13);
+`eom` for the excited states of EOM-EE-CCSDT from `XZAMPS`, `ccsdt_eom` for
+CCSDT and the excited states in one run (section 16: the number of roots,
+their label shifts and the thresholds come from the ZMAT - `%eomnroot`,
+`%xzeom`, `ESTATE_CONV`, `ESTATE_MAXCYC`); `ccsd_eom` for EOM-EE-CCSD on
+the amplitudes of CFOUR's `xx2cccsd` (16.5).  Without the argument: `CALC` of the ZMAT as joda stored it (`CALC=CCSDT`, `CCSDT[Q]`,
 `CCSDT(Q)`, `CC(n)` with `EXCITATION=3`, `CC(n-1)(n)` with `EXCITATION=4`).
 Thresholds: `CC_CONV=N` - the amplitudes (|dT1| + |dT2| + |dT3| of the full
 tensors) below 10^-N and the energy below 10^-(N+2), as the Python front end
@@ -126,6 +134,8 @@ decided alike ...`).
   `I_MPI_WAIT_MODE=1`).
 - The density stage (`density`, the last step of `ccsdt_density`) is rank
   0's.
+- The excited states (`eom`, `ccsdt_eom`) run with one rank only; with more
+  the program stops with a message (section 16.7).
 
 The steps can be separate invocations, as the X2CSO programs are called one
 after the other: `xzccsdt ccsdt` (serial or one rank), then
@@ -168,6 +178,9 @@ Written:
 | `XZQCHK.NNNN` | one per rank during (Q): a first line that names the calculation and the task list (kind, sizes, tasks, a number computed from the list), then a line per finished task (task, its two energies, seconds); deleted when (Q) has finished |
 | `xfull`, `dpoo`, `dpvv`, `dii0`, `daa0`, `dpopo`, `dpvpv` | `density`, `ccsdt_density`: the input of CFOUR's `xx2czvec` (section 10.2: one record each, complex, CFOUR's order of the spinors) |
 | `xzccsdt.rNNNN` | output of the ranks other than 0 (MPI) |
+| `XZEOM`; `JOBARC`: `TOTENER2` | `eom`, `ccsdt_eom`: a text line per excited state (shift, root, omega, total energy, residual, weights); the total energy of the lowest state (section 16.1) |
+| `XZEOMR` | the vectors of the roots (section 16.1; not with `%xzeomvec 0`, not if the disk is short) |
+| `EOMCnnnn`, `EOMHnnnn` | only if the subspace of the EOM solver does not fit in the work array: its vectors and their sigma vectors (CFOUR's names), deleted at the end (section 16.4) |
 
 A run that reads `XZAMPS` or `XZLAMB` must run in the mode of the run that wrote it
 (labels used or not, real or complex: both follow from the same integral
@@ -230,6 +243,7 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzden.inc` | the density stage: the passes over l3 and T3, the blocks of the two-particle density, the orbital gradient, the files of `xx2czvec`; its pass C in blocks |
 | `xzdfrz.inc`, `xzfrz.F90` | frozen and dropped spinors in the density stage: the contractions with integrals of one such index, the rotations, the rows and columns of `xfull`; the integrals through CFOUR's `int_mintv2e` and `vtranpsog` |
 | `xzq.inc`, `xzqs.inc` | (Q) and (Q)_Lambda: the task loop and the dense quadruple; the quadruple in sectors of the labels |
+| `xzeom.inc`, `xzeoms.inc`, `xzeomd.F90` | EOM-EE-CCSDT: the intermediates of the ground state and the sigma vector; the solver, the driver and the test hooks; the input (flags, ZMAT sections), the label shifts and their layout, the results (section 16) |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
 Kernels of `csrc/` that are called: `zc_t3_pass1r`, `zc_t3_pass2r` (the
@@ -247,7 +261,11 @@ batch), `zc_t3_pass1w`, `zc_t3_pass2w` (the density stage),
 `zc_q_sector_energy`, `zc_rows_gemm`, `zc_xv_sector` (tnpack.c); for lambda
 `zc_l3_pass1w`, `zc_l3_pass2w` (ccsdt_t3.c), `zc_lam_pair_expand`,
 `zc_lam_pair_matvec` and their `_tab` forms (lambda_t3.c), `zc_ql_energy`,
-`zc_ql_sector_energy` (qlambda.c).
+`zc_ql_sector_energy` (qlambda.c); for the EOM solver `zc_vtransform`,
+`zc_vprecond` (t3pack.c; interfaces added, the kernels are those of the
+Python solver).  Linked from CFOUR besides `liblibr.a`: the objects of
+section 1, and for the EOM solver in complex arithmetic `eomreorder.o`,
+`eomconv.o` of its program directory `x2ceomcc` (section 16.3).
 
 **One change to a kernel file:** `zc_t3_pass1` and `zc_t3_pass2` of
 `csrc/ccsdt_t3.c` allocated their batch buffers themselves.  The bodies are
@@ -385,6 +403,11 @@ plan` to the word).
   `(private to a rank, T3 included: XZ_QMAP=0)`.  A run that iterates first
   (`ccsdt(q)`) keeps T3 in the work array for the iterations, writes
   `XZAMPS`, releases T3 and maps the file like the other ranks.
+- The excited states (`eom`, `ccsdt_eom`): the dry run goes through the
+  allocations of every label shift of the input with the smallest subspace
+  that can run; the subspace of the solver then takes what is left, per
+  shift - all of it in the work array, a smaller one in the work array, or
+  files (section 16.4).
 - **The work array of a rank other than 0 is not `MEMORY_SIZE`.**  Rank 0
   makes the plan - the batch sizes, the place of the DIIS vectors - in its
   `MEMORY_SIZE`, then runs the scheduler dry once more *as a rank other
@@ -461,7 +484,8 @@ words), `XZ_DIST=digits` (the kinds of batches that are dealt out: 1, 2, 3
 pass 1, pass 2, pp ladder; 4, 5, 6 those of the Lambda equations; `0`:
 rank 0 does all), `XZ_BPR`, `XZ_BCOST=file` (the seconds of every batch),
 `XZ_SLICES=0`, `XZ_REBAL`, `XZ_R0LOAD`, `XZ_WFAIL`.  `XZ_MAXCOR` is read by
-rank 0 only.
+rank 0 only.  The excited states: `XZ_EOMTEST`, `XZ_EOMSIG`, `XZ_EOMSD`,
+`XZ_EOMCCSD`, `XZ_EOMVEC`, `XZ_EOMCYC` (section 16.8).
 
 Measured (H2O / 6-31G, login node): the same energies to 1e-12 with the work
 array at its floor (2022176 words: DIIS in the file, one pair per batch),
@@ -1041,6 +1065,9 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   memory, or all in the file).
 - CCSDTQ, (P), properties, the AO-driven CCSD(T); CFOUR's nonrelativistic
   programs.
+- Excited states: EOM-EE-CCSDT energies and right-hand vectors are there
+  (section 16); not done: left-hand vectors and properties, IP / EA, more
+  than one MPI rank, restart and root following (16.9).
 - The relaxed density for `xsox2cprop` (`denfinal`): the density stage and
   the files of `xx2czvec` are there for CCSDT, with frozen and dropped
   spinors (section 13).  Not done there: the contributions of (Q); the held
@@ -1049,9 +1076,12 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   needs the spinors of CFOUR's SCF, which have no labels); a Z-vector solver
   of our own where `xx2czvec` is wrong (section 10.4).
 - The one-rank-per-node timing of (Q), labels with a modulus: as before.
-- No input section of the ZMAT is read (`%zccsdt` of the Python front end):
-  method by argument or CALC, thresholds by CC_CONV / CC_MAXCYC, everything
-  else by the environment variables named above (test hooks and overrides).
+- Of the ZMAT only the sections of the excited states are read
+  (`%eomnroot`, `%eomthrs`, `%eomndav0`, `%xzeom`, `%xzeomguess`,
+  `%xzeomvec`: section 16.1), not `%zccsdt` of the Python front end: the
+  method by argument or CALC, thresholds by CC_CONV / CC_MAXCYC (ESTATE_CONV
+  / ESTATE_MAXCYC), everything else by the environment variables named above
+  (test hooks and overrides).
 
 ## 10. Relaxed density through xx2czvec
 
@@ -2948,3 +2978,508 @@ the transfer rates above are Intel MPI's, in particular the slow
 - The first cycle waits for the other ranks to read the integrals (they
   start when rank 0 has planned: 3 to 7 s here, on its own clock).
 - Open MPI; more than four nodes; more than 8 ranks.
+
+## 16. EOM-EE-CCSDT: excited states
+
+    xzccsdt ccsdt_eom               # CCSDT, then the excited states
+    xzccsdt ccsdt; xzccsdt eom      # or the states from XZAMPS of a converged CCSDT
+
+Excitation energies and right-hand vectors of EOM-EE-CCSDT on the converged
+amplitudes, in every mode of the program: the packed block or the blocks of
+the labels, real or complex.  In blocks a state has a **label shift** D -
+its excitation operator changes the sum of the labels of the spinors by D
+(`r1[i][a]` where l_a - l_i = D, `r2`, `R3` likewise with the sums) - and
+every shift is an eigenproblem of its own in the blocks of that shift.  With
+the labels 2 m_j of `dgcosym` (section 6) D = 2 (Omega' - Omega): for a
+closed-shell reference 2 Omega of the state.  D = 0 is the totally symmetric
+case and runs through the same code.  The Python program
+(`src/zccsdt/cc/eom_opt.py`, `eom.py`, `t3shift.py`; docs/eom.md) is the
+reference of the sigma vector and of every root below; the solver is not
+its block Davidson but CFOUR's (16.3).
+
+Not here: IP / EA, left-hand vectors, properties, CFOUR's CIS guess; more
+than one MPI rank (16.7).
+
+### 16.1 Input and output
+
+The input is CFOUR's where CFOUR's two-component EOM program `xx2ceomcc`
+has a keyword or a section for the thing (docs/eom.md, section 9), read the
+same way: the flags of joda from JOBARC, the sections from the ZMAT (a line
+with the tag, the value on the next line; `xzeomd.F90`: `xzeominp`).
+
+| what | keyword / section | default |
+|---|---|---|
+| threshold | `ESTATE_CONV=N`: the largest element of the residual of a normalized vector at most 10^-N; the section `%eomthrs` (a real number) overrides | 10^-5 |
+| iterations at most | `ESTATE_MAXCYC` | 40 |
+| roots | `%eomnroot` - of every shift that `%xzeom` gives without a number | 1 |
+| vectors of the subspace at most | `%eomndav0` | 20 + roots + 2 (CFOUR's `eomene2`); at most 64 |
+| the label shifts | `%xzeom` (ours): lines `shift [roots]` until a line that is not one or two integers; shifts in the labels of the run, as the output lists them, no sign convention beyond that | shift 0 |
+| the start | `%xzeomguess` (ours): 0 unit vectors on the lowest single excitations of the shift (CFOUR's guess without CIS); 1 the roots of the singles-doubles block from these unit vectors first | 1 |
+| the vectors of the roots | `%xzeomvec` (ours): 0 no file `XZEOMR` | 1 |
+
+    ESTATE_CONV=6,ESTATE_MAXCYC=60          (in the *CFOUR(...) line)
+
+    %eomnroot
+    3
+
+    %xzeom
+    2
+    4
+    0 5
+
+(three roots of the shifts 2 and 4, five of shift 0).  For a reference that
+is symmetric under time reversal the states of -D are the time-reversed
+states of +D with the same energies (measured: 2e-12): give one of the two
+unless both are wanted; the program computes what the section lists.  A
+shift that is not a difference of sums of the labels, or that no single
+excitation has, is left out with a warning.  **Without blocks** (no labels,
+`XZ_LABELS=0`) the states of all shifts are roots of one problem and the
+program computes the sum of the roots asked for.
+
+Output, per shift: the size of a vector, where the subspace is, CFOUR's
+line per iteration and unconverged root (`EOM cycle`, the cycle, the vectors
+of the subspace, the real part of the eigenvalue, the largest element of the
+residual, the threshold: `eomconv` itself in complex arithmetic), then per
+root the excitation energy in Eh, eV and cm-1, the largest element and the
+norm of its residual (computed again from the final vectors), the cycle in
+which it converged, the weights of R1, R2, R3 (the squared norms of the
+parts of the normalized vector on i<j, a<b etc.), the total energy, and the
+largest elements of R1 as `i -> a` with the number of the spinor in the
+order of the SCF (`scf2ceig`), its label and its energy.  At the end one
+table of all states.
+
+Where a later program finds the results:
+
+| | |
+|---|---|
+| `XZEOM` (text) | a line per state: label shift, root, omega / Eh, total energy / Eh, the largest element and the norm of the residual, the weights of R1, R2, R3, converged (T / F), the largest element of R1 as the spinors i -> a (numbers of the SCF) and its absolute value; two comment lines with E(SCF), E(CCSDT) |
+| JOBARC `TOTENER2` | the total energy of the lowest converged state (the record that `xx2ceomcc` writes); `TOTENERG` stays E(CCSDT) |
+| `XZEOMR` (unformatted stream) | `'XZEOMR01'`, 5 integers of 8 bytes (occupied, virtual, words per element, classes, the step of the labels), then per root: the shift in classes, the root, the elements of the vector (3 integers), the real and the imaginary part of omega, the vector `r1[i][a]`, `r2[P][Q]` on i<j, a<b, `R3` in the blocks of the shift, normalized, in the order of the spinors of the run |
+
+### 16.2 The sigma vector (`xzeom.inc`)
+
+`sigma = <mu| [Hbar, R] |0>` is the Jacobian of the amplitude equations on R
+(docs/eom.md 1 to 3), and in the T1-dressed factorization of the CCSDT step
+
+    sigma_3 = residual(R3; W_ring, W_pp, O_hh | W'_vvvo x t2, W'_vooo x t2)
+            + residual(T3; W'_ring, W'_pp, O'_hh | W_vvvo x r2, W_vooo x r2)
+
+with `W' = W[H'; t2] + W_linear[H~; r2, R3]` and `H' = [H~, R1]`: the
+passes of the T3 equation twice with other operands, pass 1 over R3 (all
+four outputs) and over T3 with H' (its T2 part).  No kernel was written or
+changed; `zc_vtransform` and `zc_vprecond` of `csrc/t3pack.c` (the solver)
+got interfaces.
+
+**Once** (`xzeomim`): one amplitude step without its T3 residual, its
+operands kept (`xzdata`: `efoo` ..): the dressed Fock matrix and small
+blocks, the dressed `<mb||de>` on pairs, the bra-dressed `<ab||ei>`, W_ovvo,
+F_vv, F_oo, W_oooo, `<mn||Q> t2[P][Q]`, the operands of pass 1, W_vvvo,
+W_vooo, the operator on occupied triples, and - as for the Lambda equations
+- **the pp operator of the T3 equation in the place of the bare `<ab||cd>`**
+(a run that needs the bare integrals afterwards reads the files again).
+
+**Per vector** (`xzesig`), in the order of `eom_opt.sigma`:
+
+| step | how |
+|---|---|
+| H' (Fock matrix, `<mn||ie>'`, `<mn||ij>'`, `<ma||di>'`, `<ma||ij>'`) | loops and one `zc_pair_t1_contract` (`xzeh1`, `xzehs`) |
+| W'_ovvo, F'_vv, F'_oo; W'_oooo | the routine of the ground state (`xzweff`) with (r2; H'): it is linear in both; `xzewkl` |
+| sigma_1, sigma_2 without the pp terms | `xzes1`; `<ab||ij>'` (`xzes2g`); the terms that are bilinear in an amplitude and an intermediate by one routine called twice, (r2; W) and (t2; W') (`xzeb2`, `xzefvv`: GEMMs on the layouts of the CCSD part) |
+| pass 1 over R3, over T3 with H' | `zc_t3_pass1w` / `xzbpass1` (in blocks the second without the rows of the operand that are zero) |
+| W'_vvvo | `- P(ab) r1 W_ovvo` (the loop of `xzbv`), `W_pp r1` less its F_vv part, the T2 terms of W_vvvo with r2 (`xzwvoovo`, `xzwvx` as they are), the T3 part from pass 1 |
+| W'_vooo | `xzewo` |
+| sweep 1 over the blocks of W_pp | its ladders in sigma_2 (with r2 + tau1'; the T2 part taken out), `W_pp r1`, the pp ladder of R3 |
+| R3 with the operators of the ground state | pass 2 (`zc_t3_pass2r` / `xzbpass2`), the operator on occupied triples |
+| sweep 2 over the rows of W'_pp | slab by slab `- P(ab) r1[m][a] ~<mb||de>` (`zc_vvvv_dress` with r1 for t1 and a zero bare block), its ladder with t2 in sigma_2, then `+ r2 <mn||de> + 1/2 A[F'_vv]` and the pp ladder of T3 |
+| T3 with the derivatives of the operators | pass 2 with (W'_ring, r2, W_vooo | W_vvvo, r2), the operator of (W'_oooo, F'_oo) on occupied triples |
+
+Two things differ from the Python code: **W'_pp is never stored** - its
+rows are made in slabs of `nqs` rows, as the dressed `<ab||cd>` of an
+amplitude step - so a sigma vector takes no v^4 array of its own; and the
+operator O'_hh of a shift is the full matrix on occupied triples, of which
+the passes take the blocks between two groups.
+
+**Label shifts in the blocks** (`xzblk.inc`, `xzdata.F90`: `xzshctx`).  The
+block passes of the ground state take the shifts of their operands from
+module variables - `sh_t` of the rank-3 operand, `sh_w` of the operators (of
+the integrals in pass 1), `sh_a` of the amplitudes of the drive terms; the
+result has `sh_o = sh_t + sh_w` - which are zero everywhere but in the two
+residuals and the two passes 1 of a sigma vector:
+
+- a rank-3 array of shift s has the blocks (occupied triples of group g) x
+  (virtual triples of group g + s) (`xzeomlay`; `xzna`), and the gathers and
+  reductions get the table `obase` of its layout - the kernels are driven
+  by tables and do not know the layout;
+- where the class of an index follows from the classes of the others the
+  shifts enter (the group of Q in the gathered `T[P][(d, m)][Q]`, the two
+  classes of the operands of pass 1 and its two conditions for the outputs
+  of rank 1 and 2, the classes of e and m in the drive terms);
+- the ring operator is a rectangular block per delta, [(a, i) of delta +
+  sW][(d, m) of delta]; the rows of W'_pp are pairs of block h + s for the
+  columns of block h; a block that is not there is not gathered (zero);
+- `xzshctx(0, 0, 0)` gives the tables of `xzsetmode`: the ground state, the
+  Lambda equations and the density run the same statements as before (their
+  energies and files are unchanged, 16.5).
+
+r1 and r2 of a vector are dense with zeros outside their shift, and sigma_1,
+sigma_2 are masked to it at the end of every sigma vector (`xzemask`): the
+integrals are symmetric to the rounding of the SCF only, and without the
+mask the states of other shifts, which lie lower, grow in the iterations
+(found in the Python program at production size, its commit 656148d).
+
+### 16.3 The solver (`xzeoms.inc`)
+
+The user's decision was CFOUR's design; it is that of `xx2ceomcc` with its
+algorithm 2 (`eomene2`; docs/eom.md 9):
+
+1. right-hand vectors only; **one orthonormal basis for all roots of a
+   problem**, with the sigma vector of every basis vector;
+2. the projected matrix `<C_i| H C_j>` (the new row and column per new
+   vector), diagonalized by LAPACK's general solver (`zgeev`, `dgeev`), the
+   eigenpairs sorted by the real parts of the eigenvalues;
+3. the targets are the lowest roots asked for; **one correction vector per
+   root that is not converged and iteration**: the residual `sum_j y_j (H
+   C_j - omega C_j)` of the normalized Ritz vector, the test on its largest
+   element, the correction `r / (omega - D)` with the differences of the
+   spinor energies D, Gram-Schmidt against the basis twice, its sigma
+   vector;
+4. a converged root is kept by its coefficients in the subspace and
+   recognized afterwards by its overlap with the eigenvectors
+   (`eompkvec3`'s rule), so that no residual is formed for it again;
+5. when the vectors of an iteration would exceed the subspace, it is
+   compacted to the Ritz vectors of the converged roots and the lowest
+   others, roots + 2 in all, C and H C transformed alike (`eomcompact`;
+   here: the coefficients are orthonormalized in the subspace and both sets
+   are transformed in one pass, in place).
+
+What is CFOUR's code and what is written here:
+
+| | |
+|---|---|
+| linked (complex arithmetic) | `eomreorder` (the sort of the eigenpairs) and `eomconv` (the test and its line of output): two objects of its program directory `x2ceomcc` (`EOMOBJ` of the Makefile); nothing is copied |
+| written here, the same algorithm | these two for real arithmetic (`xzesmall`, `xzeconv`); and everything that touches a vector - store, project, Ritz vector and residual, precondition, orthogonalize, compact (`xzevput`, `xzevmdot`, `xzevcomb`, `xzeprec`, `xzeorth`, `xzevtrans`): CFOUR's routines for these are generic in the length but read whole vectors of complex singles and doubles through the offsets of its work array and the file names of its modules (`soccmem`, `soccmod`), and its vectors have another layout |
+
+What was not taken over, and what is done instead:
+
+- *Every root in a subspace of its own* (CFOUR's default algorithm 0, with
+  which two of four roots of H2O came out twice): one subspace for all roots
+  of a shift, the corrections orthogonal to all of it - a state cannot be
+  found twice.
+- *The collapse of algorithm 0*, suspected wrong in docs/eom.md 9: not
+  used; the compaction here transforms the projected matrix with the same
+  coefficients as the vectors (`Q^H G Q`), and a run with a subspace of 13
+  instead of 25 vectors gives the same roots (16.4).
+- *One vector per iteration, one root after the other*: here all
+  unconverged roots get their vector in an iteration, so a degenerate or
+  nearly degenerate level is built together.
+- *A converged root is never looked at again*: here the residuals of all
+  roots are computed once more from the final vectors (they are what the
+  table prints); a root above the threshold after all - the vectors of a
+  nearly degenerate level turn into each other while the subspace grows -
+  is iterated on, and the record of a converged root that no eigenvector
+  has any more (overlap below 0.95) is dropped.
+- *The preconditioner*: the differences of the spinor energies for all
+  three ranks (CFOUR: the diagonal of Hbar for the singles), a denominator
+  below 1e-3 replaced by 1e-3 (CFOUR: the element set to zero) - as the
+  Python solver.
+- *Real arithmetic*: two roots that are degenerate but for the rounding
+  come out of `dgeev` as a complex pair; the real and the imaginary part of
+  its vector are taken as two vectors with the real part of the eigenvalue.
+- `EOMFOLLOW`, `%eomroot`, `%irestart`, `%eomalg`, the core-valence and
+  continuum masks of CFOUR are not read: the lowest roots of a shift.
+
+**The start.**  Default (`%xzeomguess 1`): the roots of the singles-doubles
+block of the same matrix (the sigma vector without R3 and without the terms
+of T3 in sigma_2: no work of the size of T3) for roots + 2 unit vectors on
+the lowest single excitations of the shift, converged to 1e-4; all of them
+start the problem with triples, which takes its lowest roots.  With
+`%xzeomguess 0` the unit vectors themselves, one per root, as CFOUR without
+CIS.  Both converge to the same roots in every case below; the unit vectors
+took 6, 3 and 6 sigma vectors of T3 size more for three roots of the three
+shifts of HBr (56, 53, 68 against 50, 50, 62 at a threshold of 1e-9), and a
+root without weight on the start vectors is found only if a correction
+brings it in - hence the default.
+
+**How tight.**  The largest element of the residual is the test (CFOUR's);
+the norm of the residual is 5 to 15 times that.  HBr with `%dglin`, nine
+roots, against the roots at 1e-9:
+
+| threshold | cc-pVDZ-DK: largest error; sigma vectors per root | cc-pVTZ-DK |
+|---|---|---|
+| 1e-4 | 7.1e-6 Eh (1.6 cm-1); 7.0 | 1.2e-5 Eh (2.6 cm-1); 6.9 |
+| 1e-5 (`ESTATE_CONV` default) | 1.9e-6 Eh (0.4 cm-1); 8.6 | 9.1e-7 Eh (0.2 cm-1); 9.3 |
+| 1e-6 | 1.9e-7 Eh (0.04 cm-1); 11.4 | 5.6e-8 Eh (0.01 cm-1); 12.3 |
+| 1e-9 | -; 18.0 | -; 20.3 |
+
+### 16.4 Memory and disk
+
+A vector is `[r1 | r2 on pairs | R3 in the blocks of its shift]`, one
+region: o v + C(o,2) C(v,2) + (the blocks of the shift) elements.  In the
+work array, bottom to top: tables and integrals (the pp operator in the
+place of `<ab||cd>`), T1, T2, T3, the kept intermediates (five arrays of
+the size of `<ov||vv>` on pairs, f = o v C(v,2): the dressed block, the
+bra-dressed `<ab||ei>`, W_vvvo, the operand of pass 1 with its o / v more;
+the operator on occupied triples; arrays of (o v)^2), the table of the
+layout of the shift, the vectors to start from, **two vectors** (the new
+one and its sigma vector), the subspace, and the arrays of a sigma vector,
+taken and released stage by stage (three more of f at the peak: W'_vvvo,
+the result and the operand of the second pass 1; the batch buffers of the
+passes).
+
+**The plan** is that of section 4: `xzeom` is run dry after the layout (and
+after the iterations in `ccsdt_eom`) through the allocations of every shift
+of the input, with the smallest subspace that can run - the singles-doubles
+stage in the work array, or the buffer of the files - and the batch sizes
+are raised as far as fit.  The floor is checked before the large files are
+read:
+
+    @XZCCSDT-F, the work array is too short for this calculation.
+      words needed:          2636792   words there:          2631792
+      Set MEMORY_SIZE to at least          2636856 words (        21.1 MB).
+
+**The subspace** takes what is left after that (the batches come first, as
+for the DIIS vectors), decided per shift when its problem starts - a dry run
+of one sigma vector gives what must stay free:
+
+1. all vectors of the subspace and their sigma vectors in the work array, if
+   they fit;
+2. else, if at least 3 roots + 4 of them fit: as many as fit, in the work
+   array - the output says `the work array holds 18 vectors of the subspace
+   .. (25 asked for)`.  A smaller subspace costs sigma vectors (HBr /
+   cc-pVDZ-DK, three roots at 1e-9: 13 of 25 vectors 76 instead of 62 sigma
+   vectors, 19 of 25: 53 instead of 50) but no reading;
+3. else the files `EOMCnnnn` (vectors) and `EOMHnnnn` (sigma vectors) of the
+   run directory - CFOUR's names -, one vector each, unformatted stream,
+   read in chunks through a buffer of the work array (up to 2^20 elements
+   per vector), kept open, deleted at the end.  Every new vector reads the
+   subspace about seven times (the row and the column of the projected
+   matrix, Ritz vector and residual, Gram-Schmidt twice).  The free space of
+   the run directory is asked first: the subspace is lowered to what the
+   disk holds, and below 2 roots + 2 vectors the program stops with the
+   numbers.  A write error stops it with the name of the file and the size
+   of a vector.  `XZ_EOMVEC=f` forces the files.
+
+The file `XZEOMR` of the vectors of the roots is written only if the disk
+holds it (a warning otherwise; `%xzeomvec 0`: never).
+
+The plan prints `the least that EOM takes` and `EOM with this plan` without
+the subspace in the work array; `work array used` at the end has it.
+
+| case | o, v | mode | least for EOM | plan (without the subspace) | a sigma vector | a vector | subspace of 25 |
+|---|---|---|---|---|---|---|---|
+| H2O / 6-31G | 10, 16 | complex, dense | 26.0 MB | 51.2 MB | | 1.3 MB | (28 for 6 roots) 59 MB |
+| HBr / cc-pVDZ-DK, `%dglin`, 28 frozen | 8, 28 | real, 6 classes | 21.1 MB | 22.4 MB | 6.0 MB | 0.34 MB | 17.1 MB |
+| HBr / cc-pVTZ-DK, `%dglin`, 28 frozen | 8, 78 | real, 8 classes | | 284 MB (with CCSDT) | 108 MB | 5.7 MB | 283 MB |
+| HBr / cc-pVQZ-DK, `%dglin`, 10 frozen, `%vircut` (job 31847097) | 26, 120 | real, 10 classes | | 7.1 GB (EOM), 14.5 GB (with CCSDT and its DIIS vectors) | 2.29 GB | 674 MB (shift 0), 649 (2), 579 (4) | 33.7 GB; work array used 39.7 GB, peak resident 39.4 GB |
+
+### 16.5 Validation
+
+**The sigma vector against the derivative of the amplitude step**
+(`XZ_EOMTEST=seed`, with `ccsdt_eom`): for a random totally symmetric vector
+R the five-point formula `[8 (Res(T + R) - Res(T - R)) - (Res(T + 2R) -
+Res(T - 2R))] / 12` of the residual of the native CCSDT step - which is
+exact for these polynomials (docs/eom.md 1) and is the reference of the
+Python sigma vector too - against `xzesig`:
+
+| case | mode | abs. difference in sigma_1, sigma_2, sigma_3 (norms 0.1 to 3, 2 to 23, 10 to 109) |
+|---|---|---|
+| H2O / 6-31G (10 + 16) | dense, complex | 9e-16, 9e-15, 7e-14 |
+| | the same with batches of 2 pairs, 3 triples, slabs of 7 rows | 1e-15, 8e-15, 7e-14 |
+| HBr / cc-pVDZ-DK, `%dglin` (8 + 28) | 6 classes, real | 4e-16, 5e-15, 4e-15 |
+| | dense, real (`XZ_LABELS=0`) | 1e-16, 2e-15, 1e-14 |
+| | 6 classes, complex (`XZ_REAL=0`) | 5e-16, 7e-15, 6e-15 |
+| | 6 classes, real, small batches | 4e-16, 5e-15, 4e-15 |
+
+This is the check of the dense sigma vector and of the block passes at
+shift 0 after their generalization, in real arithmetic too.
+
+**The sigma vector against the Python sigma vector, element by element**
+(`XZ_EOMSIG=file`: the vector of the file, in the layout of 16.4, and its
+sigma vector written to `file.out`; `XZ_EOMSD=1` with it: the
+singles-doubles block).  `eom_opt.sigma` of the Python program for a random
+vector of the shift (complex: the Python program takes integrals read from
+files as complex, so the native program ran with `XZ_REAL=0` on the real
+files), each program on its own converged amplitudes; where the spinors are
+in the order of their labels in the files the two programs have the same
+layouts of r1, r2 and of R3 in the blocks of a shift:
+
+| case | mode, shift in labels | largest difference in sigma_1, sigma_2, sigma_3 (largest elements 2 to 42, 11 to 156, 25 to 188) |
+|---|---|---|
+| H2O / 6-31G, CFOUR's spinors (10 + 16) | dense, complex | 1e-10, 4e-10, 6e-10 (the amplitudes of the two programs: CC_CONV=9) |
+| HBr / cc-pVDZ-DK, labelled real spinors (8 + 28) | dense (`XZ_LABELS=0`) | 1e-15, 3e-14, 5e-14 |
+| | 6 classes, shift 0 | 1e-15, 2e-14, 4e-14 |
+| | 6 classes, shift 2 | 1e-15, 2e-14, 4e-14 |
+| | 6 classes, shift -4 | 1e-15, 2e-14, 4e-14 |
+| the same with a phase on every spinor (complex integrals) | 6 classes, shifts 2 and 6 | 2e-15, 3e-14, 5e-14 |
+
+The sigma vectors of real arithmetic with a shift are checked by their
+roots: the real blocks give the roots of the complex blocks to all digits
+printed, and those of the Python program and of the dense native run
+(below).
+
+**Roots against the Python EOM on the same integral files**
+(`zccsdt.cfour.from_cfour(dir, labels=True)`, `GCCSDT.from_integrals`,
+`eom_ee(shift=)`, residual norm 1e-9; native: largest element 1e-9, i.e.
+norms of 3e-9 to 1e-8; CC_CONV=9 or 10).  Reference directories:
+`/scratch16/lcheng24/xwang405/zccsdt_ref/<case>` (README in each).
+
+| case | mode | roots | largest difference / Eh |
+|---|---|---|---|
+| H2O / 6-31G, X2C-1e, CFOUR's spinors (10 + 16) | dense, complex | 7 (a triplet 0.2843786409 / ..8923 / ..9590, 0.3111891002, a triplet at 0.36607) | 4e-11 |
+| H2O / 6-31G, nonrelativistic RHF of PySCF as spin orbitals (the integrals of the MRCC reference, written by `zccsdt.cfour.write`) | dense, real | 16 | 1.8e-10 |
+| HBr / cc-pVDZ-DK, `%dglin`, CFOUR's SCF, 28 frozen (8 + 28) | 6 classes, real; shifts 0, 2, 4 (three roots each) | 9: shift 0 0.243530585077, 0.243983671405, 0.336571921431; shift 2 0.237036344568, 0.260822952202, 0.336663368901; shift 4 0.233028661244, 0.544410080817, 0.634588206498 | 7e-11 |
+| | 6 classes, complex (`XZ_REAL=0`) | the same 9 | equal to the real run to all digits printed |
+| | dense, real and complex (`XZ_LABELS=0`): the 9 lowest of all shifts | 0.233028661246 (twice), 0.237036344589 (twice), 0.243530585084, 0.243983671519, 0.260822952225 (twice), 0.336571921481 | 1.1e-10 to the roots of the shifts |
+| | shifts 0, -2, -4 from unit vectors (`%xzeomguess 0`) | 9 | 1e-10 to the roots of +2, +4 |
+| | the subspace in files (`XZ_EOMVEC=f`), the work array at its floor | 9 | equal to all digits printed |
+| the same with `%vircut` 1.5 (8 + 22, 6 dropped) | 6 classes, real; shifts 0, 2, 4 | 9 (0.247567085051, ..) | 1.2e-10 |
+| HBr+ doublet, `%dglin` 12 12 / 5 4 / 1 1, 28 frozen (7 + 29): an open-shell reference with unequal occupations of +-m_j | 6 classes, real; shifts 0, 2, -2, 4, -4 | 13 (shift -2: 0.012125852499, 0.157178984394, ..; shift -4: 0.011838429525, ..; shift 0: 0.273088295771, ..) | 1.1e-10 |
+| HBr / cc-pVDZ-DK, m_j-adapted spinors of a PySCF SCF in the order of their labels (`bench/cfour/labelled_run.py`; the Python program in its blocks) | 6 classes, real; shifts 0, 2, -2, 4, 6 | 14 | 7e-11; +2 against -2: 2e-12 |
+| the same with a phase on every spinor | 6 classes, complex | 9 | equal to the real spinors to all digits printed |
+
+**MRCC** (EOM-CCSDT, `bench/refs/reference_energies.json`, `eom_ee` /
+`h2o_631g`, MRCC's own RHF integrals; the native program on PySCF's
+integrals of the same molecule, row 2 above; 16 roots asked for):
+
+| state | MRCC / Eh | native | difference |
+|---|---|---|---|
+| E(CCSDT) | -76.120425238932 | -76.120425238916 | 2e-11 |
+| triplet 1 | 0.284831364143 | 0.284831363508 (three roots) | 6e-10 |
+| singlet 1 | 0.311687769200 | 0.311687768552 | 6e-10 |
+| triplet 2 | 0.366400122961 | 0.366400122669, ..669, ..770 | 3e-10 |
+| triplet 3 | 0.375682797356 | 0.375682796596 (three roots) | 8e-10 |
+| singlet 2 | 0.394170561703 | 0.394170560987 | 7e-10 |
+| singlet 3 | 0.404172632463 | 0.404172631686 | 8e-10 |
+
+(The Python program on the same files is at 0.284831363565, 0.311687768585:
+the 6e-10 to MRCC are the integrals of the two SCF programs, not the EOM.)
+
+**CFOUR's `xx2ceomcc`** (EOM-CCSD, complex spinors).  `xzccsdt ccsd_eom`
+takes T1 and T2 of CFOUR's `xx2cccsd` (its files `t1guess`, `t2guess` in
+the run directory; `xx2cccsd` runs with `ABCDTYPE=STANDARD`), T3 = 0, and
+solves the singles-doubles block as the whole problem: EOM-CCSD by the
+native sigma vector and solver, with the input of 16.1; its table goes to
+the file `XZEOMCCSD` (the format of `XZEOM`), JOBARC is not written.  It
+runs in every mode: for HBr with `%dglin` (real blocks, labels from
+`dgcosym`, frozen core; the amplitudes of `xx2cccsd` are complex in CFOUR's
+order and real to 1e-8 there) the roots of the shifts 4, 2, 0 are
+0.2341993787, 0.2382347953, 0.2446936214, 0.2451691800 - those of the
+complex dense run on unlabelled spinors below (0.234199378727, ..).  Two
+chains of the same input per molecule (`bench/cfour/eom_ccsd.sh`:
+`ABCDTYPE=AOBASIS` for `xx2ceomcc`, `STANDARD` for the integral files of the
+native program; `ESTATE_CONV=8` in CFOUR, 1e-9 here):
+
+| | CCSD energy, both chains | `xx2ceomcc` / Eh | native | difference |
+|---|---|---|---|---|
+| H2O / 6-31G, X2C-1e (10 + 16), `%eomalg 2`, two roots | -76.168127725956 | 0.280687329716, 0.280687616516 | 0.280687329791, 0.280687616393 (and 0.280688286544, 0.307695486924, ..: six roots) | 8e-11, 1.2e-10 |
+| HBr / cc-pVDZ-DK, 14 pairs frozen (8 + 28), four roots | -2604.987068096888 | 0.234048257234, 0.238083258261 (each twice) | 0.234048257149 (twice), 0.238083258312 (twice), 0.244541770328, 0.245018076348 | 9e-11, 5e-11 |
+
+**Regression** (`regr.sh` of the work directory): the binary of the commit
+before this work (e9be264) and the present one on the same files -
+`ccsdt(q)_l` for seven cases (H2O; HBr complex, with `%dglin`, with
+`%vircut`, the doublet, labelled spinors, with phases) and the labelled
+case dense, complex and both, `ccsdt(q)` for two, small batches with the
+DIIS vectors in the file - give the same E(CCSDT), E[Q]_L, E(Q)_L, E[Q],
+E(Q) and Lambda pseudo-energies to all 12 (14) decimals printed, 14 lines;
+the seven files of `ccsdt_density` are identical byte for byte for H2O and
+HBr (complex, dense) and equal to 2e-19 in blocks, where two runs of the
+old binary differ as much; the MPI build with 2 ranks gives the energies of
+the serial build.
+
+### 16.6 Timing
+
+Job 31847097, node c210 (2 x Xeon Gold 6248R), 24 threads on the cores of
+socket 0 with its memory, no other job on the node, the binary built there
+from the snapshot of commit a948521, scratch on the node-local disk
+(`qz/eom_time.sbatch` of the work directory).  HBr / cc-pVQZ-DK, X2C-1e,
+CFOUR's SCF with `%dglin`, `DROPMO=1>5` and `%vircut 4.124587` (the 120
+lowest virtual spinors): 26 + 120, real, 10 classes; the chain took 24 s.
+`xzccsdt ccsdt_eom`, three roots of each of the shifts 0, 2, 4, the largest
+element of a residual below 1e-7 (norms 5.9e-7 to 1.8e-6), the subspace of
+25 vectors in the work array (`MEMORY_SIZE` 60 GB).  Measured once.  The
+Python numbers are those of docs/eom.md, section 8 (job 31828491, node c603
+of the same type, 24 cores, PySCF's spinors of the same molecule at a bond
+length 0.0005 Angstrom longer, residual norm 1e-6).
+
+| | native | Python |
+|---|---|---|
+| CCSDT iteration | 4.73 s (19 cycles) | 6.05 s |
+| **shift 0**: triples of a vector; a sigma vector; with the solver; sigma vectors (per root) | 81 875 732; 7.78 s = 1.64 iterations; 8.99 s; 45 (15.0) | 81 875 732; -; 11.06 s; 15.3 per root |
+| **shift 2** | 78 744 914; 7.45 s = 1.58; 8.81 s; 46 (15.3) | 78 744 914; -; 10.47 s; 15.7 |
+| **shift 4** | 70 043 592; 6.63 s = 1.40; 7.71 s; 49 (16.3) | 70 043 592; -; 9.71 s; 17.7 |
+| the vector operations of the solver per sigma vector | 1.21, 1.36, 1.08 s | 1.55 s (shift 0) |
+| singles-doubles stage: sigma vectors, time | 54, 54, 42; 27.2, 27.2, 20.9 s (0.50 s each) | 52 to 73; 98, 98, 70 s (1.35 s each) |
+| time of a shift | 432, 432, 399 s | 613, 596, 591 s |
+| roots / Eh: shift 0 | 0.2420088840, 0.2424537236, 0.3324832462 | (another geometry) 0.2418705730, 0.2423160390, 0.3322661699 |
+| shift 2; shift 4 | 0.2350868824, 0.2560543447, 0.3325560201; 0.2312098041, 0.3776223127, 0.4154809801 | |
+| memory | work array used 39.7 GB, peak resident 39.4 GB (33.7 GB of it the subspace) | 31.3 GB growth, plan 36.2 GB |
+
+A sigma vector is 1.4 to 1.64 CCSDT iterations, 1.19 to 1.26 times
+faster than the Python program's with the solver included (the iteration
+itself 1.28 times); the sigma vectors per root are those of the Python
+block Davidson.  Of the 1089 s in the intermediates and the 140 sigma
+vectors of T3 size and 150 of the singles-doubles block: pass 2 of the two
+residuals 442 s (gathers and products 357, reduction 85), the two passes 1
+220 s, the pp ladders 200 s, the small dense terms 135 s (the
+singles-doubles stages in it), W'_vvvo 55 s, the rows of W'_pp 12 s, the
+operators on occupied triples 15 s.
+
+**The subspace in files** (the same job, afterwards: `xzccsdt eom`, shift 0,
+`XZ_EOMVEC=f`; 33.7 GB of files on the node-local NVMe): the same roots and
+the same 45 sigma vectors of 7.78 s, but 22.8 s per sigma vector in the
+vector operations of the solver instead of 1.2 - 2983 GB read and written
+in 961 s (3.1 GB/s; 98 readings of a vector per new vector, about seven
+times the subspace) - 1405 s for the shift instead of 432.  The work array
+used was 6.3 GB.  Hence the rule of 16.4: a smaller subspace in the work
+array before files.
+
+An indicative run of the same script on 16 cores of a shared node (c510,
+inside a holding job, not a measurement): CCSDT 5.69 s, sigma vectors 9.46,
+9.17, 8.13 s, the same numbers of vectors.
+
+Not measured: complex arithmetic and the dense layout at production size;
+the Python program on this node and these spinors (its numbers are of
+another job and another SCF).
+
+### 16.7 MPI
+
+EOM runs with one rank.  With more the program stops at the start:
+
+    @XZCCSDT-F, the excited states (EOM) run with one rank: the sigma vectors are not distributed.
+                Run "xzccsdt ccsdt" over the ranks, then "xzccsdt eom" with one (it reads XZAMPS).
+
+(`xzccsdt ccsdt` over ranks and `xzccsdt eom` with one rank of the MPI
+build or the serial build: run.)  The passes of a sigma vector are the ones
+that the iterations deal to the ranks, and they ask `xzmine` for every
+batch; what is missing is the rest of the machinery of section 15 for a
+second kind of step: the kept intermediates made on every rank
+(`xzeomim` after the amplitudes of rank 0), the vector sent to the ranks per
+sigma vector (or its slices, with the solver's vector operations on
+slices), the cost model and the deal of the batches for the layouts of a
+shift, the sums of the two passes 1 and of sigma_3, and the memory of a
+rank in the plan.  Not started.
+
+### 16.8 Test hooks
+
+`XZ_EOMTEST=seed` (16.5), `XZ_EOMSIG=file` [`XZ_EOMSD=1`], `XZ_EOMCCSD=1`
+(`eom` as `ccsd_eom`),
+`XZ_EOMVEC=f` (the subspace in files), `XZ_EOMCYC=n` (iterations at most:
+`ESTATE_MAXCYC` is in JOBARC and needs xjoda to change).
+
+### 16.9 Not done
+
+- Left-hand vectors, r0, transition moments, densities and properties of
+  the excited states; IP and EA (the Python program has them by a ghost
+  spinor with short vectors, docs/eom.md 5).
+- MPI (16.7).  T3 or the vectors in a mapped file.
+- Root following (`EOMFOLLOW=OVERLAP`), given start vectors (`%eomroot`),
+  restart from the files of the subspace (`%irestart`), the core-valence
+  separation, CFOUR's CIS guess.  A state without a single excitation in its
+  shift has no start vector (the Python program goes on with doubles).
+- A degenerate level cut by the number of roots is not completed (H2O: six
+  roots end inside the second triplet and converge slowly: 7 are 268 sigma
+  vectors, 6 did not converge in 40 iterations).
+- The residuals of all roots in one pass over the subspace; the dense small
+  terms of a sigma vector and the o v^3 arrays in blocks of the labels.
+- A CCSD ground state of its own: `ccsd_eom` needs the amplitudes of
+  CFOUR's `xx2cccsd`.
