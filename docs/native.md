@@ -102,11 +102,15 @@ get joda's flags from it, write their output to `xzccsdt.rNNNN`, wait for
 the plan of rank 0 and allocate a work array themselves (`GETMEM`) - not
 `MEMORY_SIZE` but the words that their part takes with that plan (section
 4) -, and read the integral files themselves: **the run directory must
-exist, with the integral files (and `xzlabels`), under the same path on
+exist, with the integral files (and `dgcosym`, `xzlabels`: the symmetry
+labels, section 6), under the same path on
 every node** - a shared file system, or a copy in the node-local scratch of
 every node.  All ranks read the same files and make the same decisions
 (blocks, real or complex, the batches and their ranks, the task list of
-(Q)).
+(Q)).  Rank 0 sends what it decided (classes of the labels, real or complex,
+the stored elements of T3) with its plan, and a rank that decided otherwise
+from its files stops the run (`@XZCCSDT-F, this rank and rank 0 have not
+decided alike ...`).
 
 - **The CCSDT iterations and the Lambda iterations** run on all ranks
   (section 15): every rank has the amplitudes in its own work array, does
@@ -141,7 +145,8 @@ file, complex, the first index fastest, antisymmetrized integrals):
 | `moinhhhh`, `moinhhhp`, `moinhhpp`, `moinphhp` | `<ij||kl>`, `<ij||ka>`, `<ij||ab>`, `<ia||bj>` |
 | `PPPH0001` ... | `<ab||ci>`, one file per occupied spinor |
 | `moinpppp` | `<ab||cd>` on pairs (written only with `ABCDTYPE=STANDARD`) |
-| `xzlabels` | optional, not a file of CFOUR: a symmetry label per spinor (section 6) |
+| `dgcosym` | optional: the block of the SCF of every spinor (`xsox2chf`; one record of `nmototal` 8-byte integers, the order of `scf2ceig`; all 1 without a section `%dglin` in the ZMAT). The symmetry labels of the run if it has more than one block and there is no `xzlabels` (section 6) |
+| `xzlabels` | optional, not a file of CFOUR: a symmetry label per spinor; goes before `dgcosym` (section 6) |
 | `XZAMPS` | the amplitudes of an earlier run, for `(q)` / `[q]`, `lambda`, `(q)_l` / `[q]_l` and for the ranks other than 0 |
 | `XZLAMB` | lambda of an earlier run, for `(q)_l` / `[q]_l`, `density` and for the ranks other than 0 |
 | `IIII`; `JOBARC`: `scf2ccmo` | only for the density with frozen or dropped spinors: the AO integrals of `xsox2catm` (read by CFOUR's `int_mintv2e`) and the spinors of the SCF |
@@ -206,7 +211,7 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 |---|---|
 | `xzccsdt.f` | main program in CFOUR's style: MPI start, CRAPSI on rank 0, the work array `ICORE(I0)`, `XZDRV`, CRAPSO |
 | `xzdrv.F90` | driver: job (`xzjob`), labels, the mode loop (labels x real), `xzsetmode` (classes, groups, block sizes), `xzlayout` (tables and integrals in the work array), energies, TOTENERG |
-| `xzread.F90` | readers of CFOUR's files and of `xzlabels`; checks of the labels and of the imaginary parts |
+| `xzread.F90` | readers of CFOUR's files and of the labels (`xzrdlab`: `xzlabels`; `xzrddgc`: `dgcosym`); checks of the labels and of the imaginary parts |
 | `xzmaps.F90` | index tables of pairs and triples (grouped by classes), layout of T3 in blocks |
 | `xzmem.F90` | the stack on the work array, dry runs |
 | `xzplan.F90` | the memory plan |
@@ -581,17 +586,125 @@ after n tasks of a rank (test hooks of the list and of restart).
 
 ## 6. Symmetry labels and blocks
 
-The interface is one integer label per spinor, read from the file
-**`xzlabels`** of the run directory (nothing is derived from CFOUR's files):
+The interface is one integer label per spinor of the SCF, in the order of
+`scf2ceig` (frozen, active occupied, active virtual, dropped).  A label
+adds: `<pq||rs>` vanishes unless l_p + l_q = l_r + l_s (modulo a modulus if
+that is not 0) - 2 m_j of a linear molecule with modulus 0.
+
+**Where the labels of a run come from** (the same rule in the native
+program, `xzdrv.F90`, and in the Python reader, `zccsdt.cfour.read_labels`):
+
+1. the file **`xzlabels`** of the run directory, if it is there;
+2. else the file **`dgcosym`** of CFOUR's SCF, if it has more than one
+   block: label +(2k - 1) for block 2k - 1, -(2k - 1) for block 2k, modulus
+   0 (`xzrddgc` of `xzread.F90`, `zccsdt.cfour.read_dgcosym`);
+3. else no labels.
+
+Nothing is parsed from the ZMAT.  The output says which it was:
+
+    symmetry labels: the file xzlabels, modulus    0
+    symmetry labels: the file dgcosym of CFOUR's SCF (m_j blocks), block numbers up to 6: labels 2 m_j, |2 m_j| up to 5, modulus 0
+    symmetry labels: none (no file xzlabels; dgcosym: one block, an SCF without %dglin)
+    symmetry labels: none (no file xzlabels, no file dgcosym)
+
+`XZ_LABELS=0` switches the labels of either file off.  The labels of either
+file are checked against the integrals (below).  In an MPI run every rank
+reads the two files itself in its run directory; the ranks must find the
+same (section 1: a rank that decides otherwise than rank 0 stops the run).
+
+**`dgcosym` and `%dglin`.**  CFOUR's two-component SCF `xsox2chf` does the
+SCF in blocks of m_j when the ZMAT has a section `%dglin` after the basis
+lines: the number of |m_j| values, then for |m_j| = 1/2, 3/2, ... a line
+with the numbers of occupied spinors of +m_j and of -m_j.  HBr (36
+electrons; sigma and pi shells give 12 + 12 spinors of |m_j| = 1/2, 5 + 5 of
+3/2, 1 + 1 of 5/2):
+
+    hbr X2C cc-pvdz-dk
+    BR 0.000000000000 0.000000000000 0.000000000000
+    H 0.000000000000 0.000000000000 2.672072740135
+
+    *CFOUR(CALC=CC(n-1)(n),EXCITATION=4,BASIS=SPECIAL
+    SYM=OFF,COORDINATES=CARTESIAN,UNITS=BOHR,CHARGE=0,MULT=1
+    RELATIVISTIC=X2C1E,X2CKEY=SOATMX,ABCDTYPE=STANDARD
+    SCF_CONV=10,SCF_MAXCYC=200
+    CC_CONV=9,CC_MAXCYC=100
+    MEMORY_SIZE=4,MEM_UNIT=GB)
+
+    BR:ZCCCPVDZDK
+    H:ZCCCPVDZDK
+
+    %dglin
+    3
+    12 12
+    5 5
+    1 1
+
+(the molecule on the z axis; the occupations are the user's statement of the
+state - the program checks the labels, not the state).  The SCF then writes
+the block of every spinor to `dgcosym`: one Fortran unformatted sequential
+record of `nmototal` 8-byte integers in the order of `scf2ceig`, block
+2k - 1 for m_j = +(2k - 1)/2 and block 2k for m_j = -(2k - 1)/2 (the
+numbering of `linsym` of sox2chf); without `%dglin` the file is there with
+all numbers 1.  With `%dglin` the MO integrals of `xx2cvtran` are also real
+(largest imaginary part 2e-11 for the input above, 1.5e-12 with 18 frozen
+spinors) and 17 % of them are nonzero, against 0.16 and 75 % for the same
+molecule without the section: the program runs in real blocks instead of
+complex dense, with no file of ours in the run directory.  A record of
+another length than `nmototal` integers or a block number below 1 stops the
+program:
+
+    @XZCCSDT-F, the file dgcosym has          504 bytes of data; one 8-byte integer for each of the       64 spinors of the SCF
+                 is expected (nmototal),          512 bytes.  (The file xzlabels, if it is there, is used instead.)
+    @XZCCSDT-F, the file dgcosym: a block number            0; the blocks of the SCF are numbered from 1.
+
+A block number is not a label that adds; the numbering above is known in one
+routine on each side (`xzrddgc`, `read_dgcosym`, which also takes a table
+for another numbering).  Frozen and dropped spinors need nothing: the file
+has all spinors of the SCF in the order of `scf2ceig`, and the program takes
+the labels of the active ones.
+
+Measured on that input (HBr / cc-pVDZ-DK, 36 + 28 spinors all-electron;
+login node, 4 threads, `xzccsdt ccsdt`; 6 classes, T3 15.25 % and `<ab||cd>`
+17.98 % of the dense arrays; the times are of a shared login node and only
+say the order of magnitude):
+
+| run directory | labels from | arithmetic, classes | E(CCSDT) | cycles | s per cycle |
+|---|---|---|---|---|---|
+| `%dglin`, all-electron (36 + 28) | `dgcosym` | real, 6 | -2605.010449740676 | 19 | 0.61 |
+| | hand-written `xzlabels` (2 m_j) | real, 6 | -2605.010449740676 | 19 | 0.63 |
+| | `dgcosym`, `XZ_LABELS=0` | real, 1 | -2605.010449740676 | 19 | 5.70 |
+| | `dgcosym`, `XZ_REAL=0` | complex, 6 | -2605.010449740676 | 19 | 1.37 |
+| | `dgcosym`, 2 ranks x 2 threads | real, 6 | -2605.010449740676 | 19 | 0.75 |
+| | `dgcosym` with two block numbers exchanged | refused (forbidden `<oo||oo>` 1.41), real, 1 | -2605.010449740676 | 19 | 5.78 |
+| | `xzlabels` with modulus 4 | not used (warning), real, 1 | -2605.010449740676 | 19 | 5.74 |
+| the same input, the chain run again | `dgcosym` | real, 6 / 1 | -2605.010449740678 | 19 | 0.63 / 5.74 |
+| `%dglin`, `DROPMO=1>9` (18 + 28 active) | `dgcosym` | real, 6 | -2605.002712127468 | 18 | 0.06 |
+| | `dgcosym`, `XZ_LABELS=0` | real, 1 | -2605.002712127468 | 18 | 0.38 |
+| | `dgcosym`, 2 ranks x 2 threads | real, 6 | -2605.002712127468 | 18 | 0.07 |
+| no `%dglin`, `DROPMO=1>9` | none (`dgcosym`: one block) | complex, 1 | -2605.002712127468 | 18 | 0.99 |
+| `%dglin`, `DROPMO=1>9`, `%vircut` 1.5 (18 + 22 active, 6 dropped) | `dgcosym` | real, 6 / 1 | -2604.991484860860 | 18 | 0.04 / 0.18 |
+| `%dglin`, `%vircut` 1.5 (36 + 22 active) | `dgcosym` | real, 6 / 1 | -2604.998290453414 | 18 | 0.39 / 2.62 |
+| HBr+ doublet, `%dglin` 12 12 / 5 4 / 1 1, `DROPMO=1>9` (17 + 29 active) | `dgcosym` | real, 6 / 1 | -2604.591824417278 | 21 | 0.07 / 0.38 |
+
+("6 / 1": the run with the labels and the run with `XZ_LABELS=0`, the same
+energy to all digits printed.)  The all-electron case without `%dglin` is
+complex and dense: 18.7 s per cycle against 0.60 s, the same E(CCSDT)
+-2605.010449740676 (measured before this rule, with a hand-written
+`xzlabels`; then also `ccsdt_density` and `xx2czvec` on the labelled real
+spinors: relaxed electronic dipole 1.07498654471939 against 1.07498654470416
+by the complex dense route).  The doublet is one case of unequal
+occupations of +m_j and -m_j (the hole in m_j = -3/2): the SCF converges,
+the integrals are real (3.3e-11) and the labels pass the check; nothing
+more was looked at for open shells.
+
+**`xzlabels`** is the way to give labels from outside (it goes before
+`dgcosym`), a text file:
 
     # comment lines start with #
     <number of spinors> <modulus>
     <label> <label> ...          (free format, any number per line)
 
-One label per spinor of the SCF in the order of `scf2ceig` (frozen, active
-occupied, active virtual, dropped).  A label adds: `<pq||rs>` vanishes unless
-l_p + l_q = l_r + l_s (modulo the modulus if it is not 0) - 2 m_j of a linear
-molecule with modulus 0.  The Python side reads and writes the same file:
+The Python side reads and writes the same file:
 `zccsdt.cfour.write_labels`, `read_labels`; `cfour.write` adds it for a
 container with labels, `from_cfour(labels=True)` gives the container the
 labels (default: not, as before).  `bench/cfour/labelled_run.py` makes test
@@ -612,14 +725,16 @@ What the program does with the labels:
   the scheduler of `SpinBlockT3` of the Python program for any number of
   classes).  Everything else of a step runs on the dense arrays with the
   grouped tables.
-- no labels (no file) is one class: one block, the dense kernels, in the
-  same step routine.  It is not a separate program.
+- no labels (neither file, or one block in `dgcosym`) is one class: one
+  block, the dense kernels, in the same step routine.  It is not a separate
+  program.
 - the labels are not trusted: while the integrals are read, the largest
   element that the labels forbid is taken over all blocks; above 1e-8 the
   program says so with the block and the element, drops the labels and reads
   the integrals again for one class.  The spinors of an SCF without the
   symmetry fail this check (the two partners of a Kramers pair are mixed):
-  that is the SCF's business.
+  that is the SCF's business - CFOUR's does it with `%dglin` (above).  The
+  warning names the file the labels came from:
 
       @XZCCSDT-W, the labels of xzlabels are not symmetry labels of these spinors:
                    an element of <oo||vv> that they forbid is   1.18E-01.  The labels are not used.
@@ -638,9 +753,19 @@ What the program does with the labels:
   tasks, ranks, restart and sampling of section 5 are the same code.
 
 `XZ_LABELS=0`: the labels are not used.  **Not done:** labels with a modulus
-(the block code is for labels that add without one; with a modulus the
-program warns and runs dense); the rotation of unadapted Kramers pairs into
-j_z eigenfunctions.
+- the file format of `xzlabels` has one, the readers pass it on (`modulus` of
+`xzdata.F90`; `xzrddgc` returns one too, 0 for the m_j blocks), and the
+driver decides in one place: with a modulus that is not 0 the program warns
+(`@XZCCSDT-W, labels with a modulus are not used by this program: one
+block.`) and runs dense, whichever file the labels came from.  What assumes
+labels without a modulus is the block code itself: the classes are (label -
+smallest) / step and the group of a pair or triple is the sum of the classes
+(`xzclasses`, `xzsetmode`, `xzblk.inc`, `xzlblk.inc`, `xzqs.inc`).  Also not
+done: the rotation of unadapted Kramers pairs into j_z eigenfunctions (for a
+run of CFOUR's SCF without `%dglin`); other sections of the SCF (`%dg2lin`,
+...) were not run - their block numbers would need their own table in
+`xzrddgc`, and are refused by the check against the integrals if the m_j
+numbering does not fit them.
 
 ## 7. Validation
 
@@ -904,8 +1029,9 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   plan has one knob (the occupied indices whose Xv is held), no batches of
   columns.
 - Labels with a modulus; the rotation of unadapted Kramers pairs into j_z
-  eigenfunctions (to get labelled, real integrals out of CFOUR's present
-  SCF).
+  eigenfunctions (CFOUR's SCF gives labelled, real integrals itself with a
+  section `%dglin`, and the program takes the labels from its `dgcosym`:
+  section 6).
 - A scheduler compiled once for both element types (section 3): today one
   source, two instances.
 - T3 of the iterations in a mapped scratch file ((Q) reads a mapped T3:
