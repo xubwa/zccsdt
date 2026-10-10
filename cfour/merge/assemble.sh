@@ -7,8 +7,8 @@
 #   cfour/merge/assemble.sh --cfour CFOUR_SOURCE_TREE [--name NAME] [--prog PROG] [--out DIR]
 #
 #   --cfour DIR   a CFOUR source tree: the routines that the density stage takes
-#                 from another program directory (FRZOBJ of cfour/xzccsdt/Makefile:
-#                 objects of x2czvec) are copied from there.  Read only, unless
+#                 from other program directories (FRZOBJ, EOMOBJ of cfour/xzccsdt/Makefile:
+#                 objects of x2czvec, x2ceomcc) are copied from there.  Read only, unless
 #                 --out points into it.
 #   --name NAME   the name of the directory (default xzccsdt)
 #   --prog PROG   the name of the installed program (default x<NAME>, CFOUR's
@@ -18,7 +18,7 @@
 #
 # What is assembled is the repository as it is now: every source of
 # cfour/xzccsdt/ (a glob, no list), the C kernels that its Makefile names
-# (KERNELS) from csrc/, the routines of CFOUR that it names (FRZOBJ), a
+# (KERNELS) from csrc/, the routines of CFOUR that it names (objects below $(CFOUR)), a
 # Makefile in CFOUR's style and a README.  Nothing of CFOUR is stored in this
 # repository.  See cfour/merge/README.md.
 #
@@ -46,7 +46,7 @@ done
 [ -n "$prog" ] || prog=x$name
 [ -n "$out" ] || out=$PWD/$name
 die() { echo "assemble.sh: $*" >&2; exit 1; }
-[ -n "$cfour" ] || die "--cfour CFOUR_SOURCE_TREE is needed (the routines of FRZOBJ are taken from it)"
+[ -n "$cfour" ] || die "--cfour CFOUR_SOURCE_TREE is needed (routines of CFOUR are taken from it)"
 [ -d "$cfour" ] || die "no directory $cfour"
 [ -f "$src/Makefile" ] || die "no $src/Makefile"
 case $name in *[!A-Za-z0-9_]*|'') die "the name '$name' is not a plain directory name" ;; esac
@@ -132,14 +132,18 @@ putc() {
 }
 for k in $kernels; do putc "$k.c"; done
 
-# ---- 3. routines of other program directories of CFOUR (FRZOBJ) -------------
-# The repository links objects of a built CFOUR; in CFOUR a program directory
-# has its own copy of such routines (dgoccinp.f90 is in nine directories).
-frz=$(mkvar FRZOBJ)
-frzdir=$(echo "$frz" | sed -n 's/.*\$(CFOUR)\/\([A-Za-z0-9_]*\)\/.*/\1/p')
+# ---- 3. routines of other program directories of CFOUR ----------------------
+# The repository links objects of a built CFOUR: every variable of its
+# Makefile of the form  X := $(addprefix $(CFOUR)/<directory>/, a.o b.o ...)
+# (FRZOBJ: x2czvec; EOMOBJ: x2ceomcc).  In CFOUR a program directory has its
+# own copy of such routines (dgoccinp.f90 is in nine directories): their
+# sources are copied from the tree given with --cfour.
 frzlist=
-if [ -n "$frz" ]; then
-  [ -n "$frzdir" ] || die "FRZOBJ of $src/Makefile is not \$(CFOUR)/<directory>/ and object names: $frz"
+cfvars=$(mktemp)
+sed -e ':a' -e '/\\$/{N;s/\\\n/ /;ba' -e '}' "$src/Makefile" |
+  sed -n 's/^\([A-Za-z0-9_]*\)[[:space:]]*[:?]\{0,1\}=.*\$(CFOUR)\/\([A-Za-z0-9_]*\)\/[,[:space:]]*\(.*\)$/\1 \2 \3/p' > "$cfvars"
+while read -r var frzdir frz; do
+  n=0
   for w in $(echo "$frz" | tr ',()' '   '); do
     case $w in
       *.o)
@@ -148,14 +152,16 @@ if [ -n "$frz" ]; then
           if [ -f "$cfour/$frzdir/$r.$s" ]; then
             t=$r.$s; [ $s = F90 ] && t=$r.f90
             put "$cfour/$frzdir/$r.$s" "$t" "CFOUR $frzdir/$r.$s"
-            found=1; frzlist="$frzlist $frzdir/$r.$s"; break
+            found=1; n=$((n + 1)); frzlist="$frzlist $frzdir/$r.$s"; break
           fi
         done
-        [ -n "$found" ] || die "no source of $r in $cfour/$frzdir (FRZOBJ)"
+        [ -n "$found" ] || die "no source of $r in $cfour/$frzdir ($var of $src/Makefile)"
         ;;
     esac
   done
-fi
+  [ $n -gt 0 ] || die "$var of $src/Makefile names $cfour/$frzdir but no objects: $frz"
+done < "$cfvars"
+rm -f "$cfvars"
 
 # ---- 4. the order of compilation -------------------------------------------
 # CFOUR's config/mkdep90.py (.f90deps) reads "use" only in the compiled files
@@ -207,7 +213,8 @@ for f in "$out"/*.c; do
 done
 
 # ---- 5. the Makefile --------------------------------------------------------
-commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo unknown)
+# (an export of the repository without .git: a file COMMIT at its top)
+commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null || cat "$repo/COMMIT" 2>/dev/null || echo unknown)
 if [ -n "$(git -C "$repo" status --porcelain -- cfour/xzccsdt csrc 2>/dev/null)" ]; then
   commit="$commit (with uncommitted changes in cfour/xzccsdt or csrc)"
 fi
@@ -308,13 +315,14 @@ $name - spinor CCSDT in CFOUR's two-component chain
 The program $prog runs after xjoda, xsox2catm, xsox2chf and xx2cvtran
 (ABCDTYPE=STANDARD) in their directory, on their integral files:
 
-    $prog [method]     ccsdt, ccsdt(q), ccsdt[q], (q), [q], lambda, (q)_l, [q]_l,
-                       ccsdt(q)_l, ccsdt[q]_l, density, ccsdt_density, mp2;
-                       without the argument what CALC of the ZMAT asks for
+    $prog [method]     ccsdt, ccsdt(q), (q), lambda, (q)_l, ccsdt(q)_l, density,
+                       ccsdt_density, ... (docs/native.md, section 1; the
+                       header of xzccsdt.f); without the argument what CALC
+                       of the ZMAT asks for
 
-CCSDT, the (Q) and [Q] corrections, the Lambda equations, (Q)_Lambda, and the
+CCSDT, the (Q) and [Q] corrections, the Lambda equations, (Q)_Lambda, the
 unrelaxed CCSDT density with the orbital gradient as the input files of
-xx2czvec.  A Fortran scheduler on CFOUR's work array (CRAPSI) with C kernels;
+xx2czvec, and what the repository has added since.  A Fortran scheduler on CFOUR's work array (CRAPSI) with C kernels;
 real or complex arithmetic and the blocks of the symmetry labels (dgcosym of
 xsox2chf with %dglin) are chosen at run time.
 
