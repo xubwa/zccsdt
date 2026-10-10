@@ -373,7 +373,9 @@ subroutine N(xzesig)(w, kv, ks, sd)
                              w(kra), c_null_ptr, stats, w(kbuf))
       end if
     else
+      p1_noe = .true.
       call N(xzbpass1)(w, jt3, w(kgpd), w(kgmq), w(kzpp), w(kdfov), w(kxacc), w(kyall), w(kr1c), w(kra))
+      p1_noe = .false.
     end if
     if (.not. xzdry) then
       call xztoc(5, 'pass 1 over T3 with H''')

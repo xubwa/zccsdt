@@ -279,6 +279,13 @@ subroutine xzdrv(w, maxcor)
     jt1 = xzget(nwe * no * nv, 'T1')
     jt2 = xzget(nwe * no * no * nv * nv, 'T2')
     jt3 = xzget(nwe * n3, 'T3')
+  else if (.not. docc .and. eccsd) then
+    if (nwe == 2) then
+      call xzeomccsd_z(w, ecorr)
+    else
+      call xzeomccsd_d(w, ecorr)
+    end if
+    write(6, '(/,a,f20.12)') '   XZ_EOMCCSD: T1 and T2 of CFOUR''s CCSD (t1guess, t2guess), T3 = 0; CCSD correlation energy ', ecorr
   else if (.not. docc) then
     if (nwe == 2) then
       call xzamps_z(w, 'r', ecorr)
@@ -562,6 +569,9 @@ subroutine xzjob()
   end select
   with_eom = method == 'EOM' .or. method == 'CCSDT_EOM'
   if (with_eom) call xzeominp()
+  ! a test hook: XZ_EOMCCSD, "xzccsdt eom" on the amplitudes of CFOUR's CCSD
+  call get_environment_variable('XZ_EOMCCSD', length=larg)
+  eccsd = larg > 0 .and. method == 'EOM'
   with_cc = method(1:5) == 'CCSDT'
   larg = len_trim(method)
   q_left = method(max(larg - 1, 1):larg) == '_L'

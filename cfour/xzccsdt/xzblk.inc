@@ -79,6 +79,7 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
           sx = gp - sd - sh_w
           sy = gp - sd + sh_t + sh_w
           ne = xznvc(sx)
+          if (p1_noe) ne = 0
           nj = xznoc(sx)
           ney = xznvc(sy)
           njy = xznoc(sy)
@@ -135,6 +136,7 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
             sx = gp - sd - sh_w
             sy = gp - sd + sh_t + sh_w
             ne = xznvc(sx)
+            if (p1_noe) ne = 0
             nj = xznoc(sx)
             ney = xznvc(sy)
             njy = xznoc(sy)
