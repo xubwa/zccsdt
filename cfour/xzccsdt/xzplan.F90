@@ -34,6 +34,7 @@ module xzpland
   logical :: pfile = .true.
   logical :: planq = .false.          ! only (Q) is planned (a rank that does no iterations)
   integer(8) :: pneedq = 0            ! words of the work array that (Q) takes with the plan
+  integer(8) :: pneedw = 0            ! words that a rank other than 0 takes with the plan (iterations, (Q))
 contains
   subroutine setpar(k, v)
     use xzdata
@@ -66,6 +67,7 @@ integer(8) function xzpeak_cc(w)
   use xzdata
   use xzmem
   use xzpland
+  use xzdist, only: xzworker
   implicit none
   real(8) :: w(*)
   real(8) :: e
@@ -92,8 +94,8 @@ integer(8) function xzpeak_cc(w)
       call xzlam_d(w, pslot, pfile, pchunk, c, n)
     end if
   end if
-  ! the density stage: the integrals, the amplitudes and lambda again, then its arrays
-  if (with_den) then
+  ! the density stage (rank 0): the integrals, the amplitudes and lambda again, then its arrays
+  if (with_den .and. .not. xzworker()) then
     call xzrel(mlay)
     k = xzget(nwe * no * nv, 'T1')
     k = xzget(nwe * no * no * nv * nv, 'T2')
@@ -147,11 +149,15 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   use xzmem
   use xzkern
   use xzpland
+  use xzdist
+  use omp_lib
   implicit none
   real(8) :: w(*)
   integer(8), intent(out) :: nslot, nch
   logical, intent(out) :: usefile
   logical, intent(in) :: flooronly
+  integer :: nthr0
+  integer(8) :: bpr
   integer(8), external :: xzpeak_cc, xzpeak_q
   integer(8) :: f, floor_cc, floor_q, need_cc, need_q, free_bytes, per_vec, nfit, k8
   integer :: k
@@ -179,6 +185,15 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   phi(2) = max(1_8, min(nto, int(1.3d9 / (2d0 * 8 * nwe * nvp * nv * frac), 8)))
   plo(3) = 1
   phi(3) = max(1_8, min(npo, int(2d9 / (3d0 * 8 * nwe * f * frac), 8)))
+  ! (with more than one rank the batches are what is dealt out: at least
+  ! bpr of them per rank, XZ_BPR, so that the cost model can balance the ranks)
+  if (nrank > 1) then
+    bpr = 8
+    call get_environment_variable('XZ_BPR', arg, larg)
+    if (larg > 0) read(arg(1:larg), *) bpr
+    phi(2) = max(1_8, min(phi(2), nto / (max(bpr, 1_8) * nrank)))
+    phi(3) = max(1_8, min(phi(3), npo / (max(bpr, 1_8) * nrank)))
+  end if
   plo(4) = 1
   phi(4) = max(1_8, nv / 8)
   plo(5) = 3
@@ -194,20 +209,25 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     call setpar(k, plo(k))
   end do
 
-  ! ---- the floor
+  ! ---- the floor (a rank other than 0 has none of its own: rank 0 plans its
+  !      memory and it takes that plan, below)
   pfile = .true.
   pslot = ndiis
   pchunk = min(max(n3, 1_8), 1048576_8)
+  if (myrank > 0 .and. flooronly) return
   floor_cc = 0
+  floor_q = 0
+  if (myrank == 0) then
   if (.not. planq) floor_cc = xzpeak_cc(w)
   ! (MP2: the integrals and one array of the size of T2 twice)
   if (method == 'MP2') with_q = .false.
   floor_q = xzpeak_q(w)
   if (flooronly .and. max(floor_cc, floor_q) <= xzsize) return
+  end if
   write(6, '(/,a,a,a)') '   Memory plan (words of 8 bytes; ', merge('real numbers   ', 'complex numbers', nwe == 1), ')'
-  if (.not. planq) write(6, '(a,a36,i16,a,f10.1,a)') '     the least that ', trim(what) // ' takes:', floor_cc, '  = ', &
-    8d-6 * floor_cc, ' MB'
-  if (with_q) write(6, '(a,i16,a,f10.1,a)') '     the least that (Q) takes:       ', floor_q, '  = ', &
+  if (.not. planq .and. myrank == 0) write(6, '(a,a36,i16,a,f10.1,a)') '     the least that ', trim(what) // ' takes:', &
+    floor_cc, '  = ', 8d-6 * floor_cc, ' MB'
+  if (with_q .and. myrank == 0) write(6, '(a,i16,a,f10.1,a)') '     the least that (Q) takes:       ', floor_q, '  = ', &
     8d-6 * floor_q, ' MB'
   write(6, '(a,i16,a,f10.1,a)') '     the work array has:             ', xzsize, '  = ', 8d-6 * xzsize, ' MB'
   if (max(floor_cc, floor_q) > xzsize) then
@@ -216,7 +236,41 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     write(6, '(a,i16,a,i16)') '   words needed: ', max(floor_cc, floor_q), '   words there: ', xzsize
     write(6, '(a,i16,a,f12.1,a)') '   Set MEMORY_SIZE to at least ', max(floor_cc, floor_q) + 64, &
       ' words (', 8d-6 * (max(floor_cc, floor_q) + 64), ' MB).'
-    call errex
+    call xzerrex
+  end if
+
+  ! ---- a rank other than 0: the batch sizes of rank 0, in the work array
+  !      that rank 0 planned for it; no DIIS vectors
+  if (myrank > 0) then
+    do k = 1, npar
+      call setpar(k, max(1_8, int(rplan(1 + k), 8)))
+    end do
+    pslot = 0
+    pfile = .false.
+    if (slices) then
+      ! (its slices of the DIIS vectors, where rank 0 has its own)
+      pslot = int(rplan(10), 8)
+      pfile = rplan(11) == 1d0
+      pchunk = int(rplan(12), 8)
+    end if
+    need_cc = 0
+    if (.not. planq) need_cc = xzpeak_cc(w)
+    need_q = xzpeak_q(w)
+    nslot = pslot
+    usefile = pfile
+    nch = pchunk
+    pneedq = need_q
+    if (.not. planq) write(6, '(a,a43,i16,a,f10.1,a)') '     this rank, ', trim(what) // ' with the plan of rank 0:', &
+      need_cc, '  = ', 8d-6 * need_cc, ' MB'
+    if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with the plan of rank 0:    ', need_q, '  = ', 8d-6 * need_q, ' MB'
+    if (max(need_cc, need_q) > xzsize) then
+      write(6, '(/,a)') ' @XZCCSDT-F, the work array of this rank is too short for the plan of rank 0.'
+      write(6, '(a,i16,a,i16)') '   words needed: ', max(need_cc, need_q), '   words there: ', xzsize
+      write(6, '(a)') '   (rank 0 plans the memory of all ranks: do the ranks differ in their environment?)'
+      call xzerrex
+    end if
+    flush(6)
+    return
   end if
 
   ! ---- the batches of the iterations, one after the other
@@ -232,6 +286,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   else if (xzpeak_cc(w) > xzsize) then
     pfile = .true.
     per_vec = 2 * 8 * nwe * n3
+    if (slices) per_vec = 2 * 8 * nwe * smax
     free_bytes = xz_free_disk('.' // c_null_char)
     if (free_bytes >= 0 .and. per_vec * pslot > free_bytes - 1073741824_8) then
       nfit = max(0_8, (free_bytes - 1073741824_8) / max(per_vec, 1_8))
@@ -281,11 +336,33 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   usefile = pfile
   nch = pchunk
   pneedq = need_q
+  ! what a rank other than 0 takes: the iterations without the DIIS vectors
+  ! (with the most threads that a rank has), or (Q)
+  pneedw = 0
+  if (nrank > 1) then
+    pneedw = need_q
+    if (.not. planq) then
+      nthr0 = omp_get_max_threads()
+      if (maxthr > nthr0) call omp_set_num_threads(int(maxthr))
+      asworker = .true.
+      pneedw = max(pneedw, xzpeak_cc(w))
+      asworker = .false.
+      if (maxthr > nthr0) call omp_set_num_threads(nthr0)
+    end if
+  end if
   if (.not. planq) then
   write(6, '(a,a51,i16,a,f10.1,a)') '     ', trim(what) // ' with this plan:', need_cc, '  = ', 8d-6 * need_cc, ' MB'
   end if
   if (with_q) write(6, '(a,i16,a,f10.1,a)') '     (Q) with this plan:             ', need_q, '  = ', &
     8d-6 * need_q, ' MB'
+  if (nrank > 1 .and. (.not. planq .or. with_q)) then
+    write(6, '(a,i16,a,f10.1,a)') '     a rank other than 0 takes:      ', pneedw, '  = ', 8d-6 * pneedw, ' MB'
+    if (.not. planq .and. .not. slices) write(6, '(a)') '       (its own work array: the integrals, the amplitudes, ' // &
+      'its part of the residual, the batches; no DIIS vectors)'
+    if (.not. planq .and. slices) write(6, '(a,f10.1,a)') '       (its own work array: the integrals, the amplitudes, ' // &
+      'the residual, the batches, its slice of every DIIS vector: at most ', 8d-6 * nwe * smax, ' MB of T3)'
+    call xznodemem(max(need_cc, need_q), pneedw + 4096)
+  end if
   if (with_q .and. t3shared) then
     if (q_left) then
       write(6, '(a)') '       (private to a rank.  Not in the work array: T3 and Lambda3, read where the files XZAMPS'
@@ -309,8 +386,10 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   else if (pfile) then
     write(6, '(a,i3,a,f10.1,a)') '     DIIS: ', pslot, ' vectors, T3 parts in the file XZDIIS (', &
       16d-6 * nwe * n3 * pslot, ' MB)'
+    if (slices) write(6, '(a)') '       (every rank the slice of its rows, in its own file XZDIIS.<rank>)'
   else
     write(6, '(a,i3,a)') '     DIIS: ', pslot, ' vectors in the work array'
+    if (slices) write(6, '(a)') '       (every rank the slice of its rows, in its own work array)'
   end if
   end if
   if (with_q) then
@@ -321,7 +400,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   end if
   if (max(need_cc, need_q) > xzsize) then
     write(6, '(/,a)') ' @XZCCSDT-F, the plan does not fit the work array (XZ_PLAN?).'
-    call errex
+    call xzerrex
   end if
   flush(6)
 
@@ -358,7 +437,7 @@ contains
     read(text, *, iostat=ios) v
     if (ios /= 0) then
       write(6, '(a)') ' @XZCCSDT-F, XZ_PLAN: eight numbers expected.'
-      call errex
+      call xzerrex
     end if
     do kk = 1, npar
       if (v(kk) > 0) call setpar(kk, max(1_8, v(kk)))

@@ -63,7 +63,7 @@ subroutine xzfrzinit(w)
   if (.not. there) then
     write(6, '(/,a)') ' @XZCCSDT-F, no file IIII (the AO integrals of xsox2catm): the density with frozen or'
     write(6, '(a)') '   dropped spinors needs integrals with one of them, which are transformed here.'
-    call errex
+    call xzerrex
   end if
   m = xzmark()
   kbuf = xzget(2 * nall, 'record of scf2ceig')

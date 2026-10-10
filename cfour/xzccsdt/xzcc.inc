@@ -5,10 +5,16 @@
 ! The amplitudes stay in the work array (jt1, jt2, jt3 of xzdata) for what
 ! follows; everything else that is taken here is released.
 !
+! With more than one rank (xzdist.F90) rank 0 runs this loop and sends, at
+! the start of every iteration, a word that says "one more" and the
+! amplitudes; the other ranks (N(xzccwork)) take them into their own T1, T2,
+! T3 and do their part of the step.  The DIIS vectors are those of rank 0.
+!
 subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   use xzdata
   use xzmem
   use xzkern
+  use xzdist
   use xzdiisd, only: ncnt
   use omp_lib
   implicit none
@@ -21,7 +27,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   integer(8) :: kt1n, kt2n, kr3, icyc, m0, n, kb1, kb2
   logical :: fromccsd
   integer(8), external :: N(xzdiis_target)
-  real(8) :: norms(3), eold, enew, de, normt, t0, t1w
+  real(8) :: norms(3), eold, enew, de, normt, t0, t1w, ctl(2), tsg
   ZT :: e
   character(len=256) :: dbg
   integer :: ldbg
@@ -32,7 +38,25 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   m0 = xzmark()
   kt1n = xzget(NW * no * nv, 'new T1')
   kt2n = xzget(NW * no * no * nv * nv, 'new T2')
-  call N(xzdiis_alloc)(nslot, usefile, nch)
+  if (xzworker()) then
+    ! a rank other than 0: no DIIS vectors, one region for its part of the
+    ! residual (with slices: its slices of the DIIS vectors, as on rank 0)
+    if (slices) then
+      call N(xzdiis_alloc)(nslot, usefile, nch)
+    else
+      call N(xzdiis_alloc)(0_8, .false., nch)
+    end if
+    if (.not. xzdry) then
+      call N(xzccwork)(w, kt1n, kt2n, ncyc)
+      call N(xzdiis_close)()
+      call xzrel(m0)
+      ecorr = 0d0
+      converged = .true.
+      return
+    end if
+  else
+    call N(xzdiis_alloc)(nslot, usefile, nch)
+  end if
   ! XZ_START=ccsd: T1 and T2 of CFOUR's xx2cccsd as the start (its files
   ! t1guess, t2guess of the run directory)
   call get_environment_variable('XZ_START', dbg, ldbg)
@@ -56,6 +80,10 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
   eold = dble(e)
   call get_environment_variable('XZ_DEBUG', dbg, ldbg)
+  if (ldbg > 0 .and. nrank > 1) then
+    write(6, '(/,a)') ' @XZCCSDT-F, XZ_DEBUG (one step from a file) runs with one rank only.'
+    call xzerrex
+  end if
   if (ldbg > 0) then
     ! one step on amplitudes read from a file, the result written next to it
     n = NW * (no * nv + no * no * nv * nv + n3)
@@ -90,13 +118,42 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   write(6, '(a)') '  ' // repeat('-', 98)
   converged = .false.
   ncyc = maxcyc
+  ! (the other ranks read the integrals after rank 0: wait for them here, so
+  ! that the clock of the first broadcast is not that of their reading)
+  if (nrank > 1) then
+    call xztic()
+    call xzmpi_barrier()
+    call xztoc(1, 'MPI: ranks reading integrals')
+  end if
   do icyc = 1, maxcyc
     t0 = omp_get_wtime()
+    if (nrank > 1) then
+      ! one more iteration: the amplitudes to the ranks (T3 of the first one is zero)
+      call xztic()
+      tsg = omp_get_wtime()
+      ctl = [1d0, merge(0d0, 1d0, icyc == 1)]
+      call xzmpi_bcast(ctl, 16_8)
+      call xzmpi_bcast_w(w(jt1), NW * no * nv)
+      call xzmpi_bcast_w(w(jt2), NW * no * no * nv * nv)
+      if (icyc > 1 .and. .not. slices) call xzmpi_bcast_w(w(jt3), NW * n3)
+      call xztoc(1, 'MPI: amplitudes to the ranks')
+      dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
+    end if
     kr3 = N(xzdiis_target)()
     call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    call xzrebal(1)
+    tsg = omp_get_wtime()
     call xztic()
     call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms)
     call xztoc(1, 'DIIS')
+    dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
+    if (slices) then
+      ! the slices of the new T3 to every rank
+      tsg = omp_get_wtime()
+      call xzmpi_slices_put(w(jt3), swoff)
+      call xztoc(1, 'MPI: T3 slices to the ranks')
+      dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
+    end if
     call xztic()
     call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
     call xztoc(1, 'energy')
@@ -113,9 +170,75 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     end if
   end do
   write(6, '(a)') '  ' // repeat('-', 98)
+  if (nrank > 1) then
+    ! the iterations are over
+    ctl = 0d0
+    call xzmpi_bcast(ctl, 16_8)
+  end if
   ecorr = eold
   call N(xzdiis_close)()
   call xzrel(m0)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! The iterations of a rank other than 0: as long as rank 0 says "one more",
+! its amplitudes into T1, T2, T3 of this rank and the part of this rank of
+! the step (xzstep leaves out what only rank 0 does).
+subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
+  use xzdata
+  use xzmem
+  use xzkern
+  use xzdist
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kt1n, kt2n
+  integer(8), intent(out) :: icyc
+  integer(8), external :: N(xzdiis_target)
+  integer(8) :: kr3
+  real(8) :: ctl(2), tsg, t0, norms(3)
+  icyc = 0
+  write(6, '(/,a)') '  CCSDT iterations: the batches of this rank'
+  if (slices) call zc_vzero_d(NW * n3, w(jt3))
+  call xzmpi_barrier()
+  do
+    call xzmpi_bcast(ctl, 16_8)
+    if (ctl(1) /= 1d0) exit
+    t0 = omp_get_wtime()
+    tsg = t0
+    call xztic()
+    call xzmpi_bcast_w(w(jt1), NW * no * nv)
+    call xzmpi_bcast_w(w(jt2), NW * no * no * nv * nv)
+    if (slices) then
+      ! (T3 is here: the slices of the ranks came at the end of the iteration before)
+    else if (ctl(2) == 1d0) then
+      call xzmpi_bcast_w(w(jt3), NW * n3)
+      dwords(1) = dwords(1) + dble(NW * n3)
+    else
+      call zc_vzero_d(NW * n3, w(jt3))
+    end if
+    call xztoc(1, 'MPI: amplitudes from rank 0')
+    dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
+    kr3 = N(xzdiis_target)()
+    call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    call xzrebal(1)
+    if (slices) then
+      ! DIIS on the slice of this rank, then the slices of the new T3 of all ranks
+      tsg = omp_get_wtime()
+      call xztic()
+      call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms)
+      call xztoc(1, 'DIIS')
+      dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call xzmpi_slices_put(w(jt3), swoff)
+      call xztoc(1, 'MPI: T3 slices to the ranks')
+      dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
+      dwords(1) = dwords(1) + dble(NW * (n3 - (soff(myrank + 1) - soff(myrank))))
+    end if
+    icyc = icyc + 1
+    write(6, '(a,i5,f12.2,a)') '   cycle ', icyc, omp_get_wtime() - t0, ' s'
+    flush(6)
+  end do
 end subroutine
 
 ! ---------------------------------------------------------------------------
@@ -220,7 +343,7 @@ subroutine N(xzamps)(w, rw, ecorr)
     if (ios == 0) close(77, iostat=ios)
     if (ios /= 0) then
       write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZAMPS failed (iostat ', ios, '): disk full?'
-      call errex
+      call xzerrex
     end if
     return
   end if
@@ -231,13 +354,13 @@ subroutine N(xzamps)(w, rw, ecorr)
   inquire(file='XZAMPS', exist=there)
   if (.not. there) then
     write(6, '(/,a)') ' @XZCCSDT-F, no file XZAMPS: the amplitudes of a converged CCSDT run of xzccsdt.'
-    call errex
+    call xzerrex
   end if
   open(unit=77, file='XZAMPS', form='unformatted', access='stream', status='old', action='read', iostat=ios)
   if (ios == 0) read(77, iostat=ios) tag, head, ecorr
   if (ios /= 0 .or. tag /= 'XZAMPS01') then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZAMPS is not a file of amplitudes of this program.'
-    call errex
+    call xzerrex
   end if
   if (head(1) /= no .or. head(2) /= nv .or. head(3) /= NW .or. head(4) /= ncls .or. head(5) /= n3) then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZAMPS belongs to another calculation or another mode:'
@@ -245,7 +368,7 @@ subroutine N(xzamps)(w, rw, ecorr)
     write(6, '(a,5i12)') '   and here:                                                      ', no, nv, &
       int(NW, 8), ncls, n3
     write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: XZ_LABELS, XZ_REAL)'
-    call errex
+    call xzerrex
   end if
   read(77, iostat=ios) w(jt1:jt1 + n1 - 1)
   if (ios == 0) read(77, iostat=ios) w(jt2:jt2 + n2 - 1)
@@ -253,7 +376,7 @@ subroutine N(xzamps)(w, rw, ecorr)
   close(77)
   if (ios /= 0) then
     write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZAMPS failed, iostat ', ios
-    call errex
+    call xzerrex
   end if
   ! T3 where the file is mapped (stored there as the program uses it, in every mode)
   if (t3shared) call xzmapt3(w, 'XZAMPS', n1 + n2, NW * n3, jt3)

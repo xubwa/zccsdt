@@ -19,10 +19,12 @@ subroutine xzdrv(w, maxcor)
   use xzmem
   use xzkern
   use xzpar
-  use xzpland, only: planq, pneedq
+  use xzdist
+  use xzpland, only: planq, pneedq, pneedw
   use omp_lib
   implicit none
   integer(8), intent(in) :: maxcor
+  integer(8) :: mcc
   real(8) :: w(maxcor)
   integer(8) :: iintln, ifltln, iintfp, ialone, ibitwd
   common /machsp/ iintln, ifltln, iintfp, ialone, ibitwd
@@ -37,7 +39,7 @@ subroutine xzdrv(w, maxcor)
   call xzinit(loc(w(1)), maxcor)
   ! (a test hook: XZ_MAXCOR words of the work array are used)
   call get_environment_variable('XZ_MAXCOR', arg, larg)
-  if (larg > 0) then
+  if (larg > 0 .and. myrank == 0) then
     read(arg, *) nmax
     xzsize = min(xzsize, nmax)
   end if
@@ -58,8 +60,12 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f20.12)') '   E(SCF) of JOBARC: ', escf
   write(6, '(a,i14,a,f10.1,a)') '   work array (MAXCOR): ', maxcor, ' words = ', 8d-6 * maxcor, ' MB'
   write(6, '(a,i4,a,i2)') '   threads: ', nthr, '   BLAS integers: bytes ', 4 + 4 * ilp64
-  if (xzmpi_enabled() == 1) write(6, '(a,i5,a,i5,a)') '   MPI: rank ', myrank, ' of ', nrank, &
-    ' ((Q) is parallel over the ranks; the other ranks take the work array that their (Q) needs)'
+  if (xzmpi_enabled() == 1) then
+    write(6, '(a,i5,a,i5,a)') '   MPI: rank ', myrank, ' of ', nrank, &
+      ' (the iterations and (Q) run over the ranks; a rank other than 0 has a work array of its own,'
+    write(6, '(a,i10,a)') '        as large as its part needs; arrays go between the ranks in messages of ', &
+      xzmpi_chunk(), ' words)'
+  end if
   ! (Q) reads T3 (and Lambda3) where the files are mapped unless XZ_QMAP=0
   t3shared = with_q
   call get_environment_variable('XZ_QMAP', arg, larg)
@@ -73,11 +79,11 @@ subroutine xzdrv(w, maxcor)
   end if
   if (ilp64 /= 1) then
     write(6, '(a)') ' @XZCCSDT-F, the kernels were not compiled for the 8-byte integers of this BLAS.'
-    call errex
+    call xzerrex
   end if
   if (no < 3 .or. nv < 3) then
     write(6, '(a)') ' @XZCCSDT-F, fewer than three occupied or virtual spinors: no triples.'
-    call errex
+    call xzerrex
   end if
 
   ! ---- the symmetry labels
@@ -106,21 +112,18 @@ subroutine xzdrv(w, maxcor)
     tryreal = .false.
   end if
 
-  ! ---- which ranks do what: the iterations (CCSDT, Lambda) are those of
-  !      rank 0; the other ranks wait for them here and then read the
-  !      integrals, the amplitudes (file XZAMPS) and lambda (XZLAMB) themselves
+  ! ---- which ranks do what: every rank reads the integrals itself; the
+  !      iterations (CCSDT, Lambda) run on all ranks (xzdist.F90: rank 0 sends
+  !      the amplitudes, every rank does its batches), (Q) on all ranks from
+  !      the files XZAMPS and XZLAMB, the density stage on rank 0
   docc = with_cc
-  planq = .not. (with_cc .or. with_lam .or. with_den) .or. myrank > 0
-  if (with_den .and. myrank > 0) return
+  planq = .not. (with_cc .or. with_lam .or. with_den)
+  if (with_den .and. .not. (with_cc .or. with_lam) .and. myrank > 0) return
   ! (a test hook: XZ_DEN_ACTIVE=1 writes the files of the active spinors alone)
   call get_environment_variable('XZ_DEN_ACTIVE', arg, larg)
   den_active = larg > 0
   if (method == 'MP2' .and. myrank > 0) return
   sync = 0d0
-  if ((with_cc .or. with_lam) .and. myrank > 0) then
-    call xzmpi_bcast(sync, 16_8)
-    if (.not. with_q .or. sync(2) /= 1d0) return
-  end if
 
   ! ---- the integrals: for labels and real numbers first; the memory of a
   !      case is checked before it is read (the floor of its plan)
@@ -129,6 +132,7 @@ subroutine xzdrv(w, maxcor)
   do
     call xzsetmode(uselab)
     nwe = merge(1_8, 2_8, isreal)
+    call xzslices()
     call xzplan(w, nslot, usefile, nch, .true.)
     call xzrel(0_8)
     call xzlayout(w, status)
@@ -168,17 +172,30 @@ subroutine xzdrv(w, maxcor)
 
   ! ---- the memory plan
   call xzplan(w, nslot, usefile, nch, .false.)
-  ! (the other ranks allocate what (Q) takes with this plan: xzrankmem)
-  if (myrank == 0 .and. nrank > 1 .and. with_q) then
-    sync = [dble(pneedq), 0d0]
-    call xzmpi_bcast(sync, 16_8)
-    sync = 0d0
+  ! (the other ranks allocate what their part takes with this plan and use
+  ! its batch sizes: xzrankmem, xzplan)
+  if (myrank == 0 .and. nrank > 1 .and. (with_q .or. with_cc .or. with_lam)) then
+    rplan = 0d0
+    rplan(1) = dble(pneedw)
+    rplan(2:9) = dble([nqs, nbt, nbp, nba, qxv, qc22, qc13, qrows])
+    rplan(10:12) = dble([nslot, merge(1_8, 0_8, usefile), nch])
+    call xzmpi_bcast(rplan, 128_8)
   end if
+  ! (a test hook: XZ_WFAIL, an error on a rank other than 0)
+  call get_environment_variable('XZ_WFAIL', length=larg)
+  if (larg > 0 .and. myrank > 0) then
+    write(6, '(a)') ' @XZCCSDT-F, XZ_WFAIL: a test of the exit of a rank other than 0.'
+    call xzerrex
+  end if
+  ! the batches of the iterations, dealt to the ranks
+  if (with_cc .or. with_lam) call xzdeal()
+  flush(6)
 
-  ! ---- CCSDT (rank 0), or the amplitudes of an earlier run
+  ! ---- CCSDT (all ranks: xzdist.F90), or the amplitudes of an earlier run
   tcc = 0d0
   tlm = 0d0
-  if (docc .and. myrank == 0) then
+  mcc = xzmark()
+  if (docc) then
     t0 = omp_get_wtime()
     if (nwe == 2) then
       call xzcc_z(w, nslot, usefile, nch, ecorr, converged, ncyc)
@@ -186,6 +203,11 @@ subroutine xzdrv(w, maxcor)
       call xzcc_d(w, nslot, usefile, nch, ecorr, converged, ncyc)
     end if
     tcc = omp_get_wtime() - t0
+    call xzdtable(1, ncyc)
+    call xzbdump()
+    if (myrank > 0) call xztable(1, 'the CCSDT iterations on this rank', tcc, ncyc)
+  end if
+  if (docc .and. myrank == 0) then
     if (.not. converged .and. timing_run) then
       write(6, '(/,a,i5,a)') ' @XZCCSDT-W, XZ_NCYC: CCSDT stopped after ', maxcyc, &
         ' cycles; the amplitudes and what follows are NOT converged.'
@@ -197,7 +219,7 @@ subroutine xzdrv(w, maxcor)
         ' cycles (CC_MAXCYC).'
       call xzmpi_bcast(sync, 16_8)
       if (larg > 0) return
-      call errex
+      call xzerrex
     end if
     write(6, '(a,i4,a)') '   CCSDT converged in ', ncyc, ' cycles.'
     call xztable(1, 'the CCSDT iterations', tcc, ncyc)
@@ -215,7 +237,12 @@ subroutine xzdrv(w, maxcor)
       call xzrel(jt3 - xzbase)
       call xzmapt3(w, 'XZAMPS', nwe * (no * nv + no * no * nv * nv), nwe * n3, jt3)
     end if
-  else
+  else if (.not. docc .and. myrank > 0 .and. with_lam) then
+    ! (a rank other than 0 before the Lambda equations: rank 0 sends the amplitudes)
+    jt1 = xzget(nwe * no * nv, 'T1')
+    jt2 = xzget(nwe * no * no * nv * nv, 'T2')
+    jt3 = xzget(nwe * n3, 'T3')
+  else if (.not. docc) then
     if (nwe == 2) then
       call xzamps_z(w, 'r', ecorr)
     else
@@ -224,9 +251,28 @@ subroutine xzdrv(w, maxcor)
     write(6, '(/,a,f20.12)') '   amplitudes read from the file XZAMPS; CCSDT correlation energy ', ecorr
   end if
   flush(6)
+  ! the amplitudes are there (rank 0 has written XZAMPS, or stops)
+  if ((with_cc .or. with_lam) .and. nrank > 1) then
+    if (myrank == 0) sync = [ecorr, 1d0]
+    call xzmpi_bcast(sync, 16_8)
+    if (myrank > 0) then
+      if (sync(2) /= 1d0) return
+      ecorr = sync(1)
+      if (docc .and. with_q .and. .not. with_lam) then
+        ! (Q) follows: T1 and T2 of the file, T3 where it is mapped
+        call xzrel(mcc)
+        if (nwe == 2) then
+          call xzamps_z(w, 'r', ecorr)
+        else
+          call xzamps_d(w, 'r', ecorr)
+        end if
+      end if
+    end if
+    sync = 0d0
+  end if
 
-  ! ---- the Lambda equations (rank 0), or lambda of an earlier run
-  if (with_lam .and. myrank == 0) then
+  ! ---- the Lambda equations (all ranks), or lambda of an earlier run
+  if (with_lam) then
     t0 = omp_get_wtime()
     if (nwe == 2) then
       call xzlam_z(w, nslot, usefile, nch, converged, ncyc)
@@ -234,6 +280,11 @@ subroutine xzdrv(w, maxcor)
       call xzlam_d(w, nslot, usefile, nch, converged, ncyc)
     end if
     tlm = omp_get_wtime() - t0
+    call xzdtable(2, ncyc)
+    call xzbdump()
+    if (myrank > 0) call xztable(2, 'the iterations of the Lambda equations on this rank', tlm - tlamim, ncyc)
+  end if
+  if (with_lam .and. myrank == 0) then
     if (.not. converged .and. timing_run) then
       write(6, '(/,a,i5,a)') ' @XZCCSDT-W, XZ_NCYC: the Lambda equations stopped after ', maxcyc, &
         ' cycles; lambda and what follows are NOT converged.'
@@ -243,7 +294,7 @@ subroutine xzdrv(w, maxcor)
       write(6, '(/,a,i5,a)') ' @XZCCSDT-F, the Lambda equations of CCSDT did not converge in ', maxcyc, &
         ' cycles (CC_MAXCYC).'
       call xzmpi_bcast(sync, 16_8)
-      call errex
+      call xzerrex
     end if
     write(6, '(a,i4,a)') '   The Lambda equations converged in ', ncyc, ' cycles.'
     call xztable(3, 'the intermediates of the Lambda equations', tlamim, 0_8)
@@ -256,6 +307,15 @@ subroutine xzdrv(w, maxcor)
     end if
     write(6, '(/,a,f10.1,a,f8.2,a)') '   lambda written to the file XZLAMB (', &
       8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
+  end if
+  if (with_lam) then
+    ! lambda is there (rank 0 has written XZLAMB, or stops)
+    if (nrank > 1) then
+      if (myrank == 0) sync = [ecorr, 1d0]
+      call xzmpi_bcast(sync, 16_8)
+      if (myrank > 0 .and. (sync(2) /= 1d0 .or. .not. with_q)) return
+      sync = 0d0
+    end if
     if (with_q .or. with_den) then
       ! the pp operator took the place of <ab||cd>: the integrals and the
       ! amplitudes are read again for what follows
@@ -263,7 +323,7 @@ subroutine xzdrv(w, maxcor)
       call xzlayout(w, status)
       if (status /= 0) then
         write(6, '(/,a)') ' @XZCCSDT-F, the integral files changed during the run.'
-        call errex
+        call xzerrex
       end if
       if (nwe == 2) then
         call xzamps_z(w, 'r', ecorr)
@@ -279,10 +339,6 @@ subroutine xzdrv(w, maxcor)
       call xzlamb_d(w, 'r', ecorr)
     end if
     if (.not. (with_lam .and. myrank == 0)) write(6, '(a)') '   lambda read from the file XZLAMB'
-  end if
-  if ((with_cc .or. with_lam) .and. myrank == 0) then
-    sync = [ecorr, 1d0]
-    call xzmpi_bcast(sync, 16_8)
   end if
   flush(6)
 
@@ -407,7 +463,7 @@ subroutine xzjob()
       write(6, '(/,a,i4,a,i3,a)') ' @XZCCSDT-F, CALC of the ZMAT (level ', level, ', EXCITATION ', nexc, &
         ') is not CCSDT, CCSDT[Q] or CCSDT(Q).'
       write(6, '(a)') '   Give the method as the argument: xzccsdt ccsdt | "ccsdt(q)"'
-      call errex
+      call xzerrex
     end if
   end if
   select case (method)
@@ -416,7 +472,7 @@ subroutine xzjob()
   case default
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), &
       ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, DENSITY, CCSDT_DENSITY, MP2.'
-    call errex
+    call xzerrex
   end select
   with_cc = method(1:5) == 'CCSDT'
   larg = len_trim(method)
@@ -824,7 +880,7 @@ subroutine xzwrec(name, n, rec)
   if (ios == 0) close(79, iostat=ios)
   if (ios /= 0) then
     write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', name, ' failed (iostat ', ios, ').'
-    call errex
+    call xzerrex
   end if
 end subroutine xzwrec
 
@@ -895,21 +951,57 @@ end subroutine xzqmodel
 subroutine xzrankmem(maxcor)
   use xzdata
   use xzpar
+  use xzdist
   implicit none
   integer(8), intent(inout) :: maxcor
-  real(8) :: sync(2)
   call xzjob()
-  if (.not. with_q) then
+  if (.not. (with_q .or. with_cc .or. with_lam)) then
     maxcor = 4096
     return
   end if
   ! (the broadcasts in the order of rank 0: the sizes, then its plan)
   call xzsizes()
   sizes_set = .true.
-  sync = 0d0
-  call xzmpi_bcast(sync, 16_8)
-  maxcor = min(maxcor, int(sync(1), 8) + 4096)
+  rplan = 0d0
+  call xzmpi_bcast(rplan, 128_8)
+  maxcor = min(maxcor, int(rplan(1), 8) + 4096)
 end subroutine xzrankmem
+
+! ---------------------------------------------------------------------------
+! The start of the ranks (called by every rank after the flags of joda went
+! round): the largest number of threads of a rank - the memory plan of a
+! rank has buffers per thread, and rank 0 plans for all -, and the test of
+! the chunked transfers (XZ_MPITEST=n: arrays of n words through every
+! routine, with the chunk of XZ_MPICHUNK).
+subroutine xzmpistart()
+  use xzpar
+  use xzdist
+  use xzkern
+  implicit none
+  real(8) :: a(2), b(2)
+  integer(8) :: nthr, ilp64, n
+  character(len=32) :: arg
+  integer :: larg
+  call xz_blas_info(nthr, ilp64)
+  a = [dble(nthr), -dble(nthr)]
+  b = a
+  call xzmpi_max(a, b, 2_8)
+  call xzmpi_bcast(b, 16_8)
+  maxthr = nint(b(1), 8)
+  call xznodes()
+  if (myrank == 0 .and. b(1) /= -b(2)) write(6, '(a,i4,a,i4,a)') ' @XZCCSDT-W, the ranks have between ', &
+    nint(-b(2)), ' and ', nint(b(1)), ' threads: the memory of every rank is planned for the largest number.'
+  call get_environment_variable('XZ_MPITEST', arg, larg)
+  if (larg > 0) then
+    read(arg(1:larg), *) n
+    a = [dble(xzmpi_selftest(n)), 0d0]
+    b = a
+    call xzmpi_max(a, b, 1_8)
+    if (myrank == 0) write(6, '(a,i12,a,i10,a,i4,a,i12)') ' XZ_MPITEST: arrays of ', n, ' words in messages of ', &
+      xzmpi_chunk(), ' words over ', nrank, ' ranks; wrong words (largest count of a rank): ', nint(b(1), 8)
+    if (myrank == 0 .and. b(1) /= 0d0) call xzerrex
+  end if
+end subroutine xzmpistart
 
 ! ---------------------------------------------------------------------------
 ! T3 (or Lambda3) of the file `name' where the file is mapped, read-only:
@@ -930,12 +1022,32 @@ subroutine xzmapt3(w, name, nskip, n3w, j3)
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', name, ' could not be mapped (or has another length than its header says).'
     write(6, '(a,i16,a,i16)') '   bytes mapped: ', nbytes, '   expected: ', 56 + 8 * (nskip + n3w)
     write(6, '(a)') '   XZ_QMAP=0 reads T3 into the work array of every rank instead.'
-    call errex
+    call xzerrex
   end if
   diff = addr + 56 + 8 * nskip - loc(w(1))
   if (mod(diff, 8_8) /= 0) then
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, the map of the file ', name, ' is not aligned with the work array; use XZ_QMAP=0.'
-    call errex
+    call xzerrex
   end if
   j3 = diff / 8 + 1
 end subroutine xzmapt3
+
+! ---------------------------------------------------------------------------
+! The exit after an error (every error of the program comes here, its message
+! written).  Rank 0: CFOUR's ERREX (status 1, the ERROR banner).  A rank
+! other than 0 must not call ERREX - it closes JOBARC as if this rank had
+! opened it and writes an empty index (JAINDX) over that of the run
+! directory -: it stops all ranks through MPI.
+subroutine xzerrex()
+  use xzpar
+  implicit none
+  flush(6)
+  if (myrank == 0) then
+    call errex
+  else
+    write(6, '(a,i5,a)') ' @XZCCSDT-F, rank ', myrank, ' stops the run.'
+    flush(6)
+    call xzmpi_abort(1_8)
+  end if
+  stop 1
+end subroutine xzerrex

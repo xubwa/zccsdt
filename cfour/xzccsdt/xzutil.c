@@ -152,3 +152,16 @@ void xz_rss4(int64_t *kb)
     }
     fclose(f);
 }
+
+/* kB of memory that the node can still give (MemAvailable of /proc/meminfo; -1: unknown) */
+int64_t xz_mem_avail(void)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    char line[256];
+    long long kb = -1;
+    if (!f) return -1;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "MemAvailable: %lld", &kb) == 1) break;
+    fclose(f);
+    return (int64_t)kb;
+}

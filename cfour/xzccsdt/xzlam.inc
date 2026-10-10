@@ -24,10 +24,16 @@
 ! file XZDIIS).  Batch sizes: nbp (two half-expanded batches in pass 1 and
 ! in pass 2), nbt (the gathered batch of the ladder and its product), nba.
 !
+! With more than one rank (xzdist.F90): rank 0 sends T1, T2, T3 once - every
+! rank makes the intermediates itself - and lambda at the start of every
+! iteration; the other ranks do their batches of pass 1, pass 2 and the
+! ladder.  The DIIS vectors and the residuals of rank 1 and 2 are rank 0's.
+!
 subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   use xzdata
   use xzmem
   use xzkern
+  use xzdist
   use xzdiisd, only: ncnt
   use omp_lib
   implicit none
@@ -38,7 +44,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   integer(8), intent(out) :: ncyc
   integer(8) :: kl1n, kl2n, kr3, icyc, m0, ov, kk
   integer(8), external :: N(xzdiis_target)
-  real(8) :: norms(3), normt, t0, t1w
+  real(8) :: norms(3), normt, t0, t1w, ctl(2), tsg
   ZT :: pe
   character(len=256) :: dbg
   integer :: ldbg
@@ -53,7 +59,11 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   m0 = xzmark()
   kl1n = xzget(NW * ov, 'new Lambda1')
   kl2n = xzget(NW * ov * ov, 'new Lambda2')
-  call N(xzdiis_alloc)(nslot, usefile, nch)
+  if (xzworker() .and. .not. slices) then
+    call N(xzdiis_alloc)(0_8, .false., nch)
+  else
+    call N(xzdiis_alloc)(nslot, usefile, nch)
+  end if
   ! ---- what is kept of the integrals and of t
   lfov = xzget(NW * ov, 'F_ov')
   lfvv = xzget(NW * nv * nv, 'F_vv of T3')
@@ -80,10 +90,28 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
 
   call get_environment_variable('XZ_LDEBUG', dbg, ldbg)
   t0 = omp_get_wtime()
+  if (nrank > 1) then
+    ! the amplitudes of rank 0 on every rank (when all ranks have read the integrals)
+    call xzmpi_barrier()
+    t0 = omp_get_wtime()
+    tsg = omp_get_wtime()
+    call xzmpi_bcast_w(w(jt1), NW * ov)
+    call xzmpi_bcast_w(w(jt2), NW * ov * ov)
+    call xzmpi_bcast_w(w(jt3), NW * n3)
+    dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
+    if (myrank > 0) dwords(2) = dwords(2) + dble(NW * n3)
+  end if
   call N(xzlamim)(w)
   tlamim = omp_get_wtime() - t0
   write(6, '(/,a,f10.2,a)') '   intermediates of the Lambda equations: ', tlamim, ' s'
   if (ldbg > 0) call N(xzlamdump)(w, dbg(1:ldbg))
+  if (myrank > 0) then
+    call N(xzlamwork)(w, kl1n, kl2n, ncyc)
+    call N(xzdiis_close)()
+    call xzrel(m0)
+    converged = .true.
+    return
+  end if
 
   ! the start: conj(t)
   call N(xzlconj)(ov, w(jt1), w(jl1))
@@ -97,16 +125,37 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   ncyc = maxcyc
   do icyc = 1, maxcyc
     t0 = omp_get_wtime()
+    if (nrank > 1) then
+      ! one more iteration: lambda to the ranks
+      call xztic()
+      tsg = omp_get_wtime()
+      ctl = [1d0, 1d0]
+      call xzmpi_bcast(ctl, 16_8)
+      call xzmpi_bcast_w(w(jl1), NW * ov)
+      call xzmpi_bcast_w(w(jl2), NW * ov * ov)
+      if (.not. slices) call xzmpi_bcast_w(w(jl3), NW * n3)
+      call xztoc(2, 'MPI: lambda to the ranks')
+      dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
+    end if
     kr3 = N(xzdiis_target)()
     call N(xzlamstep)(w, jl1, jl2, jl3, kl1n, kl2n, kr3, ldbg > 0 .and. icyc == 1)
+    call xzrebal(2)
     if (ldbg > 0 .and. icyc == 1) then
       call xzdumpw(dbg(1:ldbg) // '.l1n', NW * ov, w(kl1n))
       call xzdumpw(dbg(1:ldbg) // '.l2n', NW * ov * ov, w(kl2n))
       call xzdumpw(dbg(1:ldbg) // '.l3n', NW * n3, w(kr3))
     end if
     call xztic()
+    tsg = omp_get_wtime()
     call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms)
     call xztoc(2, 'DIIS')
+    dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
+    if (slices) then
+      tsg = omp_get_wtime()
+      call xzmpi_slices_put(w(jl3), swoff)
+      call xztoc(2, 'MPI: l3 slices to the ranks')
+      dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
+    end if
     call N(xzlpseudo)(no, nv, w(jl2), w(joovv), pe)
     normt = norms(1) + norms(2) + norms(3)
     write(6, '(i8,f28.14,3es11.3,i7,f10.2)') icyc, dble(pe), norms, ncnt, omp_get_wtime() - t0
@@ -118,8 +167,68 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     end if
   end do
   write(6, '(a)') '  ' // repeat('-', 90)
+  if (nrank > 1) then
+    ctl = 0d0
+    call xzmpi_bcast(ctl, 16_8)
+  end if
   call N(xzdiis_close)()
   call xzrel(m0)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! The Lambda iterations of a rank other than 0: lambda of rank 0 into l1, l2,
+! l3 of this rank and its part of the step, as long as rank 0 says "one more".
+subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
+  use xzdata
+  use xzmem
+  use xzkern
+  use xzdist
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kl1n, kl2n
+  integer(8), intent(out) :: icyc
+  integer(8), external :: N(xzdiis_target)
+  integer(8) :: kr3, ov
+  real(8) :: ctl(2), tsg, t0, norms(3)
+  ov = no * nv
+  icyc = 0
+  write(6, '(/,a)') '  Lambda equations of CCSDT: the batches of this rank'
+  ! (with slices l3 does not come from rank 0: the start is conj(t3) here as there)
+  if (slices) call N(xzlconj)(n3, w(jt3), w(jl3))
+  do
+    call xzmpi_bcast(ctl, 16_8)
+    if (ctl(1) /= 1d0) exit
+    t0 = omp_get_wtime()
+    tsg = t0
+    call xztic()
+    call xzmpi_bcast_w(w(jl1), NW * ov)
+    call xzmpi_bcast_w(w(jl2), NW * ov * ov)
+    if (.not. slices) then
+      call xzmpi_bcast_w(w(jl3), NW * n3)
+      dwords(2) = dwords(2) + dble(NW * n3)
+    end if
+    call xztoc(2, 'MPI: lambda from rank 0')
+    dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
+    kr3 = N(xzdiis_target)()
+    call N(xzlamstep)(w, jl1, jl2, jl3, kl1n, kl2n, kr3, .false.)
+    call xzrebal(2)
+    if (slices) then
+      tsg = omp_get_wtime()
+      call xztic()
+      call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms)
+      call xztoc(2, 'DIIS')
+      dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call xzmpi_slices_put(w(jl3), swoff)
+      call xztoc(2, 'MPI: l3 slices to the ranks')
+      dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
+      dwords(2) = dwords(2) + dble(NW * (n3 - (soff(myrank + 1) - soff(myrank))))
+    end if
+    icyc = icyc + 1
+    write(6, '(a,i5,f12.2,a)') '   cycle ', icyc, omp_get_wtime() - t0, ' s'
+    flush(6)
+  end do
 end subroutine
 
 ! ---------------------------------------------------------------------------
@@ -158,7 +267,7 @@ subroutine N(xzlamb)(w, rw, ecorr)
     if (ios == 0) close(77, iostat=ios)
     if (ios /= 0) then
       write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZLAMB failed (iostat ', ios, '): disk full?'
-      call errex
+      call xzerrex
     end if
     return
   end if
@@ -169,13 +278,13 @@ subroutine N(xzlamb)(w, rw, ecorr)
   inquire(file='XZLAMB', exist=there)
   if (.not. there) then
     write(6, '(/,a)') ' @XZCCSDT-F, no file XZLAMB: lambda of a converged run of xzccsdt lambda.'
-    call errex
+    call xzerrex
   end if
   open(unit=77, file='XZLAMB', form='unformatted', access='stream', status='old', action='read', iostat=ios)
   if (ios == 0) read(77, iostat=ios) tag, head, e
   if (ios /= 0 .or. tag /= 'XZLAMB01') then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZLAMB is not a file of lambda of this program.'
-    call errex
+    call xzerrex
   end if
   if (head(1) /= no .or. head(2) /= nv .or. head(3) /= NW .or. head(4) /= ncls .or. head(5) /= n3) then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZLAMB belongs to another calculation or another mode:'
@@ -183,12 +292,12 @@ subroutine N(xzlamb)(w, rw, ecorr)
     write(6, '(a,5i12)') '   and here:                                                      ', no, nv, &
       int(NW, 8), ncls, n3
     write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: XZ_LABELS, XZ_REAL)'
-    call errex
+    call xzerrex
   end if
   if (abs(e - ecorr) > 1d-9) then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZLAMB is lambda of other amplitudes than those of XZAMPS:'
     write(6, '(a,2f20.12)') '   CCSDT correlation energies of the two files: ', e, ecorr
-    call errex
+    call xzerrex
   end if
   if (with_den) read(77, iostat=ios) w(jl1:jl1 + n1 - 1)
   if (ios == 0) read(77, pos=57 + 8 * n1, iostat=ios) w(jl2:jl2 + n2 - 1)
@@ -196,7 +305,7 @@ subroutine N(xzlamb)(w, rw, ecorr)
   close(77)
   if (ios /= 0) then
     write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZLAMB failed, iostat ', ios
-    call errex
+    call xzerrex
   end if
   if (t3shared) call xzmapt3(w, 'XZLAMB', n1 + n2, NW * n3, jl3)
 end subroutine
@@ -391,11 +500,14 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   use xzdata
   use xzmem
   use xzkern
+  use xzdist
   use omp_lib
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: kl1, kl2, kl3, kl1n, kl2n, kr3
   logical, intent(in) :: dump
+  integer(8) :: p0, kex
+  real(8) :: tst, tsg
   integer(8) :: m0, m1, ov, ov2, kk
   integer(8) :: kl2p, kl2pp, kyall, kdr, kd1, kg, kdo4, kgoo3, kgvv3, kgvv, kgoo, kdov, ku, kvp
   integer(8) :: kr1, kr2, kr2q, kr1x, kxij, ky1c, kg2, kpmv, ky2t, kbl, kbt, kz, ktv, kxp, kx2b
@@ -414,6 +526,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   dense = ncls == 1
   tcur = 2
   m0 = xzmark()
+  tst = omp_get_wtime()
   kl2p = xzget(NW * no * no * nvp, 'L2 [i][j][Q]')
   kl2pp = xzget(NW * npo * nvp, 'L2 [P][Q]')
   kyall = xzget(NW * npo * nv * ny, 'pass-1 result Y')
@@ -448,15 +561,24 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     call xztoc(2, 'L2 on pairs, zeros')
   end if
   m1 = xzmark()
+  tsg = omp_get_wtime()
+  dkind = 4
   if (dense) then
     kbl = xzget(NW * nbp * ov * nvp, 'pass-1 batch of L3')
     kbt = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
     if (.not. xzdry) then
       stats = 0
       call xztic()
-      call N(zc_l3_pass1w)(w(kl3), w(jt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), &
-                           w(jvsgn), nbp, w(lgpd), w(lgmq), ny, w(kl2pp), w(lbdrv), w(kyall), w(kdr), &
-                           w(kd1), stats, w(kbl), w(kbt))
+      ! (the rows of the pairs of other ranks)
+      if (nrank > 1) call zc_vzero_d(NW * npo * nv * ny, w(kyall))
+      do p0 = 0, npo - 1, nbp
+        if (.not. xzmine(p0)) cycle
+        call xzbtic()
+        call N(zc_l3_pass1r)(w(kl3), w(jt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), &
+                             w(jvsgn), nbp, p0, min(p0 + nbp, npo), w(lgpd), w(lgmq), ny, w(kl2pp), w(lbdrv), &
+                             w(kyall), w(kdr), w(kd1), stats, w(kbl), w(kbt))
+        call xzbtoc(p0)
+      end do
       call xztoc(2, 'pass 1')
       call xztpart(2, 'pass 1: gather', stats(1))
       call xztpart(2, 'pass 1: stacked GEMMs', stats(2))
@@ -465,12 +587,55 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   else
     call N(xzlbpass1)(w, kl3, jt3, w(lgpd), w(lgmq), w(kl2pp), w(lbdrv), w(kyall), w(kdr), w(kd1))
   end if
+  dkind = 0
   call xzrel(m1)
-
-  ! ---- the Gram matrix of l3 and T3
   if (.not. xzdry) then
+    dsec(1, 2) = dsec(1, 2) + omp_get_wtime() - tsg
+    if (nrank > 1) then
+      ! what the batches of all ranks made, on every rank
+      tsg = omp_get_wtime()
+      tint(1) = tint(1) + tsg - tst
+      call xztic()
+      call xzmpi_barrier()
+      call xztoc(2, 'MPI: waiting for the ranks')
+      dsec(9, 2) = dsec(9, 2) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call xzmpi_allsum_w(w(lbdrv), NW * ny * no * nvp)
+      call xzmpi_allsum_w(w(kyall), NW * npo * nv * ny)
+      call xzmpi_allsum_w(w(kdr), NW * ov2)
+      call xzmpi_allsum_w(w(kd1), NW * ov)
+      call xztoc(2, 'MPI: sums of pass 1')
+      dsec(4, 2) = dsec(4, 2) + omp_get_wtime() - tsg
+      tsync = omp_get_wtime()
+    end if
+  end if
+
+  ! ---- the Gram matrix of l3 and T3 (rank 0: only the residuals of rank 1
+  !      and 2 need it; with slices every rank makes the rows of its triples)
+  if (.not. xzdry .and. slices) then
+    tsg = omp_get_wtime()
     call xztic()
-    if (dense) then
+    call zc_vzero_d(NW * nto * nto, w(kg))
+    do g = 0, ntg - 1
+      ni = otoff(g + 1) - otoff(g)
+      na = vtoff(g + 1) - vtoff(g)
+      if (ni == 0 .or. na == 0) cycle
+      call xzslrows(g, i0, nb)
+      if (nb <= i0) cycle
+      call N(zc_gemm)(0_4, 1_4, nb - i0, ni, na, one, w(kl3 + NW * (boff(g) + i0 * na)), na, &
+                      w(jt3 + NW * boff(g)), na, zero, w(kg + NW * ((otoff(g) + i0) * nto + otoff(g))), nto)
+    end do
+    call xztoc(2, 'Gram matrix')
+    dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
+    call xzmpi_sum0_w(w(kg), NW * nto * nto)
+    call xztoc(2, 'MPI: sum of the Gram matrix')
+  end if
+  if (.not. xzdry .and. myrank == 0) then
+    tsg = omp_get_wtime()
+    call xztic()
+    if (slices) then
+      ! (made above)
+    else if (dense) then
       call N(zc_gemm)(0_4, 1_4, nto, nto, nvt, one, w(kl3), nvt, w(jt3), nvt, zero, w(kg), nto)
     else
       call zc_vzero_d(NW * nto * nto, w(kg))
@@ -484,6 +649,10 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     end if
     call N(xzlgramd)(no, npo, nto, w(jotri), w(josgn), w(kg), w(kdo4), w(kgoo3))
     call xztoc(2, 'Gram matrix')
+    dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
+  end if
+  if (.not. xzdry) then
+    call xztic()
     ! the operands of this iteration
     call N(xzlitops)(no, nv, npo, nvp, w(kl1), w(kl2), w(kl2p), w(kl2pp), w(lfov), w(looovd), w(jgpp), &
                      w(kyall), w(jopa), w(jopb), w(lbdrv), w(ladrv), w(kxij), w(ky1c), w(ku), w(kvp), w(kg2))
@@ -492,24 +661,36 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
 
   ! ---- pass 2: ring, outer products, drive products
   call xztic()
+  tsg = omp_get_wtime()
   if (.not. xzdry) call zc_vzero_d(NW * n3, w(kr3))
   m1 = xzmark()
+  dkind = 5
   if (dense) then
     kbl = xzget(NW * nbp * ov * nvp, 'pass-2 batch of L3')
     kz = xzget(NW * nbp * ov * nvp, 'pass-2 product')
     if (.not. xzdry) then
       stats = 0
-      call N(zc_l3_pass2w)(w(kl3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
-                           w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, w(lwl), w(ku), 2_8, w(kvp), &
-                           w(ladrv), kk, w(lbdrv), w(kr3), stats, w(kbl), w(kz))
+      do p0 = 0, npo - 1, nbp
+        if (.not. xzmine(p0)) cycle
+        call xzbtic()
+        call N(zc_l3_pass2r)(w(kl3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
+                             w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), w(lwl), &
+                             w(ku), 2_8, w(kvp), w(ladrv), kk, w(lbdrv), w(kr3), stats, w(kbl), w(kz))
+        call xzbtoc(p0)
+      end do
     end if
   else
     kbl = xzget(NW * 2 * nbd, 'pass-2 operand B in blocks')
     if (.not. xzdry) call N(xzbbdk)(2_8, w(lbdrv), w(kbl))
     call N(xzbpass2)(w, kl3, kr3, w(lwl), w(ladrv), w(kbl), 2_8, 2_8, w(ku), w(kvp))
   end if
+  dkind = 0
   call xzrel(m1)
-  if (.not. xzdry) call xztoc(2, 'pass 2')
+  if (.not. xzdry) then
+    call xztoc(2, 'pass 2')
+    dsec(3, 2) = dsec(3, 2) + omp_get_wtime() - tsg
+  end if
+  tsg = omp_get_wtime()
 
   ! ---- the ladder with the transposed pp operator; Xq and X2
   if (.not. xzdry) then
@@ -517,6 +698,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     call zc_vzero_d(NW * ov, w(kr1x))
   end if
   m1 = xzmark()
+  dkind = 6
   if (dense) then
     ktv = xzget(NW * nvp * nbt * nv, 'ladder batch of L3')
     kxp = xzget(NW * nvp * nbt * nv, 'ladder product')
@@ -524,6 +706,8 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     if (.not. xzdry) then
       do i0 = 0, nto - 1, nbt
         nb = min(nbt, nto - i0)
+        if (.not. xzmine(i0)) cycle
+        call xzbtic()
         call xztic()
         call N(zc_gather_vir_half)(w(kl3), nvt, w(jrows + i0), nb, w(jvtri), w(jvsgn), nv, nvp, w(ktv))
         call xztoc(2, 'ladder: gather')
@@ -540,12 +724,61 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
         call N(xzlx2b)(no, nvp, nto, nb, i0, w(lx2), w(kx2b))
         call N(zc_gemm)(1_4, 0_4, nv, no, nvp * nb, one, w(ktv), nv, w(kx2b), no, one, w(kr1x), no)
         call xztoc(2, 'ladder: reduction, small')
+        call xzbtoc(i0)
       end do
     end if
   else
     call N(xzlbladder)(w, kl3, kr3, w(lxq), w(lx2), w(kr2q), w(kr1x))
   end if
+  dkind = 0
   call xzrel(m1)
+  if (.not. xzdry) then
+    dsec(2, 2) = dsec(2, 2) + omp_get_wtime() - tsg
+    if (nrank > 1) then
+      ! the parts of the residual of l3 and of what the ladder adds to the
+      ! residuals of rank 1 and 2, summed onto rank 0
+      tsg = omp_get_wtime()
+      tint(2) = tint(2) + tsg - tsync
+      call xztic()
+      call xzmpi_barrier()
+      call xztoc(2, 'MPI: waiting for the ranks')
+      dsec(10, 2) = dsec(10, 2) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      if (.not. slices) call xzmpi_sum0_w(w(kr3), NW * n3)
+      call xzmpi_sum0_w(w(kr2q), NW * npo * nvp)
+      call xzmpi_sum0_w(w(kr1x), NW * ov)
+      call xztoc(2, 'MPI: sum of the residual')
+      dsec(5, 2) = dsec(5, 2) + omp_get_wtime() - tsg
+    end if
+    dsec(7, 2) = dsec(7, 2) + omp_get_wtime() - tst
+  end if
+  if (slices) then
+    ! the rows of this rank: the transposed operator on occupied triples, the
+    ! parts of the residual of all ranks; a rank other than 0 then does the
+    ! Jacobi step on its rows and is done
+    kex = xzget(min(xzmpi_chunk(), NW * max(smax, 1_8)), 'chunk of the exchange')
+    if (.not. xzdry) then
+      tsg = omp_get_wtime()
+      call xztic()
+      call N(xzslocc)(w, kl3, kr3, w(lo6t))
+      call xztoc(2, 'hh ladder, F_oo')
+      dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call xzmpi_slices_add(w(kr3), swoff, w(kex))
+      call xztoc(2, 'MPI: residual to its rows')
+      dsec(5, 2) = dsec(5, 2) + omp_get_wtime() - tsg
+      if (myrank > 0) then
+        call N(xzslupd)(w, kl3, kr3)
+        call xztoc(2, 'L3 update')
+      end if
+    end if
+  end if
+  ! (the rest is rank 0's)
+  if (.not. xzdry .and. myrank > 0) then
+    call xzrel(m0)
+    return
+  end if
+  tsg = omp_get_wtime()
 
   ! ---- the transposed operator on the occupied triples
   m1 = xzmark()
@@ -553,7 +786,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     khg = xzget(NW * npo * no * xzhhcols(), 'hh ladder: L3 by pairs')
     khx = xzget(NW * npo * no * xzhhcols(), 'hh ladder: product')
   end if
-  if (.not. xzdry) then
+  if (.not. xzdry .and. .not. slices) then
     call xztic()
     if (xzhhpair()) then
       call N(xzhhapply)(0_4, no, npo, nto, nvt, xzhhcols(), w(jotri), w(josgn), w(jofree), w(jopair), w(lo6t), &
@@ -641,12 +874,16 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
     call N(xzlupd)(no, nv, npo, nvp, w(jeps), w(kl1), w(kl2), w(kr1), w(kr2), w(jopa), w(jopb), &
                    w(jvpa), w(jvpb), w(kl1n), w(kl2n))
     call xztoc(2, 'update of L1, L2')
-    if (dense) then
+    if (slices) then
+      call N(xzslupd)(w, kl3, kr3)
+    else if (dense) then
       call N(zc_t3_update)(w(kl3), w(kr3), nto, nvt, w(jeo3), w(jev3), c_null_ptr)
     else
       call N(xzbupd)(w, kl3, kr3)
     end if
     call xztoc(2, 'L3 update')
+    dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
+    dsec(7, 2) = dsec(7, 2) + omp_get_wtime() - tsg
   end if
   call xzrel(m0)
 end subroutine

@@ -53,7 +53,7 @@ KCFLAGS ?= $(CFLAGS)
 
 # the C kernels that the program calls
 KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda
-MODS    := xzkern xzmem xzdata xzdiis xzpar xzfrz
+MODS    := xzkern xzmem xzdata xzdiis xzpar xzdist xzfrz
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
 INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc
 
@@ -67,7 +67,7 @@ $(BUILD)/xzccsdt: $(OBJS)
 $(BUILD)/%.o: %.F90 $(INCS) | $(BUILD)
 	$(FC) $(FCFLAGS) -module $(BUILD) -I. -I$(CFOUR)/libx2c -c $< -o $@
 
-$(BUILD)/xzccsdt.o: xzccsdt.f $(BUILD)/xzpar.o | $(BUILD)
+$(BUILD)/xzccsdt.o: xzccsdt.f $(BUILD)/xzpar.o $(BUILD)/xzdist.o | $(BUILD)
 	$(FC) $(FCFLAGS) -extend-source -module $(BUILD) -c $< -o $@
 
 $(BUILD)/xzutil.o: xzutil.c | $(BUILD)
@@ -83,6 +83,7 @@ $(BUILD)/%.o: $(CSRC)/%.c | $(BUILD)
 $(addprefix $(BUILD)/, $(addsuffix .o, $(SRCS))): $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS)))
 $(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o $(BUILD)/xzpar.o: $(BUILD)/xzkern.o
 $(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o
+$(BUILD)/xzdist.o: $(BUILD)/xzdata.o $(BUILD)/xzpar.o
 
 $(BUILD):
 	mkdir -p $(BUILD)

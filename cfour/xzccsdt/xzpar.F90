@@ -67,6 +67,65 @@ module xzpar
     end subroutine
     subroutine xzmpi_barrier() bind(C)
     end subroutine
+    ! arrays of n double words in messages of at most xzmpi_chunk() words:
+    ! from rank 0 to all; to / from one rank; the sum over the ranks in place
+    ! on rank 0; the sum over the ranks in place on every rank
+    subroutine xzmpi_bcast_w(buf, n) bind(C)
+      import
+      type(*), dimension(*) :: buf
+      integer(c_int64_t), value :: n
+    end subroutine
+    subroutine xzmpi_send_w(buf, n, dest, tag) bind(C)
+      import
+      type(*), dimension(*) :: buf
+      integer(c_int64_t), value :: n, dest, tag
+    end subroutine
+    subroutine xzmpi_recv_w(buf, n, src, tag) bind(C)
+      import
+      type(*), dimension(*) :: buf
+      integer(c_int64_t), value :: n, src, tag
+    end subroutine
+    subroutine xzmpi_sum0_w(buf, n) bind(C)
+      import
+      type(*), dimension(*) :: buf
+      integer(c_int64_t), value :: n
+    end subroutine
+    subroutine xzmpi_allsum_w(buf, n) bind(C)
+      import
+      type(*), dimension(*) :: buf
+      integer(c_int64_t), value :: n
+    end subroutine
+    ! slices of an array (off: the first word of the slice of every rank, and
+    ! the end): the contributions of all ranks summed on the slice of its
+    ! owner; the slices of the owners to every rank
+    subroutine xzmpi_slices_add(buf, off, tmp) bind(C)
+      import
+      type(*), dimension(*) :: buf, tmp
+      integer(c_int64_t) :: off(*)
+    end subroutine
+    subroutine xzmpi_slices_put(buf, off) bind(C)
+      import
+      type(*), dimension(*) :: buf
+      integer(c_int64_t) :: off(*)
+    end subroutine
+    subroutine xzmpi_set_chunk(n) bind(C)
+      import
+      integer(c_int64_t), value :: n
+    end subroutine
+    function xzmpi_chunk() bind(C) result(r)
+      import
+      integer(c_int64_t) :: r
+    end function
+    function xzmpi_selftest(n) bind(C) result(r)
+      import
+      integer(c_int64_t), value :: n
+      integer(c_int64_t) :: r
+    end function
+    subroutine xzmpi_node(name, len) bind(C)
+      import
+      character(kind=c_char) :: name(*)
+      integer(c_int64_t), value :: len
+    end subroutine
     subroutine xzmpi_finalize() bind(C)
     end subroutine
     subroutine xzmpi_abort(code) bind(C)

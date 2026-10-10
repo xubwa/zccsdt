@@ -25,6 +25,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   use xzdata
   use xzmem
   use xzkern
+  use xzdist
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -59,6 +60,10 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   do gp = 0, npg - 1
     do p0 = opoff(gp), opoff(gp + 1) - 1, nbp
       nb = min(nbp, opoff(gp + 1) - p0)
+      if (.not. xzdry) then
+        if (.not. xzmine(p0)) cycle
+      end if
+      call xzbtic()
       mk = xzmark()
       ngq = 0
       ntask = 0
@@ -208,6 +213,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
                             ocoff(sy + 1) - ocoff(sy), p0, vcoff(sd), vcoff(sy), ocoff(sy), w(tky(it)), yall)
         end do
         call xztoc(tcur, 'pass 1: stacked GEMMs')
+        call xzbtoc(p0)
       end if
       call xzrel(mk)
     end do
@@ -277,6 +283,7 @@ subroutine N(xzlbladder)(w, kl3, kr3, xq, x2, r2q, r1x)
   use xzdata
   use xzmem
   use xzkern
+  use xzdist
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -293,6 +300,10 @@ subroutine N(xzlbladder)(w, kl3, kr3, xq, x2, r2q, r1x)
     if (vtoff(g + 1) == vtoff(g)) cycle
     do i0 = otoff(g), otoff(g + 1) - 1, nbt
       nb = min(nbt, otoff(g + 1) - i0)
+      if (.not. xzdry) then
+        if (.not. xzmine(i0)) cycle
+      end if
+      call xzbtic()
       do sc = 0, ncls - 1
         h = g - sc
         if (h < 0 .or. h >= npg) cycle
@@ -335,6 +346,7 @@ subroutine N(xzlbladder)(w, kl3, kr3, xq, x2, r2q, r1x)
         end if
         call xzrel(mk)
       end do
+      if (.not. xzdry) call xzbtoc(i0)
     end do
   end do
 end subroutine

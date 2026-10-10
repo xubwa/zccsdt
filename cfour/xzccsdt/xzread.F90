@@ -55,19 +55,19 @@ subroutine xzrfile(fname, buf, n)
     write(6, '(/,a,a)') ' @XZCCSDT-F, no file ', trim(fname)
     if (fname == 'moinpppp') write(6, '(a)') &
       '   xx2cvtran writes <ab||cd> only with ABCDTYPE=STANDARD.'
-    call errex
+    call xzerrex
   end if
   if (xzrecbytes(nbytes) /= 8 * n) then
     write(6, '(/,a,a,a,i16,a,i16,a)') ' @XZCCSDT-F, the file ', trim(fname), ' has ', xzrecbytes(nbytes), &
       ' bytes of data; ', 8 * n, ' are expected for the sizes of this run.'
-    call errex
+    call xzerrex
   end if
   open(unit=71, file=fname, form='unformatted', access='sequential', status='old', &
        action='read', iostat=ios)
   if (ios == 0) read(71, iostat=ios) buf
   if (ios /= 0) then
     write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', trim(fname), ' failed, iostat ', ios
-    call errex
+    call xzerrex
   end if
   close(71)
 end subroutine xzrfile
@@ -90,7 +90,7 @@ subroutine xzsizes()
     if (.not. there) then
       write(6, '(/,a,a,a)') ' @XZCCSDT-F, no file ', trim(need(k)), &
         ' (run after xjoda, xsox2catm, xsox2chf and xx2cvtran).'
-      call errex
+      call xzerrex
     end if
   end do
   inquire(file='moinhhhh', size=nb)
@@ -99,14 +99,14 @@ subroutine xzsizes()
   no = nint((sqrt(8d0 * dble(po) + 1d0) - 1d0) / 2d0, 8)
   if (no < 1 .or. (no * (no + 1) / 2) ** 2 /= nel) then
     write(6, '(/,a)') ' @XZCCSDT-F, moinhhhh is not a block on pairs of occupied spinors.'
-    call errex
+    call xzerrex
   end if
   inquire(file='moinhhpp', size=nb)
   nel = xzrecbytes(nb) / 16
   nv = nint(sqrt(dble(nel)) / dble(no), 8)
   if (nv < 1 .or. (no * nv) ** 2 /= nel) then
     write(6, '(/,a)') ' @XZCCSDT-F, moinhhhh and moinhhpp do not belong together.'
-    call errex
+    call xzerrex
   end if
   open(unit=71, file='nmototal', form='unformatted', access='sequential', status='old', action='read')
   read(71) ntot
@@ -127,7 +127,7 @@ subroutine xzsizes()
   if (ndropped < 0) then
     write(6, '(/,a,4i7)') ' @XZCCSDT-F, the integral files are not those of this SCF: ' // &
       'spinors, frozen, occupied, virtual', ntot, nfrozen, no, nv
-    call errex
+    call xzerrex
   end if
   ny = no + nv
   npo = no * (no - 1) / 2
@@ -189,7 +189,7 @@ subroutine xzrdlab(nlab, lab, modul, there)
   if (n /= nlab .or. have /= nlab) then
     write(6, '(/,a,i6,a,i6,a,i6,a)') ' @XZCCSDT-F, the file xzlabels: ', n, ' spinors announced, ', have, &
       ' labels found; the SCF has ', nlab, ' spinors.'
-    call errex
+    call xzerrex
   end if
 end subroutine xzrdlab
 

@@ -61,6 +61,12 @@ module xzkern
       integer(c_int64_t) :: kb(4)
     end subroutine
 
+    ! kB that the node can still give (-1: unknown)
+    function xz_mem_avail() bind(C) result(kb)
+      import
+      integer(c_int64_t) :: kb
+    end function
+
     ! kB of the process: (1) peak resident set, (2) resident set now
     subroutine xz_rss(kb) bind(C)
       import
