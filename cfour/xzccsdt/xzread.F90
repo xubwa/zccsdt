@@ -14,6 +14,9 @@
 !   moinpppp   <ab||cd>  [a<=b, c<=d]
 !   xzlabels   optional, not a file of CFOUR: a symmetry label per spinor
 !              (xzrdlab)
+!   dgcosym    the block of the SCF of every spinor (xsox2chf; m_j blocks
+!              with %dglin in the ZMAT): the labels if there is no xzlabels
+!              (xzrddgc)
 !
 ! Each integral file is one record of an unformatted sequential file,
 ! complex(8), the first index fastest; a pair p<=q has the number
@@ -192,6 +195,61 @@ subroutine xzrdlab(nlab, lab, modul, there)
     call xzerrex
   end if
 end subroutine xzrdlab
+
+! ---------------------------------------------------------------------------
+! The symmetry labels of the spinors from the file dgcosym of CFOUR's
+! two-component SCF (xsox2chf), for a run directory without xzlabels - the
+! rule of zccsdt.cfour.read_dgcosym / read_labels.  The file is one record
+! of nlab 8-byte integers: the block of the SCF of every spinor in the order
+! of scf2ceig; all 1 unless the ZMAT has a section %dglin, with which the
+! SCF is done in blocks of m_j (linsym of sox2chf): block 2k - 1 is
+! m_j = +(2k - 1)/2, block 2k is m_j = -(2k - 1)/2.  A block number is not a
+! label that adds; the label is 2 m_j, +(2k - 1) and -(2k - 1), with no
+! modulus.  (This routine is the only place where the numbering of the
+! blocks is known; a table for another kind of blocks would give labels and
+! a modulus here, and the caller takes both as it takes those of xzlabels.)
+!   there = .false.: no file, or one block only (no symmetry in the SCF)
+!   nblk: the largest block number of the file (0: no file)
+subroutine xzrddgc(nlab, lab, modul, there, nblk)
+  implicit none
+  integer(8), intent(in) :: nlab
+  integer(8), intent(out) :: lab(0:nlab-1), modul, nblk
+  logical, intent(out) :: there
+  integer(8) :: nbytes, p, k
+  integer(8), external :: xzrecbytes
+  integer :: ios
+  modul = 0
+  nblk = 0
+  inquire(file='dgcosym', exist=there, size=nbytes)
+  if (.not. there) return
+  if (xzrecbytes(nbytes) /= 8 * nlab) then
+    write(6, '(/,a,i12,a,i8,a)') ' @XZCCSDT-F, the file dgcosym has ', xzrecbytes(nbytes), &
+      ' bytes of data; one 8-byte integer for each of the ', nlab, ' spinors of the SCF'
+    write(6, '(a,i12,a)') '             is expected (nmototal), ', 8 * nlab, &
+      ' bytes.  (The file xzlabels, if it is there, is used instead.)'
+    call xzerrex
+  end if
+  open(unit=71, file='dgcosym', form='unformatted', access='sequential', status='old', &
+       action='read', iostat=ios)
+  if (ios == 0) read(71, iostat=ios) lab
+  if (ios /= 0) then
+    write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file dgcosym failed, iostat ', ios
+    call xzerrex
+  end if
+  close(71)
+  nblk = maxval(lab)
+  if (minval(lab) < 1) then
+    write(6, '(/,a,i12,a)') ' @XZCCSDT-F, the file dgcosym: a block number ', minval(lab), &
+      '; the blocks of the SCF are numbered from 1.'
+    call xzerrex
+  end if
+  there = nblk > 1
+  if (.not. there) return
+  do p = 0, nlab - 1
+    k = (lab(p) + 1) / 2
+    lab(p) = merge(2 * k - 1, -(2 * k - 1), mod(lab(p), 2_8) == 1)
+  end do
+end subroutine xzrddgc
 
 ! ---------------------------------------------------------------------------
 ! The energies of the active spinors, occupied first, in the order of the

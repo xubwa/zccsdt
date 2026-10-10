@@ -29,9 +29,13 @@ module xzdata
   integer(8) :: nwe = 2             ! words of an element: 2 complex, 1 real
   integer(8) :: n3 = 0              ! elements of T3 as it is stored (the allowed blocks)
 
-  ! ---- symmetry labels (the file xzlabels) and their classes
+  ! ---- symmetry labels (the file xzlabels, else dgcosym of CFOUR's SCF) and
+  !      their classes.  A label is an integer that adds, modulo modulus if
+  !      that is not 0; the block code below is for modulus 0 only (the
+  !      classes are (label - smallest) / step, a group is a sum of classes)
   integer, parameter :: maxcls = 64, maxgrp = 3 * maxcls
-  logical :: have_labels = .false.  ! the file is there and can be used
+  logical :: have_labels = .false.  ! labels were found and can be used
+  character(len=8) :: labfile = ' ' ! the file they came from: xzlabels, dgcosym
   integer(8) :: modulus = 0
   integer(8) :: ncls = 1            ! classes of the labels: (label - smallest) / step
   integer(8) :: npg = 1, ntg = 1    ! groups of pairs (2 ncls - 1) and of triples (3 ncls - 2)

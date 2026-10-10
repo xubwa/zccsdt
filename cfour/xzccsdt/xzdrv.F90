@@ -3,11 +3,13 @@
 ! plan, the integrals, the CCSDT iterations, (Q), the energies.
 !
 ! Two things are decided from the integrals that are read:
-!   blocks   if the file xzlabels is there, its labels are used - the spinors
-!            in the order of their classes, T3 and <ab||cd> on the allowed
-!            blocks only - provided no integral that they forbid is larger
-!            than 1e-8; otherwise the labels are dropped with a warning (one
-!            class: the dense case of the same code)
+!   blocks   the labels of the file xzlabels if it is there, else those of
+!            the file dgcosym of CFOUR's SCF if that was done in more than
+!            one block (%dglin: 2 m_j), are used - the spinors in the order
+!            of their classes, T3 and <ab||cd> on the allowed blocks only -
+!            provided no integral that they forbid is larger than 1e-8;
+!            otherwise the labels are dropped with a warning (one class: the
+!            dense case of the same code)
 !   real     if no integral has an imaginary part above 1e-10, the real
 !            instance of the code runs (half the memory, real kernels)
 ! The integrals are read for the most favourable case first (labels, real);
@@ -28,7 +30,7 @@ subroutine xzdrv(w, maxcor)
   real(8) :: w(maxcor)
   integer(8) :: iintln, ifltln, iintfp, ialone, ibitwd
   common /machsp/ iintln, ifltln, iintfp, ialone, ibitwd
-  integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2), nmax, status
+  integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2), nmax, status, nblk
   logical :: usefile, converged, uselab, tryreal, isreal, there, docc
   real(8) :: sync(2)
   real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall, tlm, tden, lhs, rhs
@@ -88,17 +90,32 @@ subroutine xzdrv(w, maxcor)
 
   ! ---- the symmetry labels
   allocate(lab(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
+  !      (every rank reads them from the files of its run directory, by the
+  !      same rule: 1. xzlabels, 2. dgcosym with more than one block, 3. none)
+  nblk = 0
   call xzrdlab(ntot, lab, modulus, there)
+  if (there) then
+    labfile = 'xzlabels'
+    write(6, '(a,i4)') '   symmetry labels: the file xzlabels, modulus ', modulus
+  else
+    call xzrddgc(ntot, lab, modulus, there, nblk)
+    if (there) then
+      labfile = 'dgcosym'
+      write(6, '(a,i0,a,i0,a,i0)') '   symmetry labels: the file dgcosym of CFOUR''s SCF (m_j blocks), block numbers up to ', &
+        nblk, ': labels 2 m_j, |2 m_j| up to ', 2 * ((nblk + 1) / 2) - 1, ', modulus ', modulus
+    else if (nblk == 1) then
+      write(6, '(a)') '   symmetry labels: none (no file xzlabels; dgcosym: one block, an SCF without %dglin)'
+    else
+      write(6, '(a)') '   symmetry labels: none (no file xzlabels, no file dgcosym)'
+    end if
+  end if
   have_labels = there
   uselab = there
-  if (there) then
-    write(6, '(a,i4)') '   symmetry labels: the file xzlabels, modulus ', modulus
-    if (modulus /= 0) then
-      write(6, '(a)') ' @XZCCSDT-W, labels with a modulus are not used by this program: one block.'
-      uselab = .false.
-    end if
-  else
-    write(6, '(a)') '   symmetry labels: none (no file xzlabels)'
+  ! (labels of either file with a modulus: the blocks of this program are
+  ! for labels that add without one)
+  if (there .and. modulus /= 0) then
+    write(6, '(a)') ' @XZCCSDT-W, labels with a modulus are not used by this program: one block.'
+    uselab = .false.
   end if
   call get_environment_variable('XZ_LABELS', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0' .and. uselab) then
@@ -154,6 +171,19 @@ subroutine xzdrv(w, maxcor)
     'one operator on the occupied triples  ', xzhhpair())
   write(6, '(a,f10.2,a)') '   integrals read and sorted: ', tread, ' s'
   flush(6)
+  ! (a rank other than 0 has decided from its own files: the labels, their
+  ! check against the integrals, real or complex - as rank 0, or not at all)
+  if (myrank > 0 .and. rplan(13) > 0d0) then
+    if (int(rplan(13), 8) /= ncls .or. int(rplan(14), 8) /= nwe .or. int(rplan(15), 8) /= n3) then
+      write(6, '(/,a)') ' @XZCCSDT-F, this rank and rank 0 have not decided alike from the files of their run directories:'
+      write(6, '(a,i4,a,i2,a,i16)') '             here    classes ', ncls, '   words per element ', nwe, &
+        '   elements of T3 ', n3
+      write(6, '(a,i4,a,i2,a,i16)') '             rank 0  classes ', int(rplan(13), 8), '   words per element ', &
+        int(rplan(14), 8), '   elements of T3 ', int(rplan(15), 8)
+      write(6, '(a)') '             (xzlabels, dgcosym and the integral files must be the same on every node.)'
+      call xzerrex
+    end if
+  end if
 
   ! ---- MP2: the second-order energy of the integrals as they were read (a
   !      check of the files, e.g. against the number that xx2cvtran prints)
@@ -179,6 +209,7 @@ subroutine xzdrv(w, maxcor)
     rplan(1) = dble(pneedw)
     rplan(2:9) = dble([nqs, nbt, nbp, nba, qxv, qc22, qc13, qrows])
     rplan(10:12) = dble([nslot, merge(1_8, 0_8, usefile), nch])
+    rplan(13:15) = dble([ncls, nwe, n3])
     call xzmpi_bcast(rplan, 128_8)
   end if
   ! (a test hook: XZ_WFAIL, an error on a rank other than 0)
@@ -745,7 +776,7 @@ subroutine xzlayout(w, status)
       call xzchklab(w(jold(1)), w(jold(2)), w(jold(3)), w(jold(4)), w(jold(7)), w(jvpgrp), &
                     vmax, what)
       if (vmax > tol_label) then
-        write(6, '(/,a)') ' @XZCCSDT-W, the labels of xzlabels are not symmetry labels of these spinors:'
+        write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
         write(6, '(a,a,a,es10.2,a)') '             an element of ', trim(what), ' that they forbid is ', &
           vmax, '.  The labels are not used.'
         write(6, '(a)') '             (Spinors of an SCF without the symmetry mix the labels: a pair of'
@@ -792,7 +823,7 @@ subroutine xzlayout(w, status)
   if (.not. xzdry) then
     call xzrdvvvv(w(jvvvv), w(jvpa), w(jvpb), w(krow), w(ksrc), w(ksg), offmax)
     if (offmax > tol_label) then
-      write(6, '(/,a)') ' @XZCCSDT-W, the labels of xzlabels are not symmetry labels of these spinors:'
+      write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
       write(6, '(a,es10.2,a)') '             an element of <vv||vv> that they forbid is ', offmax, &
         '.  The labels are not used.'
       status = 1
