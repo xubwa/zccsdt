@@ -2494,8 +2494,8 @@ meeting, and the batches are dealt again with those numbers (pass 2 of a
 rank starts when its ladder is done).  That also takes care of whatever a
 rank does besides its batches.  Measured on the login node with two ranks
 of 2 and 6 threads (26 + 78 in blocks): 4.02 s per cycle without, 2.37 s
-after one deal.  **On several nodes it is not measured yet with this
-commit** (see 15.7).  Energies do not depend on the deal: the regression
+after one deal.  On four nodes of nearly equal speed it changed a
+cycle by 0 to 6 % (15.7); on nodes of unequal speed it was not timed.  Energies do not depend on the deal: the regression
 set with a deal after every step (`XZ_REBAL=0.0001`, 15 to 18 deals per
 case) is identical to 12 decimals.
 
@@ -2706,8 +2706,52 @@ Gram matrix of the Lambda equations by rows on every rank (1.5 s per cycle
 of rank 0 at this size, part of the Lambda waiting).  So the four-node
 rows of the dense cases should improve by up to the waiting (an upper
 bound: 3.26 -> 3.9 real, 3.5 -> 4.4 complex on 4 x 1), the two-node and
-one-node rows hardly (waiting 0.5 to 1 s there).  The final commit was
-validated (15.5) but **not timed on several nodes**.
+one-node rows hardly (waiting 0.5 to 1 s there).  
+
+**The final commit** (a65ebe7: slices by default, batches by measured
+speeds, the Gram matrix by rows; snapshot `snap8`), one job each, the two
+main cases, the serial program of before first; seconds per cycle, mean of
+cycles 2 to 4, in brackets the speedup over the serial program of the job.
+
+*Four nodes* - job 31827703, nodes c097, c102, c106, c110 (the layout, the
+launch and the fabric of job 31814618; 38 minutes), small cases first: the
+energies of the serial program on 4 x 1 and 4 x 2 ranks.
+
+| nodes x ranks x threads | 26 + 120 dense real: CCSDT | Lambda | 26 + 160 real blocks: CCSDT | Lambda |
+|---|---|---|---|---|
+| serial before, 48 threads | 52.32 | 79.41 | 11.09 | 15.41 |
+| 2 x 1 x 48 | 28.59 (1.83) | 43.30 (1.83) | 7.63 (1.45) | 9.82 (1.57) |
+| 4 x 1 x 48 | 16.83 (3.11) | 24.78 (3.20) | 6.18 (1.79) | 6.92 (2.23) |
+| 4 x 1 x 48, `XZ_REBAL=0` | 16.90 | 25.05 | 6.09 | 7.37 |
+| 4 x 2 x 24 | 14.55 (3.60) | 19.95 (3.98) | 5.83 (1.90) | 6.87 (2.24) |
+
+These four nodes were nearly equally fast (measured speeds of the ranks
+0.93 to 1.08 of the mean; the batches were dealt again 2 to 4 times in 4
+cycles), so the measured speeds changed little: the largest waiting per
+cycle went from 0.85 to 0.69 s (CCSDT) and from 1.09 to 0.67 s (Lambda,
+dense), and a cycle by 0 to 6 %.  The 11 s of waiting of the complex case
+on the nodes of job 31814618 were **not** measured again with this commit:
+whether the speeds take them back as the two-rank test of 15.3 suggests is
+open.  The speedups are those of the earlier binary on other nodes within
+5 %; the Lambda equations on 4 x 2 gained (3.75 -> 3.98: the Gram matrix).
+
+*One node* - job 31827786, node c668; first HBr 26 + 78 in blocks,
+converged, `ccsdt(q)_l`: the serial program of before, 1 x 48, 2 x 24, 4 x
+12 and 4 x 12 with `XZ_SLICES=0` give E(CCSDT) -2605.269299541781,
+E(CCSDT[Q]_L) -2605.268884407871, E(CCSDT(Q)_L) -2605.269268719836, the
+pseudo-energy -0.29411064336159 and 20 / 18 cycles, all five alike (the
+files of this job; wall times 146.1, 151.4, 84.7, 83.4, 87.3 s).
+
+| | serial before | interleaved | 1 x 48 | 2 x 24 | 4 x 12 |
+|---|---|---|---|---|---|
+| 26 + 120 dense real, CCSDT | 46.72 | 44.33 | 46.32 | **39.49 (1.18)** | 41.10 |
+| Lambda | 73.83 | 67.81 | 73.24 | **59.10 (1.25)** | 61.93 |
+| 26 + 160 real blocks, CCSDT | 9.25 | | 9.23 | **8.19 (1.13)** | 10.13 |
+| Lambda | 12.57 | | 12.77 | **10.64 (1.18)** | 11.10 |
+
+(the complex dense case on one node was not run: the job was ended there
+to save machine time.)
+
 
 ### 15.8 An estimate for benzene / cc-pVDZ (30 + 186, complex, dense)
 
@@ -2727,7 +2771,7 @@ hour on 16 cores).  T3 is 68.5 GB.  With slices, one rank per node:
 assumptions: the measured rates hold for transfers twelve times larger and
 for 8 ranks at one rank per node (measured: 4 ranks at one per node, 8 at
 two per node, where the rate per rank halved); the speeds of the nodes are
-balanced as in 15.3 (not yet measured on several nodes).  **Memory**: a
+balanced as in 15.3 (measured on nearly equal nodes only).  **Memory**: a
 rank holds 2 T3 = 137 GB and about 15 GB of integrals and batches - it fits
 a 189 GB node, which the serial run does not (its DIIS vectors then go to a
 file of 1.1 TB) -, and its slice of the DIIS history, 16 x 68.5 / n GB: 274
@@ -2763,8 +2807,9 @@ the transfer rates above are Intel MPI's, in particular the slow
 
 ### 15.10 Not done
 
-- The timing of the final commit on several nodes (15.7: the batches by
-  measured speeds, the Gram matrix by rows).
+- The batches by measured speeds on nodes of unequal speed, and the
+  complex case, with the final commit (15.7: timed on four nearly equal
+  nodes, real cases only).
 - T3 shared by the ranks of one node (15.1); the intermediates of the
   blocks split over the ranks (15.6); `X2`, `Xq` of the Lambda equations
   by rows of the owner (15.8).
