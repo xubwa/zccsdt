@@ -33,15 +33,19 @@
 
 ! ---------------------------------------------------------------------------
 ! The place of the subspace of evcap vectors of nlen elements: the work
-! array, or files.  avail: words that are free for it.  With files the
-! number of vectors is lowered to what the disk holds (at least nmin).
-subroutine N(xzevopen)(nlen, msub, nmin, avail, mayfile)
+! array, or files.  avail: words that are free for it.  If not all msub
+! vectors fit in the work array but at least nmem of them do, the subspace
+! is that small and stays there (a smaller subspace costs sigma vectors;
+! files cost about seven readings of the whole subspace per new vector).
+! With files the number of vectors is lowered to what the disk holds (at
+! least nmin).
+subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
   use xzdata
   use xzmem
   use xzkern
   use xzeomd
   implicit none
-  integer(8), intent(in) :: nlen, nmin, avail
+  integer(8), intent(in) :: nlen, nmin, nmem, avail
   integer(8), intent(inout) :: msub
   logical, intent(in) :: mayfile
   integer(8) :: need, free_bytes, per, nfit
@@ -52,6 +56,16 @@ subroutine N(xzevopen)(nlen, msub, nmin, avail, mayfile)
   evnh = 0
   need = 2 * msub * (NW * nlen + xzalign)
   evfile = need > avail
+  if (evfile .and. mayfile) then
+    nfit = avail / (2 * (NW * nlen + xzalign))
+    if (nfit >= nmem) then
+      write(6, '(a,i4,a,i4,a)') '   the work array holds ', nfit, ' vectors of the subspace with their sigma vectors (', msub, &
+        ' asked for): the subspace is that small and stays in the work array'
+      msub = nfit
+      need = 2 * msub * (NW * nlen + xzalign)
+      evfile = .false.
+    end if
+  end if
   ! a test hook: XZ_EOMVEC=f (files), m (the work array)
   call get_environment_variable('XZ_EOMVEC', arg, larg)
   if (larg > 0 .and. mayfile .and. .not. xzdry) then
@@ -520,7 +534,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   nsig = 0
   nit = 0
   mv = xzmark()
-  call N(xzevopen)(nlen, msub, min(msub, 2 * nroot + 2), avail, .not. sd)
+  call N(xzevopen)(nlen, msub, min(msub, 2 * nroot + 2), min(msub, 3 * nroot + 4), avail, .not. sd)
   if (.not. quiet) then
     if (evfile) then
       write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the files EOMCnnnn, ' // &
@@ -884,7 +898,8 @@ subroutine N(xzeom)(w, ecorr)
   complex(8), allocatable :: ee(:)
   real(8), allocatable :: rmax(:), rnorm(:), wts(:, :)
   ZT, allocatable :: vlead(:, :)
-  real(8) :: t0, t1, tsh, tsg
+  real(8) :: t0, t1, tsh, tsg, need
+  integer(8) :: free_bytes
   logical :: ok, dense
   character(len=256) :: arg
   integer :: larg, ios, iures
@@ -980,12 +995,31 @@ subroutine N(xzeom)(w, ecorr)
     return
   end if
 
-  iures = 78
-  open(unit=iures, file='XZEOMR', form='unformatted', access='stream', status='replace', iostat=ios)
-  if (ios == 0) write(iures, iostat=ios) 'XZEOMR01', no, nv, int(NW, 8), ncls, labstep
-  if (ios /= 0) then
-    write(6, '(a)') ' @XZCCSDT-W, the file XZEOMR of the vectors cannot be written: no vectors are kept.'
-    iures = 0
+  ! ---- the file of the vectors of the roots, if the disk of the run directory holds them
+  iures = 0
+  if (ewvec /= 0 .and. .not. eccsd) then
+    need = 0d0
+    do ish = 1, nprob
+      call problem(ish, s, nroot, ok)
+      if (.not. ok) cycle
+      call xzeomlay(w, s)
+      need = need + 8d0 * NW * dble(nroot) * dble(nsd + n3s + 8)
+    end do
+    free_bytes = xz_free_disk('.' // c_null_char)
+    if (free_bytes >= 0 .and. need > dble(free_bytes) - 1073741824d0) then
+      write(6, '(a,f12.1,a,f12.1,a)') ' @XZCCSDT-W, the disk of the run directory does not hold the vectors of the roots (', &
+        1d-6 * need, ' MB; free: ', 1d-6 * free_bytes, ' MB): the file XZEOMR is not written.'
+    else
+      iures = 78
+      open(unit=iures, file='XZEOMR', form='unformatted', access='stream', status='replace', iostat=ios)
+      if (ios == 0) write(iures, iostat=ios) 'XZEOMR01', no, nv, int(NW, 8), ncls, labstep
+      if (ios /= 0) then
+        write(6, '(a)') ' @XZCCSDT-W, the file XZEOMR of the vectors cannot be written: no vectors are kept.'
+        iures = 0
+      else
+        write(6, '(a,f12.1,a)') '   the vectors of the roots go to the file XZEOMR (', 1d-6 * need, ' MB; %xzeomvec 0: not written)'
+      end if
+    end if
   end if
   nres = 0
   do ish = 1, nprob

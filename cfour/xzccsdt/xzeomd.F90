@@ -19,6 +19,8 @@
 !                        shifts of the states, in the labels of the run (2 m_j
 !                        from dgcosym: 2 Omega of the state for a closed
 !                        shell).  Without it: shift 0.
+!   %xzeomvec            0: the vectors of the roots are not written (no
+!                        file XZEOMR); 1 (default): they are
 !   %xzeomguess          0: unit vectors on the lowest single excitations of
 !                        the shift (CFOUR's default guess); 1 (default): the
 !                        roots of the singles-doubles block of the matrix
@@ -34,6 +36,7 @@ module xzeomd
   integer(8) :: emaxsub = 0                 ! 0: 20 + roots + 2
   real(8) :: ethr = 1d-5
   integer(8) :: eguess = 1
+  integer(8) :: ewvec = 1                   ! the vectors of the roots go to the file XZEOMR
   integer(8) :: labstep = 1                 ! the step of the labels: a class is (label - smallest) / step
 
   ! ---- the vectors of the subspace (C: the basis, H: its sigma vectors):
@@ -88,6 +91,7 @@ contains
     enshift = 0
     emaxsub = 0
     eguess = 1
+    ewvec = 1
     inquire(file='ZMAT', exist=there)
     if (.not. there) then
       enshift = 1
@@ -105,6 +109,8 @@ contains
         read(30, *, iostat=ios2) emaxsub
       else if (index(line, '%xzeomguess') /= 0) then
         read(30, *, iostat=ios2) eguess
+      else if (index(line, '%xzeomvec') /= 0) then
+        read(30, *, iostat=ios2) ewvec
       else if (index(line, '%xzeom') /= 0) then
         do
           read(30, '(a)', iostat=ios) line

@@ -493,7 +493,7 @@ subroutine xzdrv(w, maxcor)
     end do
     close(79)
     write(6, '(a)') '  ' // repeat('-', 98)
-    write(6, '(a)') '   (the file XZEOM has this table; XZEOMR the vectors)'
+    write(6, '(a)') '   (the file XZEOM has this table; the file XZEOMR, if it was written, the vectors)'
     if (elow < huge(1d0)) then
       call putrec(20, 'JOBARC', 'TOTENER2', iintfp, escf + ecorr + elow)
       write(6, '(a,f25.12)') '   TOTENER2 written to JOBARC (the lowest state):   ', escf + ecorr + elow
