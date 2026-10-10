@@ -7,7 +7,7 @@
 !            the file dgcosym of CFOUR's SCF if that was done in more than
 !            one block (%dglin: 2 m_j), are used - the spinors in the order
 !            of their classes, T3 and <ab||cd> on the allowed blocks only -
-!            provided no integral that they forbid is larger than 1e-8;
+!            provided no integral that they forbid is larger than 1e-8 (XZ_LABTOL);
 !            otherwise the labels are dropped with a warning (one class: the
 !            dense case of the same code)
 !   real     if no integral has an imaginary part above 1e-10, the real
@@ -699,12 +699,34 @@ subroutine xzlayout(w, status)
   integer(8) :: m, mint, kbuf, krow, ksrc, ksg, po, pv, nbuf, k, jold(7), nel(7), ktn
   real(8) :: vmax, offmax, ximag
   real(8), external :: xzimag
-  real(8), parameter :: tol_label = 1d-8, tol_imag = 1d-10
+  real(8) :: tol_label, tol_imag
   character(len=8) :: what
+  character(len=64) :: targ
+  integer :: ltarg, ios
+  logical, save :: told = .false.
   character(len=24), parameter :: names(7) = [character(len=24) :: '<oo||oo>', '<oo||ov>', '<oo||vv>', &
     '<ov||vo>', '<oo||vv> on a<b', '<oo||vv> on i<j, a<b', '<ov||vv> on a<b']
 
   status = 0
+  ! the largest integral that the labels forbid, and the largest imaginary part, that are
+  ! taken as zero: 1e-8 and 1e-10; XZ_LABTOL and XZ_IMAGTOL give other values (a basis
+  ! with very large exponents leaves more than 1e-8 in the integrals of CFOUR's chain)
+  tol_label = 1d-8
+  tol_imag = 1d-10
+  call get_environment_variable('XZ_LABTOL', targ, ltarg)
+  if (ltarg > 0) then
+    read(targ(1:ltarg), *, iostat=ios) tol_label
+    if (ios /= 0 .or. tol_label <= 0d0) tol_label = 1d-8
+  end if
+  call get_environment_variable('XZ_IMAGTOL', targ, ltarg)
+  if (ltarg > 0) then
+    read(targ(1:ltarg), *, iostat=ios) tol_imag
+    if (ios /= 0 .or. tol_imag <= 0d0) tol_imag = 1d-10
+  end if
+  if ((tol_label /= 1d-8 .or. tol_imag /= 1d-10) .and. .not. xzdry .and. .not. told) write(6, '(a,es9.2,a,es9.2,a)') &
+    '   tolerances of the integrals: ', tol_label, ' for what the labels forbid (XZ_LABTOL), ', tol_imag, &
+    ' for imaginary parts (XZ_IMAGTOL)'
+  if (.not. xzdry) told = .true.
   po = no * (no + 1) / 2
   pv = nv * (nv + 1) / 2
   jotri = xzget(no * npo, 'occupied tables')
@@ -829,6 +851,8 @@ subroutine xzlayout(w, status)
       status = 1
       return
     end if
+    if (offmax > 1d-8) write(6, '(a,es10.2,a,es9.2,a)') '   the largest element of <vv||vv> that the labels forbid: ', &
+      offmax, ' (below the tolerance ', tol_label, ': taken as zero)'
     if (nwe == 1) then
       if (xzimag(nvv, w(jvvvv)) > tol_imag) then
         status = 2
