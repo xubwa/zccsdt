@@ -65,6 +65,27 @@ module xzdata
   integer(8) :: jvci = 0                    ! vcol[vtri[d][Q]] (int32)
   integer(8) :: jrowpos = 0                 ! place of (a, i) among the pairs of s(a) - s(i)
 
+  ! ---- label shifts of the operands of the passes in blocks (xzblk.inc), in
+  !      classes.  Every array has a shift: (the classes of its creators) -
+  !      (those of its annihilators); the amplitudes and the operators of the
+  !      ground state have shift 0, which is what these are unless the EOM
+  !      code (xzeom.inc) sets them with xzshctx:
+  !        sh_t   of the rank-3 operand of a pass (its layout: kob_in, bof_in)
+  !        sh_w   of the operators of the residual (ring, pp, hh) / of the
+  !               integrals of pass 1
+  !        sh_a   of the amplitudes of the drive terms
+  !        sh_o   of the result, sh_t + sh_w (its layout: kob_out, bof_out)
+  !        sh_b   of the operators of the drive terms, sh_o - sh_a
+  !      The layout of a rank-3 array of shift s: the block of the group g of
+  !      occupied triples has the virtual triples of group g + s (xzna of them).
+  integer(8) :: sh_t = 0, sh_w = 0, sh_a = 0, sh_o = 0, sh_b = 0
+  integer(8) :: kob_in = 0, kob_out = 0     ! obase of the two layouts (index in w)
+  integer(8) :: bof_in(0:maxgrp) = 0, bof_out(0:maxgrp) = 0
+  integer(8) :: eshift = 0                  ! the shift of the EOM vectors that are worked on
+  integer(8) :: jobase_s = 0                ! obase of their layout
+  integer(8) :: boff_s(0:maxgrp) = 0        ! its blocks
+  integer(8) :: n3s = 0                     ! elements of a rank-3 array of that shift
+
   ! ---- the job
   character(len=16) :: method = ' '
   logical :: with_q = .false.
@@ -72,6 +93,7 @@ module xzdata
   logical :: with_lam = .false.     ! the Lambda equations are
   logical :: q_left = .false.       ! (Q) with lambda on the left: (Q)_Lambda
   logical :: with_den = .false.     ! the density and the orbital gradient of CCSDT are (xzden.inc)
+  logical :: with_eom = .false.     ! excited states are: EOM-EE-CCSDT (xzeom.inc)
   ! (Q) reads T3 (and Lambda3) where the files XZAMPS (XZLAMB) are mapped,
   ! read-only: one copy in the page cache of a node for all its ranks, not
   ! in the work array (XZ_QMAP=0: a private copy in the work array)
@@ -131,6 +153,24 @@ module xzdata
   integer(8) :: looovd = 0          ! dressed <mn||ie> [m][n][i][e]
   integer(8) :: lt2p = 0            ! t2[i][j][Q]
 
+  ! ---- what a sigma vector of EOM-CCSDT needs of the ground state
+  !      (xzeom.inc: made once by xzeomim, kept for all sigma vectors; the pp
+  !      operator of the T3 equation is in the place of <ab||cd>, jvvvv)
+  integer(8) :: efoo = 0, efov = 0, efvv = 0        ! the T1-dressed Fock matrix [m][i], [m][e], [a][e]
+  integer(8) :: eft = 0                     ! f[e][m]
+  integer(8) :: efevv = 0, efeoo = 0        ! F_vv[a][d], F_oo[m][i] of the T3 equation
+  integer(8) :: eooovd = 0, eooood = 0      ! dressed <mn||ie>, <mn||ij>
+  integer(8) :: eovvod = 0, eovood = 0      ! dressed <mb||ej>, <mb||ij>
+  integer(8) :: eweff = 0                   ! W_ovvo[m][a][d][i]
+  integer(8) :: ed = 0                      ! dressed <mb||de> [m][b][Q]
+  integer(8) :: ebv = 0                     ! bra-dressed <ab||ei> [Q][e][i]
+  integer(8) :: ewv = 0, ewo = 0            ! W_vvvo[Q][e][i], W_vooo[m][a][P]
+  integer(8) :: et2p = 0, et2pp = 0         ! t2[i][j][Q], t2[P][Q]
+  integer(8) :: egpd = 0, egmq = 0          ! the operands of pass 1
+  integer(8) :: ewkl = 0                    ! W_oooo[K][P]
+  integer(8) :: ekk = 0                     ! [m][n][P] = sum_Q <mn||Q> t2[P][Q]
+  integer(8) :: eo6 = 0                     ! the operator on occupied triples [I][J]
+
   ! ---- batch sizes: the memory plan (xzplan.F90)
   integer(8) :: nbp = 1             ! occupied pairs of a batch of pass 1 and pass 2
   integer(8) :: nqs = 1             ! rows of a slab of the dressed <ab||cd>
@@ -163,8 +203,9 @@ module xzdata
   ! ---- wall and CPU times of the stages, by name, in the order of their
   !      first use.  Sets: 1 the CCSDT iterations, 2 the iterations of the
   !      Lambda equations, 3 the intermediates of the Lambda equations (once),
-  !      4 the density and the orbital gradient
-  integer, parameter :: ntset = 4, ntmax = 64
+  !      4 the density and the orbital gradient, 5 EOM (the intermediates
+  !      once, the sigma vectors)
+  integer, parameter :: ntset = 5, ntmax = 64
   character(len=28) :: tnam(ntmax, ntset) = ' '
   real(8) :: twal(ntmax, ntset) = 0d0, tcpu(ntmax, ntset) = 0d0
   logical :: tpart(ntmax, ntset) = .false.      ! a part of another entry: wall only, not summed
@@ -174,6 +215,84 @@ module xzdata
   real(8) :: tlamim = 0d0                       ! the intermediates of the Lambda equations
 
 contains
+
+  ! virtual triples of the block of the group g of occupied triples in the
+  ! layout of a rank-3 array of shift s (0: no such block)
+  integer(8) function xzna(s, g)
+    integer(8), intent(in) :: s, g
+    integer(8) :: h
+    h = g + s
+    xzna = 0
+    if (g < 0 .or. g >= ntg .or. h < 0 .or. h >= ntg) return
+    xzna = vtoff(h + 1) - vtoff(h)
+  end function xzna
+
+  ! spinors of a class (0 outside the classes): virtual, occupied
+  integer(8) function xznvc(s)
+    integer(8), intent(in) :: s
+    xznvc = 0
+    if (s >= 0 .and. s < ncls) xznvc = vcoff(s + 1) - vcoff(s)
+  end function xznvc
+
+  integer(8) function xznoc(s)
+    integer(8), intent(in) :: s
+    xznoc = 0
+    if (s >= 0 .and. s < ncls) xznoc = ocoff(s + 1) - ocoff(s)
+  end function xznoc
+
+  ! pairs (a, i) with s(a) - s(i) = d (0 outside the range of d)
+  integer(8) function xzndel(d)
+    integer(8), intent(in) :: d
+    xzndel = 0
+    if (abs(d) < ncls) xzndel = ndel(d)
+  end function xzndel
+
+  ! The shifts of a pass in blocks (see sh_t ..): the layouts of operand and
+  ! result, the ring operators - for the pairs (d, m) of delta the block
+  ! [(a, i) of delta + sW][(d, m) of delta] - and the right-hand sides of the
+  ! drive terms by (group gQ of Q, class si of i): W_vvvo[Q][e][i] with e of
+  ! class gQ - si - sb, t2[m][i][Q] with m of class gQ - si - sa.  (0, 0, 0)
+  ! gives what xzsetmode made.
+  subroutine xzshctx(st, sw, sa)
+    integer(8), intent(in) :: st, sw, sa
+    integer(8) :: d, g, si, n
+    sh_t = st
+    sh_w = sw
+    sh_a = sa
+    sh_o = st + sw
+    sh_b = sh_o - sa
+    if (ncls == 1) return
+    if (st == 0) then
+      kob_in = jobase
+      bof_in = boff
+    else
+      kob_in = jobase_s
+      bof_in = boff_s
+    end if
+    if (sh_o == 0) then
+      kob_out = jobase
+      bof_out = boff
+    else
+      kob_out = jobase_s
+      bof_out = boff_s
+    end if
+    wdoff = 0
+    nwd = 0
+    do d = 1 - ncls, ncls - 1
+      wdoff(d) = nwd
+      nwd = nwd + xzndel(d + sw) * ndel(d)
+    end do
+    bdoff = -1
+    nbd = 0
+    do g = 0, npg - 1
+      do si = 0, ncls - 1
+        n = (xznvc(g - si - sh_b) + xznoc(g - si - sa)) * (ocoff(si + 1) - ocoff(si)) * (vpoff(g + 1) - vpoff(g))
+        if (n == 0) cycle
+        bdoff(g, si) = nbd
+        nbd = nbd + n
+      end do
+    end do
+  end subroutine xzshctx
 
   ! The hh ladder and F_oo of dense T3 with the operator on occupied triples
   ! (xzo6, one GEMM: the default) or through occupied pairs (xzwpair,

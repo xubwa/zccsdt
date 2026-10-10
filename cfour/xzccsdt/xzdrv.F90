@@ -23,17 +23,18 @@ subroutine xzdrv(w, maxcor)
   use xzpar
   use xzdist
   use xzpland, only: planq, pneedq, pneedw
+  use xzeomd
   use omp_lib
   implicit none
   integer(8), intent(in) :: maxcor
-  integer(8) :: mcc
+  integer(8) :: mcc, kres
   real(8) :: w(maxcor)
   integer(8) :: iintln, ifltln, iintfp, ialone, ibitwd
   common /machsp/ iintln, ifltln, iintfp, ialone, ibitwd
   integer(8) :: nslot, nch, ncyc, nthr, ilp64, kb(2), nmax, status, nblk
   logical :: usefile, converged, uselab, tryreal, isreal, there, docc
   real(8) :: sync(2)
-  real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall, tlm, tden, lhs, rhs
+  real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall, tlm, tden, lhs, rhs, teom, elow
   character(len=32) :: arg
   integer :: larg
 
@@ -87,6 +88,11 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a)') ' @XZCCSDT-F, fewer than three occupied or virtual spinors: no triples.'
     call xzerrex
   end if
+  if (with_eom .and. nrank > 1) then
+    write(6, '(a)') ' @XZCCSDT-F, the excited states (EOM) run with one rank: the sigma vectors are not distributed.'
+    write(6, '(a)') '             Run "xzccsdt ccsdt" over the ranks, then "xzccsdt eom" with one (it reads XZAMPS).'
+    call xzerrex
+  end if
 
   ! ---- the symmetry labels
   allocate(lab(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
@@ -134,7 +140,7 @@ subroutine xzdrv(w, maxcor)
   !      the amplitudes, every rank does its batches), (Q) on all ranks from
   !      the files XZAMPS and XZLAMB, the density stage on rank 0
   docc = with_cc
-  planq = .not. (with_cc .or. with_lam .or. with_den)
+  planq = .not. (with_cc .or. with_lam .or. with_den .or. with_eom)
   if (with_den .and. .not. (with_cc .or. with_lam) .and. myrank > 0) return
   ! (a test hook: XZ_DEN_ACTIVE=1 writes the files of the active spinors alone)
   call get_environment_variable('XZ_DEN_ACTIVE', arg, larg)
@@ -373,6 +379,23 @@ subroutine xzdrv(w, maxcor)
   end if
   flush(6)
 
+  ! ---- the excited states: EOM-EE-CCSDT (the pp operator takes the place of <ab||cd>)
+  teom = 0d0
+  if (with_eom) then
+    t0 = omp_get_wtime()
+    if (nwe == 2) then
+      call xzeom_z(w, ecorr)
+    else
+      call xzeom_d(w, ecorr)
+    end if
+    teom = omp_get_wtime() - t0
+    call get_environment_variable('XZ_EOMTEST', length=larg)
+    if (larg > 0) return
+    call get_environment_variable('XZ_EOMSIG', length=larg)
+    if (larg > 0) return
+    call xztable(5, 'EOM: the intermediates and the sigma vectors', teomim + teomsig + teomsd, neomsig)
+  end if
+
   ! ---- the density and the orbital gradient of CCSDT; the files of xx2czvec
   tden = 0d0
   if (with_den) then
@@ -443,15 +466,45 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a)') '  ' // repeat('-', 62)
   call putrec(20, 'JOBARC', 'TOTENERG', iintfp, etot)
   write(6, '(a,f25.12)') '   TOTENERG written to JOBARC:   ', etot
+  if (with_eom) then
+    ! the excited states: the table, the file XZEOM, the lowest state to JOBARC (TOTENER2, as xx2ceomcc)
+    write(6, '(/,a)') '   EOM-EE-CCSDT: the states'
+    write(6, '(a)') '  ' // repeat('-', 98)
+    write(6, '(a)') '   shift  root        omega / Eh            eV            cm-1          total energy / Eh    max |r|'
+    open(unit=79, file='XZEOM', form='formatted', status='replace')
+    write(79, '(a)') '# EOM-EE-CCSDT of xzccsdt: label shift, root, omega / Eh, total energy / Eh, ' // &
+                     'largest element and norm of the residual, weights of R1, R2, R3, converged'
+    write(79, '(a,f25.12,a,f25.12)') '# E(SCF) ', escf, '   E(CCSDT) ', escf + ecorr
+    elow = huge(1d0)
+    do kres = 1, nres
+      write(6, '(i8,i6,f20.12,f14.8,f16.4,f27.12,es11.2,a)') rshift(kres), rroot(kres), rom(kres), &
+        rom(kres) * 27.211386245988d0, rom(kres) * 219474.6313632d0, escf + ecorr + rom(kres), rmx(kres), &
+        merge('                ', '  NOT converged ', rconv(kres))
+      write(79, '(2i6,2f25.14,2es12.4,3f10.6,l3)') rshift(kres), rroot(kres), rom(kres), escf + ecorr + rom(kres), &
+        rmx(kres), rnm(kres), rwt(:, kres), rconv(kres)
+      if (rconv(kres)) elow = min(elow, rom(kres))
+    end do
+    close(79)
+    write(6, '(a)') '  ' // repeat('-', 98)
+    write(6, '(a)') '   (the file XZEOM has this table; XZEOMR the vectors)'
+    if (elow < huge(1d0)) then
+      call putrec(20, 'JOBARC', 'TOTENER2', iintfp, escf + ecorr + elow)
+      write(6, '(a,f25.12)') '   TOTENER2 written to JOBARC (the lowest state):   ', escf + ecorr + elow
+    end if
+  end if
   call xz_rss(kb)
   write(6, '(/,a,f10.2,a,f10.2,a,f10.2,a,f10.2,a)') '   wall times: integrals ', tread, ' s   CCSDT ', tcc, &
     ' s   Lambda ', tlm, ' s   (Q) ', tq, ' s'
   if (with_den) write(6, '(a,f10.2,a)') '               density and gradient ', tden, ' s'
+  if (with_eom) write(6, '(a,f10.2,a,i6,a,f10.2,a,i6,a,f10.2,a)') '               EOM ', teom, ' s:  ', neomsig, &
+    ' sigma vectors in ', teomsig, ' s, ', neomsd, ' of the singles-doubles block in ', teomsd, ' s'
   write(6, '(a,i14,a,f10.1,a,f8.1,a)') '   work array used: ', xzpeak, ' words = ', 8d-6 * xzpeak, &
     ' MB (', 100d0 * xzpeak / max(xzsize, 1_8), ' % of MAXCOR)'
   write(6, '(a,f10.1,a)') '   peak resident memory of the process: ', 1d-3 * kb(1), ' MB'
   write(6, '(a,f10.2,a)') '   XZCCSDT total wall time: ', omp_get_wtime() - twall, ' s'
-  if (with_den) then
+  if (with_eom) then
+    write(6, '(a)') '   XZCCSDT finished: EOM-EE-CCSDT done.'
+  else if (with_den) then
     write(6, '(a)') '   XZCCSDT finished: density of CCSDT done.'
   else if (method == 'LAMBDA') then
     write(6, '(a)') '   XZCCSDT finished: lambda of CCSDT done.'
@@ -466,6 +519,7 @@ end subroutine xzdrv
 ! end: the amplitudes to 10**-CC_CONV, the energy to 10**-(CC_CONV + 2).
 subroutine xzjob()
   use xzdata
+  use xzeomd, only: xzeominp
   implicit none
   integer(8) :: iflags, iflags2
   common /flags/ iflags(100)
@@ -499,19 +553,22 @@ subroutine xzjob()
   end if
   select case (method)
   case ('CCSDT', 'CCSDT[Q]', 'CCSDT(Q)', '(Q)', '[Q]', 'MP2', 'LAMBDA', 'CCSDT(Q)_L', 'CCSDT[Q]_L', &
-        '(Q)_L', '[Q]_L', 'DENSITY', 'CCSDT_DENSITY')
+        '(Q)_L', '[Q]_L', 'DENSITY', 'CCSDT_DENSITY', 'EOM', 'CCSDT_EOM')
   case default
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), &
-      ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, DENSITY, CCSDT_DENSITY, MP2.'
+      ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, DENSITY, CCSDT_DENSITY, ' // &
+      'EOM, CCSDT_EOM, MP2.'
     call xzerrex
   end select
+  with_eom = method == 'EOM' .or. method == 'CCSDT_EOM'
+  if (with_eom) call xzeominp()
   with_cc = method(1:5) == 'CCSDT'
   larg = len_trim(method)
   q_left = method(max(larg - 1, 1):larg) == '_L'
   with_lam = method == 'LAMBDA' .or. (with_cc .and. q_left)
   with_den = method == 'DENSITY' .or. method == 'CCSDT_DENSITY'
   with_lam = with_lam .or. method == 'CCSDT_DENSITY'
-  with_q = method /= 'CCSDT' .and. method /= 'MP2' .and. method /= 'LAMBDA' .and. .not. with_den
+  with_q = method /= 'CCSDT' .and. method /= 'MP2' .and. method /= 'LAMBDA' .and. .not. with_den .and. .not. with_eom
   conv_t = 10d0 ** (-abs(iflags(4)))
   conv_e = 10d0 ** (-abs(iflags(4)) - 2)
   maxcyc = iflags(7)
@@ -757,6 +814,8 @@ subroutine xzlayout(w, status)
     jvci = xzget(nv * nvp / 2 + 1, 'layout of T3')
     jrowpos = xzget(nv * no, 'layout of T3')
   end if
+  ! (the passes in blocks: all shifts zero, the layout of T3)
+  call xzshctx(0_8, 0_8, 0_8)
   m = xzmark()
   ktn = xzget(max(nto, nvt), 'work of the tables')
   if (.not. xzdry) then

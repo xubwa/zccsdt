@@ -11,3 +11,5 @@
 #include "xzdfrz.inc"
 #include "xzq.inc"
 #include "xzqs.inc"
+#include "xzeom.inc"
+#include "xzeoms.inc"

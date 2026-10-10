@@ -201,9 +201,9 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           nj = ocoff(sy + 1) - ocoff(sy)
           ! L[(P, d)][(m, Q)] of these classes
           call N(xzlbsub)(nb, nr, nq, tr0(it), nd * nm, w(gkl(gq)), w(tks(it)))
-          call N(xzbp1xy)(no, nv, npo, nvp, nb, nd, nm, nq, ne, nj, p0, vcoff(sd), ocoff(sm), qlo, &
-                          vcoff(sy), ocoff(sy), gpd, gmq, w(tks(it)), w(tkg(it)), w(tkx(it)), w(tkgy(it)), &
-                          w(tky(it)), xacc)
+          call N(xzbp1xy)(no, nv, npo, nvp, nb, nd, nm, nq, ne, nj, ne, nj, p0, vcoff(sd), ocoff(sm), qlo, &
+                          vcoff(sy), ocoff(sy), vcoff(sy), ocoff(sy), gpd, gmq, w(tks(it)), w(tkg(it)), w(tkx(it)), &
+                          w(tkgy(it)), w(tky(it)), xacc)
         end do
         end do
         do it = 1, ntask

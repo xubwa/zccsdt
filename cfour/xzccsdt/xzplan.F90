@@ -94,6 +94,14 @@ integer(8) function xzpeak_cc(w)
       call xzlam_d(w, pslot, pfile, pchunk, c, n)
     end if
   end if
+  ! the excited states (rank 0): after the amplitudes
+  if (with_eom .and. .not. xzworker()) then
+    if (nwe == 2) then
+      call xzeom_z(w, e)
+    else
+      call xzeom_d(w, e)
+    end if
+  end if
   ! the density stage (rank 0): the integrals, the amplitudes and lambda again, then its arrays
   if (with_den .and. .not. xzworker()) then
     call xzrel(mlay)
@@ -171,6 +179,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   if (with_lam .and. .not. with_cc) what = 'Lambda'
   if (with_den) what = trim(what) // ', density'
   if (with_den .and. .not. (with_cc .or. with_lam)) what = 'the density'
+  if (with_eom) what = 'CCSDT, EOM'
+  if (with_eom .and. .not. with_cc) what = 'EOM'
   f = no * nv * nvp                       ! elements of a half-expanded batch of one pair
   ! ---- the smallest and the target batch sizes
   plo(1) = min(nv, nqmax)

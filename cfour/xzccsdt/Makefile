@@ -42,7 +42,11 @@ RPATH   := -Wl,-rpath,$(MKLLIB) -Wl,-rpath,$(abspath $(ICLIB))
 # transformation, three objects of its program directory x2czvec, and its
 # reader of the AO integrals in libx2cint (module cvwint_module of libx2c)
 FRZOBJ  := $(addprefix $(CFOUR)/x2czvec/, vtranpsog.o vtran1sparse.o expnd2p.o)
-LIBS    := $(FRZOBJ) -L$(CFOUR)/lib -lx2cint -llibr -lx2cint $(BLAS) -lrt $(RPATH) $(XLIBS)
+# the EOM solver in complex arithmetic (xzeoms.inc): the sort of the
+# eigenpairs and the test of convergence of CFOUR's xx2ceomcc, two objects
+# of its program directory x2ceomcc
+EOMOBJ  := $(addprefix $(CFOUR)/x2ceomcc/, eomreorder.o eomconv.o)
+LIBS    := $(FRZOBJ) $(EOMOBJ) -L$(CFOUR)/lib -lx2cint -llibr -lx2cint $(BLAS) -lrt $(RPATH) $(XLIBS)
 
 # the compiler of the kernels (default: icc, as the rest; an experiment:
 #   make KCC=gcc KCFLAGS='-O3 -march=native -std=gnu99 -fopenmp -fcx-limited-range \
@@ -53,9 +57,9 @@ KCFLAGS ?= $(CFLAGS)
 
 # the C kernels that the program calls
 KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda
-MODS    := xzkern xzmem xzdata xzdiis xzpar xzdist xzfrz
+MODS    := xzkern xzmem xzdata xzdiis xzpar xzdist xzfrz xzeomd
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
-INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc
+INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc xzeom.inc xzeoms.inc
 
 OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil xzmpi $(KERNELS)))
 
@@ -83,6 +87,8 @@ $(BUILD)/%.o: $(CSRC)/%.c | $(BUILD)
 $(addprefix $(BUILD)/, $(addsuffix .o, $(SRCS))): $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS)))
 $(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o $(BUILD)/xzpar.o: $(BUILD)/xzkern.o
 $(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o
+$(BUILD)/xzeomd.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o
+$(BUILD)/xzdrv.o: $(BUILD)/xzplan.o
 $(BUILD)/xzdist.o: $(BUILD)/xzdata.o $(BUILD)/xzpar.o
 
 $(BUILD):
