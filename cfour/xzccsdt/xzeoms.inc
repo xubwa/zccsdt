@@ -509,8 +509,9 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   integer(8), allocatable :: keep(:), ccyc(:)
   real(8) :: rel, z, zn, ov, best, t0
   ZT :: s, om
-  logical :: needdiag
+  logical :: needdiag, stalled, allok
   integer :: ios
+  integer(8) :: wpos
 
   nsd = no * nv + npo * nvp
   nlen = nsd
@@ -520,6 +521,17 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   nit = 0
   mv = xzmark()
   call N(xzevopen)(nlen, msub, min(msub, 2 * nroot + 2), avail, .not. sd)
+  if (.not. quiet) then
+    if (evfile) then
+      write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the files EOMCnnnn, ' // &
+        'EOMHnnnn of the run directory (', 16d-6 * NW * nlen * msub, ' MB),'
+      write(6, '(a,i10,a)') '     read through a buffer of ', evnch, ' elements per vector'
+    else
+      write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the work array (', &
+        16d-6 * NW * nlen * msub, ' MB)'
+    end if
+    flush(6)
+  end if
   allocate(gm(msub, msub), ym(msub, msub), cr(msub, nroot), coef(msub), dots(msub), ev(msub), flag(msub), &
            keep(msub), ccyc(nroot), qm(msub, msub), qr(msub * msub), gq(msub, msub))
   gm = 0
@@ -547,7 +559,13 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   nconv = 0
   ccyc = 0
   needdiag = .true.
-  do it = 1, maxit
+  it = 0
+  wpos = 0
+  if (iures > 0) inquire(unit=iures, pos=wpos)
+  verify: do
+  stalled = .false.
+  do while (it < maxit)
+    it = it + 1
     nit = it
     call N(xzesmall)(n, gm, msub, ev, ym)
     needdiag = .false.
@@ -605,16 +623,22 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     if (.not. quiet) flush(6)
     if (nadded == 0 .and. count(.not. flag(1:ntarget)) > 0) then
       if (.not. quiet) write(6, '(a)') ' @XZCCSDT-W, EOM: no correction vector is left (all of them are in the subspace).'
+      stalled = .true.
       exit
     end if
   end do
 
-  ! ---- the roots: their vectors, the residuals once more, the weights
+  ! ---- the roots: their vectors, the residuals once more, the weights.  A
+  !      root whose residual is above the threshold after all (the vectors of
+  !      a nearly degenerate level turn into each other while the subspace
+  !      grows, and a converged root is only recognized by its overlap) is
+  !      iterated on: the records of the converged roots are dropped.
   if (needdiag) then
     call N(xzesmall)(n, gm, msub, ev, ym)
     call mark_converged()
   end if
   nfound = min(nroot, n)
+  allok = .true.
   do k = 1, nfound
     coef(1:n) = ym(1:n, k)
     call N(xzevcomb)(w, 1, n, coef, kxa, .false.)
@@ -630,6 +654,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     ee(k) = ev(k)
     xmx(k) = z
     xnm(k) = sqrt(dble(s))
+    if (z > thr) allok = .false.
     cyc(k) = 0
     do c = 1, nconv
       ov = abs(sum(CONJ(cr(1:n, c)) * ym(1:n, k)))
@@ -647,13 +672,22 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     call N(xzelead)(no * nv, w(kxa), nlead, lead(1, k), vlead(1, k))
     if (kout > 0) call N(xzecopy)(nsd, w(kxa), w(kout + NW * nsd * (k - 1)))
     if (iures > 0) then
-      write(iures, iostat=ios) eshift, k, nlen, dble(ev(k)), aimag(ev(k)), w(kxa:kxa + NW * nlen - 1)
+      if (k == 1) then
+        write(iures, pos=wpos, iostat=ios) eshift, k, nlen, dble(ev(k)), aimag(ev(k)), w(kxa:kxa + NW * nlen - 1)
+      else
+        write(iures, iostat=ios) eshift, k, nlen, dble(ev(k)), aimag(ev(k)), w(kxa:kxa + NW * nlen - 1)
+      end if
       if (ios /= 0) then
         write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZEOMR failed (iostat ', ios, '): disk full?'
         call xzerrex
       end if
     end if
   end do
+  if (allok .or. stalled .or. it >= maxit) exit verify
+  if (.not. quiet) write(6, '(a)') '   (a root is not converged after all: the iterations go on)'
+  nconv = 0
+  needdiag = .false.
+  end do verify
   call N(xzevclose)()
   call xzrel(mv)
 
@@ -691,6 +725,7 @@ contains
   ! the coefficients that were kept when it converged)
   subroutine mark_converged()
     integer(8) :: cc, jj
+    logical :: kept(max(nroot, 1_8))
     flag = .false.
     do cc = 1, nconv
       best = -1d0
@@ -703,8 +738,24 @@ contains
           jbest = jj
         end if
       end do
-      if (jbest > 0) flag(jbest) = .true.
+      if (jbest > 0 .and. best >= 0.95d0) then
+        flag(jbest) = .true.
+        kept(cc) = .true.
+      else
+        kept(cc) = .false.
+      end if
     end do
+    ! (a record that no eigenvector has any more: the root is tested again)
+    jj = 0
+    do cc = 1, nconv
+      if (.not. kept(cc)) cycle
+      jj = jj + 1
+      if (jj /= cc) then
+        cr(:, jj) = cr(:, cc)
+        ccyc(jj) = ccyc(cc)
+      end if
+    end do
+    nconv = jj
   end subroutine
 
   ! the subspace becomes the span of mkeep Ritz vectors: the converged roots,
@@ -989,13 +1040,8 @@ subroutine N(xzeom)(w, ecorr)
     t1 = omp_get_wtime()
     evio = 0d0
     evbytes = 0d0
-    if (2 * msub * (NW * nlen + xzalign) <= avail) then
-      write(6, '(a,i4,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the work array'
-    else
-      write(6, '(a,i4,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the files EOMCnnnn, EOMHnnnn'
-    end if
-    write(6, '(a,f10.1,a,f10.1,a,f10.1,a)') '     (', 16d-6 * NW * nlen * msub, ' MB; a sigma vector takes ', 8d-6 * sigw, &
-      ' MB of the work array, free besides: ', 8d-6 * avail, ' MB)'
+    write(6, '(a,f10.1,a,f10.1,a)') '   a sigma vector takes ', 8d-6 * sigw, ' MB of the work array; free besides it: ', &
+      8d-6 * avail, ' MB'
     flush(6)
     if (eguess == 1) then
       call N(xzesolve)(w, .false., nroot, ethr, emaxcyc, msub, nst, kst, singles, kxa, kxb, avail, &
