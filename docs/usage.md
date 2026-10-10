@@ -614,6 +614,18 @@ everything in the directory they run in.  What is read: `JOBARC` and
   energy dropped with a section `%vircut`: both are CFOUR's business - the
   integral files hold the active spinors only, and how many were frozen
   and dropped is read from what CFOUR wrote, not from the ZMAT.
+- for a linear molecule, optionally a section `%dglin` after the basis
+  lines (the number of |m_j| values, then per |m_j| = 1/2, 3/2, ... the
+  numbers of occupied spinors of +m_j and of -m_j): `xsox2chf` then does
+  the SCF in blocks of m_j and writes the block of every spinor to
+  `dgcosym`, and the MO integrals come out real.  The labels of a run are
+  those of the file `xzlabels` if it is there, else 2 m_j from `dgcosym` if
+  it has more than one block, else none - in `zccsdt.cfour.read_labels` and
+  in the native program `cfour/xzccsdt` alike, nothing is parsed from the
+  ZMAT, and the labels are checked against the integrals.  HBr / cc-pVDZ-DK
+  all-electron in the native program: 6 real blocks, 0.6 s per CCSDT cycle
+  against 18.7 s complex dense, the same energy.  The example input, the
+  file formats and the measured cases: docs/native.md, section 6.
 
 **What the ZMAT says to the CC step.**
 
