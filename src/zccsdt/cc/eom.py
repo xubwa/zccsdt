@@ -195,11 +195,14 @@ def davidson(apply, precond, guesses, store, nroots, conv_tol=1e-6, max_space=20
         if prev is not None:        # the roots that the previous ones have become
             pv = np.zeros((n, prev.shape[1]), dtype=complex)
             pv[:prev.shape[0]] = prev
-            ov = abs(pv.conj().T @ (ev / np.linalg.norm(ev, axis=0)))
-            pick = []
-            for k in range(prev.shape[1]):
-                order = np.argsort(-ov[k])
-                pick.append(next(int(x) for x in order if x not in pick))
+            # by their weight in the space of the previous roots, not one to one: inside a
+            # degenerate level the eigenvectors of two iterations are rotated against each
+            # other at will, and a one-to-one match gave the last root of a sixfold level
+            # (F-, 2p^-1) to a vector far above it
+            Qp = _orthonormal_columns(pv, False)
+            score = np.linalg.norm(Qp.conj().T @ (ev / np.linalg.norm(ev, axis=0)), axis=0)
+            pick = sorted((int(x) for x in np.argsort(-score, kind='stable')[:prev.shape[1]]),
+                          key=lambda j: (ew[j].real, j))
         else:
             pick = list(np.argsort(ew.real, kind='stable')[:nroots])
         w, Y = ew[pick], ev[:, pick]
@@ -402,7 +405,9 @@ def fixed_bytes(eris, dtype, with_t3=True, mem_mb=2000.0, shift=None):
     sig = pp + dpp + 7 * f + 22 * s + t3 + bufs + 2 * occ + ccsdt_opt.overhead()
     if not with_t3:
         sig = pp + dpp + 3 * f + 22 * s + ccsdt_opt.overhead()
-    return max(prep, sig)
+    # the vectors of the singles-doubles stage (rank one and two; 2 (4 (nroots + extra) + 16)
+    # of them: 80 for four roots)
+    return max(prep, sig) + 80 * (o * v + om.npair * vm.npair) * isz
 
 
 def t3kern_min_occ():
@@ -479,6 +484,7 @@ class Result:
     ground: object = None
     timings: dict = None
     shift: object = None        # the label shift in classes of the maps (None: totally symmetric, layout of t3)
+    cut_level: bool = False     # the roots end inside a degenerate level (by the singles-doubles stage)
     short: object = None        # IP / EA with short vectors: the Short of the problem (strip() takes the ghost out)
     label_shift: object = None  # the same in units of the labels (set by the front end)
     partner_of: object = None   # these are the time-reversed states of that label shift (no vectors)
@@ -803,7 +809,7 @@ def ghost_short(eris, t1, t2, t3=None, kind='ip'):
 
 def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None,
            nguess=None, guess_tol=1e-4, opts=None, mem_mb=2000.0, verbose=False, plan=None, ground=None,
-           stdout=None, singles=None, name='EE', shift=None, sector=None):
+           stdout=None, singles=None, name='EE', shift=None, sector=None, complete=False, extra=2):
     '''EOM-EE-CCSDT for converged amplitudes (t3 flat in the layout of the
     engine of ``eris``; None: EOM-EE-CCSD for CCSD amplitudes): the
     ``nroots`` lowest excitation energies and right-hand vectors.
@@ -826,6 +832,14 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     singles with l_a - l_i = D and every sigma vector is projected on the
     elements of that shift (Sector): the other components of a degenerate
     level, which have other shifts, are not computed.
+    ``extra``: the singles-doubles stage solves for this many roots more
+    than asked for, to see whether ``nroots`` cuts a degenerate level (the
+    next roots within 2e-6 Eh of the last one): then a warning is printed
+    and Result.cut_level is set, or with ``complete`` the rest of the
+    level is computed too (more roots than asked for come back).  Where
+    the single excitations are fewer than the vectors wanted, the guess
+    goes on with unit vectors on the lowest doubles; if fewer roots than
+    asked for can be started, that is said (a warning), not passed over.
     ``conv_tol``: the norm of the residual of a normalized vector.
     ``opts``: solver.Options for max_memory, max_disk, incore_complete.
     Returns a Result.'''
@@ -849,6 +863,12 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     def say(msg):
         if verbose:
             print(msg, file=out, flush=True)
+
+    def note(msg):
+        import warnings
+        say('  warning: ' + msg)
+        warnings.warn('EOM-%s: %s' % (name, msg), stacklevel=3)
+    cut_level = False
 
     def logger(stage):
         def log(it, n, w, res, conv, sec):
@@ -888,26 +908,70 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     # ---- the singles-doubles stage
     sd = Store(sizes[:2], dtype)
     first = None
+    lowest = False
     t0 = time.perf_counter()
     if guess is None:
         allowed = symmetric_singles(eris, shift or 0) if sec is None else sec.m1
         if singles is not None:
             allowed = allowed & np.asarray(singles, bool)
-        idx = singles_guess(g, nguess or nroots, allowed)
+        want = max(nguess or 0, nroots + extra)
+        idx = singles_guess(g, want, allowed)
         gs = []
         for k in idx:
             v = sd.new()
             v[0][k] = 1.0
             gs.append(v)
-        nroots = min(nroots, len(gs))
-        final = not with3
         if not gs:
             raise ValueError('no single excitation to start from%s' % (
                 '' if shift is None else ' with a label shift of %d classes' % shift))
-        first = davidson(apply_for(False), make_precond(g, False), gs, sd, nroots,
-                         conv_tol if final else guess_tol, max(4 * nroots + 16, plan.max_space if final else 0),
+        if len(gs) < want:
+            # fewer singles than vectors wanted (IP of three electrons: three): the lowest doubles
+            d2 = denominators(g)[1].copy()
+            if shift is not None:
+                d2[~g.masks(shift)[1].ravel()] = np.inf
+            elif sec is not None:
+                d2[~sec.m2.ravel()] = np.inf
+            elif singles is not None or g.om.spins is not None:
+                d2[:] = np.inf          # (which doubles belong to these singles is not known here)
+            for k in np.argsort(d2, kind='stable')[:want - len(gs)]:
+                if np.isfinite(d2[k]):
+                    v = sd.new()
+                    v[1][k] = 1.0
+                    gs.append(v)
+        asked = nroots
+        nroots = min(nroots, len(gs))
+        if nroots < asked:
+            note('only %d of the %d roots asked for can be started: no more single%s excitations to start from'
+                 % (nroots, asked, '' if singles is not None else ' or double'))
+        final = not with3
+        nsolve = min(len(gs), nroots + extra)
+        first = davidson(apply_for(False), make_precond(g, False), gs, sd, nsolve,
+                         conv_tol if final else guess_tol, max(4 * nsolve + 16, plan.max_space if final else 0),
                          max_cycle, log=logger('SD   ' if with3 else 'iter '))
-        start = first.vectors
+        # does nroots cut a degenerate level?  (the roots beyond it, by the singles-doubles stage)
+        order = np.argsort(first.e.real, kind='stable')
+        e_sd = first.e.real[order]
+        k = nroots
+        while k < len(e_sd) and e_sd[k] - e_sd[k - 1] < 2e-6:
+            k += 1
+        if k > nroots:
+            more = ' (and the level may go on: raise nroots)' if k == len(e_sd) else ''
+            if complete:
+                say('  %d roots asked for cut a degenerate level at %.8f Eh: %d roots are computed%s'
+                    % (nroots, e_sd[nroots - 1], k, more))
+                nroots = k
+            else:
+                cut_level = True
+                note('%d roots cut a degenerate level at %.8f Eh (%s%d roots would complete it%s; complete=True '
+                     'does that)' % (nroots, e_sd[nroots - 1], 'at least ' if more else '', k, ''))
+        keep = order[:nroots]
+        # the triples stage starts from all of them and takes the lowest roots: a state that
+        # the singles-doubles block puts above its neighbours (the M_S = -1 component of the
+        # triplet of Li+, a 2h1p state for a UHF reference) comes down with the triples
+        start = [first.vectors[j] for j in order]
+        lowest = True
+        first = Solved(first.e[keep], [first.vectors[j] for j in keep], first.converged[keep], first.residuals[keep],
+                       first.niter, first.nsigma, first.ncollapse, first.history)
     else:
         start = [[np.array(a, dtype=dtype).ravel(), np.array(b, dtype=dtype).ravel()] for a, b in guess]
         if sec is not None:
@@ -927,8 +991,8 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
             v[0][:], v[1][:] = x[0], x[1]
             gs.append(v)
         t0 = time.perf_counter()
-        res = davidson(apply_for(True), make_precond(g, True, shift=shift), gs, store, nroots, conv_tol, plan.max_space,
-                       max_cycle, follow=True, log=logger('iter '))
+        res = davidson(apply_for(True), make_precond(g, True, shift=shift), gs, store, nroots, conv_tol,
+                       max(plan.max_space, len(gs) + nroots), max_cycle, follow=not lowest, log=logger('iter '))
         times['iterations'] = time.perf_counter() - t0
     wts = np.array([[float(np.vdot(p, p).real) if p.size else 0.0 for p in v] for v in res.vectors])
     wts = np.concatenate([wts, np.zeros((len(wts), 3 - wts.shape[1]))], axis=1)
@@ -939,7 +1003,7 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
                      r1=[v[0].reshape(nocc, nvir) for v in vec], r2=[v[1].reshape(g.om.npair, g.vm.npair) for v in vec],
                      r3=[v[2] for v in vec] if with3 else None, weights=wts[order], niter=res.niter,
                      nsigma=res.nsigma, ncollapse=res.ncollapse, guess=first if with3 else None,
-                     history=res.history, plan=plan, ground=g, timings=times, shift=shift)
+                     history=res.history, plan=plan, ground=g, timings=times, shift=shift, cut_level=cut_level)
     times['total'] = time.perf_counter() - t_all
     say('  root   omega / Eh       omega / eV   |residual|   %R1   %R2   %R3')
     for k in range(len(out_res.e)):

@@ -155,3 +155,52 @@ def test_states_of_one_spin_label_on_the_packed_block():
         c2.verbose, c2.max_cycle = 0, 1
         c2.kernel()
         c2.eom_ee(nroots=1, shift=2)
+
+
+def test_sixfold_level_and_a_cut_level():
+    '''F- / 6-31G, RHF as GHF spin orbitals, 1s frozen, EOM-IP-CCSDT with
+    short vectors: the lowest level, 2p^-1, is sixfold.  Six roots are six
+    times the same energy (the first version matched the roots of two
+    iterations one to one and lost the sixth to a vector far above); four
+    roots cut the level - a warning and Result.cut_level -, and with
+    complete=True all six come back.'''
+    from pyscf import gto
+    mf = scf.RHF(gto.M(atom='F 0 0 0', basis='6-31g', charge=-1, verbose=0)).run(conv_tol=1e-12)
+    cc = zccsdt.CCSDT(mf.to_ghf(), frozen=2)
+    cc.verbose, cc.symmetry, cc.conv_tol, cc.conv_tol_normt = 0, False, 1e-11, 1e-9
+    cc.kernel()
+    e, res = cc.eom_ip(nroots=6, conv_tol=1e-8)
+    assert res.converged.all() and len(e) == 6 and e.max() - e.min() < 1e-9 and 0 < e[0] < 0.2 and not res.cut_level
+    with pytest.warns(UserWarning, match='cut a degenerate level'):
+        e4, r4 = cc.eom_ip(nroots=4, conv_tol=1e-8)
+    assert len(e4) == 4 and r4.cut_level and abs(e4 - e[0]).max() < 1e-8
+    e6, r6 = cc.eom_ip(nroots=4, conv_tol=1e-8, complete=True)
+    assert len(e6) == 6 and r6.converged.all() and abs(e6 - e[0]).max() < 1e-8 and not r6.cut_level
+    # the next level (2s^-1, twofold) after it
+    e8, r8 = cc.eom_ip(nroots=8, conv_tol=1e-8)
+    assert r8.converged.all() and abs(e8[:6] - e[0]).max() < 1e-8 and abs(e8[6] - e8[7]) < 1e-8 and e8[6] - e8[5] > 0.1
+
+
+def test_more_roots_than_singles():
+    '''Li / 6-31G, UHF as GHF, three electrons (CCSDT and the IP vectors
+    are exact; the numbers are differences of FCI energies): four roots
+    asked for with three single excitations - the guess goes on with
+    doubles and four come back (the first version returned three without a
+    word): the ground state of Li+ and the triplet.  The third component
+    of the triplet has no single excitation in its sector (M_S = -1 of an
+    alpha reference); it is among the four lowest once enough vectors are
+    started (extra=10), else the singlet at 2.4521 takes its place.'''
+    from pyscf import gto
+    mf = scf.UHF(gto.M(atom='Li 0 0 0', basis='6-31g', spin=1, verbose=0)).run(conv_tol=1e-12)
+    cc = zccsdt.CCSDT(mf.to_ghf())
+    cc.verbose, cc.symmetry, cc.conv_tol, cc.conv_tol_normt = 0, False, 1e-11, 1e-9
+    cc.kernel()
+    e, res = cc.eom_ip(nroots=4, conv_tol=1e-8)
+    assert len(e) == 4 and res.converged.all()
+    assert abs(e - [0.19591086, 2.42362128, 2.42362128, 2.45206337]).max() < 1e-7
+    e, res = cc.eom_ip(nroots=4, conv_tol=1e-8, extra=10)
+    assert abs(e - [0.19591086, 2.42362128, 2.42362128, 2.42362128]).max() < 1e-7
+    # with the ghost at full length only its singles are known: three roots, and a warning
+    with pytest.warns(UserWarning, match='only 3 of the 4 roots'):
+        e3, _ = cc.eom_ip(nroots=4, conv_tol=1e-8, short=False)
+    assert len(e3) == 3

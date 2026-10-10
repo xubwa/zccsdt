@@ -308,7 +308,8 @@ def test_plan_and_memory_with_a_shift():
         assert plan.vectors == 16 * 8 * (om.n * vm.n + om.npair * vm.npair + n3) and n3 < packed / 5
         assert plan.fixed == eom.fixed_bytes(eris, np.float64, shift=s if s else None)
         # (far below the plan of the same integrals on the packed block)
-        assert plan.fixed - ccsdt_opt.overhead() < 8 * (2 * vm.npair ** 2 + 7 * om.n * vm.n ** 3 + 22 * om.n ** 2 * vm.n ** 2 + packed)
+        assert plan.fixed - ccsdt_opt.overhead() < 8 * (2 * vm.npair ** 2 + 7 * om.n * vm.n ** 3 + 22 * om.n ** 2 * vm.n ** 2 + packed
+                                                       + 80 * (om.n * vm.n + om.npair * vm.npair))
         if d == 0:
             continue
         arrays = plan.need - ccsdt_opt.overhead()

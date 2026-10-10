@@ -27,7 +27,7 @@ def test_short_vectors_against_the_reference_and_the_ghost_route(cplx, method):
     rank-3 parts of C(4,3) C(8,2) = 112 and C(4,2) C(8,3) = 336 elements
     where the EE problem with the ghost has 336 and 560 - are the lowest
     eigenvalues of the dense matrices of the reference (1e-9) and the
-    roots of the ghost route (1e-10), with as many sigma vectors.'''
+    roots of the ghost route (1e-10).'''
     mf = scf.addons.convert_to_ghf(_scf('lih'))
     C = _spin_mixed(mf)[0] if cplx else mf.mo_coeff
     eris = E.from_scf(mf, mo_coeff=C, packed_vvvv=not cplx)
@@ -47,7 +47,7 @@ def test_short_vectors_against_the_reference_and_the_ghost_route(cplx, method):
         assert res.converged.all() and abs(res.e - w.real[:4]).max() < 1e-9
         e2, t1, t2, t3g, singles = eom.ghost(eris, rt.t1, rt.t2, t3, kind)
         old = eom.kernel(e2, t1, t2, t3g, nroots=4, conv_tol=1e-9, singles=singles)
-        assert abs(res.e - old.e).max() < 1e-10 and res.nsigma == old.nsigma
+        assert abs(res.e - old.e).max() < 1e-10
         if with3:
             assert res.r3[0].size == n3 and old.r3[0].size == (336 if kind == 'ip' else 560)
             assert res.r3[0].dtype == (np.complex128 if cplx else np.float64)

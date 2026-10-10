@@ -174,18 +174,52 @@ passes 1, one `t2 x <mb||ef>` product (o^2 v^4, as in W_vvvo of the ground
 state), o v^4 for `<ab||de>'` and `W_pp r1`, and (ov)^3: about two
 amplitude iterations less the T1 dressing.  Measured: section 8.
 
-**What would make it cheaper, not done.**  The second residual - T3 with
-the derivatives of the operators - is the part of `Hbar` with three-body
-character.  Its pp ladder costs o^3 v^5 / 24 as a ladder, but `W'_pp` has
-low rank in the occupied indices: `r2[mn,ab] (<mn||de> T3[ijk,dec])` is
-o^5 v^3 through the intermediate in brackets, and `-P(ab) r1[m,a]
-(<mb||de>~ T3[ijk,dec])` is o^4 v^4; likewise the ring term with
-`<mn||de> r2`.  With these the second residual would cost a fraction of
-the first for o << v, and a sigma vector little more than one iteration.
-It needs kernels for T3 contracted with integrals to a six-index
-intermediate; the three T2 terms of `pass1(T3; H')` also follow from the
-T3 parts of W_vvvo and W_vooo of the ground state contracted with r1,
-except `f'[m,e] T3[ijm,abe]`.
+**The factorized second residual: what holds and what does not.**  The
+second residual - T3 with the derivatives of the operators - was expected
+to cost a fraction of the first ("a sigma vector little more than one
+iteration").  Term by term:
+
+- *The ring term cannot be reduced.*  `P(i/jk) P(a/bc) sum_md W'[m,d,i,a]
+  T3[mjk,dbc]` with `W' = <ma||di>' + <mn||de> r2[in,ae]`: whichever
+  factor meets T3 first - `(g r2) T3`, as now, or `(g T3) r2` with a
+  six-index intermediate, stored or not - the last product sums two
+  single indices against two free ones with the spectators (jk, bc):
+  (o v)^2 C(o,2) C(v,2) flops, a ring pass.  W' is an (o v) x (o v)
+  matrix of full rank; a low rank in the occupied indices exists only in
+  its r1 parts, which are an o / v share of it.  The first version of
+  this section said "likewise the ring term": wrong.
+- *The pp ladder can be replaced.*  `W'_pp = -P(ab) r1[m,a] <mb||de>~ +
+  r2[mn,ab] <mn||de> + 1/2 A[F'_vv delta]`.  With Y[(mn), I, c] = sum_de
+  <mn||de> T3[I, dec] and Z[m, b, I, c] = sum_de <mb||de>~ T3[I, dec] -
+  both independent of R, made once in `prepare` from one pass over T3,
+  (C(o,2) + o v) C(o,3) v numbers, 6 o / v of the size of T3 - the ladder
+  becomes `r2[P, (ab)] Y[P, I, c] - P(ab) r1[m,a] Z[m,b,I,c]` followed by
+  the reduction P(c/ab) of the ladder: o^5 v^3 / 24 + o^4 v^3 / 6 flops
+  (with the r1 part as v x o products per b and a six-term reduction of
+  a v^3 cube; as one GEMM with the operator [r2 | r1 delta] it costs
+  (o / v)^2 + 2 o / v of the ladder).  The F'_vv part moves into the ring
+  operator of the same residual at no cost, as `F'_vv[a,d] delta_im / 3`.
+- *Pass 1 over T3 with H'*: two of its three T2 terms follow from the T3
+  parts of W_vvvo and W_vooo of the ground state contracted with r1; the
+  third, `f'[m,e] T3[ijm,abe]`, still gathers T3.
+
+So the saving is bounded by the pp ladder of the second residual, less
+what replaces it (its reduction, which is about a sixth of it, and the
+products above).  Its share of a sigma vector, measured (the timer
+`eom.t3/pp_ladder`):
+
+| | o + v | pp ladder of the second residual | of a sigma vector | what could be saved |
+|---|---|---|---|---|
+| H2O / cc-pVTZ, packed block, 8 threads (job 31825453) | 10 + 106 | 1.39 s | 8.18 s: 17% | about 11% |
+| HBr / cc-pVTZ-DK, label blocks, 24 threads | 8 + 78 | @@PP_TZ@@ | @@PPSHARE_TZ@@ | - |
+| HBr / cc-pVQZ-DK, label blocks, 24 threads | 26 + 120 | @@PP_QZ@@ | @@PPSHARE_QZ@@ | @@PPSAVE_QZ@@ |
+
+**Not implemented**: for the linear molecules in label blocks that this
+stage is about the gain is a few percent of a sigma vector, against two
+stored intermediates of the size of T3, a new reduction kernel and their
+block and shift structure.  The ratio of a sigma vector to an iteration
+stays near 1.7 to 2; what remains above the two residuals is the two
+passes 1 and the dense small terms (section 8).
 
 ## 4. The solver (`zccsdt.cc.eom.davidson`)
 
@@ -227,6 +261,37 @@ not EOM-CCSD - the amplitudes are those of CCSDT - but as good a start.)
 For EOM-CCSD the unit vectors themselves.  `guess=` takes vectors (r1, r2).
 Spin is not a symmetry of the code: a triplet is three roots, in spinors
 split by spin-orbit coupling.
+
+**Which roots come back** (`eom.kernel`; found with F- and Li, where the
+first version lost roots).
+
+- The singles-doubles stage solves for `extra` (default 2) roots more than
+  asked for, from as many unit vectors more.  Where the single excitations
+  run out - IP of three electrons has three - the guess goes on with unit
+  vectors on the lowest doubles of the shift (the first version returned
+  three roots for four asked, without a word).  If fewer roots can be
+  started than asked for, a warning says so (the ghost route at full
+  length knows its singles only).
+- The triples stage starts from all of these vectors and takes the
+  **lowest** roots; it does not follow the singles-doubles roots one by
+  one.  A given `guess=` is followed, by the weight of an eigenvector in
+  the space of the previous roots - the first version matched the roots of
+  two iterations one to one, and inside a degenerate level, whose
+  eigenvectors are rotated at will from one iteration to the next, the
+  last root went to a vector far above (F-, 2p^-1: five roots at 3.1402 eV
+  and one at 67 eV; now six at 3.1402).
+- `nroots` that cut a degenerate level (the next roots of the
+  singles-doubles stage within 2e-6 Eh of the last one): a warning and
+  `Result.cut_level`; with `complete=True` the rest of the level is
+  computed too and more roots than asked for come back.
+- What is not guaranteed: a state without a single excitation in its
+  sector (the M_S = -1 component of the triplet of Li+ from an alpha
+  reference: 2h1p only) is found if a doubles guess of its sector is among
+  the vectors started and its singles-doubles root among the nroots +
+  extra lowest - for Li with `extra=10`, not with the default, where the
+  singlet above the triplet takes the fourth place.  The energies that are
+  returned are right in either case (Li: the FCI differences to 1e-8).
+  Sectors (below) are the remedy that does not depend on the guess.
 
 **Degenerate levels and sectors.**  The solver finds a degenerate level
 whole - asked for six roots of a spectrum that starts with a threefold
