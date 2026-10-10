@@ -3951,6 +3951,80 @@ operators - the one part of a sigma vector that stored intermediates could
 replace (`docs/eom.md` 3; the ring term cannot be) - is 0.0105 s of 0.372
 (8 + 78) and 0.78 s of 11.06 (26 + 120): not implemented.
 
+## Two production-size runs of the native program: benzene and ThF+ (2026-10-09/10)
+
+Both through CFOUR's two-component chain (`xjoda`, [`xx2camf`,] `xsox2catm`,
+`xsox2chf`, `xx2cvtran` with `ABCDTYPE=STANDARD`) and then `xzccsdt` (CCSDT,
+then (Q) from the amplitude file), on nodes of the `bigmem` partition (2 x 24
+cores Xeon Gold 6248R, 1.5 TB); run directories on the node-local disk.
+One run each; nothing here is a comparison with another program.
+
+**Benzene** (job 31791570, node bigmem12, 16 cores, `MEMORY_SIZE` 400 GB;
+binary of a5045bf): cc-pVDZ (PySCF's primitives through
+`bench/cfour/genbas.py`), D6h geometry r(CC) = 1.397, r(CH) = 1.084
+Angstrom, X2C-1e, `SYM=OFF`, 6 C 1s frozen (`DROPMO=1>6`): 228 spinors, **30
+occupied + 186 virtual spinors correlated; complex, no labels (dense)**.
+T3 is 68.5 GB.
+
+| step | wall time | memory |
+|---|---|---|
+| `xsox2catm`, `xsox2chf` (24 cycles, E = -230.806390149723) | 7 s, 6 s | |
+| `xx2cvtran` | 30 s | 46.7 GB |
+| CCSDT: 19 cycles (`CC_CONV=7`) | 77 728 s (21.6 h), 4091 s per cycle on average | 161.4 GB planned = used |
+| cycle 1 (no DIIS vector) ... cycle 8 (7 vectors in the file) | 3469, 3561, 3620, 3692, 3869, 4010, 4106, 4190 s | |
+| amplitudes to `XZAMPS` and a copy of it (69.0 GB) | 32 s for the copy | |
+
+E(CCSDT) = -231.666048351136 Eh, correlation energy -0.859658201414 Eh (the
+non-relativistic closed-shell CCSDT of the same basis and frozen core:
+-0.859518675).  The 8 DIIS vectors, 137 GB per pair, are records of the
+file `XZDIIS` (1.1 TB of the 1.7 TB disk): a cycle grows by 60 - 150 s per
+stored vector.  (Q) of this run: still running when this was written.
+
+**ThF+** (job 31831186, node bigmem17, 24 cores, `MEMORY_SIZE` 680 GB;
+binary of e9be264): R = 3.743547 bohr (1.981 Angstrom), X2CAMF
+(`%amfiMethod*` 0 1 1 0), basis `TH:DYVTZ-SO` and `F:ADYVTZ-SO` of CFOUR's
+GENBAS - the entry of Th there has an empty spin-orbit information line, and
+the run used a copy with the line `3  1 6  2 4  3 2` (six p, four d and two
+f shells contracted per kappa, as the contraction pattern of the entry
+shows; with the empty line the SCF does not converge and is 8000 Eh off);
+`SYM=OFF`; SCF in blocks of m_j, Kramers-unrestricted, the open-shell
+determinant sigma(-1/2) delta(+3/2) with Omega = 1:
+
+    %dglin
+    4
+    28 29
+    15 14
+    5 5
+    1 1
+
+428 spinors, 70 frozen (`DROPMO=1>35`: Th up to 5p, F 1s): **28 occupied +
+330 virtual spinors correlated; real arithmetic, 12 classes of the labels
+2 m_j** read from CFOUR's `dgcosym` with `XZ_LABTOL=1e-5` (the largest
+element of `<vv||vv>` that the labels forbid is 4.4e-7; with the default
+1e-8 the labels are refused and the run is dense: T3 155.5 GB).  T3 in
+blocks: 15.6 GB (10.1 % of the dense one).
+
+| step | wall time | memory |
+|---|---|---|
+| `xx2camf`, `xsox2catm` | 22 s, 28 s | |
+| `xsox2chf` (46 cycles, E = -26537.292447227) | 120 s | 93 GB |
+| `xx2cvtran` | 408 s | 389 GB |
+| integrals read and sorted by `xzccsdt` | 108 s | |
+| CCSDT: 55 cycles (`CC_CONV=7`) | 17 180 s (4.8 h), 312 s per cycle | 301.2 GB planned = used, 8 DIIS vectors in the work array |
+| (Q), one process, 24 threads | 19 387 s (5.4 h) | 104.1 GB |
+
+E(CCSDT) = -26538.330244805904 Eh (correlation energy -1.037797579),
+E[Q] = +0.001138617963, E(Q) = -0.001399567108, E(CCSDT(Q)) =
+-26538.331644373011 Eh.  The closed-shell determinant (7s^2: `29 29 / 14 14
+/ 5 5 / 1 1`) has E(SCF) = -26537.263334288, 0.0291 Eh above the open-shell
+one; only its SCF and integral transformation were run (`xx2cvtran` 403 s).
+The iterations converge at a steady 0.78 per cycle from cycle 12 on
+(|dT| 1e-3 at cycle 12, 6e-8 at cycle 52).  Of a cycle, pass 1 takes 17 %
+and the t2 `<ov||vv>` term of W_vvvo 6 %.
+
+The same per-cycle numbers side by side: 68 minutes for 30 + 186 complex
+dense on 16 cores, 5.2 minutes for 28 + 330 real in blocks on 24.
+
 ## Correctness references
 
 | Reference | Agreement | Test |
