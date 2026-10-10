@@ -158,6 +158,7 @@ Written:
 | `JOBARC` | `TOTENERG`: the energy of the method |
 | `XZAMPS` | after converged CCSDT: unformatted stream; `'XZAMPS01'`, 5 integers of 8 bytes (occupied, virtual, words per element: 1 real / 2 complex, classes of the labels, elements of T3 as stored), the correlation energy (real, 8 bytes), then T1 `[i][a]`, T2 `[i][j][a][b]`, T3 as stored (packed i<j<k, a<b<c; its blocks one after the other), row-major, in the order of the spinors of the run that wrote it |
 | `XZLAMB` | after converged Lambda equations: the format of `XZAMPS` with the tag `'XZLAMB01'`; the real number is the CCSDT correlation energy of the amplitudes that lambda belongs to (checked against `XZAMPS` when both are read); then l1 `[i][a]`, l2 `[i][j][a][b]`, l3 as T3 is stored |
+| `XZDIIS.NNNN` | with several ranks: the slice of rank NNNN of the DIIS vectors, in its run directory, where rank 0 has `XZDIIS` (section 15) |
 | `XZDIIS` | only if the DIIS vectors do not all fit in the work array (section 4: all in memory or all in the file): direct-access file with the T3 parts of the vectors (of the amplitudes, then of lambda); deleted at the end |
 | `XZQCHK.NNNN` | one per rank during (Q): a first line that names the calculation and the task list (kind, sizes, tasks, a number computed from the list), then a line per finished task (task, its two energies, seconds); deleted when (Q) has finished |
 | `xfull`, `dpoo`, `dpvv`, `dii0`, `daa0`, `dpopo`, `dpvpv` | `density`, `ccsdt_density`: the input of CFOUR's `xx2czvec` (section 10.2: one record each, complex, CFOUR's order of the spinors) |
@@ -397,16 +398,20 @@ plan` to the word).
   work arrays of the ranks of a node against what the node had, with a
   warning if they are more:
 
-        a rank other than 0 takes:              1987654321  =    15901.2 MB
+        a rank other than 0 takes:            1943019168  =    15544.2 MB
           (its own work array: the integrals, the amplitudes, its part of the residual, the batches; no DIIS vectors)
         the work arrays of the ranks, node by node (MB; rank 0: its plan):
-          node of rank     0:    2 ranks, work arrays     119405.3   memory available at the start     184200.1
+          node of rank     0:    2 ranks, work arrays      72127.4   memory available at the start     171230.4
+
+  (26 + 120 dense real, two ranks on one node, `XZ_SLICES=0`.)
 
   **With several ranks on one node `MEMORY_SIZE` is rank 0's alone**: it
   must leave room for the other ranks of the node (the line above says how
   much), otherwise rank 0 plans the DIIS vectors into memory that the node
-  does not have.  With slices (`XZ_SLICES=1`, section 15) every rank holds
-  its slice of every DIIS vector and takes what rank 0 takes.
+  does not have.  With slices (the default with more than one rank, section
+  15) every rank holds its slice of every DIIS vector - in its work array,
+  or in its own file `XZDIIS.<rank>` - and takes what rank 0 takes; the
+  description above is that of `XZ_SLICES=0`.
 - With more than one rank the batches of pairs and of triples are what is
   dealt to the ranks, so their targets are capped: at least 8 batches of
   each kind per rank (`XZ_BPR`).  One rank: the targets of before.
@@ -450,7 +455,8 @@ message), `XZ_MPITEST=n` (a test of the chunked transfers on arrays of n
 words), `XZ_DIST=digits` (the kinds of batches that are dealt out: 1, 2, 3
 pass 1, pass 2, pp ladder; 4, 5, 6 those of the Lambda equations; `0`:
 rank 0 does all), `XZ_BPR`, `XZ_BCOST=file` (the seconds of every batch),
-`XZ_SLICES=1`, `XZ_R0LOAD`.  `XZ_MAXCOR` is read by rank 0 only.
+`XZ_SLICES=0`, `XZ_REBAL`, `XZ_R0LOAD`, `XZ_WFAIL`.  `XZ_MAXCOR` is read by
+rank 0 only.
 
 Measured (H2O / 6-31G, login node): the same energies to 1e-12 with the work
 array at its floor (2022176 words: DIIS in the file, one pair per batch),
@@ -881,13 +887,10 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   equations with constant terms (lambda of CCSDT(Q), the equations of the
   first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); the densities of
   (Q) and (Q)_Lambda (the density of CCSDT is there: section 13).
-- The iterations over ranks (section 15): what is not distributed (the
-  small intermediates are made by every rank with its own threads - in
-  blocks of the labels they are a third of an iteration; the CCSD part,
-  the Gram matrix and the residuals of rank 1 and 2 of the Lambda
-  equations are rank 0's); T3 shared between the ranks of one node (every
-  rank has its own copy); a cost model that is corrected from the measured
-  seconds during the run.
+- The iterations over ranks: section 15.10 (what is not distributed - in
+  blocks of the labels the small intermediates, a quarter of an iteration,
+  are made by every rank with its own threads -; T3 shared between the
+  ranks of one node; the final commit timed on several nodes).
 - (Q) over ranks on separate nodes was not timed (section 8).  Whole groups
   now go to the ranks and T3 is shared between the ranks of a node (sections
   5, 14).  Not done there: Xo shared in the same way (it is formed by every
@@ -2306,3 +2309,471 @@ the packed block) and are not quoted.
 - The DIIS stage in the file with fewer passes; cycles with all eight
   vectors in the file were not timed.
 - The estimate of `XZ_QSAMPLE` is an upper estimate (1 to 36 % high here).
+
+## 15. The CCSDT iterations and the Lambda iterations over MPI ranks
+
+    mpirun -np 8 -ppn 2 xzccsdt ccsdt          # 4 nodes, one rank per socket
+    mpirun -np 4 -ppn 1 xzccsdt lambda         # 4 nodes, one rank per node
+
+Until this commit only (Q) ran over ranks.  Now an iteration of the T3
+equation and of the Lambda equations does: the target is the calculation
+without symmetry (complex, dense), which takes days on one node.  What is
+measured below says so (job, nodes); in short, for HBr 26 + 120 dense real
+on Xeon Gold 6248R nodes: a CCSDT cycle takes 48 s serial, 40 s with one rank per socket
+of one node (1.2 times), and on other nodes 56.7 s serial against 30.8 s on
+two nodes (1.84), 17.4 s on four (3.26) and 15.1 s on four with two ranks
+each (3.75); the Lambda equations the same (1.81, 3.28, 3.75); complex T3
+1.92 and 3.51 on two and four nodes; in blocks of the labels 1.5 and 2.0,
+because a quarter of an iteration there is not distributed.
+
+### 15.1 The design as built
+
+**Every rank runs the same step on its own copy of the amplitudes.**  The
+step is `xzstep` (`xzlamstep`) as before, with three differences: the three
+loops that are 95 % of a dense iteration - pass 1 and pass 2 over batches of
+occupied pairs, the pp ladder over batches of occupied triples (in the
+Lambda equations: pass 1 with the densities, pass 2, the ladder) - skip the
+batches of other ranks; the ranks meet twice to sum what the batches made;
+and the rows of T3 have owners.  `xzdist.F90` holds the list of batches, the
+slices and the clocks; all MPI calls are in `xzmpi.c`.
+
+*What a rank holds* (its own work array): the tables and the integrals - it
+reads the files itself, as the ranks of (Q) do -, T1, T2, **all of T3**,
+one region of the size of T3 for the residual (Lambda: T3, lambda3 and the
+residual), the arrays of a step at the batch sizes of rank 0's plan, and
+its slice of the DIIS vectors.  The small intermediates (dressed blocks,
+F, W_ovvo, W_vooo, W_vvvo, the operands of the passes, the occupied
+operator; for the Lambda equations everything that `xzlamim` makes once,
+the pp operator in the place of `<ab||cd>`, `Xq`, `X2`) are **made by every
+rank** from T1, T2 and the summed results of pass 1, with its own threads:
+they are small, the code is the serial code, and nothing has to be sent or
+kept consistent.  (The design named both ways; recomputing is the simpler
+and is exact.  Its price is in 15.6: what is not distributed is done by
+every rank with its own threads, so on *one* node it gets slower with more
+ranks.)
+
+*One iteration of the T3 equation:*
+
+| step | who | what goes between the ranks |
+|---|---|---|
+| T1, T2 of rank 0 | rank 0 -> all | 2 small broadcasts |
+| dressing, operands of pass 1 | every rank | - |
+| **pass 1** | every rank: its batches of pairs | - |
+| meeting 1 | all | sums on every rank (`MPI_Allreduce`, in place, in chunks): the T3 parts of W_vvvo (`X`: (o + v) o v(v-1)/2 numbers) and of W_vooo (`Y`: o(o-1)/2 v (o + v)), of the T1 residual (o v) and of the T2 residual (on pairs) |
+| W_vvvo, W_vooo, W_ovvo, F, operands of pass 2 | every rank | - |
+| sweep over the slabs of the dressed `<ab||cd>`; **pp ladder** | every rank dresses every slab; its batches of triples | - |
+| CCSD part (new T1, T2), occupied operator | every rank (only rank 0's T1, T2 are used) | - |
+| **pass 2** | every rank: its batches of pairs | - |
+| hh ladder + F_oo | every rank: the rows of its slice | - |
+| meeting 2 | all | **the residual to the owners of its rows** (`xzmpi_slices_add`) |
+| Jacobi step, DIIS | every rank: its slice | the overlaps (a few numbers: sum, then rank 0's with the T1, T2 parts to all) |
+| new T3 | all | **the slices to every rank** (`xzmpi_slices_put`) |
+| energy, convergence | rank 0 | one word: "one more" or "done" |
+
+The Lambda equations: the same with lambda3 in the place of T3 (T3 is sent
+once, by broadcast, before the intermediates); meeting 1 sums the result of
+the stacked products (`X`, `Y`) and the densities `Dr` ((o v)^2) and `D1`;
+the Gram matrix of lambda3 and T3 is made by rows on the owners and summed
+onto rank 0; meeting 2 sums the two small results of the ladder (`r2q`,
+`r1x`) onto rank 0 and exchanges the residual; the residuals of rank 1 and
+2 and the update of l1, l2 are rank 0's.
+
+**Slices.**  Rank r owns the elements `soff(r) <= e < soff(r + 1)` of the
+stored T3 - equal numbers of elements, cut at rows (occupied triples; in
+blocks of the labels at the rows of a block).  A pass of this rank adds to
+rows of every owner (pass 2 scatters; the pp ladder writes the rows of its
+own triples only, which are not the rows of its slice), so every rank has a
+whole residual array, and at meeting 2 the parts go home: in `nrank - 1`
+rounds, in round d every rank sends what it has for rank + d and receives
+what rank - d has for it (`MPI_Sendrecv`, chunk by chunk, a threaded add).
+All ranks transfer at once, each moves (n - 1) / n of a T3 out and in, and
+no rank relays or collects for another.  The same rounds carry the slices
+of the new T3 to all ranks.  Then:
+
+- the operator on occupied triples, the Jacobi step and DIIS are done by
+  every rank on its rows (`xzslocc`, `xzslupd`, `xzdiis_upd` on a range of
+  the stored array);
+- **no rank holds more of the DIIS history than its slice**: 8 vectors and
+  8 error vectors take 16 T3 / n per rank, in the work array if rank 0's
+  plan has them there, else in the rank's own file `XZDIIS.<rank>` in its
+  run directory ("memory first, all or nothing" is decided once, by rank
+  0's plan, for all); the overlaps are sums of the ranks' dot products, the
+  extrapolation is done slice by slice;
+- rank 0 sends no T3 and receives no residual of other rows.
+
+This is stage two of the design, and the default with more than one rank.
+**Stage one** - rank 0 broadcasts T3, the residual is summed onto rank 0
+(`MPI_Reduce` in place), rank 0 alone does the hh ladder, the Jacobi step
+and DIIS and holds all vectors - was built first and validated, is still
+there (`XZ_SLICES=0`) and is slower everywhere (15.6, 15.7): the reduction
+of a T3 onto rank 0 ran at 0.4 to 1.9 GB/s, the exchange between owners at
+4 to 12 GB/s.
+
+**Deviations from the design as it was given.**  (1) The small T1/T2
+dependent arrays are recomputed, not sent (above).  (2) A split of the
+residual by rows was not used to avoid sending zeros: with the owners of
+rows nothing is collected on one rank at all.  (3) Stage two became the
+default, and with it the hh ladder, the Jacobi step and DIIS are
+distributed too.  (4) T3 shared between the ranks of one node through a
+mapped file was not built - it does not fall out for free here: the
+amplitudes of the iterations change every iteration, so it would be a
+shared *writable* segment (one per node, every rank writing its slice into
+it and reading all of it), with the T3 of every rank addressed outside its
+work array as (Q) addresses the mapped `XZAMPS`.  It would save (ranks per
+node - 1) copies of T3 and the transfer of the slices within a node
+(1.0 s of a 40 s cycle for 26 + 120 dense on 2 x 24, 15.6).
+
+### 15.2 The chunked transfers (`xzmpi.c`)
+
+An array of n double words goes in messages of at most `xz_chunk` words
+(2^23 = 64 MB; `XZ_MPICHUNK`, capped at 2^27 so that no count in bytes
+passes 2^31 - 1 either): `xzmpi_bcast_w` (from rank 0), `xzmpi_send_w` /
+`xzmpi_recv_w`, `xzmpi_sum0_w` (the sum onto rank 0, in place),
+`xzmpi_allsum_w` (the sum on every rank, in place), `xzmpi_slices_add` and
+`xzmpi_slices_put` (above; every rank does the same number of chunks per
+round, that of the longest slice, with empty messages where its own slice
+is shorter).  Calls: `MPI_Bcast`, `MPI_Send`, `MPI_Recv`, `MPI_Sendrecv`,
+`MPI_Reduce`, `MPI_Allreduce` with `MPI_IN_PLACE`, `MPI_Gather`,
+`MPI_Barrier`, `MPI_Get_processor_name`, all with `int` counts of
+`MPI_DOUBLE` or `MPI_BYTE` on `MPI_COMM_WORLD`.  The Fortran side passes
+regions of the work array and 8-byte integers; it never sees an MPI handle
+or an MPI integer.
+
+`XZ_MPITEST=n` runs every routine on arrays of n words with patterns that
+depend on rank and index (slices of unequal lengths, one of them empty) and
+counts wrong words.  Run (login node): n = 1 000 003 with chunks of 4097
+words on 1, 2, 3, 4, 6 ranks and of 1 word on 3 ranks; n = 300 000 000 (2.4
+GB per array, more bytes than 2^31) with the default chunk and with the
+largest; on four nodes n = 100 003 in chunks of 5000 - no wrong word.  The
+whole regression set was run with chunks of 1000 to 7000 words (15.5).
+
+A rank other than 0 that stops with an error (a file that is not there, a
+work array too short for the plan) must not call CFOUR's `ERREX`: that
+closes JOBARC as if the rank had opened it and writes an empty index
+(`JAINDX`) over that of the run directory, which then cannot be read until
+the chain is run again (found here; it held for the ranks of (Q) as well).
+All errors of the program go through `xzerrex` now: `ERREX` on rank 0,
+`MPI_Abort` on the others (their message is in `xzccsdt.rNNNN`).
+`XZ_WFAIL` tests it; the directory runs again afterwards.
+
+### 15.3 The batches and their ranks
+
+The batches are those of the loops: `nbp` occupied pairs (pass 1, pass 2),
+`nbt` occupied triples (ladder), never across the groups of the labels.
+With more than one rank the plan keeps at least 8 batches of each kind per
+rank (`XZ_BPR`; 26 + 120 dense on 8 ranks: 109 batches of 3 pairs, 65 of 40
+triples).  `xzdeal` deals them, the most expensive first, **each to the
+rank that is done with it first**; every rank makes the same list.
+
+*The cost model* (`xzbcost1`): the operations of the products of a batch
+by classes - pass 1: sum over the classes (d, m) of `n_d n_m n_Q (8 + n_e +
+n_j)`; pass 2: sum over the groups Q of `n_delta n_Q (n_delta + 64)` (96 in
+the Lambda equations); ladder: sum over the classes of the free index of
+`n_c n_Q (n_Q + 16)`; Lambda pass 1 adds the densities `n_delta^2 n_Q`.
+With one class every pair (triple) costs the same.  Measured with
+`XZ_BCOST` (seconds of every batch; `fitb.py`), seconds over model cost,
+normalized, for the batches that hold 90 % of the time: 26 + 78 in blocks,
+8 threads: pass 1 0.94 to 1.07, pass 2 0.97 to 1.01, ladder 0.96 to 1.12;
+26 + 160 in blocks, one rank of 12 threads: 0.92 to 1.18, 0.95 to 1.02, 0.97
+to 1.03; four ranks of 12 threads: 0.85 to 1.55, 0.74 to 1.09, 0.94 to 1.08;
+one rank of 48 threads: 0.71 to 1.92 in pass 1 (a few large tasks do not
+use 48 threads: section 12).  The imbalance of the ranks that the model
+left (the slowest rank above the mean, job 31814617, one node, no
+correction): dense 0.4 to 1.8 %; blocks 0.2 to 7.6 % (pass 1 the worst).
+
+*The speeds of the ranks are measured, not assumed.*  On four nodes the
+slowest rank was 7 to 15 % above the mean with a model that was right (the
+dense case: every pair costs the same) - the nodes of the partition are not
+equally fast (section 12: up to 40 %) - and the other ranks waited 2.0 to
+2.7 s of a 17 s cycle (real) and 11 s of 54 s (complex).  So after every
+step the ranks send rank 0 their seconds in their batches of each loop and
+up to the two meetings (`xzrebal`); if the last rank came more than 3 %
+(`XZ_REBAL`) after the mean, rank 0 sends back, per rank, the model cost per
+second in each loop and the seconds of everything else before each
+meeting, and the batches are dealt again with those numbers (pass 2 of a
+rank starts when its ladder is done).  That also takes care of whatever a
+rank does besides its batches.  Measured on the login node with two ranks
+of 2 and 6 threads (26 + 78 in blocks): 4.02 s per cycle without, 2.37 s
+after one deal.  **On several nodes it is not measured yet with this
+commit** (see 15.7).  Energies do not depend on the deal: the regression
+set with a deal after every step (`XZ_REBAL=0.0001`, 15 to 18 deals per
+case) is identical to 12 decimals.
+
+### 15.4 Memory per rank
+
+Planned by the dry run (section 4), printed by rank 0, checked node by node
+against `MemAvailable`.  Work arrays as planned = as used (the table of the
+ranks prints both the work array and the peak resident set of every rank),
+MB, `MEMORY_SIZE` 150 GB, 4 DIIS vectors (`XZ_DIIS=m4`; the default of 8
+adds 8 more T3 / n per rank with slices, 8 T3 on rank 0 without):
+
+| case (T3) | step | serial | stage one: rank 0, others | slices: every rank of 2 | of 4 | of 8 |
+|---|---|---|---|---|---|---|
+| 26 + 120 dense real (5.8 GB) | CCSDT | 56 583 | 56 583, 15 544 | 39 059 | 27 198 | 21 013 |
+| | Lambda | 67 540 | 67 540, 26 501 | 50 016 | 38 135 | 32 132 |
+| 26 + 160 real blocks (1.6 GB) | CCSDT | 19 820 | 19 820, 8 418 | 15 047 | 11 705 | 9 844 |
+| | Lambda | | | 26 947 | 23 283 | 21 172 |
+| 26 + 120 dense complex (11.7 GB) | CCSDT | 111 852 | 111 852, 29 774 | 76 803 | 53 437 | |
+
+(resident sets: 85 to 97 % of these.)  With slices a rank of the CCSDT
+iterations holds 2 T3 + 2 x (DIIS vectors) T3 / n + the integrals and the
+batches; a rank of the Lambda iterations 3 T3 + `X2` and `Xq` (dense: 3.9 +
+0.8 GB real at 26 + 120) + the same.  Floors and errors: rank 0 as before
+(`the work array is too short ... Set MEMORY_SIZE to at least`); a rank
+other than 0 has no floor of its own - it takes rank 0's plan and stops
+with both numbers if its array does not hold it (ranks with different
+numbers of threads are planned for the largest).  Tested (login node, 3
+ranks): rank 0 at the floor of its plan (the DIIS vectors then in the files
+`XZDIIS`, `XZDIIS.0001`, ...), below it (the error, exit 255), `XZ_DIIS=f8`,
+`XZ_DIIS=m0`, ranks of 1 and 3 threads.
+
+### 15.5 Validation
+
+All against the serial program of before this work (tag
+`xzccsdt-openmp-20261009b`, `bin_old`), to the 12 decimals printed.
+
+(1) **The regression set** (sections 7, 11: `ccsdt(q)_l` of H2O / 6-31G, the
+frozen + `%vircut` case, HBr / cc-pVDZ-DK dense, the labelled case in its
+four modes, with phases in blocks and dense, shuffled; `ccsdt(q)` of two;
+12 lines of `native3/base.regr`: cycles, E(CCSDT), E(CCSDT[Q]_L),
+E(CCSDT(Q)_L), the pseudo-energy, E(CCSDT[Q]), E(CCSDT(Q))) -
+`natmpi/regr.sh`, login node: identical with the serial build, and with
+the MPI build on 1, 2, 3, 4 and 6 ranks, in the order of the work: nothing
+distributed (`XZ_DIST=0`), the pp ladder alone (`3`), the T3 equation
+(`123`), everything; stage one (`XZ_SLICES=0`) and slices; chunks of 1000
+to 7000 words; batches of 2 pairs and 3 triples; the DIIS vectors in the
+files; a deal after every step.  The final commit: serial, 1 (`m1`), 2, 3,
+4 ranks with slices, 2 and 3 ranks with `XZ_SLICES=0`.
+(2) `ccsdt_density` on 2 to 4 ranks against the serial files of `xx2czvec`
+(`tden.sh`: H2O, with frozen and dropped spinors, HBr with 28 frozen, the
+labelled case in blocks and dense complex): largest difference 7e-17.
+(3) The steps as separate invocations on 3 ranks (`ccsdt`, `lambda`,
+`(q)_l`: `tsep.sh`).
+(4) **HBr / cc-pVTZ-DK, 10 frozen, labelled, 26 + 78, converged**
+(`CC_CONV=9`; job 31814617, node c393, snapshot 3eb4282), `ccsdt(q)_l`:
+
+| | serial before | 1 x 48 | 2 x 24 | 4 x 12 | 2 x 24, 4 x 12 slices |
+|---|---|---|---|---|---|
+| blocks: E(CCSDT) | -2605.269299541783 | the same | the same | the same | the same |
+| E(CCSDT[Q]_L) | -2605.268884407873 | | | | |
+| E(CCSDT(Q)_L) | -2605.269268719839 | | | | |
+| pseudo-energy | -0.29411064336175 | | | | |
+| cycles CCSDT / Lambda | 20 / 18 | | | | |
+| wall time of the chain / s | 146.1 | 149.4 | 90.2 | 87.2 | 83.9, 84.0 |
+| dense (`XZ_LABELS=0`): the five numbers | the same as in blocks | the same | the same | the same | the same (4 x 12) |
+| wall time of the chain / s | 1155.6 | 1175.7 | 795.0 | 811.5 | 757.5 (4 x 12) |
+
+("the same": every digit printed.  Section 14 has -2605.269299541779 for
+this case: another run of the SCF that writes the files, as said there; the
+columns here are one set of files.)
+(5) **Four nodes** (job 31814618, c292, c314, c395, c495; the run directory
+in the shared scratch, a network file system - (Q) then maps `XZAMPS`
+there, with its warning): `ccsdt(q)_l` of the labelled case and of HBr /
+cc-pVDZ-DK dense on 4 x 1 ranks (chunks of 5000 words, `XZ_MPITEST`) and 4
+x 2 ranks, `ccsdt_density` on 2 x 2: all numbers those of the serial
+program on the same files.
+
+### 15.6 One node
+
+Job 31814617, node c393 (2 x 24 cores Xeon Gold 6248R, 189 GB), snapshot
+3eb4282 (before slices became the default and before the measured speeds:
+"slices" below is `XZ_SLICES=1` of that binary), run directories in the
+node-local `/tmp`, `XZ_NCYC=4`, 4 DIIS vectors in memory, Intel MPI on the
+node (`I_MPI_HYDRA_BOOTSTRAP=fork`, `I_MPI_PIN_DOMAIN=omp`,
+`OMP_PROC_BIND=close`).  Seconds per cycle, mean of cycles 2 to 4; the
+serial program of before first.
+
+| HBr, 10 frozen | serial before, 48 threads | the same, `numactl --interleave=all`, spread | 1 x 48 | 2 x 24 stage one | 4 x 12 stage one | 2 x 24 slices | 4 x 12 slices |
+|---|---|---|---|---|---|---|---|
+| 26 + 120 dense real, CCSDT | 48.08 | 44.46 | 47.95 | 43.90 | 45.98 | **40.07** | 41.21 |
+| Lambda | 72.69 | 68.13 | 72.40 | 64.77 | 71.32 | **59.66** | 63.20 |
+| 26 + 160 real blocks, CCSDT | 9.34 | | 9.57 | 9.26 | 10.70 | **8.20** | 10.11 |
+| Lambda | 12.57 | | 12.55 | 11.44 | 11.95 | **10.49** | 11.05 |
+
+One rank per socket gains 1.20 (CCSDT) and 1.22 (Lambda) over the serial
+program as it is run, 1.11 and 1.14 over the serial program with its pages
+interleaved; four ranks gain less.  **Why so little** - per cycle, dense
+CCSDT, the serial program against a rank of 2 x 24 (which does half):
+
+| stage | serial, 48 threads | 2 x 24, per rank | gain |
+|---|---|---|---|
+| pass 1 | 7.6 | 5.1 | 1.5 |
+| sweep and pp ladder | 11.5 | 10.5 | 1.1 |
+| pass 2 | 26.0 | 18.4 | 1.4 |
+| the three | 45.1 | 34.0 | 1.33 |
+| residual to its rows; T3 slices to the ranks | - | 1.0; 1.0 | |
+| on its rows (hh ladder, Jacobi step, DIIS), CCSD part | 2.0 | 2.0 | |
+| waiting for the other rank | - | 1.0 | |
+
+Two ranks of 24 threads do the passes exactly as fast as two serial
+programs of 24 threads would (section 14: 70.5 s per cycle on 24 threads,
+i.e. 35 s for half) - the ranks do not disturb each other -, but the serial
+program on 48 threads is already at 1.5 times its speed on 24: the GEMM of
+the pp ladder uses the second socket fully, pass 1 and pass 2 (gathers and
+reductions, bound by the memory) partly.  What is left to win on one node
+is that NUMA part, 1.33 in the passes, and 5 s of transfers, row work and
+waiting take half of it back.  (Q) gained 1.7 to 1.8 from one rank per
+socket (section 14) because a rank of (Q) shares nothing and waits for no
+one.  In blocks every rank also makes the small intermediates with its own
+threads (below): with four ranks of 12 threads an iteration is slower than
+the serial one.
+
+**What is not distributed** (shares of a serial iteration, 48 threads, job
+31814617):
+
+| | 26 + 120 dense real | 26 + 160 real blocks |
+|---|---|---|
+| pass 1, pp ladder, pass 2: over the ranks | 15.9 + 24.0 + 54.0 = 93.9 % | 21.7 + 18.2 + 33.5 = 73.4 % |
+| hh ladder, Jacobi step, DIIS: on the rows of a rank (slices) | 3.0 + 0.1 + 1.0 % | 1.2 + 0.2 + 2.4 % |
+| the rest: made by every rank with its own threads | 2.0 % | 22.8 % (W_vvvo: t2 with `<ov||vv>` 11.0, CCSD part 2.2, W_vvvo bare 1.7, dressing 2.6, W_ovvo 1.0, ...) |
+
+Dense, the limit of the scheme is 1 / 0.02 before communication; in blocks
+1 / 0.23, because the dense o^2 v^4 and o^3 v^3 terms of the intermediates
+(section 12) weigh there - they are not split over the ranks (not done:
+the largest, the t2 `<ov||vv>` term of W_vvvo, is a loop over batches of
+first indices and could be dealt out like a pass).  Lambda, dense, serial:
+pass 1 39.0 %, pass 2 37.2 %, ladder 17.0 % (93.2 % over the ranks), Gram
+matrix 2.0 % and hh ladder 2.1 % (on the rows of a rank), the rest - the
+residuals of rank 1 and 2 on rank 0 - 1.7 %.
+
+### 15.7 Several nodes
+
+Job 31814618: four nodes c292, c314, c395, c495 of the partition `parallel`
+(`sbatch -N 4 --ntasks-per-node=1 -c 48 --mem=180G`: one Slurm task per
+node with all its cores - not `--ntasks-per-node=2 -c 24` as proposed,
+because Intel MPI's launcher then gets one task of 48 cores per node and
+pins the `-ppn` ranks itself: `cores allowed: 0-47` for one rank per node,
+`0-23` and `24-47` for two, printed by the job), Intel MPI 2021 started by
+`mpirun -np N -ppn P -hosts ...` through Slurm (`srun` in the PATH),
+**fabric: libfabric provider `mlx`** (`I_MPI_DEBUG=5`), snapshot 3eb4282,
+`XZ_NCYC=4`, 4 DIIS vectors.  **Run directories: the node-local `/tmp` of
+every node** - made on the first node (157 s), carried as one tar file
+(5.7 GB) through `/scratch16/lcheng24/xwang405` and unpacked on all four
+(10 s for both), the scratch emptied again.  The serial program of before
+first, on the first node (c292 is 18 % slower than c393 of 15.6).  Seconds
+per cycle, mean of cycles 2 to 4; in brackets the speedup over the serial
+program on the first node.
+
+| nodes x ranks x threads | 26 + 120 dense real: CCSDT | Lambda | 26 + 160 real blocks: CCSDT | Lambda | 26 + 120 dense complex: CCSDT |
+|---|---|---|---|---|---|
+| serial before, 48 threads | 56.7 | 85.7 | 12.38 | 16.52 | 188.1 |
+| 1 x 1 x 48 | 56.7 | 85.8 | 12.13 | 16.90 | 186.2 |
+| 1 x 2 x 24, stage one | 52.3 | 77.1 | 12.22 | | |
+| 2 x 1 x 48, stage one | 34.9 (1.63) | 52.3 (1.64) | 9.18 (1.35) | | 113.9 (1.65) |
+| **2 x 1 x 48, slices** | **30.8 (1.84)** | **47.4 (1.81)** | **8.06 (1.54)** | **10.29 (1.61)** | **97.9 (1.92)** |
+| 2 x 2 x 24, stage one | 40.1 (1.42) | 55.5 (1.54) | 10.09 (1.23) | | |
+| 4 x 1 x 48, stage one | 25.4 (2.24) | 35.5 (2.42) | 8.32 (1.49) | | 78.3 (2.40) |
+| **4 x 1 x 48, slices** | **17.4 (3.26)** | **26.2 (3.28)** | **6.15 (2.01)** | **7.09 (2.33)** | **53.6 (3.51)** |
+| 4 x 2 x 24, stage one | 23.4 (2.42) | 32.9 (2.61) | 7.59 (1.63) | | |
+| **4 x 2 x 24, slices** | **15.1 (3.75)** | **22.8 (3.75)** | **5.84 (2.12)** | **6.89 (2.40)** | not run |
+
+(the complex case: CCSDT only; its Lambda part and two ranks per node were
+cut from the job to save machine time.)
+
+Where a cycle goes on four nodes (slices, seconds per cycle, the slowest
+rank; "waiting" is the largest time a rank stood at a meeting):
+
+| | pass 1 | sweep, ladder | pass 2 | waiting | sums of pass 1 | residual to its rows | T3 slices | on its rows |
+|---|---|---|---|---|---|---|---|---|
+| dense real, 4 x 1 x 48 | 2.2 | 4.1 | 7.9 | 0.4 + 2.7 | 0.12 | 0.70 | 1.0 | 1.0 |
+| dense real, 4 x 2 x 24 | 1.5 | 3.3 | 5.3 | 0.3 + 2.0 | 0.20 | 1.5 | 1.7 | 0.8 |
+| dense complex, 4 x 1 x 48 | 6.7 | 12.2 | 26.6 | 0.9 + 11.1 | 0.23 | 1.35 | 1.3 | 3.3 |
+| dense real Lambda, 4 x 1 x 48 | 8.4 | 4.2 | 8.4 | 1.0 + 4.2 | 0.14 | 0.76 | 1.2 | 3.7 |
+
+**The transfers** (measured rates; a T3 of 5.84 GB real, 11.68 GB complex):
+
+| | on one node (shared memory) | between nodes (`mlx`) |
+|---|---|---|
+| stage one: T3 from rank 0, into a receiving rank | 3.1 to 4.2 GB/s | 9.8 GB/s (2 ranks), 5.0 to 5.5 (4), 2.7 (8) |
+| stage one: the residual summed onto rank 0 (`MPI_Reduce`, in place) | 1.1 to 1.9 GB/s | 1.5 GB/s (2 ranks), 0.7 to 0.9 (4, 8), 0.44 (2 nodes x 2) |
+| slices: the residual to the owners of its rows, per rank | 4.1 to 5.8 GB/s | 11.4 to 11.8 GB/s (2 ranks), 8.3 to 8.5 (4), 3.9 (8) |
+| slices: the slices of the new T3, into a rank | 3.5 to 3.8 GB/s | 7.6 GB/s (2), 5.6 to 7.1 (4), 3.5 (8) |
+
+(GB of one whole T3 per rank over the seconds of the transfer; with slices
+a rank sends and receives (n - 1) / n of a T3, in n - 1 rounds.)  In a
+cycle of the dense real case on four nodes the two exchanges are 1.7 s of
+17.4 (10 %), for complex T3 2.7 s of 53.6 (5 %); the sums of pass 1 0.1 to
+0.2 s.  Stage one spent 7.0 s (real) and 17 s (complex) per cycle in the
+reduction onto rank 0 alone.
+
+**What this binary did not have, and the final one has** (the numbers
+above are from snapshot 3eb4282; the last changes came out of them):
+slices as the default (no number changes: the "slices" rows are that
+mode); the batches dealt by the measured speeds of the ranks (15.3) - the
+"waiting" column above is what it is for: 2.0 to 2.7 s of 15 to 17 s
+(real), 11 s of 54 s (complex), 4.2 s of 26 s (Lambda) on four nodes; the
+Gram matrix of the Lambda equations by rows on every rank (1.5 s per cycle
+of rank 0 at this size, part of the Lambda waiting).  So the four-node
+rows of the dense cases should improve by up to the waiting (an upper
+bound: 3.26 -> 3.9 real, 3.5 -> 4.4 complex on 4 x 1), the two-node and
+one-node rows hardly (waiting 0.5 to 1 s there).  The final commit was
+validated (15.5) but **not timed on several nodes**.
+
+### 15.8 An estimate for benzene / cc-pVDZ (30 + 186, complex, dense)
+
+**An estimate, not a measurement.**  From the complex dense case that was
+measured (26 + 120, c292: 188 s per cycle serial on 48 threads; per cycle
+pass 1 26 s, sweep and ladder 48 s, pass 2 104 s, the rest 8 s), scaled by
+the operations of each stage (pass 1 o^3 v^3 (o + v): 8.5; ladder o^3 v^5:
+13.7; pass 2 o^4 v^4: 10.2): a serial cycle of about 2000 s on a 48-core
+node of this partition (the run that prompted this work reports about an
+hour on 16 cores).  T3 is 68.5 GB.  With slices, one rank per node:
+
+| nodes | passes / n (+ 3 % imbalance) | made by every rank (2 %) | exchanges (68.5 GB (n-1)/n out and in, at 7 to 8.5 GB/s) and sums | a cycle | speedup |
+|---|---|---|---|---|---|
+| 4 | 500 s | 40 s | 20 s | about 560 s | 3.6 |
+| 8 | 250 s | 40 s | 25 s | about 315 s | 6.3 |
+
+assumptions: the measured rates hold for transfers twelve times larger and
+for 8 ranks at one rank per node (measured: 4 ranks at one per node, 8 at
+two per node, where the rate per rank halved); the speeds of the nodes are
+balanced as in 15.3 (not yet measured on several nodes).  **Memory**: a
+rank holds 2 T3 = 137 GB and about 15 GB of integrals and batches - it fits
+a 189 GB node, which the serial run does not (its DIIS vectors then go to a
+file of 1.1 TB) -, and its slice of the DIIS history, 16 x 68.5 / n GB: 274
+GB (4 nodes) or 137 GB (8), i.e. in the file `XZDIIS.<rank>` on the
+node-local disk of every rank (the plan decides), read by n ranks at once
+where the serial program reads all of it.  The Lambda equations need 3 T3
+and `X2` (33 GB) per rank, 250 GB: they do not fit these nodes in any mode
+(not done: `X2`, `Xq` and the T3 of the Lambda equations as rows of the
+owner only).
+
+### 15.9 Intel MPI and Open MPI
+
+The source uses nothing of one vendor (15.2); `make MPI=1` needs only the
+compiler wrappers.  Specific to Intel MPI in what was run:
+
+- the build: the wrappers `mpiifort`, `mpiicc` (`LD`, `MPICC` of the
+  Makefile; Open MPI: `mpifort`, `mpicc` wrapping ifort / icc, and its
+  `mpi.h` - the program has no Fortran MPI module to match, so the 8-byte
+  integers of CFOUR do not matter to either library);
+- the launch: `I_MPI_HYDRA_BOOTSTRAP=fork` (one node without `srun`),
+  `-ppn`, `-hosts`, `I_MPI_PIN_DOMAIN=omp` (a rank is pinned to
+  `OMP_NUM_THREADS` cores), `I_MPI_DEBUG=5` (prints the fabric),
+  `I_MPI_WAIT_MODE`.  Open MPI: `mpirun --map-by ppr:2:node:PE=24
+  --bind-to core` (or `--map-by socket:PE=24`) for the placement, `--host`
+  for the nodes; the fabric is chosen by its own components (UCX on this
+  hardware);
+- both libraries spin while a rank waits in a blocking call, so a rank
+  that waits at a meeting uses one core, not its threads.
+
+**Not run with Open MPI** (no Open MPI of the Intel compilers was at hand);
+the transfer rates above are Intel MPI's, in particular the slow
+`MPI_Reduce` of large arrays in place.
+
+### 15.10 Not done
+
+- The timing of the final commit on several nodes (15.7: the batches by
+  measured speeds, the Gram matrix by rows).
+- T3 shared by the ranks of one node (15.1); the intermediates of the
+  blocks split over the ranks (15.6); `X2`, `Xq` of the Lambda equations
+  by rows of the owner (15.8).
+- The sums of pass 1 use `MPI_Allreduce` (about 1 GB/s; 0.1 to 0.5 s per
+  cycle here, about 2 s estimated for benzene); stage one keeps
+  `MPI_Reduce`.
+- (Q) after the iterations still needs a run directory that all nodes see
+  (the ranks read `XZAMPS`); with node-local directories run `ccsdt` and
+  `lambda` there and (Q) from a shared one.
+- The first cycle waits for the other ranks to read the integrals (they
+  start when rank 0 has planned: 3 to 7 s here, on its own clock).
+- Open MPI; more than four nodes; more than 8 ranks.
