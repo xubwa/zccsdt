@@ -1606,18 +1606,40 @@ class GCCSDT(UCCSDT):
         return self.e_ql
 
     def eom_ee(self, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None, nguess=None,
-               guess_tol=1e-4):
+               guess_tol=1e-4, shift=None, partners=False):
         '''EOM-EE-CCSDT: the ``nroots`` lowest excitation energies of the
         converged amplitudes and their right-hand vectors (zccsdt.cc.eom;
         docs/eom.md).  Returns (energies in Hartree, zccsdt.cc.eom.Result);
         the result is kept as self.eom, the energies as self.e_ee.
 
-        The states: all of them on the packed block; where the iterations
+        The states: all of them on the packed block.  Where the iterations
         ran in the blocks of the symmetry labels (a linear molecule with
-        ``symmetry``), the totally symmetric ones - those with the m_j of
-        the ground state.  Spin is not a label here: the three components
-        of a triplet are three roots.
+        ``symmetry``), the states of one label shift: the excitation
+        operator changes the sum of the labels of the spinors (2 m_j, as
+        the output lists them) by ``shift`` - r1[i,a] where l_a - l_i =
+        shift, r2 and r3 likewise with the sums.  Default 0: the totally
+        symmetric states, those with the m_j of the ground state.  Each
+        shift is an eigenproblem of its own, in the blocks of that shift.
+        Spin is not a label here: the three components of a triplet are
+        three roots (in a linear molecule in different shifts, unless two
+        of them have the same).
 
+                     On the packed block (``symmetry`` off, or spin orbitals of pure
+                     spin from an RHF / UHF reference, whose label is 2 m_s) a shift
+                     selects the states too - by projection, at the cost of the packed
+                     block: the guess and every sigma vector are restricted to the
+                     elements of the shift (shift 2 of a closed shell: the M_S = 1
+                     components of the triplets, each state once; shift 0: the singlets
+                     and the M_S = 0 components).
+        shift        a number, or a list of them (or 'all': every shift a single
+                     excitation can make): then ``nroots`` roots of each (nroots may be
+                     a list too), and the return value is ({shift: energies}, {shift:
+                     Result}).  For a reference that is symmetric under time reversal
+                     (a closed shell: every spinor of label l has a partner of label -l
+                     with its energy) the states of -shift are the time-reversed states
+                     of +shift with the same energies: of such a pair in the list only
+                     the first is computed and the other gets its energies (a Result
+                     without vectors, ``partner_of`` set), unless ``partners`` is True.
         conv_tol     the norm of the residual (H R - omega R) of a normalized vector
         max_space    vectors of the Davidson subspace at most (default 8 + 4 nroots;
                      lowered to what max_memory or max_disk hold)
@@ -1629,27 +1651,161 @@ class GCCSDT(UCCSDT):
         if self.t3 is None:
             raise RuntimeError('%s.eom_ee(): no amplitudes (kernel() first)' % self.__class__.__name__)
         eris = self._eris if self._eris is not None else self.ao2mo()
-        with disk.limit(self.max_disk):
-            res = eom.kernel(eris, self.t1, self.t2, self.t3, nroots=nroots, conv_tol=conv_tol,
-                             max_space=max_space, max_cycle=max_cycle, guess=guess, nguess=nguess,
-                             guess_tol=guess_tol, opts=self._options(None, None),
-                             verbose=self.verbose >= logger.NOTE, stdout=self.stdout)
-        self.eom, self.e_ee = res, res.e
-        return res.e, res
 
-    def eom_ip(self, nroots=3, **kwargs):
+        def run(n, cls, sector=None):
+            with disk.limit(self.max_disk):
+                return eom.kernel(eris, self.t1, self.t2, self.t3, nroots=n, conv_tol=conv_tol,
+                                  max_space=max_space, max_cycle=max_cycle, guess=guess, nguess=nguess,
+                                  guess_tol=guess_tol, opts=self._options(None, None),
+                                  verbose=self.verbose >= logger.NOTE, stdout=self.stdout, shift=cls, sector=sector)
+        if shift is None:
+            res = run(nroots, None)
+            self.eom, self.e_ee = res, res.e
+            return res.e, res
+        from zccsdt.cc import t3pack
+        blocks = t3pack.classes_of(eris) is not None        # in the blocks of the labels, or by masks
+        labels = np.asarray(eris.labels) if blocks else self._state_labels(eris)
+        if labels is None:
+            raise ValueError('%s.eom_ee(shift=): no symmetry labels for the states - a linear molecule on the z '
+                             'axis (2 m_j) or spin orbitals of pure spin (2 m_s) have them' % self.__class__.__name__)
+        many = isinstance(shift, (list, tuple, str))
+        if isinstance(shift, str):
+            if shift != 'all':
+                raise ValueError("shift: a number, a list of numbers or 'all'")
+            shifts = sorted(eom.label_shifts(eris, labels), key=lambda d: (abs(d), -d))
+        else:
+            shifts = [int(d) for d in (shift if many else [shift])]
+        counts = list(nroots) if isinstance(nroots, (list, tuple)) else [nroots] * len(shifts)
+        if len(counts) != len(shifts):
+            raise ValueError('nroots: one number, or one per shift')
+        classes = [eom.class_shift(eris, d) if blocks else None for d in shifts]
+        paired = not partners and eom.time_reversal_symmetric(eris, labels=labels)
+        out = {}
+        for d, cls, n in zip(shifts, classes, counts):
+            if d in out:
+                continue
+            if paired and d != 0 and -d in out and len(out[-d].e) >= n:
+                out[d] = eom.partner(out[-d], d, n)
+                if self.verbose >= logger.NOTE:
+                    print('EOM-EE: label shift %+d: the time-reversed states of shift %+d, the same energies'
+                          % (d, -d), file=self.stdout, flush=True)
+                continue
+            if self.verbose >= logger.NOTE:
+                print('EOM-EE: label shift %+d' % d, file=self.stdout, flush=True)
+            # (shift 0: the layout of T3 and the engine as it is)
+            out[d] = run(n, cls if cls else None) if blocks else run(n, None, (labels, d))
+            out[d].label_shift = d
+        if not many:
+            res = out[shifts[0]]
+            self.eom, self.e_ee = res, res.e
+            return res.e, res
+        self.eom, self.e_ee = out, {d: r.e for d, r in out.items()}
+        return self.e_ee, out
+
+    def _state_labels(self, eris):
+        '''A label per active spinor that adds (occupied, then virtual), by
+        which states can be told apart on the packed block: 2 m_j of the
+        spinors of a linear molecule, 2 m_s of spin orbitals of pure spin;
+        None if there is none.'''
+        lab = getattr(eris, 'labels', None)
+        if lab is not None:
+            return None if getattr(eris, 'modulus', 0) else np.asarray(lab)
+        if isinstance(self._scf, _Given) or self._kind() != 'ghf':
+            return None
+        C = np.asarray(self.mo_coeff)
+        nao = C.shape[0] // 2
+        _, o, v, _ = self._active()
+        cols = np.concatenate((o, v))
+        a, b = np.linalg.norm(C[:nao, cols], axis=0), np.linalg.norm(C[nao:, cols], axis=0)
+        if not np.all((a < 1e-8) | (b < 1e-8)):
+            return None
+        return np.where(b < 1e-8, 1, -1).astype(np.int64)
+
+    def eom_ip(self, nroots=3, shift=None, partners=False, short=True, **kwargs):
         '''EOM-IP-CCSDT: the ``nroots`` lowest ionization energies (Hartree)
-        and the zccsdt.cc.eom.Result - by the EE problem with a ghost
-        virtual spinor (zccsdt.cc.eom.ghost; docs/eom.md): vectors r[i,x],
-        r[(i<j),(a<x)], r3 with x once, on the packed block without symmetry
-        labels, at the cost of an EE calculation.  Options as eom_ee().'''
-        return self._eom_ghost('ip', nroots, kwargs)
+        and the zccsdt.cc.eom.Result; vectors r[i], r[(i<j), a],
+        r[(i<j<k), (a<b)] (docs/eom.md, section 5).  The result is kept as
+        self.eom_ip_result.
 
-    def eom_ea(self, nroots=3, **kwargs):
+        shift        None: all states, on the packed layout.  Where the iterations ran
+                     in the blocks of the symmetry labels, the label of the electron
+                     that is removed - minus the label (2 m_j) of its spinor, the change
+                     of the sum of the labels of the state - selects the states, which
+                     are then computed in the blocks of the labels; a list of them, or
+                     'all' (every label an occupied spinor has), as in eom_ee(): the
+                     return value is ({shift: energies}, {shift: Result}), and of a
+                     pair +-shift of a reference that is symmetric under time reversal
+                     one is computed unless ``partners`` is True
+        short        False: the EE problem with a ghost virtual spinor at its full
+                     length, on the packed block (zccsdt.cc.eom.ghost: the reference
+                     route; the cost of an EE calculation)
+        the others   as eom_ee().  The vectors of a Result have the ghost index
+                     (res.short.strip(res, k) takes it out).'''
+        return self._eom_open('ip', nroots, shift, partners, kwargs) if short else self._eom_ghost('ip', nroots, kwargs)
+
+    def eom_ea(self, nroots=3, shift=None, partners=False, short=True, **kwargs):
         '''EOM-EA-CCSDT: the ``nroots`` lowest E(N+1) - E(N) (minus the
-        electron affinities; Hartree) and the Result - the EE problem with
-        a ghost occupied spinor, as eom_ip().'''
-        return self._eom_ghost('ea', nroots, kwargs)
+        electron affinities; Hartree) and the Result; vectors r[a],
+        r[i, (a<b)], r[(i<j), (a<b<c)].  ``shift``: the label of the
+        electron that is attached (the label of its spinor); everything
+        else as eom_ip().  The result is kept as self.eom_ea_result.'''
+        return self._eom_open('ea', nroots, shift, partners, kwargs) if short else self._eom_ghost('ea', nroots, kwargs)
+
+    def _eom_open(self, kind, nroots, shift, partners, kwargs):
+        '''IP and EA with short vectors (zccsdt.cc.eom.ghost_short).'''
+        from zccsdt import disk
+        from zccsdt.cc import eom
+        if self.t3 is None:
+            raise RuntimeError('%s.eom_%s(): no amplitudes (kernel() first)' % (self.__class__.__name__, kind))
+        note = self.verbose >= logger.NOTE
+        if shift is None:
+            eris, t3 = self._dense_view()
+        else:
+            eris, t3 = (self._eris if self._eris is not None else self.ao2mo()), self.t3
+            eom.class_shift(eris, 0)            # (the labels must be in use)
+        sh = eom.ghost_short(eris, self.t1, self.t2, t3, kind)
+
+        def run(n, cls):
+            with disk.limit(self.max_disk):
+                res = eom.kernel(sh.eris, sh.t1, sh.t2, sh.t3, nroots=n, opts=self._options(None, None),
+                                 name=kind.upper(), verbose=note, stdout=self.stdout, shift=cls, **kwargs)
+            res.short = sh
+            return res
+        if shift is None:
+            res = run(nroots, sh.class_shift(None))
+            setattr(self, 'eom_' + kind + '_result', res)
+            return res.e, res
+        many = isinstance(shift, (list, tuple, str))
+        if isinstance(shift, str):
+            if shift != 'all':
+                raise ValueError("shift: a number, a list of numbers or 'all'")
+            shifts = sorted(sh.labels(), key=lambda d: (abs(d), -d))
+        else:
+            shifts = [int(d) for d in (shift if many else [shift])]
+        counts = list(nroots) if isinstance(nroots, (list, tuple)) else [nroots] * len(shifts)
+        if len(counts) != len(shifts):
+            raise ValueError('nroots: one number, or one per shift')
+        classes = [sh.class_shift(d) for d in shifts]
+        paired = not partners and eom.time_reversal_symmetric(eris)
+        out = {}
+        for d, cls, n in zip(shifts, classes, counts):
+            if d in out:
+                continue
+            if paired and -d in out and len(out[-d].e) >= n:
+                out[d] = eom.partner(out[-d], d, n)
+                if note:
+                    print('EOM-%s: label %+d: the time-reversed states of label %+d, the same energies'
+                          % (kind.upper(), d, -d), file=self.stdout, flush=True)
+                continue
+            if note:
+                print('EOM-%s: label %+d of the electron' % (kind.upper(), d), file=self.stdout, flush=True)
+            out[d] = run(n, cls)
+            out[d].label_shift = d
+        res = out[shifts[0]] if not many else out
+        setattr(self, 'eom_' + kind + '_result', res)
+        if not many:
+            return res.e, res
+        return {d: r.e for d, r in out.items()}, out
 
     def _eom_ghost(self, kind, nroots, kwargs):
         from zccsdt import disk

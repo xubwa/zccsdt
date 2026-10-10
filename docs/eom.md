@@ -8,10 +8,16 @@ complex: excitation energies and right-hand vectors.
 |---|---|
 | dense reference: sigma vector three ways, matrix, IP / EA by a ghost orbital | `src/zccsdt/cc/eom_ref.py`, `tests/test_eom_ref.py` |
 | sigma vector on packed amplitudes | `src/zccsdt/cc/eom_opt.py`, `tests/test_eom_opt.py` |
-| Davidson solver, memory plan, driver, ghost spinor | `src/zccsdt/cc/eom.py`, `tests/test_eom.py` |
+| Davidson solver, memory plan, driver, ghost spinor | `src/zccsdt/cc/eom.py`, `tests/test_eom.py`, `tests/test_eom_solver.py` |
+| states with a label shift in the blocks of the symmetry labels | `src/zccsdt/cc/t3shift.py`, `tests/test_eom_shift.py` |
+| IP and EA with short vectors | `eom.ghost_short`, `tests/test_eom_short.py` |
 | front end | `GCCSDT.eom_ee`, `eom_ip`, `eom_ea` (`src/zccsdt/ccsdt.py`; `docs/usage.md`) |
 | reference runs | `bench/refs/reference_energies.json` (`eom_ee`), `bench/dirac/mrcc_eom.sh`, `bench/cfour/eom_ccsd.sh` |
-| timing | `bench/eom_bench.py`, `bench/slurm_eom.sh` |
+| timing | `bench/eom_bench.py`, `bench/slurm_eom.sh`; label blocks: `bench/eom2_bench.py`, `bench/slurm_eom2.sh` |
+
+Stage two (sections 4 to 6, 8): states with a label shift in the blocks of
+a linear molecule, IP and EA with short vectors, the threaded solver, the
+choice of the roots.
 
 Not in this document, and not done: left-hand vectors, transition
 properties, excited-state gradients, the native Fortran program.
@@ -172,18 +178,52 @@ passes 1, one `t2 x <mb||ef>` product (o^2 v^4, as in W_vvvo of the ground
 state), o v^4 for `<ab||de>'` and `W_pp r1`, and (ov)^3: about two
 amplitude iterations less the T1 dressing.  Measured: section 8.
 
-**What would make it cheaper, not done.**  The second residual - T3 with
-the derivatives of the operators - is the part of `Hbar` with three-body
-character.  Its pp ladder costs o^3 v^5 / 24 as a ladder, but `W'_pp` has
-low rank in the occupied indices: `r2[mn,ab] (<mn||de> T3[ijk,dec])` is
-o^5 v^3 through the intermediate in brackets, and `-P(ab) r1[m,a]
-(<mb||de>~ T3[ijk,dec])` is o^4 v^4; likewise the ring term with
-`<mn||de> r2`.  With these the second residual would cost a fraction of
-the first for o << v, and a sigma vector little more than one iteration.
-It needs kernels for T3 contracted with integrals to a six-index
-intermediate; the three T2 terms of `pass1(T3; H')` also follow from the
-T3 parts of W_vvvo and W_vooo of the ground state contracted with r1,
-except `f'[m,e] T3[ijm,abe]`.
+**The factorized second residual: what holds and what does not.**  The
+second residual - T3 with the derivatives of the operators - was expected
+to cost a fraction of the first ("a sigma vector little more than one
+iteration").  Term by term:
+
+- *The ring term cannot be reduced.*  `P(i/jk) P(a/bc) sum_md W'[m,d,i,a]
+  T3[mjk,dbc]` with `W' = <ma||di>' + <mn||de> r2[in,ae]`: whichever
+  factor meets T3 first - `(g r2) T3`, as now, or `(g T3) r2` with a
+  six-index intermediate, stored or not - the last product sums two
+  single indices against two free ones with the spectators (jk, bc):
+  (o v)^2 C(o,2) C(v,2) flops, a ring pass.  W' is an (o v) x (o v)
+  matrix of full rank; a low rank in the occupied indices exists only in
+  its r1 parts, which are an o / v share of it.  The first version of
+  this section said "likewise the ring term": wrong.
+- *The pp ladder can be replaced.*  `W'_pp = -P(ab) r1[m,a] <mb||de>~ +
+  r2[mn,ab] <mn||de> + 1/2 A[F'_vv delta]`.  With Y[(mn), I, c] = sum_de
+  <mn||de> T3[I, dec] and Z[m, b, I, c] = sum_de <mb||de>~ T3[I, dec] -
+  both independent of R, made once in `prepare` from one pass over T3,
+  (C(o,2) + o v) C(o,3) v numbers, 6 o / v of the size of T3 - the ladder
+  becomes `r2[P, (ab)] Y[P, I, c] - P(ab) r1[m,a] Z[m,b,I,c]` followed by
+  the reduction P(c/ab) of the ladder: o^5 v^3 / 24 + o^4 v^3 / 6 flops
+  (with the r1 part as v x o products per b and a six-term reduction of
+  a v^3 cube; as one GEMM with the operator [r2 | r1 delta] it costs
+  (o / v)^2 + 2 o / v of the ladder).  The F'_vv part moves into the ring
+  operator of the same residual at no cost, as `F'_vv[a,d] delta_im / 3`.
+- *Pass 1 over T3 with H'*: two of its three T2 terms follow from the T3
+  parts of W_vvvo and W_vooo of the ground state contracted with r1; the
+  third, `f'[m,e] T3[ijm,abe]`, still gathers T3.
+
+So the saving is bounded by the pp ladder of the second residual, less
+what replaces it (its reduction, which is about a sixth of it, and the
+products above).  Its share of a sigma vector, measured (the timer
+`eom.t3/pp_ladder`):
+
+| | o + v | pp ladder of the second residual | of a sigma vector | what could be saved |
+|---|---|---|---|---|
+| H2O / cc-pVTZ, packed block, 8 threads (job 31825453) | 10 + 106 | 1.39 s | 8.18 s: 17% | about 11% |
+| HBr / cc-pVTZ-DK, label blocks, 24 threads (job 31828491) | 8 + 78 | 0.0105 s | 0.372 s: 2.8% | - |
+| HBr / cc-pVQZ-DK, label blocks, 24 threads | 26 + 120 | 0.78 s | 11.06 s: 7.1% | about 2.5% (o / v = 0.22: the products that replace the ladder cost half of it) |
+
+**Not implemented**: for the linear molecules in label blocks that this
+stage is about the gain is a few percent of a sigma vector, against two
+stored intermediates of the size of T3, a new reduction kernel and their
+block and shift structure.  The ratio of a sigma vector to an iteration
+stays near 1.7 to 2; what remains above the two residuals is the two
+passes 1 and the dense small terms (section 8).
 
 ## 4. The solver (`zccsdt.cc.eom.davidson`)
 
@@ -226,6 +266,69 @@ For EOM-CCSD the unit vectors themselves.  `guess=` takes vectors (r1, r2).
 Spin is not a symmetry of the code: a triplet is three roots, in spinors
 split by spin-orbit coupling.
 
+**Which roots come back** (`eom.kernel`; found with F- and Li, where the
+first version lost roots).
+
+- The singles-doubles stage solves for `extra` (default 2) roots more than
+  asked for, from as many unit vectors more.  Where the single excitations
+  run out - IP of three electrons has three - the guess goes on with unit
+  vectors on the lowest doubles of the shift (the first version returned
+  three roots for four asked, without a word).  If fewer roots can be
+  started than asked for, a warning says so (the ghost route at full
+  length knows its singles only).
+- The triples stage starts from all of these vectors and takes the
+  **lowest** roots; it does not follow the singles-doubles roots one by
+  one.  A given `guess=` is followed, by the weight of an eigenvector in
+  the space of the previous roots - the first version matched the roots of
+  two iterations one to one, and inside a degenerate level, whose
+  eigenvectors are rotated at will from one iteration to the next, the
+  last root went to a vector far above (F-, 2p^-1: five roots at 3.1402 eV
+  and one at 67 eV; now six at 3.1402).
+- `nroots` that cut a degenerate level (the next roots of the
+  singles-doubles stage within 2e-6 Eh of the last one): a warning and
+  `Result.cut_level`; with `complete=True` the rest of the level is
+  computed too and more roots than asked for come back.
+- What is not guaranteed: a state without a single excitation in its
+  sector (the M_S = -1 component of the triplet of Li+ from an alpha
+  reference: 2h1p only) is found if a doubles guess of its sector is among
+  the vectors started and its singles-doubles root among the nroots +
+  extra lowest - for Li with `extra=10`, not with the default, where the
+  singlet above the triplet takes the fourth place.  The energies that are
+  returned are right in either case (Li: the FCI differences to 1e-8).
+  Sectors (below) are the remedy that does not depend on the guess.
+
+**Degenerate levels and sectors.**  The solver finds a degenerate level
+whole - asked for six roots of a spectrum that starts with a threefold
+level, a single root and a pair it returns those six with orthonormal
+vectors (`tests/test_eom_solver.py`) -, so on the packed block the three
+components of a triplet are three roots, each with its sigma vectors.
+What tells the components apart is a label that adds, and where the
+spinors have one the states of one label shift D (section 6) are an
+eigenproblem of their own:
+
+- in the blocks of the labels of a linear molecule: `eom_ee(shift=D)`
+  (section 6), the cheap way - the vectors are those of the shift only;
+- on the packed block, by masks (`eom.Sector`, `eom.kernel(sector=(labels,
+  D))`): the guess is taken from the singles with l_a - l_i = D, and every
+  sigma vector is projected on the elements of the shift (r1, r2 by masks,
+  the packed r3 row by row from the sums of the labels of the triples, one
+  pass of numpy over the vector).  The cost per sigma vector is that of
+  the packed block; what is saved is the roots that are not asked for.
+  The front end uses it for `eom_ee(shift=D)` when the labels are not in
+  use in the blocks: 2 m_j with `symmetry = False`, and **2 m_s for spin
+  orbitals of pure spin** (an RHF or UHF reference as GHF): shift 2 holds
+  the M_S = 1 components of the triplets (and of higher multiplets) and no
+  singlet, so each triplet is computed once; shift 0 holds the singlets
+  and the M_S = 0 components; shift -2 is the time-reversed image of
+  shift 2 for a closed shell and is not computed.  H2O / 6-31G: the two
+  lowest triplets as the two lowest roots of shift 2, to 1e-9 of MRCC's.
+- Not done, because it is not cheap: telling singlets from the M_S = 0
+  components of triplets inside shift 0 (the eigenvalue of the spin flip;
+  for Kramers-restricted spinors that of time reversal, which is a linear
+  map on real vectors only), and deflating the partners of a converged
+  root without a label - that needs the operation that makes one partner
+  from another (S+-, a rotation), applied to R3.
+
 **Vectors and memory** (`eom.plan_for`, `eom.Plan`).  The operands of the
 ground state and of a sigma vector are in memory: the pp operator twice,
 seven arrays of the size of `<ia||bc>` (f = o v^3: the dressed block, its
@@ -242,11 +345,34 @@ a calculation whose CCSDT needed them cannot run EOM yet);
 `DiskFullError` if the smallest subspace fits nowhere.  What numpy
 allocates in a run is checked against the plan by `tracemalloc`
 (`tests/test_eom.py`: between 50% and 100% of it for 8 + 38 spin
-orbitals); the resident memory of the two production cases against the
+orbitals); the resident memory of the production cases against the
 plan is in section 8.
 
-The preconditioner and the transformations of the subspace pass over the
-vectors with numpy, on one thread.
+*In the blocks of the symmetry labels* the fixed part is counted with the
+sizes of the blocks: T3, the pp operator and its derivative (with a shift:
+the rectangular blocks between the pair blocks h and h + s), the work
+array of the passes (`SpinBlockT3.buffer_bytes`, and for a shift
+`ShiftT3.buffer_bytes`: every pass sizes its batch to two thirds of
+`mem_mb` by what one occupied pair or triple takes in that layout), the
+blocks of the occupied operator of a shift; the o v^3 arrays are dense
+there too.  The amplitude step of `prepare` is counted with at most two
+blocks of T3 for the blocks of its occupied operator, where the plan of
+the ground state sets aside a quarter of the buffer budget (500 MB by
+default) - that reserve was most of what the first version planned above
+the use for HBr (1.62 GB planned, 0.93 GB used).  A vector of a shift is
+o v + C(o,2) C(v,2) + (the blocks of the shift) numbers.
+`tests/test_eom_shift.py`: HBr / cc-pVDZ-DK, 8 + 28, two shifts - what
+numpy allocates (the work array of the engine included) is between a
+third and all of the plan less the allowance for the threads.
+
+**Vector operations** are threaded (`csrc/t3pack.c`): dot products with
+all vectors of the subspace in one pass (`zc_vmdot`: the new column and
+row of the projected matrix, the orthogonalization), linear combinations
+(`zc_vlincomb`: residuals, corrections), the collapse of the subspace in
+place in blocks of 256 elements of all vectors (`zc_vtransform`), and the
+division by the denominators block by block (`zc_vprecond`).  The first
+version did the last two and the columns of the projected matrix with
+numpy on one thread.
 
 ## 5. Ionized and attached states
 
@@ -262,65 +388,146 @@ eigenvalues are the ionization energies (EA: E(N+1) - E(N)).
 - Reference: `eom_ref.ghost`, `eom_ref.eigenvalues(kind='ip' | 'ea')`,
   checked against the operators `a+ b+ k j i` in a Fock space and against
   PySCF's IP- and EA-EOM-CCSD.
-- On packed amplitudes: `eom.ghost` pads the integral container and the
-  amplitudes, the guess is taken from the singles with x, and everything
-  else is the EE code (`GCCSDT.eom_ip`, `eom_ea`).  **That is correct and
-  validated, and it is not the cheap implementation**: the vectors have
-  the length of the EE problem with one spinor more, of which C(o,3)
-  C(v,2) elements are not zero (IP), and a sigma vector costs what an EE
-  one costs.  It runs on the packed block without symmetry labels.
-- What the cheap form needs: R3 stored as [C(o,3), C(v,2)] (IP) or
-  [C(o,2), C(v,3)] (EA) and the passes over it.  Every pass of
-  `residual(R3; ..)` then loses one virtual (occupied) index of R3: the pp
-  ladder acts on the one virtual pair (a GEMM of W_pp with R3 itself, no
-  gather, no P(c/ab)), the ring term on (i a) of half-expanded
-  `R3[P, a, m, b]` with two instead of three positions for the pair, the
-  drive terms have W'_vvvo and W'_vooo with x in the place of one virtual
-  index - for IP `W'_vvvo[ab,e,i]` becomes a v^2 o-sized `W'[b,e,i]` - and
-  `residual(T3; W')` contracts T3 with operators that carry x.  These are
-  new gathers and reductions next to those of `csrc/ccsdt_t3.c` (two
-  views, two reductions per case), not new algebra: the terms are those of
-  section 2 with one index fixed.  The Davidson solver, the plan and the
-  preconditioner take any vector.
+- **The ghost route at full length** (`eom.ghost`; `eom_ip(short=False)`):
+  the integral container and the amplitudes padded, the guess taken from
+  the singles with x, everything else the EE code on the packed block.
+  The vectors have the length of the EE problem with one spinor more, of
+  which C(o,3) C(v,2) elements are not zero (IP), and a sigma vector costs
+  what an EE one costs.  Kept as the reference of the short vectors.
+- **Short vectors** (`eom.ghost_short`; the default of `eom_ip`, `eom_ea`).
+  "x once" is a label: give x a symmetry label of its own and the vectors
+  with x once are exactly the vectors of one label shift (section 6) of the
+  padded problem, and the machinery of the label blocks stores and passes
+  over nothing else.
+  - *Without symmetry labels* (the packed layout): every spinor gets the
+    label 0 and the ghost the label 1 (EA: -1).  T3 has the one block it
+    had - the flat array is passed as it is -, and R3 is the block
+    [occupied triples, virtual triples with x] = [C(o,3), C(v,2)] (EA:
+    [C(o,2), C(v,3)]): the short vector.
+  - *With the labels of a linear molecule* (n classes of 2 m_j): the ghost
+    is 3 (n - 1) + 1 classes beyond the last one (IP) or before the first
+    (EA).  Then no element without the ghost has the shift of an element
+    with it, T3 keeps its blocks (the same flat array), and the vectors
+    with x once fall into blocks by the label of the electron that is
+    removed or attached: the change of the sum of the labels of the state,
+    minus the label of the spinor that is emptied (IP), the label of the
+    spinor that is filled (EA).  Each label is an eigenproblem of its own
+    (`eom_ip(shift=D)`, a list, or `'all'`); the states of +D and -D of a
+    closed shell are each other's time-reversed images and only one of
+    them is computed (section 6).
+  - *What a sigma vector costs.*  `residual(R3; W)` - the passes over R3
+    with the operators of the ground state - loses a virtual (occupied)
+    index everywhere: the gathers, products and reductions run over the
+    blocks of the short layout only.  `residual(T3; W')` still gathers T3
+    (pass 2 once, the pp ladder once, pass 1 once), but its products are
+    small: of the rows (a i) of the ring operator only (x i) is wanted -
+    o instead of o v rows -, of the rows (a<b) of the pp operator only
+    (a x), v instead of C(v,2).  The classes without spinors between the
+    labels of the molecule and that of the ghost cost loops that find
+    nothing.  Measured: section 8.
+  - `Short.strip(res, k)` takes the ghost index out of a root: r[i],
+    r[(i<j), a], r3 (IP).
 
 ## 6. Symmetry labels
 
 With the labels of a linear molecule in use (2 m_j; `docs/usage.md`) T3 is
 stored in the blocks of occupied and virtual triples with equal sums of
-labels (`t3engine.T3Layout`).
+labels (`t3engine.T3Layout`).  An excitation operator R changes the sum of
+the labels of the spinors by a fixed amount D, **the label shift** of the
+state:
 
-- **Totally symmetric states** (the m_j of the ground state): R has the
-  block structure of T, every operand of section 3 that of its
-  ground-state counterpart, and the code runs unchanged in the blocks; the
-  guess takes the singles with equal labels.  `tests/test_eom.py`: the
-  sigma vector in blocks equals the one on the packed block for a
-  symmetric vector (868 of 3264 elements for LiH / 6-31G), and the roots
-  in blocks are roots on the packed block.  This is what `eom_ee()` does
-  after a ground state in blocks.
-- **States with another label** (a shift s = the label of R: the sum over
-  the virtual indices minus the sum over the occupied ones is s for every
-  element).  Not implemented.  What is needed, precisely:
-  1. A layout `T3Layout(shift=s)`: the blocks pair the occupied triples of
-     sum g with the virtual triples of sum g + s; `stored`, `boff`, `nI`,
-     `nA`, `to_dense`, `from_dense` follow.  r1 and r2 are dense arrays with
-     the elements of the shifted label.
-  2. `residual(R3; W)` with the operators of the ground state (which are
-     symmetric): input and output in the shifted layout.  The kernels of
-     `SpinBlockT3` (`_pass2_c`, `_ppl_c`, `_pass1_c`) take the group of a
-     virtual pair or triple from that of the occupied one in several
-     places (`_red_targets`, `_rows`, the tables of `_vtables`); each needs
-     the shift as an offset.  The operators themselves stay block diagonal.
-  3. `residual(T3; W')` with the derivatives of the operators, which carry
-     the label s: `W'_pp` couples the pair blocks h and h + s (it is no
-     longer a list of diagonal blocks), `O'_hh` couples occupied triples of
-     different sums, `W'_ring` the classes of (a i) and (d m) shifted
-     against each other; input in the layout of T3, output in the shifted
-     one.  The drive terms likewise (W symmetric with r2 shifted, W'
-     shifted with t2 symmetric).
-  4. Pass 1 with shifted outputs.
-  The dense engine does all of this already - the states of all labels are
-  roots on the packed block (`cc.symmetry = False`), at the cost of the
-  packed block; the labels of the roots found there are not printed.
+    r1[i,a]        where l_a - l_i = D,
+    r2[ij,ab]      where l_a + l_b - l_i - l_j = D,
+    r3[ijk,abc]    where l_a + l_b + l_c - l_i - l_j - l_k = D,
+
+and the sigma vector maps the vectors of one shift to themselves: every
+shift is an eigenproblem of its own.  D is counted in the labels of the
+run, as the output lists them; nothing is assumed about their meaning (for
+2 m_j, D = 2 (Omega' - Omega) of the two states; the labels are only
+added).  D = 0: the totally symmetric states, with the block structure of
+T.  The front end: `eom_ee(shift=D)`, a list of shifts, or `'all'`.
+
+**Totally symmetric states** (`shift` None or 0): every operand of section
+3 has the block structure of its ground-state counterpart and the code
+runs unchanged in the blocks of the engine; the guess takes the singles
+with equal labels.
+
+**States with a shift** (`zccsdt.cc.t3shift`).
+
+1. *The layout* (`ShiftLayout`): the occupied triples of group g (the sum
+   of their classes; a class is a label less the smallest, divided by the
+   step) with the virtual triples of group g + s, s the shift in classes.
+   The blocks of all shifts together are the packed block (LiH / 6-31G:
+   14 + 112 + 368 + 704 + 868 + 704 + 368 + 112 + 14 = 3264).  r1 and r2
+   stay dense arrays (o v, C(o,2) C(v,2): small next to r3) with zeros
+   outside their shift; the sigma vector is masked to the shift, so the
+   rounding of the integrals (1e-12 of them is outside the labels after an
+   SCF converged to 1e-12) cannot leak into other shifts.
+2. *Every array has a shift*: (the labels of its creators) - (those of its
+   annihilators); amplitudes virtual minus occupied, `<pq||rs>` bra minus
+   ket.  A product has the sum of the shifts of its factors.  The operands
+   of the ground state have shift 0; r1, r2, R3 and with them H' and all
+   the derivatives W' have the shift s.
+3. *The passes* (`ShiftT3.pass1`, `ShiftT3.residual`) are those of the
+   spin-blocked engine with shifts as arguments:
+
+       pass1(T, sT; integrals of shift sG)       outputs of shift sT + sG
+       residual(T, sT; ring, pp and hh operators of shift sW;
+                drive: t2 of shift sa, W_vvvo and W_vooo of shift sT + sW - sa)
+                                                  result of shift sT + sW
+
+   A sigma vector is `residual(R3, s; W of shift 0; t2 with W' of shift s)`
+   plus `residual(T3, 0; W' of shift s; r2 of shift s with W)`, and
+   `pass1(R3, s; H~)`, `pass1(T3, 0; H' of shift s)`.  In the code: where
+   the engine takes the class of an index from the classes of the others
+   (the pair group of the gathered `T[P, (d m), Q]`: g_Q = g_P + s_m - s_d
+   + sT; the classes of e and m in the drive terms; the two conditions of
+   the rank-1 and rank-2 outputs of pass 1, which coincide without a
+   shift), the shift enters; the result is reduced into the blocks of the
+   output layout.  **No kernel was written**: the gathers and reductions of
+   `csrc/t3pack.c` are driven by tables (the row of a block per occupied
+   triple, the column per virtual triple), and only the tables know the
+   layout.  A block of the product whose operand does not exist (its
+   group is out of range) is set to zero, since the reductions read it.
+4. *Operators with a shift couple different blocks.*  `W'_pp` is a list of
+   rectangular blocks, (pairs of block h + s) x (pairs of block h), built
+   as the square ones are (`-P(ab) r1 <mb||de>~`, `r2 <mn||de>`, and the
+   antisymmetrized F'_vv between two blocks: `t3shift.one_body_pairs`).
+   `W'_ring[(a i), (d m)]` is taken between the classes delta = s_d - s_m
+   and delta + s.  The occupied operator `O'[I, J]` (hh ladder and F'_oo)
+   couples the triples of group g with those of g + s: its blocks are cut
+   from the matrix on the range of triples that holds both groups
+   (`t3pack.occ_operator_direct`), one GEMM each - the pair-driven form of
+   the hh ladder is for the square blocks only.
+5. *The parts of rank one and two* of a sigma vector are dense GEMMs that
+   do not look at labels; only the loop over the pair blocks of the pp
+   operator knows the shift.
+6. *The guess*: unit vectors on the lowest singles with l_a - l_i = D, the
+   singles-doubles block of that shift.  A shift without singles has no
+   guess (`ValueError`); `eom.label_shifts` lists those that have.
+7. *Vectors, preconditioner, plan*: the Davidson solver takes vectors of
+   any length; the denominators are those of the blocks of the layout;
+   the plan counts the vectors of the shift and, in label blocks, what the
+   blocks take (section 4).
+
+**+D and -D.**  If the reference is symmetric under time reversal - a
+closed shell: every spinor of label l has a partner of label -l with its
+energy, which `eom.time_reversal_symmetric` tests - the states of -D are
+the time-reversed states of +D with the same energies.  Given a list that
+has both, the front end computes the first of each pair and hands the
+other its energies (a `Result` without vectors, `partner_of` set);
+`partners=True` computes both.  `'all'` orders the shifts by |D|, +D
+first.  For an open-shell reference every shift is computed.
+
+**Labels with a modulus** (the fermion irreps of C2 and its like,
+`eris.modulus`): the T3 engine has no blocks for them
+(`t3pack.classes_of` returns None and CCSDT runs on the packed block), so
+there is no shifted layout either.  On the packed block the states of all
+labels are roots.
+
+**On the packed block** (`cc.symmetry = False`, or spin orbitals) the
+states of one shift can be selected without blocks, by masks: section 4,
+"sectors".
 
 ## 7. Validation
 
@@ -350,6 +557,38 @@ stopped the EE and IP runs in some orders of the calls.)
 | roots in label blocks are roots on the packed block | 1e-8 (observed 1e-10; threshold of the residual 1e-8) |
 | the vectors of the subspace in a scratch file, a subspace of 11 instead of 20 vectors | the same roots (1e-9, 1e-8) |
 | IP and EA of EOM-CCSD and EOM-CCSDT by the ghost spinor against the dense IP / EA matrices (LiH; real with the packed `<ab\|\|cd>`, complex) and PySCF's roots (H2O / STO-3G) | 1e-9, 1e-8 |
+
+**States with a label shift** (`tests/test_eom_shift.py`).
+
+| Check | Agreement |
+|---|---|
+| the blocks of all shifts are the packed block, each element once; shift 0 is the layout of T3 | exact |
+| sigma of a random vector of every shift (-4 .. 4 classes: 14 to 868 of 3264 triples; LiH / 6-31G, X2C, 4 + 18) in the blocks against the packed block; also the singles-doubles block; shift 0 by the shifted passes against the engine | 1e-10 of the largest element (observed 4e-12: the SCF is converged to 1e-12 and so are the zeros of the integrals); 1e-12 |
+| the same with a phase on every spinor (complex integrals and amplitudes with the labels they had): sigma carries the phases | 1e-11 |
+| LiH: the roots of the shifts 0, +-2, +-4 are roots of the packed block (`symmetry = False`), and below 0.2 Eh their union is its spectrum with multiplicities - 12 roots; the lowest level, a triplet, is one root each of the shifts -2, 0, 2 | 1e-10 (observed 2e-11; threshold of the residual 1e-9) |
+| HBr / cc-pVDZ-DK, 28 frozen, 8 + 16: the eight lowest roots of the packed block are the lowest of the shifts +-4 (0.2475010526, the state MRCC finds first: a root with no single excitation of shift 0), +-2 (0.2520595925, 0.2769384419) and 0 (0.2601782223, 0.2607020264) | 1e-10 (observed 2e-11) |
+| the same roots with a phase on every spinor (complex arithmetic in the blocks) | 1e-10 |
+| +D against -D, computed separately (`partners=True`) | 1e-10 (observed 1e-11) |
+| a shift on the packed block by masks (`symmetry = False`): the roots of the blocks | 1e-10 |
+| EOM-CCSD with a shift against the packed block | 1e-10 |
+| the plan of a shift and what a run allocates (HBr, 8 + 28) | between 1/3 and 1 of the plan |
+
+**IP and EA with short vectors** (`tests/test_eom_short.py`).
+
+| Check | Agreement |
+|---|---|
+| LiH / STO-3G, CCSD and CCSDT, real and complex: four roots of IP and EA against the ghost route at full length (the same number of sigma vectors) and against the dense IP / EA matrices of the reference | 1e-10 (observed 1e-15); 1e-9 (observed 3e-11) |
+| the stripped vector (ghost index taken out) has all of the norm | 1e-12 |
+| H2O / STO-3G, EOM-IP- and EA-CCSD against PySCF | 1e-8 |
+| LiH / 6-31G, X2C, front end: short vectors on the packed layout against the ghost route; by the label of the electron in the blocks of the labels (`shift='all'`), the union of the roots against the packed layout; +-label | 1e-10 (observed 1e-11) |
+| HBr / cc-pVDZ-DK, 8 + 16: the eight valence ionization energies by the labels -+1 (three each) and -+3 (one each) against the packed layout | 1e-10 |
+
+**The solver and the sectors** (`tests/test_eom_solver.py`): the threaded
+collapse, preconditioner and multiple dot products against numpy (1e-12);
+a model matrix with a threefold and a twofold level; H2O / 6-31G, spin
+orbitals: the two lowest triplets of MRCC as the two lowest roots of the
+shift 2 of the spin label, the lowest triplet and singlet in shift 0
+(1e-9).
 
 **MRCC** (LR-CC, the same eigenvalues; release of February 2018, `cctol=11`;
 energies with 12 decimals; `bench/refs/reference_energies.json`, `eom_ee`).
@@ -484,9 +723,78 @@ In the blocks the plan is far above what was used (1.62 against 0.93 GB):
 layout.  On the packed block and for H2O the peak is 90% and 99% of the
 plan; nothing was above it.
 
+(The numbers of this job are from the first version: 8 cores of the
+shared node, shift 0 only in the blocks.)
+
+**Label shifts and IP in label blocks, a node of its own.**
+
+Job 31828491, node c603 (2 x Xeon Gold 6248R), 24 cores - socket 0 and its
+memory, no other job on the node -, `bench/slurm_eom2.sh`, commit ae688c1,
+scratch on the local disk, real arithmetic, T3 in the blocks of the labels
+2 m_j, threshold 1e-6 of the residual, three roots per shift, two per
+label of IP.  Measured once.  Of each pair +-D one shift was computed.
+
+| | HBr / cc-pVTZ-DK, 28 frozen, 8 + 78 | HBr / cc-pVQZ-DK, 10 frozen, lowest 120 virtual spinors, 26 + 120 |
+|---|---|---|
+| T3 in blocks (packed block) | 0.62 million (4.26) | 81.9 million (730) |
+| CCSDT iteration (median) | 0.205 s | 6.05 s |
+| **EE, shift 0**: triples of a vector; sigma vector; per root | 622 138; 0.372 s = 1.82 iterations; 14.0 | 81 875 732; 11.06 s = 1.83; 15.3 |
+| **EE, shift +-2** | 582 637; 0.365 s = 1.78; 14.3 | 78 744 914; 10.47 s = 1.73; 15.7 |
+| **EE, shift +-4** | 478 234; 0.330 s = 1.61; 18.7 | 70 043 592; 9.71 s = 1.60; 17.7 |
+| EE, time of a shift (guess stage in it) | 20.6, 18.3, 21.4 s (4.7, 2.4, 2.7 s) | 613, 596, 591 s (98, 98, 70 s) |
+| lowest roots / Eh: shift 0 | 0.2404148147, 0.2408465048, 0.3332902852 | 0.2418705730, 0.2423160390, 0.3322661699 |
+| shift +-2 | 0.2337441859, 0.2560105237, 0.3333697909 | 0.2349495523, 0.2559147563, 0.3323390838 |
+| shift +-4 | 0.2298116664, 0.4236483143, 0.4989666136 | 0.2310729220, 0.3776418761, 0.4154702080 |
+| **IP, label -+1** (short vectors): triples; sigma vector; per root | 27 713; 0.253 s = 1.23 iterations; 16.0 | 2 341 338; 3.72 s = 0.61; 17.0 |
+| **IP, label -+3** | 23 294; 0.246 s = 1.20; 17.5 | 2 116 224; 3.63 s = 0.60; 19.5 |
+| IP / Eh: label -+1; -+3 | 0.4317625609, 0.5730642677; 0.4200399244, 0.7022642982 | 0.4374237765, 0.5755092816; 0.4254934673, 0.7124140607 |
+| memory, shift 0: growth of the resident memory in the run; plan | 0.37 GB; 2.12 GB (1.5 GB of it the allowance for 24 threads) | 31.3 GB; 36.2 GB (27 GB the 20 + 20 vectors) |
+| shift +-2, +-4 | 0.20, 0.03 GB; 2.10, 2.07 GB | 28.4, 25.7 GB; 35.3, 32.5 GB |
+| IP | 0.12, 0.35 GB; 1.92 GB | 4.9, 5.9 GB; 10.7, 10.6 GB |
+
+The lowest state of HBr is in shift +-4 (0.22981; MRCC on the same
+integrals: 0.229811656650), the next in +-2 - with shift 0 alone, which is
+all the first version had in blocks, neither is found.  The second root of
+IP label -+3 has no weight in the singles (a 2h1p state).
+
+*Memory.*  The growth is below the plan in every run.  The resident memory
+of the process is above it from the second eigenproblem on (38.98 GB at
+the peak of shift 2 against a plan of 35.26 GB): every `Result` keeps the
+operands of its ground state (`res.ground`, 6 GB here), and the front end
+keeps the last result, so a new problem starts 6 GB higher until the old
+result is dropped.  Not fixed.
+
+*A sigma vector, 26 + 120, shift 0* (seconds of 11.06; of the same run):
+the residual with R3 2.74 (pass 2 1.90, pp ladder 0.77), the residual with
+T3 2.73 (1.90, 0.78), the two passes 1 1.82, W'_vvvo 0.86, the dense small terms
+with `<ab||de>'` and the ladders of sigma_2 1.4, the solver's vector
+operations 1.55.  The guess stage is 12 to 16% of the time
+of a shift: 52 to 73 singles-doubles vectors of 1.35 s (dense GEMMs on
+o^2 v^2 and o v^3 arrays that do not use the labels).
+
+*IP.*  With 26 + 120 a sigma vector is 0.6 iterations: the passes over the
+short R3 0.21 s, the residual with T3 0.58 s (it gathers T3, its products
+are small), pass 1 0.47 s - and 2.2 s of dense terms of the size of the
+EE problem (small terms, `<ab||de>'`, W'_vvvo), which do not know that
+only the elements with the ghost are wanted.  With 8 + 78, where a CCSDT
+iteration is 0.2 s of mostly such terms, an IP sigma vector is 1.2
+iterations.  The vectors are 35 times shorter than those of EE (26 + 120).
+
+*The vector operations of the solver* (8 + 78, the same job, the three
+shifts): 2.34, 1.93, 2.40 s with numpy on one thread for collapse,
+preconditioner and projected matrix (`ZCCSDT_EOM_NUMPY=1`), 0.94, 0.78,
+1.00 s with the threaded kernels; a sigma vector 0.390, 0.383, 0.365 s
+against 0.372, 0.365, 0.330 s.  With 26 + 120 they are 1.55 s of 11.06
+per sigma vector with the kernels: every residual and every
+orthogonalization reads the whole subspace (up to 40 vectors of 0.65 GB)
+once per root, which is bound by the memory bandwidth.  Forming the
+residuals of all roots in one pass would cut that by the number of roots;
+not done.
+
 What was not measured: a run with the vectors in the scratch file at
 production size (the tests do it at 8 + 16), complex arithmetic at
-production size, more than 8 threads, IP and EA.
+production size, EA at production size, the packed block and MRCC on
+this node.
 
 ## 9. CFOUR's spinor EOM-CCSD: the solver
 
@@ -633,16 +941,25 @@ method with one subspace for all roots.
 
 - Left-hand vectors, r0, transition moments, excited-state densities and
   gradients.
-- The cheap IP / EA (section 5) and states with a label shift in the
-  blocks (section 6): both written down, neither implemented.
-- The factorized second residual (section 3) that would bring a sigma
-  vector from two iterations to little more than one.
+- The pp ladder of the second residual by stored intermediates (section
+  3): a few percent in label blocks, not implemented; the ring term
+  cannot be reduced.
+- IP / EA: the dense terms of a sigma vector are those of the EE problem
+  (section 8); a label for IP / EA on the packed block (sectors by masks
+  are wired for EE only).
+- Label shifts for labels with a modulus (CCSDT has no blocks for them).
+- Singlets apart from the M_S = 0 components of triplets; partners of a
+  degenerate level without a label; a state without a single excitation
+  in its sector needs a larger `extra` (section 4).
+- A `Result` keeps the operands of its ground state: successive
+  eigenproblems of one object add them up until the result is dropped.
+- The residuals of all roots in one pass over the subspace (section 8).
 - EOM when the ground state needed the sliced pp operator or a mapped T3:
   `prepare` keeps the operands in memory.  U / R-form integrals (UCCSDT,
   RCCSDT) are not served: `capture` is for dense integrals.
 - The small terms of a sigma vector are einsum and GEMMs on dense o^2 v^2
-  arrays without the labels; the preconditioner and the subspace
-  transformations are numpy on one thread.
-- Core-valence separation, an energy window or a target label for the
-  roots: the solver takes the lowest roots (or follows a guess).
+  arrays without the labels (15% of a sigma vector and all of the guess
+  stage with 26 + 120).
+- Core-valence separation, an energy window: the solver takes the lowest
+  roots of a shift (or follows a guess).
 - The native Fortran program.
