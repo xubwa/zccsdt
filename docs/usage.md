@@ -526,7 +526,7 @@ components of a triplet are three roots.  Labels with a modulus (the
 fermion irreps of a point group) have neither blocks nor shifts in CCSDT.
 
 **Cost and memory.**  A sigma vector is two T3 residuals: 2.1 CCSDT
-iterations measured for H2O / cc-pVTZ on the packed block, @@EE_RATIO@@
+iterations measured for H2O / cc-pVTZ on the packed block, 1.6 to 1.8
 in the blocks of the labels (`docs/benchmarks.md`), with 13 to 18 sigma
 vectors per root to 1e-6.  The operands of the ground state and of one sigma vector are kept
 in memory (about twice the pp operator, seven arrays of o v^3, T3, the
@@ -548,7 +548,16 @@ run EOM yet (`MemoryError` with the numbers).
 
 The vectors of a `Result` carry the ghost index (the last virtual spinor
 for IP, the first occupied one for EA); `res.short.strip(res, k)` returns
-root k without it.  @@IP_COST@@
+root k without it.  A sigma vector costs 0.6 CCSDT
+iterations for HBr with 26 + 120 spinors and 1.2 with 8 + 78, where the
+dense terms that do not shrink with the vectors dominate.
+
+**Which roots.**  `nroots` roots that cut a degenerate level give a warning
+(`res.cut_level`); `complete=True` computes the rest of the level, so more
+roots than asked for come back.  If the single excitations are fewer than
+the roots asked for the guess continues with doubles; a state without any
+single excitation in its sector may still need more start vectors
+(`extra=10`, default 2; `docs/eom.md` 4).
 
 **EOM-CCSD** on CCSD amplitudes: `zccsdt.cc.eom.kernel(eris, t1, t2, None,
 nroots=..)` with the amplitudes of `zccsdt.cc.solver.kernel(eris, 'ccsd')`;

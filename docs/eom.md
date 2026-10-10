@@ -15,6 +15,10 @@ complex: excitation energies and right-hand vectors.
 | reference runs | `bench/refs/reference_energies.json` (`eom_ee`), `bench/dirac/mrcc_eom.sh`, `bench/cfour/eom_ccsd.sh` |
 | timing | `bench/eom_bench.py`, `bench/slurm_eom.sh`; label blocks: `bench/eom2_bench.py`, `bench/slurm_eom2.sh` |
 
+Stage two (sections 4 to 6, 8): states with a label shift in the blocks of
+a linear molecule, IP and EA with short vectors, the threaded solver, the
+choice of the roots.
+
 Not in this document, and not done: left-hand vectors, transition
 properties, excited-state gradients, the native Fortran program.
 
@@ -211,8 +215,8 @@ products above).  Its share of a sigma vector, measured (the timer
 | | o + v | pp ladder of the second residual | of a sigma vector | what could be saved |
 |---|---|---|---|---|
 | H2O / cc-pVTZ, packed block, 8 threads (job 31825453) | 10 + 106 | 1.39 s | 8.18 s: 17% | about 11% |
-| HBr / cc-pVTZ-DK, label blocks, 24 threads | 8 + 78 | @@PP_TZ@@ | @@PPSHARE_TZ@@ | - |
-| HBr / cc-pVQZ-DK, label blocks, 24 threads | 26 + 120 | @@PP_QZ@@ | @@PPSHARE_QZ@@ | @@PPSAVE_QZ@@ |
+| HBr / cc-pVTZ-DK, label blocks, 24 threads (job 31828491) | 8 + 78 | 0.0105 s | 0.372 s: 2.8% | - |
+| HBr / cc-pVQZ-DK, label blocks, 24 threads | 26 + 120 | 0.78 s | 11.06 s: 7.1% | about 2.5% (o / v = 0.22: the products that replace the ladder cost half of it) |
 
 **Not implemented**: for the linear molecules in label blocks that this
 stage is about the gain is a few percent of a sigma vector, against two
@@ -719,9 +723,78 @@ In the blocks the plan is far above what was used (1.62 against 0.93 GB):
 layout.  On the packed block and for H2O the peak is 90% and 99% of the
 plan; nothing was above it.
 
+(The numbers of this job are from the first version: 8 cores of the
+shared node, shift 0 only in the blocks.)
+
+**Label shifts and IP in label blocks, a node of its own.**
+
+Job 31828491, node c603 (2 x Xeon Gold 6248R), 24 cores - socket 0 and its
+memory, no other job on the node -, `bench/slurm_eom2.sh`, commit ae688c1,
+scratch on the local disk, real arithmetic, T3 in the blocks of the labels
+2 m_j, threshold 1e-6 of the residual, three roots per shift, two per
+label of IP.  Measured once.  Of each pair +-D one shift was computed.
+
+| | HBr / cc-pVTZ-DK, 28 frozen, 8 + 78 | HBr / cc-pVQZ-DK, 10 frozen, lowest 120 virtual spinors, 26 + 120 |
+|---|---|---|
+| T3 in blocks (packed block) | 0.62 million (4.26) | 81.9 million (730) |
+| CCSDT iteration (median) | 0.205 s | 6.05 s |
+| **EE, shift 0**: triples of a vector; sigma vector; per root | 622 138; 0.372 s = 1.82 iterations; 14.0 | 81 875 732; 11.06 s = 1.83; 15.3 |
+| **EE, shift +-2** | 582 637; 0.365 s = 1.78; 14.3 | 78 744 914; 10.47 s = 1.73; 15.7 |
+| **EE, shift +-4** | 478 234; 0.330 s = 1.61; 18.7 | 70 043 592; 9.71 s = 1.60; 17.7 |
+| EE, time of a shift (guess stage in it) | 20.6, 18.3, 21.4 s (4.7, 2.4, 2.7 s) | 613, 596, 591 s (98, 98, 70 s) |
+| lowest roots / Eh: shift 0 | 0.2404148147, 0.2408465048, 0.3332902852 | 0.2418705730, 0.2423160390, 0.3322661699 |
+| shift +-2 | 0.2337441859, 0.2560105237, 0.3333697909 | 0.2349495523, 0.2559147563, 0.3323390838 |
+| shift +-4 | 0.2298116664, 0.4236483143, 0.4989666136 | 0.2310729220, 0.3776418761, 0.4154702080 |
+| **IP, label -+1** (short vectors): triples; sigma vector; per root | 27 713; 0.253 s = 1.23 iterations; 16.0 | 2 341 338; 3.72 s = 0.61; 17.0 |
+| **IP, label -+3** | 23 294; 0.246 s = 1.20; 17.5 | 2 116 224; 3.63 s = 0.60; 19.5 |
+| IP / Eh: label -+1; -+3 | 0.4317625609, 0.5730642677; 0.4200399244, 0.7022642982 | 0.4374237765, 0.5755092816; 0.4254934673, 0.7124140607 |
+| memory, shift 0: growth of the resident memory in the run; plan | 0.37 GB; 2.12 GB (1.5 GB of it the allowance for 24 threads) | 31.3 GB; 36.2 GB (27 GB the 20 + 20 vectors) |
+| shift +-2, +-4 | 0.20, 0.03 GB; 2.10, 2.07 GB | 28.4, 25.7 GB; 35.3, 32.5 GB |
+| IP | 0.12, 0.35 GB; 1.92 GB | 4.9, 5.9 GB; 10.7, 10.6 GB |
+
+The lowest state of HBr is in shift +-4 (0.22981; MRCC on the same
+integrals: 0.229811656650), the next in +-2 - with shift 0 alone, which is
+all the first version had in blocks, neither is found.  The second root of
+IP label -+3 has no weight in the singles (a 2h1p state).
+
+*Memory.*  The growth is below the plan in every run.  The resident memory
+of the process is above it from the second eigenproblem on (38.98 GB at
+the peak of shift 2 against a plan of 35.26 GB): every `Result` keeps the
+operands of its ground state (`res.ground`, 6 GB here), and the front end
+keeps the last result, so a new problem starts 6 GB higher until the old
+result is dropped.  Not fixed.
+
+*A sigma vector, 26 + 120, shift 0* (seconds of 11.06; of the same run):
+the residual with R3 2.74 (pass 2 1.90, pp ladder 0.77), the residual with
+T3 2.73 (1.90, 0.78), the two passes 1 1.82, W'_vvvo 0.86, the dense small terms
+with `<ab||de>'` and the ladders of sigma_2 1.4, the solver's vector
+operations 1.55.  The guess stage is 12 to 16% of the time
+of a shift: 52 to 73 singles-doubles vectors of 1.35 s (dense GEMMs on
+o^2 v^2 and o v^3 arrays that do not use the labels).
+
+*IP.*  With 26 + 120 a sigma vector is 0.6 iterations: the passes over the
+short R3 0.21 s, the residual with T3 0.58 s (it gathers T3, its products
+are small), pass 1 0.47 s - and 2.2 s of dense terms of the size of the
+EE problem (small terms, `<ab||de>'`, W'_vvvo), which do not know that
+only the elements with the ghost are wanted.  With 8 + 78, where a CCSDT
+iteration is 0.2 s of mostly such terms, an IP sigma vector is 1.2
+iterations.  The vectors are 35 times shorter than those of EE (26 + 120).
+
+*The vector operations of the solver* (8 + 78, the same job, the three
+shifts): 2.34, 1.93, 2.40 s with numpy on one thread for collapse,
+preconditioner and projected matrix (`ZCCSDT_EOM_NUMPY=1`), 0.94, 0.78,
+1.00 s with the threaded kernels; a sigma vector 0.390, 0.383, 0.365 s
+against 0.372, 0.365, 0.330 s.  With 26 + 120 they are 1.55 s of 11.06
+per sigma vector with the kernels: every residual and every
+orthogonalization reads the whole subspace (up to 40 vectors of 0.65 GB)
+once per root, which is bound by the memory bandwidth.  Forming the
+residuals of all roots in one pass would cut that by the number of roots;
+not done.
+
 What was not measured: a run with the vectors in the scratch file at
 production size (the tests do it at 8 + 16), complex arithmetic at
-production size, more than 8 threads, IP and EA.
+production size, EA at production size, the packed block and MRCC on
+this node.
 
 ## 9. CFOUR's spinor EOM-CCSD: the solver
 
@@ -868,16 +941,25 @@ method with one subspace for all roots.
 
 - Left-hand vectors, r0, transition moments, excited-state densities and
   gradients.
-- The cheap IP / EA (section 5) and states with a label shift in the
-  blocks (section 6): both written down, neither implemented.
-- The factorized second residual (section 3) that would bring a sigma
-  vector from two iterations to little more than one.
+- The pp ladder of the second residual by stored intermediates (section
+  3): a few percent in label blocks, not implemented; the ring term
+  cannot be reduced.
+- IP / EA: the dense terms of a sigma vector are those of the EE problem
+  (section 8); a label for IP / EA on the packed block (sectors by masks
+  are wired for EE only).
+- Label shifts for labels with a modulus (CCSDT has no blocks for them).
+- Singlets apart from the M_S = 0 components of triplets; partners of a
+  degenerate level without a label; a state without a single excitation
+  in its sector needs a larger `extra` (section 4).
+- A `Result` keeps the operands of its ground state: successive
+  eigenproblems of one object add them up until the result is dropped.
+- The residuals of all roots in one pass over the subspace (section 8).
 - EOM when the ground state needed the sliced pp operator or a mapped T3:
   `prepare` keeps the operands in memory.  U / R-form integrals (UCCSDT,
   RCCSDT) are not served: `capture` is for dense integrals.
 - The small terms of a sigma vector are einsum and GEMMs on dense o^2 v^2
-  arrays without the labels; the preconditioner and the subspace
-  transformations are numpy on one thread.
-- Core-valence separation, an energy window or a target label for the
-  roots: the solver takes the lowest roots (or follows a guess).
+  arrays without the labels (15% of a sigma vector and all of the guess
+  stage with 26 + 120).
+- Core-valence separation, an energy window: the solver takes the lowest
+  roots of a shift (or follows a guess).
 - The native Fortran program.
