@@ -452,8 +452,13 @@ subroutine xzdrv(w, maxcor)
   ! ---- energies
   write(6, '(/,a)') '  ' // repeat('-', 62)
   write(6, '(a,f25.12)') '   E(SCF)                        ', escf
-  write(6, '(a,f25.12)') '   CCSDT correlation energy      ', ecorr
-  write(6, '(a,f25.12)') '   E(CCSDT)                      ', escf + ecorr
+  if (eccsd) then
+    write(6, '(a,f25.12)') '   CCSD correlation energy       ', ecorr
+    write(6, '(a,f25.12)') '   E(CCSD) (CFOUR''s amplitudes)  ', escf + ecorr
+  else
+    write(6, '(a,f25.12)') '   CCSDT correlation energy      ', ecorr
+    write(6, '(a,f25.12)') '   E(CCSDT)                      ', escf + ecorr
+  end if
   etot = escf + ecorr
   if (with_q .and. .not. q_left) then
     write(6, '(a,f25.12)') '   E[Q] (fifth order)            ', eq5
@@ -471,15 +476,21 @@ subroutine xzdrv(w, maxcor)
     if (method == 'CCSDT[Q]_L' .or. method == '[Q]_L') etot = escf + ecorr + eq5
   end if
   write(6, '(a)') '  ' // repeat('-', 62)
-  call putrec(20, 'JOBARC', 'TOTENERG', iintfp, etot)
-  write(6, '(a,f25.12)') '   TOTENERG written to JOBARC:   ', etot
+  if (.not. eccsd) then
+    call putrec(20, 'JOBARC', 'TOTENERG', iintfp, etot)
+    write(6, '(a,f25.12)') '   TOTENERG written to JOBARC:   ', etot
+  end if
   if (with_eom) then
     ! the excited states: the table, the file XZEOM, the lowest state to JOBARC (TOTENER2, as xx2ceomcc)
-    write(6, '(/,a)') '   EOM-EE-CCSDT: the states'
+    write(6, '(/,a,a)') '   EOM-EE-', merge('CCSD: the states ', 'CCSDT: the states', eccsd)
     write(6, '(a)') '  ' // repeat('-', 98)
     write(6, '(a)') '   shift  root        omega / Eh            eV            cm-1          total energy / Eh    max |r|'
-    open(unit=79, file='XZEOM', form='formatted', status='replace')
-    write(79, '(a)') '# EOM-EE-CCSDT of xzccsdt: label shift, root, omega / Eh, total energy / Eh, ' // &
+    if (eccsd) then
+      open(unit=79, file='XZEOMCCSD', form='formatted', status='replace')
+    else
+      open(unit=79, file='XZEOM', form='formatted', status='replace')
+    end if
+    write(79, '(a)') '# EOM-EE-' // merge('CCSD ', 'CCSDT', eccsd) // ' of xzccsdt: label shift, root, omega / Eh, total energy / Eh, ' // &
                      'largest element and norm of the residual, weights of R1, R2, R3, converged'
     write(79, '(a,f25.12,a,f25.12)') '# E(SCF) ', escf, '   E(CCSDT) ', escf + ecorr
     elow = huge(1d0)
@@ -487,14 +498,18 @@ subroutine xzdrv(w, maxcor)
       write(6, '(i8,i6,f20.12,f14.8,f16.4,f27.12,es11.2,a)') rshift(kres), rroot(kres), rom(kres), &
         rom(kres) * 27.211386245988d0, rom(kres) * 219474.6313632d0, escf + ecorr + rom(kres), rmx(kres), &
         merge('                ', '  NOT converged ', rconv(kres))
-      write(79, '(2i6,2f25.14,2es12.4,3f10.6,l3)') rshift(kres), rroot(kres), rom(kres), escf + ecorr + rom(kres), &
-        rmx(kres), rnm(kres), rwt(:, kres), rconv(kres)
+      write(79, '(2i6,2f25.14,2es12.4,3f10.6,l3,2i7,f10.6)') rshift(kres), rroot(kres), rom(kres), &
+        escf + ecorr + rom(kres), rmx(kres), rnm(kres), rwt(:, kres), rconv(kres), rli(kres), rla(kres), rlv(kres)
       if (rconv(kres)) elow = min(elow, rom(kres))
     end do
     close(79)
     write(6, '(a)') '  ' // repeat('-', 98)
-    write(6, '(a)') '   (the file XZEOM has this table; the file XZEOMR, if it was written, the vectors)'
-    if (elow < huge(1d0)) then
+    if (eccsd) then
+      write(6, '(a)') '   (the file XZEOMCCSD has this table; JOBARC is not written)'
+    else
+      write(6, '(a)') '   (the file XZEOM has this table; the file XZEOMR, if it was written, the vectors)'
+    end if
+    if (elow < huge(1d0) .and. .not. eccsd) then
       call putrec(20, 'JOBARC', 'TOTENER2', iintfp, escf + ecorr + elow)
       write(6, '(a,f25.12)') '   TOTENER2 written to JOBARC (the lowest state):   ', escf + ecorr + elow
     end if
@@ -510,7 +525,7 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f10.1,a)') '   peak resident memory of the process: ', 1d-3 * kb(1), ' MB'
   write(6, '(a,f10.2,a)') '   XZCCSDT total wall time: ', omp_get_wtime() - twall, ' s'
   if (with_eom) then
-    write(6, '(a)') '   XZCCSDT finished: EOM-EE-CCSDT done.'
+    write(6, '(a,a)') '   XZCCSDT finished: EOM-EE-', merge('CCSD done. ', 'CCSDT done.', eccsd)
   else if (with_den) then
     write(6, '(a)') '   XZCCSDT finished: density of CCSDT done.'
   else if (method == 'LAMBDA') then
@@ -560,18 +575,18 @@ subroutine xzjob()
   end if
   select case (method)
   case ('CCSDT', 'CCSDT[Q]', 'CCSDT(Q)', '(Q)', '[Q]', 'MP2', 'LAMBDA', 'CCSDT(Q)_L', 'CCSDT[Q]_L', &
-        '(Q)_L', '[Q]_L', 'DENSITY', 'CCSDT_DENSITY', 'EOM', 'CCSDT_EOM')
+        '(Q)_L', '[Q]_L', 'DENSITY', 'CCSDT_DENSITY', 'EOM', 'CCSDT_EOM', 'CCSD_EOM')
   case default
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), &
       ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, DENSITY, CCSDT_DENSITY, ' // &
-      'EOM, CCSDT_EOM, MP2.'
+      'EOM, CCSDT_EOM, CCSD_EOM, MP2.'
     call xzerrex
   end select
-  with_eom = method == 'EOM' .or. method == 'CCSDT_EOM'
+  with_eom = method == 'EOM' .or. method == 'CCSDT_EOM' .or. method == 'CCSD_EOM'
   if (with_eom) call xzeominp()
   ! a test hook: XZ_EOMCCSD, "xzccsdt eom" on the amplitudes of CFOUR's CCSD
   call get_environment_variable('XZ_EOMCCSD', length=larg)
-  eccsd = larg > 0 .and. method == 'EOM'
+  eccsd = (larg > 0 .and. method == 'EOM') .or. method == 'CCSD_EOM'
   with_cc = method(1:5) == 'CCSDT'
   larg = len_trim(method)
   q_left = method(max(larg - 1, 1):larg) == '_L'

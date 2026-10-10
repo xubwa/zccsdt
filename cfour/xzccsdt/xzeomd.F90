@@ -54,6 +54,8 @@ module xzeomd
   ! ---- the results, for the table at the end and the file XZEOM
   integer(8) :: nres = 0
   integer(8) :: rshift(maxres) = 0, rroot(maxres) = 0, rnsig(maxres) = 0, rcyc(maxres) = 0
+  integer(8) :: rli(maxres) = 0, rla(maxres) = 0     ! the largest element of R1: spinors i -> a (numbers of the SCF)
+  real(8) :: rlv(maxres) = 0d0                       ! its absolute value
   real(8) :: rom(maxres) = 0d0, rim(maxres) = 0d0, rmx(maxres) = 0d0, rnm(maxres) = 0d0, rwt(3, maxres) = 0d0
   logical :: rconv(maxres) = .false.
   real(8) :: teomim = 0d0, teomsig = 0d0, teomsd = 0d0, teomvec = 0d0

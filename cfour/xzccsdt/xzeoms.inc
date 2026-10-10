@@ -1135,6 +1135,14 @@ subroutine N(xzeom)(w, ecorr)
         rconv(nres) = rmax(k) <= ethr
         rcyc(nres) = cyc(k)
         rnsig(nres) = nsig
+        rli(nres) = 0
+        rla(nres) = 0
+        rlv(nres) = 0d0
+        if (lead(1, k) >= 0) then
+          rli(nres) = nfrozen + operm(lead(1, k) / nv) + 1
+          rla(nres) = nfrozen + no + vperm(mod(lead(1, k), nv)) + 1
+          rlv(nres) = abs(vlead(1, k))
+        end if
       end if
     end do
     write(6, '(/,a)') '   the largest elements of R1 (spinors in the order of the SCF: number, label, energy / Eh)'
