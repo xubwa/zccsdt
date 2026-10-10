@@ -736,15 +736,15 @@ subroutine N(xzbppl)(w, kt3, kr3, h, q0, nq, slab)
         call xztic()
         call N(zc_bgather_vir)(w(kt3), w(kob_in), w(jvcol), w(josig), w(jvsig), w(jvtri), w(jvsgn), nvp, &
                                nb, w(jrows + i0), vpoff(h), nqh, vcoff(sc), nc, w(ktv))
-        call xztoc(1, 'pp ladder: gather')
+        call xztoc(tcur, 'pp ladder: gather')
         call xztic()
         call N(zc_gemm)(0_4, 0_4, nq, nb * nc, nqh, one, slab, nqh, w(ktv), nb * nc, zero, w(kxp), nb * nc)
-        call xztoc(1, 'pp ladder: GEMM')
+        call xztoc(tcur, 'pp ladder: GEMM')
         call xztic()
         call N(zc_breduce_ppl_rows)(w(kr3), w(kob_out), w(jvcol), nb, w(jrows + i0), nvt, vtoff(g + sh_o), &
                                     vtoff(g + sh_o + 1), w(jvfree), w(jvpair), vcls, sc, vpoff(h + sh_w), q0, q0 + nq, &
                                     nc, vcoff(sc), w(kxp))
-        call xztoc(1, 'pp ladder: reduction')
+        call xztoc(tcur, 'pp ladder: reduction')
         call xzbtoc(i0)
       end if
       call xzrel(m0)
