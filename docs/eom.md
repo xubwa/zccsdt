@@ -14,13 +14,16 @@ complex: excitation energies and right-hand vectors.
 | front end | `GCCSDT.eom_ee`, `eom_ip`, `eom_ea` (`src/zccsdt/ccsdt.py`; `docs/usage.md`) |
 | reference runs | `bench/refs/reference_energies.json` (`eom_ee`), `bench/dirac/mrcc_eom.sh`, `bench/cfour/eom_ccsd.sh` |
 | timing | `bench/eom_bench.py`, `bench/slurm_eom.sh`; label blocks: `bench/eom2_bench.py`, `bench/slurm_eom2.sh` |
+| the native program in CFOUR's chain (`xzccsdt eom`, `ccsdt_eom`): the sigma vector of section 3 and the label shifts of section 6 in Fortran, with the solver of section 9 | `cfour/xzccsdt/xzeom.inc`, `xzeoms.inc`, `xzeomd.F90`; docs/native.md, section 16 |
 
 Stage two (sections 4 to 6, 8): states with a label shift in the blocks of
 a linear molecule, IP and EA with short vectors, the threaded solver, the
 choice of the roots.
 
 Not in this document, and not done: left-hand vectors, transition
-properties, excited-state gradients, the native Fortran program.
+properties, excited-state gradients.  The native Fortran program has
+EOM-EE-CCSDT (not IP / EA): docs/native.md, section 16, with its
+validation against this code and against MRCC and CFOUR.
 
 Notation as in `docs/factorization.md` and `docs/lambda.md`: `o`, `v`
 occupied and virtual spin orbitals or spinors; i j k l m n occupied, a b c d
@@ -937,6 +940,15 @@ diagonals are CFOUR's; the native CCSDT has its own packed layouts.
 The Python solver of section 4 was not modelled on this one: it is a block
 method with one subspace for all roots.
 
+**The port** (docs/native.md, section 16.3): the native program has this
+solver in the design of `eomene2` - one subspace for all roots of a label
+shift, one correction vector per unconverged root and iteration, the roots
+verified at the end - with `eomreorder` and `eomconv` linked in complex
+arithmetic and everything that touches a vector written for its own
+layouts; the subspace is in the work array if it fits and in the files
+`EOMCnnnn` / `EOMHnnnn` otherwise.  Its EOM-CCSD on the amplitudes of
+`xx2cccsd` reproduces the roots of `xx2ceomcc` to 1e-10.
+
 ## 10. Not done
 
 - Left-hand vectors, r0, transition moments, excited-state densities and
@@ -962,4 +974,5 @@ method with one subspace for all roots.
   stage with 26 + 120).
 - Core-valence separation, an energy window: the solver takes the lowest
   roots of a shift (or follows a guess).
-- The native Fortran program.
+- In the native Fortran program: IP / EA, the block solver of section 4
+  (it has the solver of section 9: docs/native.md, section 16.3).
