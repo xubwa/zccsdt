@@ -897,9 +897,13 @@ subroutine xzlayout(w, status)
         ximag = max(ximag, xzimag(nel(k), w(jold(k))))
       end do
       if (ximag > tol_imag) then
+        write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of the integrals: ', ximag, &
+          ' (above the tolerance ', tol_imag, ', XZ_IMAGTOL: complex arithmetic)'
         status = 2
         return
       end if
+      if (ximag > 1d-12) write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of the integrals: ', &
+        ximag, ' (below the tolerance ', tol_imag, ': taken as zero)'
     end if
   end if
   call xzrel(m)
@@ -938,10 +942,15 @@ subroutine xzlayout(w, status)
     if (offmax > 1d-8) write(6, '(a,es10.2,a,es9.2,a)') '   the largest element of <vv||vv> that the labels forbid: ', &
       offmax, ' (below the tolerance ', tol_label, ': taken as zero)'
     if (nwe == 1) then
-      if (xzimag(nvv, w(jvvvv)) > tol_imag) then
+      ximag = xzimag(nvv, w(jvvvv))
+      if (ximag > tol_imag) then
+        write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', ximag, &
+          ' (above the tolerance ', tol_imag, ', XZ_IMAGTOL: complex arithmetic)'
         status = 2
         return
       end if
+      if (ximag > 1d-12) write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', &
+        ximag, ' (below the tolerance ', tol_imag, ': taken as zero)'
       call xztoreal(nvv, w(jvvvv), w(jvvvv))
     end if
   end if
