@@ -80,7 +80,6 @@ module xzdata
   !      occupied triples has the virtual triples of group g + s (xzna of them).
   integer(8) :: sh_t = 0, sh_w = 0, sh_a = 0, sh_o = 0, sh_b = 0
   logical :: p1_noe = .false.               ! pass 1: the rows e of its first operand are zero and left out
-  logical :: eccsd = .false.                ! XZ_EOMCCSD: EOM-CCSD on T1, T2 of CFOUR's CCSD (a test hook)
   integer(8) :: kob_in = 0, kob_out = 0     ! obase of the two layouts (index in w)
   integer(8) :: bof_in(0:maxgrp) = 0, bof_out(0:maxgrp) = 0
   integer(8) :: eshift = 0                  ! the shift of the EOM vectors that are worked on

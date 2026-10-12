@@ -57,7 +57,7 @@ KCFLAGS ?= $(CFLAGS)
 
 # the C kernels that the program calls
 KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda cc3_fly cc3_native
-MODS    := xzkern xzmem xzdata xzdiis xzpar xzdist xzfrz xzeomd
+MODS    := xzkern xzmem xzdata xzdiis xzpar xzdist xzfrzd xzfrz xzpland xzeomd
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
 INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc xzeom.inc xzeoms.inc xzcc3.inc
 
@@ -86,7 +86,8 @@ $(BUILD)/%.o: $(CSRC)/%.c | $(BUILD)
 # the modules before what uses them
 $(addprefix $(BUILD)/, $(addsuffix .o, $(SRCS))): $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS)))
 $(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o $(BUILD)/xzpar.o: $(BUILD)/xzkern.o
-$(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o
+$(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzfrzd.o
+$(BUILD)/xzpland.o: $(BUILD)/xzdata.o
 $(BUILD)/xzeomd.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o
 $(BUILD)/xzdrv.o: $(BUILD)/xzplan.o
 $(BUILD)/xzdist.o: $(BUILD)/xzdata.o $(BUILD)/xzpar.o

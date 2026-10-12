@@ -1010,11 +1010,7 @@ subroutine N(xzeom)(w, ecorr)
   t0 = omp_get_wtime()
   call N(xzeomim)(w)
   teomim = omp_get_wtime() - t0
-  if (eccsd) then
-    write(6, '(/,a)') '  EOM-EE-CCSD (XZ_EOMCCSD: T1, T2 of CFOUR''s CCSD, T3 = 0): excitation energies and right-hand vectors'
-  else
-    write(6, '(/,a)') '  EOM-EE-CCSDT: excitation energies and right-hand vectors'
-  end if
+  write(6, '(/,a)') '  EOM-EE-CCSDT: excitation energies and right-hand vectors'
   write(6, '(a)') '  ' // repeat('-', 98)
   write(6, '(a,f10.2,a)') '   intermediates of the ground state (the pp operator in the place of <ab||cd>): ', teomim, ' s'
   write(6, '(a,es9.2,a,i4,a)') '   convergence: the largest element of a residual below ', ethr, &
@@ -1056,7 +1052,7 @@ subroutine N(xzeom)(w, ecorr)
 
   ! ---- the file of the vectors of the roots, if the disk of the run directory holds them
   iures = 0
-  if (ewvec /= 0 .and. .not. eccsd) then
+  if (ewvec /= 0) then
     need = 0d0
     do ish = 1, nprob
       call problem(ish, s, nroot, ok)
@@ -1112,21 +1108,6 @@ subroutine N(xzeom)(w, ecorr)
     allocate(ee(nkeep), rmax(nkeep), rnorm(nkeep), wts(3, nkeep), cyc(nkeep), lead(nlead, nkeep), vlead(nlead, nkeep))
     nst = nroot
     nsgd = 0
-    if (eccsd) then
-      ! ---- a test hook: EOM-CCSD (the amplitudes are those of a CCSD calculation, T3 = 0):
-      !      the singles-doubles block is the whole problem
-      t1 = omp_get_wtime()
-      msd = min(64_8, 8 + 4 * nkeep)
-      call xzdry_begin()
-      call N(xzesig)(w, kxa, kxb, .true.)
-      call xzdry_end(peak)
-      avail = xzsize - xztop - (peak - xztop)
-      n3s = 0
-      call N(xzesolve)(w, .true., nroot, ethr, emaxcyc, msd, nkeep, 0_8, singles, kxa, kxb, avail, &
-                       ee, rmax, rnorm, wts, cyc, nfound, nsig, nit, 0_8, 0, lead, vlead, .false.)
-      t1 = omp_get_wtime() - t1
-      tsg = 0d0
-    else
     if (eguess == 1) then
       ! ---- the singles-doubles block of the matrix, from unit vectors
       t1 = omp_get_wtime()
@@ -1165,11 +1146,10 @@ subroutine N(xzeom)(w, ecorr)
     end if
     t1 = omp_get_wtime() - t1
     tsg = teomsig - tsg
-    end if
     ! ---- the roots
     write(6, '(/,a,i5,a,i4,a,f10.2,a,f9.2,a)') '   sigma vectors: ', nsig, '   iterations: ', nit, '   time: ', t1, &
       ' s   (', t1 / max(nsig, 1_8), ' s per sigma vector, the solver included)'
-    if (.not. eccsd) write(6, '(a,f10.2,a,f9.2,a,f10.2,a,f9.2,a)') '   in the sigma vectors: ', tsg, ' s (', &
+    write(6, '(a,f10.2,a,f9.2,a,f10.2,a,f9.2,a)') '   in the sigma vectors: ', tsg, ' s (', &
       tsg / max(nsig, 1_8), ' each);  in the vector operations of the solver: ', t1 - tsg, ' s (', &
       (t1 - tsg) / max(nsig, 1_8), ' per sigma vector)'
     if (evbytes > 0d0) write(6, '(a,f12.1,a,f10.2,a)') '   vectors in files: ', 1d-9 * evbytes, &
@@ -1417,39 +1397,3 @@ subroutine N(xzetres3)(cw, t3, t3n, eo3, ev3, f3)
   end do
 end subroutine
 
-! ---------------------------------------------------------------------------
-! XZ_EOMCCSD (a test hook): the amplitudes of a CCSD calculation of CFOUR's
-! xx2cccsd on the same integral files (its files t1guess, t2guess) in the
-! places of T1 and T2, T3 = 0: the excited states are then those of
-! EOM-CCSD.  ecorr: the CCSD correlation energy of these amplitudes.
-subroutine N(xzeomccsd)(w, ecorr)
-  use xzdata
-  use xzmem
-  use xzkern
-  implicit none
-  real(8) :: w(*)
-  real(8), intent(out) :: ecorr
-  integer(8) :: n, kb1, kb2
-  ZT :: e
-  jt1 = xzget(NW * no * nv, 'T1')
-  jt2 = xzget(NW * no * no * nv * nv, 'T2')
-  jt3 = xzget(NW * n3, 'T3')
-  n = xzmark()
-  kb1 = xzget(2 * no * nv, 't1guess')
-  kb2 = xzget(2 * (no * (no + 1) / 2) * (nv * (nv + 1) / 2), 't2guess')
-  ecorr = 0d0
-  if (.not. xzdry) then
-    call N(xzguess)(no, nv, w(jeps), w(joovv), w(jt1), w(jt2))
-    call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
-    ecorr = dble(e)
-    call N(xzccsdstart)(no, nv, w(kb1), w(kb2), w(jt1), w(jt2))
-    call zc_vzero_d(NW * n3, w(jt3))
-    call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
-    if (abs(dble(e) - ecorr) < 1d-14) then
-      write(6, '(/,a)') ' @XZCCSDT-F, XZ_EOMCCSD: no amplitudes of CFOUR''s CCSD (files t1guess, t2guess of xx2cccsd).'
-      call xzerrex
-    end if
-    ecorr = dble(e)
-  end if
-  call xzrel(n)
-end subroutine

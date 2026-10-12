@@ -29,12 +29,29 @@ labels, complex or real, the iterations and (Q), (Q)_Lambda over MPI ranks,
 (Q) with restart - are there and validated against the Python program; so is the density stage of
 CCSDT with the files for `xx2czvec`, frozen and dropped spinors included
 (section 13), validated against the Python hand-over of section 10 and
-through `xx2czvec` and `xsox2cprop`.  Excited states: EOM-EE-CCSDT (`eom`,
-`ccsdt_eom`) in all four modes, in blocks for the states of a label shift,
+through `xx2czvec` and `xsox2cprop`.  Excited states: EOM-EE-CCSDT
+(`EXCITE=EOMEE`) in all four modes, in blocks for the states of a label shift,
 with CFOUR's solver design and input - section 16; one MPI rank.  CC3:
-with T3 stored (a switch of the CCSDT step, its EOM in every label shift)
-and without stored triples (the batches of `csrc/cc3_fly.c`, over MPI
-ranks; EOM-CC3 folded, the totally symmetric states) - section 17.
+without stored triples (the batches of `csrc/cc3_fly.c`, over MPI ranks;
+EOM-CC3 folded, the totally symmetric states) and, as a check, with T3
+stored (its EOM in every label shift) - section 17.
+
+**The program takes no argument** (since commit a38e493): the job comes from
+the ZMAT as joda stored it, and the steps that were arguments before (`(q)`,
+`lambda`, `density`, `eom` on the files of an earlier run) happen by
+themselves when the files `XZAMPS`, `XZLAMB` fit the run (section 1).  The
+measurements below name the argument that was given then:
+
+| argument (before a38e493) | now: ZMAT |
+|---|---|
+| `ccsdt`, `ccsdt[q]`, `ccsdt(q)` | `CALC=CCSDT`, `CCSDT[Q]`, `CCSDT(Q)` |
+| `ccsdt(q)_l` | `CALC=CCSDT(Q)_L` |
+| `ccsdt[q]_l` | not available (joda does not know `CCSDT[Q]_L`); `E[Q]_L` is printed with `CCSDT(Q)_L` |
+| `ccsdt_density` | `CALC=CCSDT,PROPS=FIRST_ORDER` (or `DERIV_LEV=1`) |
+| `ccsdt_eom` | `CALC=CCSDT,EXCITE=EOMEE` |
+| `(q)`, `[q]`, `lambda`, `(q)_l`, `[q]_l`, `density`, `eom` | the same ZMAT as the full job, in the directory of an earlier run: `XZAMPS` (`XZLAMB`) are taken |
+| `mp2` | `CALC=MP2` |
+| `ccsd_eom` | removed (CFOUR's `xx2ceomcc` is EOM-CCSD) |
 
 ## 1. Build and run
 
@@ -42,6 +59,9 @@ ranks; EOM-CC3 folded, the totally symmetric states) - section 17.
     cd cfour/xzccsdt
     make                # -> build/xzccsdt/xzccsdt           (serial: no MPI in it)
     make MPI=1          # -> build/xzccsdt_mpi/xzccsdt       (the iterations and (Q) over ranks)
+
+Inside CFOUR (the program directory `zccsdt`, the binaries `bin/xzccsdt`
+and `bin/xzccsdt_mpi`): `cfour/merge/README.md`.
 
 Compilers and flags are those of the CFOUR build (`ifort`, `icc`, `-i8`,
 `-assume byterecl`; `make.config` of `~/apps/cfour-x2cso-rebuild`).  Linked:
@@ -64,26 +84,61 @@ otherwise.  A GEMM with more than 2^31 elements in one operand was not run
 (32 GB for one complex operand); the results of all cases below agree with
 the LP64 Python build.
 
-    xzccsdt [method]
+    xzccsdt
 
-`method`: `ccsdt`, `ccsdt[q]`, `ccsdt(q)`; `(q)` or `[q]` for the correction
-alone from the amplitudes of an earlier run (file `XZAMPS`); `lambda` for the
-Lambda equations of CCSDT for the amplitudes of `XZAMPS` (written to
-`XZLAMB`); `(q)_l` or `[q]_l` for CCSDT(Q)_Lambda from `XZAMPS` and `XZLAMB`;
-`ccsdt(q)_l`, `ccsdt[q]_l` for CCSDT, Lambda and the correction in one run
-(section 11); `density` for the unrelaxed density and the orbital gradient of
-CCSDT from `XZAMPS` and `XZLAMB`, written as the files of `xx2czvec`;
-`ccsdt_density` for CCSDT, Lambda and the density in one run (section 13);
-`eom` for the excited states of EOM-EE-CCSDT from `XZAMPS`, `ccsdt_eom` for
-CCSDT and the excited states in one run (section 16: the number of roots,
-their label shifts and the thresholds come from the ZMAT - `%eomnroot`,
-`%xzeom`, `ESTATE_CONV`, `ESTATE_MAXCYC`); `ccsd_eom` for EOM-EE-CCSD on
-the amplitudes of CFOUR's `xx2cccsd` (16.5); `cc3` for CC3 without stored
-triples, `cc3_eom` for CC3 and its folded excited states (the totally
-symmetric ones), `cc3_stored` and `cc3_stored_eom` for CC3 with T3 stored
-and its excited states in every label shift (section 17).  Without the argument: `CALC` of the ZMAT as joda stored it (`CALC=CCSDT`, `CCSDT[Q]`,
-`CCSDT(Q)`, `CC(n)` with `EXCITATION=3`, `CC(n-1)(n)` with `EXCITATION=4`,
-`CALC=CC3`: `cc3`).
+The program takes no argument (one stops it: `@XZCCSDT-F, xzccsdt takes no
+argument ...` with the keywords below).  As every CFOUR program it does what
+the ZMAT asks for, from the flags that joda stored in JOBARC (`xzjob` in
+`xzdrv.F90`):
+
+| ZMAT | job |
+|---|---|
+| `CALC=CCSDT` (`CC(n)` with `EXCITATION=3`) | CCSDT |
+| `CALC=CCSDT[Q]` | CCSDT, [Q] (the final energy; (Q) printed too) |
+| `CALC=CCSDT(Q)` (`CC(n-1)(n)` with `EXCITATION=4`) | CCSDT, (Q) and [Q] |
+| `CALC=CCSDT(Q)_L` (`CC(n-1)(n)_L` with `EXCITATION=4`) | CCSDT, the Lambda equations, (Q)_Lambda and [Q]_Lambda (section 11) |
+| `CALC=CCSDT,EXCITE=EOMEE` | CCSDT, then EOM-EE-CCSDT (section 16: the roots, their label shifts and the thresholds from `%eomnroot`, `%xzeom`, `ESTATE_CONV`, `ESTATE_MAXCYC`) |
+| `CALC=CCSDT,PROPS=FIRST_ORDER` or `DERIV_LEV=1` | CCSDT, Lambda, the unrelaxed density and the orbital gradient as the files of `xx2czvec` (section 13) - the keywords with which CFOUR's own spinor CC programs (`xx2cccsd`: `max(DERIV_LEV, PROPS)`) make the density |
+| `CALC=MP2` | the MP2 energy of the integral files (a check; `TOTENERG` not written) |
+| `CALC=CC3` (with or without `EXCITE=EOMEE`) | stops: not in this version (the place of the next method in `xzjob`) |
+
+What joda (x2cso branch, `cfour-x2cso/bin/xjoda`, with `RELATIVISTIC=X2C1E`)
+stores for these, measured 2026-10-12 on the test case of the package
+(`cfour/merge/test`): `CALC=CCSDT,EXCITE=EOMEE` becomes `PROPS=EXCITATION`,
+`EXCITE=NONE`, `DERIV_LEV=SECOND`, `CC_PROG=ECC` (joda's rule for EOM-EE with
+CCSDT unless `CC_PROG=NCC` or `MRCC`) - the program reads either form as
+EOM; `PROPS=FIRST_ORDER` sets `DERIV_LEV=FIRST` and `RELAX_DENS=ON`;
+`DERIV_LEV=1` sets `CC_PROG=ECC`; `CCSDT[Q]` and `CCSDT(Q)` set `CC_PROG=NCC`.
+None of this changes what the chain writes: E(SCF) and E(CCSDT) of all these
+runs agree to all digits printed; `DROPMO` is not touched.  `CALC=CCSDT[Q]_L`
+is not a value of joda: it is stored as `SCF` without a message, and the
+program stops (`CALC ... is not one of ...`).  EOM or the density with
+another `CALC` than `CCSDT` stops the program.
+
+**Files of an earlier run.**  The amplitudes go to `XZAMPS`, lambda to
+`XZLAMB`, and the file `XZKEY` (text) records what they were solved for: the
+active occupied and virtual spinors, all spinors, the frozen spinors,
+E(SCF) of JOBARC, the sum of the spinor energies of `scf2ceig` and the sum
+of (p + 1) times the energy of spinor p (the order), `CC_CONV` of the
+amplitudes and of lambda.  At the start (`xzreuse`; rank 0 decides, the
+other ranks are told) `XZAMPS` is taken in the place of the CCSDT iterations
+if `XZKEY` and `XZAMPS` are there, the header of `XZAMPS` has the active
+spaces, the sizes agree exactly and the three energies to 1e-9 (relative),
+and it was converged at least as tightly (`CC_CONV` not smaller); `XZLAMB`
+in the place of the Lambda iterations if moreover it is lambda of these
+amplitudes (its header, the CCSDT energy, as before) and its `CC_CONV` is
+not smaller.  The output says which: `amplitudes: the file XZAMPS of an
+earlier run belongs to these integrals (XZKEY): taken, the CCSDT iterations
+are skipped` or `amplitudes: solved here`, likewise for lambda.  The labels
+and the arithmetic are decided again from the same files; a file written in
+another mode (`XZ_LABELS`, `XZ_REAL` changed between the runs) stops the run
+when it is read.  So the steps can be separate runs in one directory:
+`CALC=CCSDT`, then xjoda again with `CALC=CCSDT(Q)` (or `EXCITE=EOMEE`, or
+`PROPS=FIRST_ORDER`) and the program again: only the new part is computed
+(rerunning xjoda with another `CALC` in a finished directory: run, the files
+of the SCF and of xx2cvtran stay valid).  Remove the files to force a new
+solution.
+
 Thresholds: `CC_CONV=N` - the amplitudes (|dT1| + |dT2| + |dT3| of the full
 tensors) below 10^-N and the energy below 10^-(N+2), as the Python front end
 reads it - and `CC_MAXCYC`; lambda: |dL1| + |dL2| + |dL3| below 10^-N.  Frozen and dropped spinors are what CFOUR left
@@ -103,7 +158,7 @@ Threads: `OMP_NUM_THREADS` (kernels and MKL share Intel's OpenMP runtime).
 
     export PATH=$PATH:/cm/shared/apps/slurm/current/bin   # in a job: mpirun needs srun (section 8)
     export OMP_NUM_THREADS=24 I_MPI_PIN_DOMAIN=omp        # threads per rank
-    mpirun -np 8 -ppn 2 xzccsdt "ccsdt(q)"                # Intel MPI, inside a Slurm allocation
+    mpirun -np 8 -ppn 2 xzccsdt_mpi                       # Intel MPI, inside a Slurm allocation
 
 e.g. `sbatch -N 4 --ntasks-per-node=1 -c 48 --mem=180G` - one Slurm task per
 node with all its cores; Intel MPI starts `-ppn` ranks on every node and
@@ -144,10 +199,9 @@ decided alike ...`).
 - The excited states (`eom`, `ccsdt_eom`) run with one rank only; with more
   the program stops with a message (section 16.7).
 
-The steps can be separate invocations, as the X2CSO programs are called one
-after the other: `xzccsdt ccsdt` (serial or one rank), then
-`mpirun ... xzccsdt "(q)"`; or `xzccsdt ccsdt`, `xzccsdt lambda`,
-`mpirun ... xzccsdt "(q)_l"`.
+The steps can be separate invocations in one directory: `CALC=CCSDT`
+(serial or one rank), then `CALC=CCSDT(Q)` with `mpirun ...`: the second
+takes `XZAMPS` of the first.
 
 ## 2. Files
 
@@ -493,7 +547,7 @@ pass 1, pass 2, pp ladder; 4, 5, 6 those of the Lambda equations; `0`:
 rank 0 does all), `XZ_BPR`, `XZ_BCOST=file` (the seconds of every batch),
 `XZ_SLICES=0`, `XZ_REBAL`, `XZ_R0LOAD`, `XZ_WFAIL`.  `XZ_MAXCOR` is read by
 rank 0 only.  The excited states: `XZ_EOMTEST`, `XZ_EOMSIG`, `XZ_EOMSD`,
-`XZ_EOMCCSD`, `XZ_EOMVEC`, `XZ_EOMCYC` (section 16.8).
+`XZ_EOMVEC`, `XZ_EOMCYC` (section 16.8).
 
 Measured (H2O / 6-31G, login node): the same energies to 1e-12 with the work
 array at its floor (2022176 words: DIIS in the file, one pair per batch),
@@ -2990,8 +3044,8 @@ the transfer rates above are Intel MPI's, in particular the slow
 
 ## 16. EOM-EE-CCSDT: excited states
 
-    xzccsdt ccsdt_eom               # CCSDT, then the excited states
-    xzccsdt ccsdt; xzccsdt eom      # or the states from XZAMPS of a converged CCSDT
+    CALC=CCSDT,EXCITE=EOMEE         # CCSDT, then the excited states (or the
+                                    # states from XZAMPS of an earlier CCSDT run)
 
 Excitation energies and right-hand vectors of EOM-EE-CCSDT on the converged
 amplitudes, in every mode of the program: the packed block or the blocks of
@@ -3363,25 +3417,10 @@ integrals of the same molecule, row 2 above; 16 roots asked for):
 (The Python program on the same files is at 0.284831363565, 0.311687768585:
 the 6e-10 to MRCC are the integrals of the two SCF programs, not the EOM.)
 
-**CFOUR's `xx2ceomcc`** (EOM-CCSD, complex spinors).  `xzccsdt ccsd_eom`
-takes T1 and T2 of CFOUR's `xx2cccsd` (its files `t1guess`, `t2guess` in
-the run directory; `xx2cccsd` runs with `ABCDTYPE=STANDARD`), T3 = 0, and
-solves the singles-doubles block as the whole problem: EOM-CCSD by the
-native sigma vector and solver, with the input of 16.1; its table goes to
-the file `XZEOMCCSD` (the format of `XZEOM`), JOBARC is not written.  It
-runs in every mode: for HBr with `%dglin` (real blocks, labels from
-`dgcosym`, frozen core; the amplitudes of `xx2cccsd` are complex in CFOUR's
-order and real to 1e-8 there) the roots of the shifts 4, 2, 0 are
-0.2341993787, 0.2382347953, 0.2446936214, 0.2451691800 - those of the
-complex dense run on unlabelled spinors below (0.234199378727, ..).  Two
-chains of the same input per molecule (`bench/cfour/eom_ccsd.sh`:
-`ABCDTYPE=AOBASIS` for `xx2ceomcc`, `STANDARD` for the integral files of the
-native program; `ESTATE_CONV=8` in CFOUR, 1e-9 here):
-
-| | CCSD energy, both chains | `xx2ceomcc` / Eh | native | difference |
-|---|---|---|---|---|
-| H2O / 6-31G, X2C-1e (10 + 16), `%eomalg 2`, two roots | -76.168127725956 | 0.280687329716, 0.280687616516 | 0.280687329791, 0.280687616393 (and 0.280688286544, 0.307695486924, ..: six roots) | 8e-11, 1.2e-10 |
-| HBr / cc-pVDZ-DK, 14 pairs frozen (8 + 28), four roots | -2604.987068096888 | 0.234048257234, 0.238083258261 (each twice) | 0.234048257149 (twice), 0.238083258312 (twice), 0.244541770328, 0.245018076348 | 9e-11, 5e-11 |
+**CFOUR's `xx2ceomcc`** (EOM-CCSD): an EOM-CCSD mode of this program on
+the amplitudes of CFOUR's `xx2cccsd` (`ccsd_eom`) was compared with
+`xx2ceomcc` (H2O, HBr: the roots agree to 1e-10) and removed since:
+CFOUR's own EOM-CCSD serves.
 
 **Regression** (`regr.sh` of the work directory): the binary of the commit
 before this work (e9be264) and the present one on the same files -
@@ -3455,10 +3494,11 @@ another job and another SCF).
 EOM runs with one rank.  With more the program stops at the start:
 
     @XZCCSDT-F, the excited states (EOM) run with one rank: the sigma vectors are not distributed.
-                Run "xzccsdt ccsdt" over the ranks, then "xzccsdt eom" with one (it reads XZAMPS).
+                Run CALC=CCSDT (without EXCITE) over the ranks, then EXCITE=EOMEE with one rank:
+                the second run takes the amplitudes of the file XZAMPS of the first.
 
-(`xzccsdt ccsdt` over ranks and `xzccsdt eom` with one rank of the MPI
-build or the serial build: run.)  The passes of a sigma vector are the ones
+(CCSDT over ranks and EOM with one rank of the MPI build or the serial
+build: run, with the arguments of the time.)  The passes of a sigma vector are the ones
 that the iterations deal to the ranks, and they ask `xzmine` for every
 batch; what is missing is the rest of the machinery of section 15 for a
 second kind of step: the kept intermediates made on every rank
@@ -3470,8 +3510,7 @@ rank in the plan.  Not started.
 
 ### 16.8 Test hooks
 
-`XZ_EOMTEST=seed` (16.5), `XZ_EOMSIG=file` [`XZ_EOMSD=1`], `XZ_EOMCCSD=1`
-(`eom` as `ccsd_eom`),
+`XZ_EOMTEST=seed` (16.5), `XZ_EOMSIG=file` [`XZ_EOMSD=1`],
 `XZ_EOMVEC=f` (the subspace in files), `XZ_EOMCYC=n` (iterations at most:
 `ESTATE_MAXCYC` is in JOBARC and needs xjoda to change).
 
@@ -3490,16 +3529,21 @@ rank in the plan.  Not started.
   vectors, 6 did not converge in 40 iterations).
 - The residuals of all roots in one pass over the subspace; the dense small
   terms of a sigma vector and the o v^3 arrays in blocks of the labels.
-- A CCSD ground state of its own: `ccsd_eom` needs the amplitudes of
-  CFOUR's `xx2cccsd`.
-
 ## 17. CC3
 
-    xzccsdt cc3                 # CC3 without stored triples (CALC=CC3 of the ZMAT: the same)
-    xzccsdt cc3_eom             # CC3, then the folded excited states (label shift 0)
-    xzccsdt cc3_stored          # CC3 with T3 stored
-    xzccsdt cc3_stored_eom      # CC3 with T3 stored, then the excited states of every label shift
-    mpirun -np 4 xzccsdt cc3    # the iterations over ranks (both routes)
+    CALC=CC3                    CC3 without stored triples
+    CALC=CC3, EXCITE=EOMEE      CC3, then the folded excited states (label shift 0)
+    XZ_CC3=stored               (environment, a check route) CC3 with T3 stored; with
+                                EXCITE=EOMEE its excited states in every label shift
+    mpirun -np 4 xzccsdt        the iterations over ranks (both routes)
+
+The job comes from the ZMAT as for every method (section 1); `CALC=CC3` is
+joda's level 32, and EXCITE=EOMEE is read in either of joda's forms.  The
+validation and timings below were run while the program still took the
+method as an argument (`cc3`, `cc3_eom`, `cc3_stored`, `cc3_stored_eom`:
+the four cases above).  CC3 amplitudes are never reused from `XZAMPS`: a
+CC3 run does not read `XZKEY` and removes it after writing its amplitudes,
+so no CCSDT run takes them and no CC3 run takes those of CCSDT.
 
 CC3 of docs/ccn.md: the singles and doubles equations of CCSDT, the triples
 equation to the lowest order, `<T| [V~, T2] + [F, T3] |0> = 0`, F the Fock
@@ -3731,10 +3775,10 @@ without T3 and 3.63 s with T3 stored, a sigma vector 4.2 and 5.4 s.
   virtual triples of group g + s and the operands of a shift (an added
   kernel or a shift argument).  The states of a shift: `cc3_stored_eom`
   (T3 and R3 stored, the memory of EOM-CCSDT).
-- EOM over MPI ranks (section 16.7), for both routes: `cc3` over ranks then
-  the folded EOM is one invocation (`cc3_eom`), which runs with one rank;
-  there is no `eom` for CC3 from `XZAMPS` (the file does not say which
-  model wrote it).
+- EOM over MPI ranks (section 16.7), for both routes: CC3 with
+  EXCITE=EOMEE runs with one rank, and CC3 amplitudes are not reused (no
+  `XZKEY` for them), so the iterations cannot be done over ranks first and
+  the EOM afterwards; a model tag in `XZKEY` would allow it.
 - Spinors that are not canonical: the program stops (17.1); the
   semicanonical rotation of docs/ccn.md, section 1, belongs before the
   integral transformation (CFOUR's spinors are canonical).

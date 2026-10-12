@@ -69,6 +69,7 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a,i10,a)') '        as large as its part needs; arrays go between the ranks in messages of ', &
       xzmpi_chunk(), ' words)'
   end if
+  call xzreuse()
   ! (Q) reads T3 (and Lambda3) where the files are mapped unless XZ_QMAP=0
   t3shared = with_q
   call get_environment_variable('XZ_QMAP', arg, larg)
@@ -90,7 +91,8 @@ subroutine xzdrv(w, maxcor)
   end if
   if (with_eom .and. nrank > 1) then
     write(6, '(a)') ' @XZCCSDT-F, the excited states (EOM) run with one rank: the sigma vectors are not distributed.'
-    write(6, '(a)') '             Run "xzccsdt ccsdt" over the ranks, then "xzccsdt eom" with one (it reads XZAMPS).'
+    write(6, '(a)') '             Run CALC=CCSDT (without EXCITE) over the ranks, then EXCITE=EOMEE with one rank:'
+    write(6, '(a)') '             the second run takes the amplitudes of the file XZAMPS of the first.'
     call xzerrex
   end if
 
@@ -274,8 +276,15 @@ subroutine xzdrv(w, maxcor)
     else
       call xzamps_d(w, 'w', ecorr)
     end if
+    if (cc3mode == 0) then
+      call xzkeyw(-1_8)
+    else
+      ! (CC3 amplitudes are never reused: an XZKEY of an earlier CCSDT run goes)
+      open(unit=76, file='XZKEY', status='old', iostat=larg)
+      if (larg == 0) close(76, status='delete')
+    end if
     write(6, '(/,a,f10.1,a,f8.2,a)') '   amplitudes written to the file XZAMPS (', &
-      8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
+      8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s; XZKEY)'
     ! (Q) follows at once: T3 leaves the work array, the file is mapped as on the other ranks
     if (t3shared .and. .not. with_lam) then
       call xzrel(jt3 - xzbase)
@@ -286,13 +295,6 @@ subroutine xzdrv(w, maxcor)
     jt1 = xzget(nwe * no * nv, 'T1')
     jt2 = xzget(nwe * no * no * nv * nv, 'T2')
     jt3 = xzget(nwe * n3, 'T3')
-  else if (.not. docc .and. eccsd) then
-    if (nwe == 2) then
-      call xzeomccsd_z(w, ecorr)
-    else
-      call xzeomccsd_d(w, ecorr)
-    end if
-    write(6, '(/,a,f20.12)') '   XZ_EOMCCSD: T1 and T2 of CFOUR''s CCSD (t1guess, t2guess), T3 = 0; CCSD correlation energy ', ecorr
   else if (.not. docc) then
     if (nwe == 2) then
       call xzamps_z(w, 'r', ecorr)
@@ -356,6 +358,7 @@ subroutine xzdrv(w, maxcor)
     else
       call xzlamb_d(w, 'w', ecorr)
     end if
+    call xzkeyw(nint(-log10(conv_t), 8))
     write(6, '(/,a,f10.1,a,f8.2,a)') '   lambda written to the file XZLAMB (', &
       8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
   end if
@@ -459,10 +462,7 @@ subroutine xzdrv(w, maxcor)
   ! ---- energies
   write(6, '(/,a)') '  ' // repeat('-', 62)
   write(6, '(a,f25.12)') '   E(SCF)                        ', escf
-  if (eccsd) then
-    write(6, '(a,f25.12)') '   CCSD correlation energy       ', ecorr
-    write(6, '(a,f25.12)') '   E(CCSD) (CFOUR''s amplitudes)  ', escf + ecorr
-  else if (cc3mode /= 0) then
+  if (cc3mode /= 0) then
     write(6, '(a,f25.12)') '   CC3 correlation energy        ', ecorr
     write(6, '(a,f25.12)') '   E(CC3)                        ', escf + ecorr
   else
@@ -486,21 +486,15 @@ subroutine xzdrv(w, maxcor)
     if (method == 'CCSDT[Q]_L' .or. method == '[Q]_L') etot = escf + ecorr + eq5
   end if
   write(6, '(a)') '  ' // repeat('-', 62)
-  if (.not. eccsd) then
-    call putrec(20, 'JOBARC', 'TOTENERG', iintfp, etot)
-    write(6, '(a,f25.12)') '   TOTENERG written to JOBARC:   ', etot
-  end if
+  call putrec(20, 'JOBARC', 'TOTENERG', iintfp, etot)
+  write(6, '(a,f25.12)') '   TOTENERG written to JOBARC:   ', etot
   if (with_eom) then
     ! the excited states: the table, the file XZEOM, the lowest state to JOBARC (TOTENER2, as xx2ceomcc)
-    write(6, '(/,a,a,a)') '   EOM-EE-', trim(merge('CCSD ', mname, eccsd)), ': the states'
+    write(6, '(/,a,a,a)') '   EOM-EE-', trim(mname), ': the states'
     write(6, '(a)') '  ' // repeat('-', 98)
     write(6, '(a)') '   shift  root        omega / Eh            eV            cm-1          total energy / Eh    max |r|'
-    if (eccsd) then
-      open(unit=79, file='XZEOMCCSD', form='formatted', status='replace')
-    else
-      open(unit=79, file='XZEOM', form='formatted', status='replace')
-    end if
-    write(79, '(a)') '# EOM-EE-' // trim(merge('CCSD ', mname, eccsd)) // ' of xzccsdt: label shift, root, omega / Eh, ' // &
+    open(unit=79, file='XZEOM', form='formatted', status='replace')
+    write(79, '(a)') '# EOM-EE-' // trim(mname) // ' of xzccsdt: label shift, root, omega / Eh, ' // &
                      'total energy / Eh, largest element and norm of the residual, weights of R1, R2, R3, converged'
     write(79, '(a,f25.12,a,a,a,f25.12)') '# E(SCF) ', escf, '   E(', trim(mname), ') ', escf + ecorr
     elow = huge(1d0)
@@ -514,12 +508,8 @@ subroutine xzdrv(w, maxcor)
     end do
     close(79)
     write(6, '(a)') '  ' // repeat('-', 98)
-    if (eccsd) then
-      write(6, '(a)') '   (the file XZEOMCCSD has this table; JOBARC is not written)'
-    else
-      write(6, '(a)') '   (the file XZEOM has this table; the file XZEOMR, if it was written, the vectors)'
-    end if
-    if (elow < huge(1d0) .and. .not. eccsd) then
+    write(6, '(a)') '   (the file XZEOM has this table; the file XZEOMR, if it was written, the vectors)'
+    if (elow < huge(1d0)) then
       call putrec(20, 'JOBARC', 'TOTENER2', iintfp, escf + ecorr + elow)
       write(6, '(a,f25.12)') '   TOTENER2 written to JOBARC (the lowest state):   ', escf + ecorr + elow
     end if
@@ -535,20 +525,36 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f10.1,a)') '   peak resident memory of the process: ', 1d-3 * kb(1), ' MB'
   write(6, '(a,f10.2,a)') '   XZCCSDT total wall time: ', omp_get_wtime() - twall, ' s'
   if (with_eom) then
-    write(6, '(a,a,a)') '   XZCCSDT finished: EOM-EE-', trim(merge('CCSD ', mname, eccsd)), ' done.'
+    write(6, '(a,a,a)') '   XZCCSDT finished: EOM-EE-', trim(mname), ' done.'
   else if (with_den) then
     write(6, '(a)') '   XZCCSDT finished: density of CCSDT done.'
-  else if (method == 'LAMBDA') then
-    write(6, '(a)') '   XZCCSDT finished: lambda of CCSDT done.'
   else
     write(6, '(a)') '   XZCCSDT finished: ' // trim(method) // ' energy done.'
   end if
 end subroutine xzdrv
 
 ! ---------------------------------------------------------------------------
-! What to do: the method (the argument of the command line, else CALC of the
-! ZMAT as joda stored it), CC_CONV and CC_MAXCYC.  As in the Python front
-! end: the amplitudes to 10**-CC_CONV, the energy to 10**-(CC_CONV + 2).
+! What to do, from the ZMAT as joda stored it (the flags in JOBARC), as every
+! CFOUR program decides: the program takes no argument.
+!
+!   CALC (iflags(2))                     EXCITE / PROPS / DERIV_LEV   job
+!   CCSDT, CC(n) with EXCITATION=3       -                            CCSDT
+!   CCSDT[Q]                             -                            CCSDT, [Q]
+!   CCSDT(Q), CC(n-1)(n), EXCITATION=4   -                            CCSDT, (Q) and [Q]
+!   CCSDT(Q)_L, CC(n-1)(n)_L, EXC.=4     -                            CCSDT, Lambda, (Q)_Lambda
+!   CCSDT                                EXCITE=EOMEE                 CCSDT, EOM-EE-CCSDT
+!   CCSDT                                PROPS (not EXCITATION) or    CCSDT, Lambda, the density
+!                                        DERIV_LEV > 0                files of xx2czvec
+!   MP2 (MBPT(2))                        -                            the MP2 energy (a check)
+!   CC3                                  -                            CC3 without stored triples
+!   CC3                                  EXCITE=EOMEE                 CC3, EOM-EE-CC3 folded (shift 0)
+!   (XZ_CC3=stored: CC3 with T3 stored, its EOM in every label shift - a check route)
+!
+! joda turns EXCITE=EOMEE with CALC=CCSDT (and CC_PROG other than NCC, MRCC)
+! into PROPS=EXCITATION, EXCITE=NONE: both forms mean EOM here.  The
+! iterations of an earlier run are not repeated when the files XZAMPS
+! (XZLAMB) of the run directory belong to these integrals (xzreuse).
+! Thresholds: the amplitudes to 10**-CC_CONV, the energy to 10**-(CC_CONV + 2).
 subroutine xzjob()
   use xzdata
   use xzeomd, only: xzeominp
@@ -557,64 +563,72 @@ subroutine xzjob()
   common /flags/ iflags(100)
   common /flags2/ iflags2(500)
   character(len=32) :: arg
-  integer :: larg, i, c
-  integer(8) :: level, nexc
+  integer :: larg
+  integer(8) :: level, nexc, iexc, iprop, ideriv
+  logical :: eom, den
+  logical, save :: done = .false.
 
-  call get_command_argument(1, arg, larg)
+  ! (a rank other than 0 is here twice: before its work array and in xzdrv)
+  if (done) return
+  done = .true.
+  if (command_argument_count() > 0) then
+    call get_command_argument(1, arg, larg)
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, xzccsdt takes no argument (given: ', trim(arg), &
+      ').  The job comes from the ZMAT:'
+    write(6, '(a)') '   CALC=CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L (also CC(n) with EXCITATION=3, CC(n-1)(n) and'
+    write(6, '(a)') '   CC(n-1)(n)_L with EXCITATION=4), MP2; with CALC=CCSDT: EXCITE=EOMEE for EOM-EE-CCSDT, or'
+    write(6, '(a)') '   PROPS=FIRST_ORDER (or DERIV_LEV=1) for the density files of xx2czvec.  The amplitudes and'
+    write(6, '(a)') '   lambda of an earlier run (files XZAMPS, XZLAMB) are taken when they belong to these integrals.'
+    call xzerrex
+  end if
+  level = iflags(2)
+  nexc = iflags2(38)
+  iexc = iflags(87)
+  iprop = iflags(18)
+  ideriv = iflags(3)
+  eom = iexc == 3 .or. iprop == 14
+  den = .not. eom .and. (iprop > 0 .or. ideriv > 0)
   method = ' '
-  if (larg > 0) then
-    do i = 1, larg
-      c = iachar(arg(i:i))
-      if (c >= iachar('a') .and. c <= iachar('z')) arg(i:i) = achar(c - 32)
-    end do
-    method = arg(1:larg)
-  else
-    level = iflags(2)
-    nexc = iflags2(38)
-    if (level == 18) method = 'CCSDT'
-    if (level == 30) method = 'CCSDT[Q]'
-    if (level == 54) method = 'CCSDT(Q)'
-    if (level == 49 .and. nexc == 3) method = 'CCSDT'
-    if (level == 53 .and. nexc == 4) method = 'CCSDT(Q)'
-    if (level == 32) method = 'CC3'
-    if (method == ' ') then
-      write(6, '(/,a,i4,a,i3,a)') ' @XZCCSDT-F, CALC of the ZMAT (level ', level, ', EXCITATION ', nexc, &
-        ') is not CCSDT, CCSDT[Q], CCSDT(Q) or CC3.'
-      write(6, '(a)') '   Give the method as the argument: xzccsdt ccsdt | "ccsdt(q)" | cc3'
+  if (level == 18 .or. (level == 49 .and. nexc == 3)) method = 'CCSDT'
+  if (level == 30) method = 'CCSDT[Q]'
+  if (level == 54 .or. (level == 53 .and. nexc == 4)) method = 'CCSDT(Q)'
+  if (level == 68 .or. (level == 69 .and. nexc == 4)) method = 'CCSDT(Q)_L'
+  if (level == 1 .or. level == 42) method = 'MP2'
+  cc3mode = 0
+  if (level == 32) then
+    ! ---- CC3 (and EOM-EE-CC3 with EXCITE=EOMEE; docs/native.md, section 17):
+    !      without stored triples; XZ_CC3=stored (a check route): T3 stored
+    method = 'CC3'
+    cc3mode = 2
+    call get_environment_variable('XZ_CC3', arg, larg)
+    if (larg > 0 .and. (arg(1:1) == 's' .or. arg(1:1) == 'S')) cc3mode = 1
+    if (den) then
+      write(6, '(/,a)') ' @XZCCSDT-F, CALC=CC3: no density (PROPS, DERIV_LEV) in this program.'
       call xzerrex
     end if
+    if (eom) method = 'CC3_EOM'
   end if
-  select case (method)
-  case ('CCSDT', 'CCSDT[Q]', 'CCSDT(Q)', '(Q)', '[Q]', 'MP2', 'LAMBDA', 'CCSDT(Q)_L', 'CCSDT[Q]_L', &
-        '(Q)_L', '[Q]_L', 'DENSITY', 'CCSDT_DENSITY', 'EOM', 'CCSDT_EOM', 'CCSD_EOM', &
-        'CC3', 'CC3_STORED', 'CC3_EOM', 'CC3_STORED_EOM')
-  case default
-    write(6, '(/,a,a,a)') ' @XZCCSDT-F, method ', trim(method), &
-      ': not one of CCSDT, CCSDT[Q], CCSDT(Q), (Q), [Q], LAMBDA, CCSDT[Q]_L, CCSDT(Q)_L, [Q]_L, (Q)_L, DENSITY, CCSDT_DENSITY, ' // &
-      'EOM, CCSDT_EOM, CCSD_EOM, CC3, CC3_STORED, CC3_EOM, CC3_STORED_EOM, MP2.'
-    call xzerrex
-  end select
-  ! CC3 (docs/native.md, section 17): cc3, cc3_eom without stored triples (the
-  ! excited states folded: the totally symmetric ones); cc3_stored,
-  ! cc3_stored_eom with T3 stored (the states of every label shift)
-  cc3mode = 0
-  if (method == 'CC3' .or. method == 'CC3_EOM') cc3mode = 2
-  if (method == 'CC3_STORED' .or. method == 'CC3_STORED_EOM') cc3mode = 1
   mname = merge('CC3  ', 'CCSDT', cc3mode /= 0)
-  with_eom = method == 'EOM' .or. method == 'CCSDT_EOM' .or. method == 'CCSD_EOM' .or. &
-             method == 'CC3_EOM' .or. method == 'CC3_STORED_EOM'
+  if (method == ' ') then
+    write(6, '(/,a,i4,a,i3,a)') ' @XZCCSDT-F, CALC of the ZMAT (level ', level, ', EXCITATION ', nexc, &
+      ') is not one of CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2.'
+    call xzerrex
+  end if
+  if ((eom .or. den) .and. cc3mode == 0) then
+    if (method /= 'CCSDT') then
+      write(6, '(/,a,a,a)') ' @XZCCSDT-F, ', trim(merge('EXCITE=EOMEE          ', 'PROPS or DERIV_LEV > 0', eom)), &
+        ' goes with CALC=CCSDT only (here CALC=' // trim(method) // ').'
+      call xzerrex
+    end if
+    method = merge('CCSDT_EOM    ', 'CCSDT_DENSITY', eom)
+  end if
+  with_eom = eom
   if (with_eom) call xzeominp()
-  ! a test hook: XZ_EOMCCSD, "xzccsdt eom" on the amplitudes of CFOUR's CCSD
-  call get_environment_variable('XZ_EOMCCSD', length=larg)
-  eccsd = (larg > 0 .and. method == 'EOM') .or. method == 'CCSD_EOM'
-  with_cc = method(1:5) == 'CCSDT' .or. cc3mode /= 0
-  larg = len_trim(method)
-  q_left = method(max(larg - 1, 1):larg) == '_L'
-  with_lam = method == 'LAMBDA' .or. (with_cc .and. q_left)
-  with_den = method == 'DENSITY' .or. method == 'CCSDT_DENSITY'
-  with_lam = with_lam .or. method == 'CCSDT_DENSITY'
-  with_q = method /= 'CCSDT' .and. method /= 'MP2' .and. method /= 'LAMBDA' .and. .not. with_den .and. .not. with_eom &
-           .and. cc3mode == 0
+  with_cc = method /= 'MP2'
+  q_left = method == 'CCSDT(Q)_L'
+  with_den = den
+  with_lam = q_left .or. with_den
+  with_q = method == 'CCSDT[Q]' .or. method == 'CCSDT(Q)' .or. q_left
   conv_t = 10d0 ** (-abs(iflags(4)))
   conv_e = 10d0 ** (-abs(iflags(4)) - 2)
   maxcyc = iflags(7)
@@ -627,6 +641,152 @@ subroutine xzjob()
   end if
   ndiis = 8
 end subroutine xzjob
+
+! ---------------------------------------------------------------------------
+! The amplitudes (lambda) of an earlier run in the run directory, taken in
+! the place of the iterations if they belong to the integrals of this run.
+! The file XZKEY, written by rank 0 with XZAMPS (and again with XZLAMB),
+! records what they were solved for:
+!   XZKEY01
+!   active occupied, active virtual, spinors, frozen occupied spinors
+!   E(SCF) of JOBARC (SCFENEG)
+!   the sum of the spinor energies (scf2ceig, all spinors), and the sum of
+!   (p + 1) times the energy of spinor p (the order)
+!   CC_CONV of the amplitudes, CC_CONV of lambda (-1: no lambda)
+! XZAMPS is taken if XZKEY and XZAMPS are there, its header has these active
+! spaces, the numbers above agree (sizes exactly, energies to 1e-9 relative)
+! and it was converged at least as tightly (CC_CONV not smaller); XZLAMB if
+! XZAMPS is taken, XZLAMB is lambda of these amplitudes (its header, the
+! CCSDT energy) and its CC_CONV is not smaller.  The labels and the
+! arithmetic (real or complex) are decided again from the same files; a
+! file of another mode (XZ_LABELS, XZ_REAL changed) stops the run when it is
+! read.  Rank 0 decides, the other ranks are told.
+subroutine xzreuse()
+  use xzdata
+  use xzpar
+  use xzdist
+  implicit none
+  integer(8) :: iflags
+  common /flags/ iflags(100)
+  logical, save :: done = .false.
+  logical :: tok, lok
+  real(8) :: dec(2)
+  if (done) return
+  done = .true.
+  tok = .false.
+  lok = .false.
+  ! (CC3: its amplitudes are solved in every run; XZKEY is not written for them, so
+  ! that no CCSDT run takes them and no CC3 run takes those of CCSDT)
+  if (myrank == 0 .and. with_cc .and. cc3mode == 0) call xzkeychk(int(abs(iflags(4)), 8), with_lam, tok, lok)
+  dec = [merge(1d0, 0d0, tok), merge(1d0, 0d0, lok)]
+  call xzmpi_bcast(dec, 16_8)
+  tok = dec(1) == 1d0
+  lok = dec(2) == 1d0
+  if (.not. with_cc) return
+  if (tok) then
+    with_cc = .false.
+    write(6, '(/,a)') '   amplitudes: the file XZAMPS of an earlier run belongs to these integrals (XZKEY):'
+    write(6, '(a)') '               taken, the CCSDT iterations are skipped'
+  else
+    write(6, '(/,a)') '   amplitudes: solved here (no file XZAMPS of these integrals, or not converged as tightly)'
+  end if
+  if (with_lam) then
+    if (lok) then
+      with_lam = .false.
+      write(6, '(a)') '   lambda:     the file XZLAMB of an earlier run is lambda of these amplitudes: taken,'
+      write(6, '(a)') '               the Lambda iterations are skipped'
+    else
+      write(6, '(a)') '   lambda:     solved here'
+    end if
+  end if
+end subroutine xzreuse
+
+! the numbers of XZKEY for this run (rank 0)
+subroutine xzkeyval(e)
+  use xzdata
+  implicit none
+  real(8), intent(out) :: e(3)
+  real(8), allocatable :: buf(:)
+  integer(8) :: p
+  allocate(buf(2 * ntot))
+  call xzrfile('scf2ceig', buf, 2 * ntot)
+  e(1) = escf
+  e(2) = 0d0
+  e(3) = 0d0
+  do p = 0, ntot - 1
+    e(2) = e(2) + buf(2 * p + 1)
+    e(3) = e(3) + dble(p + 1) * buf(2 * p + 1)
+  end do
+  deallocate(buf)
+end subroutine xzkeyval
+
+! XZKEY for the amplitudes just written (lconv < 0) or for lambda (lconv: its CC_CONV)
+subroutine xzkeyw(lconv)
+  use xzdata
+  implicit none
+  integer(8), intent(in) :: lconv
+  integer(8) :: iflags
+  common /flags/ iflags(100)
+  real(8) :: e(3)
+  integer :: ios
+  call xzkeyval(e)
+  open(unit=76, file='XZKEY', form='formatted', status='replace', iostat=ios)
+  if (ios /= 0) return
+  write(76, '(a)') 'XZKEY01'
+  write(76, '(4i12)') no, nv, ntot, nfrozen
+  write(76, '(es26.17)') e(1)
+  write(76, '(2es26.17)') e(2), e(3)
+  write(76, '(2i6)') int(abs(iflags(4)), 8), lconv
+  close(76)
+end subroutine xzkeyw
+
+! the check of XZKEY, XZAMPS and XZLAMB (rank 0)
+subroutine xzkeychk(conv, needl, tok, lok)
+  use xzdata
+  implicit none
+  integer(8), intent(in) :: conv
+  logical, intent(in) :: needl
+  logical, intent(out) :: tok, lok
+  character(len=8) :: tag
+  integer(8) :: k(4), c(2), head(5), headl(5)
+  real(8) :: e(3), ek(3), ea, el
+  integer :: ios
+  logical :: there
+  tok = .false.
+  lok = .false.
+  inquire(file='XZKEY', exist=there)
+  if (.not. there) return
+  inquire(file='XZAMPS', exist=there)
+  if (.not. there) return
+  open(unit=76, file='XZKEY', form='formatted', status='old', action='read', iostat=ios)
+  if (ios /= 0) return
+  read(76, '(a)', iostat=ios) tag
+  if (ios == 0) read(76, *, iostat=ios) k
+  if (ios == 0) read(76, *, iostat=ios) ek(1)
+  if (ios == 0) read(76, *, iostat=ios) ek(2), ek(3)
+  if (ios == 0) read(76, *, iostat=ios) c
+  close(76)
+  if (ios /= 0 .or. tag /= 'XZKEY01') return
+  call xzkeyval(e)
+  if (k(1) /= no .or. k(2) /= nv .or. k(3) /= ntot .or. k(4) /= nfrozen) return
+  if (abs(e(1) - ek(1)) > 1d-9 * max(1d0, abs(e(1)))) return
+  if (abs(e(2) - ek(2)) > 1d-9 * max(1d0, abs(e(2)))) return
+  if (abs(e(3) - ek(3)) > 1d-9 * max(1d0, abs(e(3)))) return
+  if (c(1) < conv) return
+  open(unit=77, file='XZAMPS', form='unformatted', access='stream', status='old', action='read', iostat=ios)
+  if (ios == 0) read(77, iostat=ios) tag, head, ea
+  close(77)
+  if (ios /= 0 .or. tag /= 'XZAMPS01' .or. head(1) /= no .or. head(2) /= nv) return
+  tok = .true.
+  if (.not. needl .or. c(2) < conv) return
+  inquire(file='XZLAMB', exist=there)
+  if (.not. there) return
+  open(unit=77, file='XZLAMB', form='unformatted', access='stream', status='old', action='read', iostat=ios)
+  if (ios == 0) read(77, iostat=ios) tag, headl, el
+  close(77)
+  if (ios /= 0 .or. tag /= 'XZLAMB01' .or. any(headl /= head) .or. abs(el - ea) > 1d-9) return
+  lok = .true.
+end subroutine xzkeychk
 
 ! ---------------------------------------------------------------------------
 ! The classes of the spinors and everything that follows from them without
@@ -1127,14 +1287,16 @@ subroutine xzrankmem(maxcor)
   use xzdist
   implicit none
   integer(8), intent(inout) :: maxcor
+  ! (the broadcasts in the order of rank 0: the sizes, the decision on the
+  ! files of an earlier run, then its plan)
   call xzjob()
+  call xzsizes()
+  sizes_set = .true.
+  call xzreuse()
   if (.not. (with_q .or. with_cc .or. with_lam)) then
     maxcor = 4096
     return
   end if
-  ! (the broadcasts in the order of rank 0: the sizes, then its plan)
-  call xzsizes()
-  sizes_set = .true.
   rplan = 0d0
   call xzmpi_bcast(rplan, 128_8)
   maxcor = min(maxcor, int(rplan(1), 8) + 4096)
