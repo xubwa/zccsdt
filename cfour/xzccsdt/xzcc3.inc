@@ -645,12 +645,12 @@ end subroutine
 !      following the roots with the largest weight on them (nfollow), to a
 !      threshold that follows |lambda(omega) - omega| down to ESTATE_CONV;
 !      the roots of the singles-doubles stage that lie closer than 5e-4 Eh
-!      (XZ_FOLDWIN) to a neighbour form a cluster: solved together at every
+!      (option foldwin) to a neighbour form a cluster: solved together at every
 !      frequency, the root taken by its place in the cluster (a nearly
 !      degenerate level is not split reliably by following one vector);
 !      omega replaced by lambda(omega), or by the secant step for
 !      lambda(omega) = omega from the last two steps; until |lambda - omega|
-!      is below ESTATE_CONV / 100 (XZ_OMEGATOL) with the residual below
+!      is below ESTATE_CONV / 100 (option omegatol) with the residual below
 !      ESTATE_CONV.
 ! In blocks of the labels one problem per label shift of %xzeom: the vectors
 ! of shift s, the triples of the batches with the virtual triples of group
@@ -749,14 +749,14 @@ subroutine N(xzeom3)(w, ecorr)
     return
   end if
   otol = ethr / 100d0
-  call get_environment_variable('XZ_OMEGATOL', arg, larg)
+  call xzoptget('omegatol', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *, iostat=ios) otol
     if (ios /= 0) otol = ethr / 100d0
   end if
-  ! roots of the singles-doubles stage closer than cwin: one cluster (XZ_FOLDWIN, Eh)
+  ! roots of the singles-doubles stage closer than cwin: one cluster (option foldwin, Eh)
   cwin = 5d-4
-  call get_environment_variable('XZ_FOLDWIN', arg, larg)
+  call xzoptget('foldwin', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *, iostat=ios) cwin
     if (ios /= 0) cwin = 5d-4

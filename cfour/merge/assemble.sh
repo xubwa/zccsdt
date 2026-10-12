@@ -388,8 +388,7 @@ what the ZMAT asks for (as joda stored it in JOBARC):
                                         batch of occupied triples; canonical spinors)
     CALC=CC3,EXCITE=EOMEE               CC3, then EOM-EE-CC3 from the folded problem in
                                         singles and doubles, each root self-consistent
-                                        in omega: the totally symmetric states (label
-                                        shift 0 of %xzeom) only for now; one MPI rank
+                                        in omega, for the label shifts of %xzeom
 
 CC_CONV (the amplitudes to 10^-CC_CONV, the energy to 10^-(CC_CONV+2)),
 CC_MAXCYC, MEMORY_SIZE (all working memory is CFOUR's work array), DROPMO /
@@ -408,15 +407,44 @@ does not read XZKEY and removes it).
 CC3: the triples equation takes the Fock operator as the diagonal of the
 spinor energies.  The program prints the largest elements of the Fock
 matrix of the SCF off the diagonal on the active spinors and stops above
-XZ_FOCKTOL (default 1e-6).  XZ_CC3=stored: CC3 with T3 stored (the memory
-of CCSDT; a check route, and with EXCITE=EOMEE the states of every label
-shift of %xzeom).
+the option focktol.
 
-Environment: OMP_NUM_THREADS (threads); XZ_LABTOL (default 1e-8: the
-largest integral that the symmetry labels forbid and that is taken as
-zero), XZ_IMAGTOL (default 1e-10: the largest imaginary part taken as zero,
-then real arithmetic).  MPI (iterations and (Q) over ranks; the run
-directory with the integral files under the same path on every node):
+Options: the section %xzccsdt of the ZMAT, one "name value" per line (the
+name in either case; the section ends at an empty line or at the next %
+line; a name that is not an option stops the program with the list).  No
+environment variable is read (OMP_NUM_THREADS sets the threads).  An
+ordinary run needs none of them:
+
+    %xzccsdt
+    cc3 stored
+    labtol 1e-6
+
+    labtol 1e-5      the largest integral that the symmetry labels forbid and
+                     that is taken as zero (above it the labels are not used)
+    imagtol 1e-7     the largest imaginary part of an integral taken as zero
+                     (above it: complex arithmetic).  The largest values found
+                     are printed with the tolerances.
+    labels 1         0: the symmetry labels (dgcosym, xzlabels) are not used
+    real 1           0: complex arithmetic whatever the integrals
+    cc3 batch        stored: CC3 with T3 stored (the memory of CCSDT; a check
+                     route, the EOM sigma vector with R3)
+    focktol 1e-6     CC3: the largest element of F_oo, F_vv of the SCF off the
+                     diagonal that is accepted
+    omegatol         EOM-CC3: |lambda(omega) - omega| at convergence (default
+                     ESTATE_CONV / 100)
+    foldwin 5e-4     EOM-CC3: roots closer than this (Eh) are solved together
+    start ccsd       CCSDT from T1, T2 of xx2cccsd (files t1guess, t2guess)
+    hh pair          the hh ladder of dense T3 through occupied pairs
+    qmap 0           (Q): T3 in the work array of every rank, not mapped
+    eomvec f         EOM: the vectors of the subspace in files
+    slices 0, bpr n, rebal x, dist digits, mpichunk n, qtasks n, qranks n
+                     the iterations and (Q) over MPI ranks (docs/native.md)
+    diis m8|f8, plan <8 numbers>, cc3w n
+                     the memory plan by hand (docs/native.md, section 4)
+
+(docs/native.md, section 18, has these and the developer options.)  MPI
+(iterations, (Q), the folded EOM-CC3 over ranks; the run directory with
+the integral files under the same path on every node):
 
     OMP_NUM_THREADS=24 I_MPI_PIN_DOMAIN=omp mpirun -np 2 ${prog}_mpi
 

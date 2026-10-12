@@ -323,7 +323,7 @@ subroutine N(xzden)(w)
     end do
     call N(xzdbra)(no, nv, nvp, w(jvpa), w(jvpb), w(kmq), mone, w(kgnh))
     call xztoc(4, 'gradient: <ab||de>')
-    call get_environment_variable('XZ_DDEBUG', dbg, ldbg)
+    call xzoptget('ddebug', dbg, ldbg)
     if (ldbg > 0) then
       call xzdumpw(dbg(1:ldbg) // '.d1', NW * ny * ny, w(kden))
       call xzdumpw(dbg(1:ldbg) // '.gnh', NW * ov, w(kgnh))
@@ -406,7 +406,7 @@ subroutine N(xzdfrz)(w, kden, kdh, kxa, kxall, kym, kl2pp, kl2p, kt2pp, kc3, kz,
                       w(jvpa), w(jvpb), w(jvpidx), w(kus), w(kkf + NW * h * ny))
       call xztoc(4, 'held: sweep 1')
     end do
-    call get_environment_variable('XZ_DDEBUG', length=ldbg)
+    call xzoptget('ddebug', length=ldbg)
     if (ldbg > 0) then
       call xzdumpw('xd.bf', NW * ny * nheld, w(kbf))
       call xzdumpw('xd.kf', NW * ny * nheld, w(kkf))
