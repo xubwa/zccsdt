@@ -3766,7 +3766,40 @@ without T3 and 3.63 s with T3 stored, a sigma vector 4.2 and 5.4 s.
 
 ### 17.7 ThF+
 
-(job and numbers: below)
+Job 31905442, bigmem12, 24 cores (`thf_cc3.sbatch` of the work directory;
+commit a1ca399, the program still with the method as argument).  ThF+ at
+3.743547 bohr, X2CAMF, Th DYVTZ-SO + F ADYVTZ-SO, 70 spinors frozen: 28 +
+330 active spinors, closed shell, `%dglin` 29 29 / 14 14 / 5 5 / 1 1: real,
+12 classes (the case of the EOM-CCSDT job 31861231; `XZ_LABTOL=1e-5`,
+`XZ_IMAGTOL=1e-6` as there).  CC_CONV=7, ESTATE_CONV=5, MEMORY_SIZE 400 GB.
+The chain took 10.5 min (`xx2cvtran` 389 GB resident - the largest of the
+job).  The Fock check: largest |F_oo| off the diagonal 1.3e-11, |F_vv|
+4.4e-9, |F_ov| 1.8e-10, |F_pp - e_p| 3.6e-11.
+
+| | CC3, no T3 | CC3, T3 stored (3 cycles, `XZ_NCYC`) | CCSDT (job 31861231) |
+|---|---|---|---|
+| s per iteration | 37.75 (38 cycles, 23.3 cores busy) | 128.2 | 258.5 (59 cycles) |
+| work array: plan | 67.3 GB with the EOM (the least: 65.9 GB) | 302.8 GB | 302.8 GB |
+| peak resident set | 60.0 GB | 110.9 GB in 3 cycles (the DIIS vectors not all touched) | 298.1 GB |
+| total energy / Eh | -26538.335568361723 | | -26538.328976480821 |
+
+E(CC3) - E(CCSDT) = -6.59 mEh.  The work of a batch: 175 805 422 elements
+(1.4 GB; one occupied triple 6 761 747).
+
+EOM-CC3 folded, three roots of shift 0 (the totally symmetric states; the
+largest element of a residual 1e-5, |lambda - omega| below 1e-7): the
+singles-doubles stage 54 sigma vectors in 414 s (roots 0.02295, 0.02467,
+0.04217 Eh); a folded sigma vector 77.8 s (81 of them in 6300 s; it takes
+19.6 GB of the work array) = 2.1 CC3 iterations; EOM in all 6742 s.
+
+| root | omega / Eh | cm-1 | frequencies, sigma vectors | max \|r\| |
+|---|---|---|---|---|
+| 1 | 0.019859519401 | 4358.66 | 4, 20 | 8.6e-6 |
+| 2 | 0.020829587614 | 4571.57 | 5, 27 | 7.6e-6 |
+| 3 | 0.039378072332 | 8642.49 | 4, 34 | 4.8e-6 |
+
+(No EOM-CCSDT roots of shift 0 are at hand to compare; the states of
+Omega = 1, 2, 3 are those of shifts 2, 4, 6.)
 
 ### 17.8 Not done
 
