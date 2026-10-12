@@ -379,6 +379,8 @@ class CCSDTBase(lib.StreamObject):
     callback = None
     _title = 'CCSDT'
     _subtitle = ''
+    _method = 'CCSDT'           # the name of the energies in the output
+    model = 'ccsdt'             # the equations of the iterations (zccsdt.ccn: 'cc2', 'cc3')
     _norm_labels = ('|dT1|', '|dT2|', '|dT3|')
     _stages = CC_STAGES
 
@@ -576,8 +578,8 @@ class CCSDTBase(lib.StreamObject):
         else:
             pr.line(' %s NOT converged in %d iterations' % (name, self.cycles))
         pr.kv('E(SCF)', '%20.12f' % self.e_hf, indent=3)
-        pr.kv('E_corr(CCSDT)', '%20.12f' % self.e_corr, indent=3)
-        pr.kv('E(CCSDT)', '%20.12f' % self.e_tot, indent=3)
+        pr.kv('E_corr(%s)' % self._method, '%20.12f' % self.e_corr, indent=3)
+        pr.kv('E(%s)' % self._method, '%20.12f' % self.e_tot, indent=3)
         for key, value in self._extra_energies():
             pr.kv(key, value, indent=3)
         self._print_diagnostics(pr)
@@ -985,7 +987,7 @@ class UCCSDT(CCSDTBase):
 
     def _solve(self, eris, plan, t1, t2, t3, callback):
         from zccsdt.cc import solver
-        return solver.kernel(eris, 'ccsdt', self._options(plan, callback), t1=t1, t2=t2, t3=t3)
+        return solver.kernel(eris, self.model, self._options(plan, callback), t1=t1, t2=t2, t3=t3)
 
     def _labels(self, eris):
         oa, ob, va, vb = self._spaces()
@@ -1042,7 +1044,7 @@ class GCCSDT(UCCSDT):
     # that are taken once (the Lambda residuals, the densities)
     zeta_stencil = 'forward'
     response_stencil = 'exact'
-    _keys = UCCSDT._keys | {'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'q_estimate', 'q_progress', 'rdm1_blocks', 'blocks_min',
+    _keys = UCCSDT._keys | {'model', 'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'q_estimate', 'q_progress', 'rdm1_blocks', 'blocks_min',
                               'e_ql', 'e_ql5', 'e_tot_ql', 'zeta1', 'zeta2', 'zeta3', 'l1_ql', 'l2_ql', 'l3_ql',
                               'converged_zeta', 'converged_lambda_ql', 'ql_gradient_sectors', 'q_gradient_sectors',
                               'zeta_stencil', 'response_stencil', 'ql_info', 'eom', 'e_ee', 'eom_ip_result', 'eom_ea_result'}
@@ -1189,7 +1191,7 @@ class GCCSDT(UCCSDT):
         eris = self._eris if self._eris is not None else self.ao2mo()
         t3 = self.t3
         if getattr(eris, 'use_labels', False):
-            t3 = ccsdt_opt.packed_t3(eris, t3)
+            t3 = None if t3 is None else ccsdt_opt.packed_t3(eris, t3)
             eris = copy.copy(eris)
             eris.use_labels = False
             eris.__dict__.pop('_buffers', None)
@@ -1648,7 +1650,7 @@ class GCCSDT(UCCSDT):
                      vectors on the lowest single excitations, converged to guess_tol'''
         from zccsdt import disk
         from zccsdt.cc import eom
-        if self.t3 is None:
+        if self.t1 is None:
             raise RuntimeError('%s.eom_ee(): no amplitudes (kernel() first)' % self.__class__.__name__)
         eris = self._eris if self._eris is not None else self.ao2mo()
 
@@ -1657,7 +1659,8 @@ class GCCSDT(UCCSDT):
                 return eom.kernel(eris, self.t1, self.t2, self.t3, nroots=n, conv_tol=conv_tol,
                                   max_space=max_space, max_cycle=max_cycle, guess=guess, nguess=nguess,
                                   guess_tol=guess_tol, opts=self._options(None, None),
-                                  verbose=self.verbose >= logger.NOTE, stdout=self.stdout, shift=cls, sector=sector)
+                                  verbose=self.verbose >= logger.NOTE, stdout=self.stdout, shift=cls, sector=sector,
+                                  model=self.model)
         if shift is None:
             res = run(nroots, None)
             self.eom, self.e_ee = res, res.e
@@ -1755,7 +1758,7 @@ class GCCSDT(UCCSDT):
         '''IP and EA with short vectors (zccsdt.cc.eom.ghost_short).'''
         from zccsdt import disk
         from zccsdt.cc import eom
-        if self.t3 is None:
+        if self.t1 is None:
             raise RuntimeError('%s.eom_%s(): no amplitudes (kernel() first)' % (self.__class__.__name__, kind))
         note = self.verbose >= logger.NOTE
         if shift is None:
@@ -1768,7 +1771,8 @@ class GCCSDT(UCCSDT):
         def run(n, cls):
             with disk.limit(self.max_disk):
                 res = eom.kernel(sh.eris, sh.t1, sh.t2, sh.t3, nroots=n, opts=self._options(None, None),
-                                 name=kind.upper(), verbose=note, stdout=self.stdout, shift=cls, **kwargs)
+                                 name=kind.upper(), verbose=note, stdout=self.stdout, shift=cls, model=self.model,
+                                 **kwargs)
             res.short = sh
             return res
         if shift is None:
@@ -1810,13 +1814,14 @@ class GCCSDT(UCCSDT):
     def _eom_ghost(self, kind, nroots, kwargs):
         from zccsdt import disk
         from zccsdt.cc import eom
-        if self.t3 is None:
+        if self.t1 is None:
             raise RuntimeError('%s.eom_%s(): no amplitudes (kernel() first)' % (self.__class__.__name__, kind))
         eris, t3 = self._dense_view()
         eris2, t1, t2, t3, singles = eom.ghost(eris, self.t1, self.t2, t3, kind)
         with disk.limit(self.max_disk):
             res = eom.kernel(eris2, t1, t2, t3, nroots=nroots, opts=self._options(None, None), singles=singles,
-                             name=kind.upper(), verbose=self.verbose >= logger.NOTE, stdout=self.stdout, **kwargs)
+                             name=kind.upper(), verbose=self.verbose >= logger.NOTE, stdout=self.stdout,
+                             model=self.model, **kwargs)
         setattr(self, 'eom_' + kind + '_result', res)
         return res.e, res
 

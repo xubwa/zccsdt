@@ -884,3 +884,78 @@ void zc_l3_pass2r_##SFX(const T *L3p, int64_t nto, int64_t nvt,                \
 
 DEFINE_T3(double, d)
 DEFINE_T3(double complex, z)
+
+/* ---- CC3 with stored T3 (zccsdt/cc/ccsdt_opt.py, model 'cc3'; docs/ccn.md):
+ * the triples equation has the drive terms and the Fock operator only.
+ *
+ * zc_t3_drive: pass 2 without the ring term - T3 is not read:
+ *   Z[P, c, i, Q] = - sum_{e|m} Adrv[P, c, (e|m)] Bdrv[(e|m), (i, Q)]
+ *   R[I, A] += the antisymmetrizing reduction of Z, as in zc_t3_pass2w.
+ * zc_t3_fdiag: R[I, A] += (ev[A] - eo[I]) T3p[I, A], the diagonal of the
+ * Fock operator on packed triples (eo, ev: sums of its diagonal elements
+ * over the occupied / virtual triples). */
+#define DEFINE_CCN(T, SFX)                                                     \
+void zc_t3_drive_##SFX(int64_t nto, int64_t nvt,                               \
+                       int64_t no, int64_t nv, int64_t npo, int64_t nvp,       \
+                       const int64_t *ofree, const int64_t *opair,             \
+                       const int64_t *vfree, const int64_t *vpair,             \
+                       int64_t batch, const T *Adrv, const T *Bdrv,            \
+                       T *R, const int64_t *io, double *stats)                 \
+{                                                                              \
+    const int64_t dm = nv * no;                                                \
+    const int64_t sP = dm * nvp, sa = no * nvp;                                \
+    T *Z = malloc(sizeof(T) * batch * nv * no * nvp);                          \
+    for (int64_t p0 = 0; p0 < npo; p0 += batch) {                              \
+        int64_t nbp = (p0 + batch <= npo) ? batch : npo - p0;                  \
+        TIC(3);                                                                \
+        gemm_##SFX(0, 0, nbp * nv, no * nvp, nv + no, -1.0,                    \
+                   Adrv + p0 * nv * (nv + no), nv + no, Bdrv, no * nvp, 0.0,   \
+                   Z, no * nvp);                                               \
+        TOC(3);                                                                \
+        TIC(2);                                                                \
+        const int rmap = io && io[1] >= 0;                                     \
+        if (rmap)                                                              \
+            for (int64_t it = 0; it < nto; it++)                               \
+                for (int rr = 0; rr < 3; rr++) {                               \
+                    int64_t P = opair[rr * nto + it] - p0;                     \
+                    if (P >= 0 && P < nbp) {                                   \
+                        will_need(R + it * nvt, sizeof(T) * nvt);              \
+                        break;                                                 \
+                    }                                                          \
+                }                                                              \
+        _Pragma("omp parallel for schedule(dynamic, 4)")                       \
+        for (int64_t it = 0; it < nto; it++) {                                 \
+            T *r = R + it * nvt;                                               \
+            for (int rr = 0; rr < 3; rr++) {                                   \
+                int64_t P = opair[rr * nto + it] - p0;                         \
+                if (P < 0 || P >= nbp) continue;                               \
+                const T *z = Z + P * sP + ofree[rr * nto + it] * nvp;          \
+                double sg = RSGN[rr];                                          \
+                for (int64_t A = 0; A < nvt; A++) {                            \
+                    T v = z[vfree[A] * sa + vpair[A]]                          \
+                        - z[vfree[nvt + A] * sa + vpair[nvt + A]]              \
+                        + z[vfree[2 * nvt + A] * sa + vpair[2 * nvt + A]];     \
+                    r[A] += sg * v;                                            \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        TOC(2);                                                                \
+    }                                                                          \
+    free(Z);                                                                   \
+}                                                                              \
+                                                                               \
+void zc_t3_fdiag_##SFX(const T *T3p, T *R, int64_t nto, int64_t nvt,           \
+                       const double *eo, const double *ev)                     \
+{                                                                              \
+    _Pragma("omp parallel for schedule(static)")                               \
+    for (int64_t it = 0; it < nto; it++) {                                     \
+        const T *t = T3p + it * nvt;                                           \
+        T *r = R + it * nvt;                                                   \
+        const double e = eo[it];                                               \
+        for (int64_t A = 0; A < nvt; A++)                                      \
+            r[A] += (ev[A] - e) * t[A];                                        \
+    }                                                                          \
+}
+
+DEFINE_CCN(double, d)
+DEFINE_CCN(double complex, z)

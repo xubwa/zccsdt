@@ -52,7 +52,13 @@ the integral container has it**: `sum_pq f[p,q] p+ q` with the matrix
   orbital-energy denominator; for spinors rotated among the occupied or
   among the virtual ones the off-diagonal elements act on the amplitudes,
   and the energies do not change (`tests/test_ccn.py`,
-  `test_spinors_that_are_not_canonical`: 1e-10).
+  `test_spinors_that_are_not_canonical`: 1e-10).  Off-diagonal elements
+  below 1e-6 (`ccsdt_opt.FOCK_OFFDIAG_TOL`) are the noise of an SCF - 1e-6
+  to 1e-8 with the usual thresholds, mostly inside degenerate levels - and
+  are left out of the triples equation: the spinors then count as
+  canonical, the two o^3 v^3 operator passes are saved, and the closed form
+  of section 9 applies; the energy changes by less than that times the
+  triples contribution.
 - **Hartree-Fock reference** (f[i,a] = 0, every case of the front end):
   nothing else can be meant.  `exp(-T1) F exp(T1) = F + [F, T1]` then, and
   `[F, T1]` is a pure excitation operator, which commutes with T_n.
@@ -307,3 +313,230 @@ shift=0)` - the singlets and the M_S = 0 components of the triplets of the
 spin orbitals; the roots matched to CFOUR's, which are singlets.  H2O /
 STO-3G with CFOUR's basis entries: the same to 2e-10, the CC3 ground state
 to 1e-12.)
+
+## 8. CC2 of spinors on Cholesky vectors (prototype)
+
+`zccsdt.zccsd.cc2` (`DirectZCCSD(ladder='chol').cc2()`, `.cc2_ee()`): T1 in
+the coefficients, the dressed three-index integrals `B[c,i,a] = L~[c,a,i]`
+from one half-transformation of the scalar AO Cholesky vectors per
+iteration, the doubles `t2 = antisym[B B] / D` per occupied index, used for
+`Y[c,i,a] = sum_jb t2[ij,ab] L[c,j,b]` and discarded; excitation energies
+from the folded sigma vector with one-index transformed vectors.  The
+equations and the layouts are in the module.  **State: validated, not
+profiled.**  With vectors that reproduce the AO integrals to rounding it is
+the CC2 of sections 1 to 3: energy to 1e-11 Eh, sigma vectors to 1e-9 of
+their size, roots to 1e-9 (`tests/test_zccsd_cc2.py`; LiH / 6-31G, X2C);
+at the default `max_error = 1e-5` of the class the decomposition costs
+2e-7 Eh in the energy and 5e-7 Eh in the excitation energies there.  Not
+done: the production standard (profile at 30 + 400 spinors, Kramers pairs,
+three real products per complex one, the memory plan checked on a large
+case), an integral-direct variant without Cholesky vectors, IP and EA.
+CFOUR's spinor programs (`x2ccccd`, `x2cccsd`, `x2ceomcc`, `x2ceomcccd`,
+`x2cvtrancd`, `x2chbarcd`) have no CC2: the string does not occur in their
+sources.
+
+## 9. CC3 without stored triples
+
+`zccsdt.cc.cc3fly` (scheduler) and `csrc/cc3_fly.c` (kernel);
+`zccsdt.CC3(mf)` with `store_t3 = False`,
+`solver.kernel(eris, 'cc3', Options(store_t3=False))`,
+`ccsdt_opt.update_amps(opts, t1, t2, None, eris, model='cc3')`,
+`eom_opt.prepare(.., model='cc3', fly=True)` and `sigma(.., omega=)`,
+`ccn.eom_folded`.
+
+**The equations.**  For canonical spinors the triples equation of CC3 is
+solved in closed form, with the operands of the drive terms of the CCSDT
+step (`docs/factorization.md` 2.2),
+
+    Z[P, c, f, Q]  = - sum_e t2[P, e c] <Q||e f>~ - sum_m <m c||P>~ t2[m f, Q]        P = (i<j), Q = (a<b)
+    t3[ijk, abc]   = P(i/jk) P(a/bc) Z / (e_i + e_j + e_k - e_a - e_b - e_c)
+
+and enters the singles and doubles equations through the four sums of
+pass 1 (`docs/factorization.md` 2.4), with T[P, d, m, Q] the half-expanded
+triples (the triple (m; P) in its three ways, signs +, -, +):
+
+    Y[P, d, y]  += T[P, d, m, Q] <y m||Q>~         -> the term 1/2 P(ab) <bm||ef>~ t3[ijm, aef] of R2
+    X[x, m, Q]  += <P||d x>~ T[P, d, m, Q]         -> the term -1/2 P(ij) <mn||je>~ t3[imn, abe]
+    r1[m, d]    += T[P, d, m, Q] <P||Q>            -> R1
+    rA[P, Q]    += f~[m, d] T[P, d, m, Q]          -> R2
+
+(the two other sums of pass 1 - the T3 parts of W_vvvo and W_vooo - are
+not in CC3).  Everything else of the step is the CCSD part of the CCSDT
+step, unchanged.
+
+**The batch.**  The occupied triples (i, j, k) with i0 <= i < i1 <= j < k:
+one pair (j < k) and a range of the third index below it, all of one
+symmetry class.  For such a batch the three pieces of Z that its triples
+need - Z[(jk), c, i, Q], Z[(ik), c, j, Q], Z[(ij), c, k, Q] - are exactly
+three products per i and virtual class, with operands that are sub-blocks
+of four arrays made once per iteration (no copy per batch), and nothing is
+computed twice: 3 (c, Q)-slices per triple.  The batch then is
+
+1. the drive products into three pieces `[i][H]` of the work array, H the
+   number of (c, Q) of the group of the batch;
+2. the amplitudes `t3[i][A]`: the antisymmetrized sum of the three pieces
+   over the three ways of the virtual triple, over the denominator;
+3. the gather `T[i][d, Q] = +- t3[i][A(d, Q)]` over the first piece;
+4. the contractions of the four sums, one round per i.
+
+The products of a stage are cut into pieces of 96 columns (or 16 rows) and
+shared by the threads from one queue, a sequential GEMM per piece: one
+code for the few large products of the dense layout and the many small
+ones of the blocks.
+
+**Symmetry labels.**  The operands are dense arrays in the order of the
+classes; the triples exist only in the blocks the labels allow: for a batch
+of group g (the sum of the classes of i, j, k) the virtual triples of group
+g, the (c, Q) with class(c) + group(Q) = g, and in every product the
+ranges of the contracted index that the labels leave.  The layout without
+labels is the case of one class.  Real arithmetic where the integrals are
+real.
+
+**Work and memory.**  3 o^3 v^4 / 6 multiply-adds for the drive products
+(e part; o^4 v^3 / 2 for the m part) and as much for the contractions:
+o^3 v^4 in all, in blocks less by the fraction of allowed blocks.  Memory:
+four drive operands (2 o^2 v^2 + o^2 v o + (v + o) o v^2 / 2), four
+contraction operands (o v^3 / 2 + ..), the four sums (o^2 v^2 + 2 o^2 v^2 /
+2 + o v), and the work array, `ni (3 H + n_A)` elements for a batch of ni
+occupied triples - at least one triple, `10 C(v,3)` elements without
+labels, as many as `mem_mb` (2000 MB) holds otherwise.  No array of the
+size of T3: with 26 + 120 spinors T3 is 5.8 GB (real, packed) and one
+triple of work 23 MB.
+
+**Excitation energies.**  The folded eigenproblem of section 4 in the
+space of singles and doubles.  A sigma vector at the frequency omega is the
+EOM-CCSD-like part (the code of `eom_opt.sigma` for a Ground without T3)
+plus two passes over the batches:
+
+    r3 = (drive[t2; <ab||ei>', <ma||ij>'] + drive[r2; <ab||ei>~, <ma||ij>~]) / (omega + e_ijk - e_abc),
+         contracted with the integrals of H~ (the four sums): sigma_1, sigma_2;
+    t3 of the ground state, made again, contracted with the integrals of H' = [H~, R1]
+         (<mn||ei>', <am||ef>', f'[m,e]): sigma_2.
+
+`ccn.eom_folded`: the roots of the singles-doubles block (no triples work)
+to 1e-4 as the start, then root by root `ccn.folded_roots`: Davidson
+iterations at a fixed frequency (`eom.davidson`, started from the vector
+of the step before, with a threshold that follows |lambda(omega) - omega|
+down to `conv_tol`), the frequency moved by the secant step for
+lambda(omega) = omega, until |lambda(omega) - omega| < `omega_tol`
+(default conv_tol / 100) with the residual below `conv_tol`.  The totally
+symmetric states (label shift 0); states with a shift, IP and EA are with
+T3 stored.
+
+**Validation** (`tests/test_cc3fly.py`).
+
+| Check | Agreement |
+|---|---|
+| the step at amplitudes that solve nothing against the step with the stored T3 of the closed form; H2O (8 + 4), LiH (4 + 8); real, complex; one occupied triple per batch and all in one | 1e-12 |
+| ground state against T3 stored: the same, and LiH / 6-31G with X2C spinors (4 + 18) on the packed layout and in the blocks of 6 classes | 1e-12 Eh (observed 8e-15) |
+| the folded sigma vector against the Jacobian with R3 stored, folded by hand (two of its sigma vectors and a division), at two frequencies; all of the cases above | 1e-11 of the largest element (observed 1e-14) |
+| the three lowest roots (totally symmetric states in blocks) against `eom_ee` with R3 stored; conv_tol 1e-9 | 1e-9 Eh (observed 1e-11) |
+| spinors that are not canonical | `NotImplementedError` with the size of the off-diagonal Fock elements |
+
+## 10. Porting CC3 to the native program
+
+What a Fortran driver needs for CC3 without stored triples; nothing here
+uses Python objects, and the kernel is called by `zccsdt.cc.cc3fly.Fly.run`
+exactly as a driver would call it.
+
+**Kernel entry points** (`csrc/cc3_fly.c`, compiled like `ccsdt_t3.c`,
+which it needs for `zc_gemm_d` / `zc_gemm_z`; add `cc3_fly` to `KERNELS`
+of `cfour/xzccsdt/Makefile`).  All integers are `int64_t` passed by value,
+all arrays row-major (the last index runs fastest: as Fortran arrays, the
+indices reversed), `T` = `double` (`_d`) or `double complex` (`_z`):
+
+    int64_t zc_cc3_work(ncls, g, ni, vrng, qoff, aoff)
+        elements of work for a batch of ni occupied triples of group g
+
+    void zc_cc3_batch_{d,z}(
+        no, nv, nQ, nA, ncls,                  sizes: spinors, virtual pairs and triples, classes
+        orng[ncls+1], vrng[ncls+1],            first spinor of every class (occupied, virtual)
+        qoff[2 ncls], aoff[3 ncls - 1],        first virtual pair / triple of every group
+        vtri[nv*nQ], vsgn[nv*nQ] (int8),       (d, Q) -> triple and sign       (TripleMap.tri_c, sgn_c)
+        vfree[3*nA], vpair[3*nA],              triple -> its three (free; pair) (TripleMap.free_c, pair_c)
+        eo[no], ev3[nA], omega,                denominator: eo[i] + eo[j] + eo[k] - ev3[A] + omega
+        i0, i1, j, k,                          the batch: i0 <= i < i1 <= j < k, i of one class
+        nset,                                  1 or 2 drive terms (summed)
+        At1, Ao1, Bv1, Bo1,  At2, Ao2, Bv2, Bo2,   the drive operands (set 2 is not read if nset = 1)
+        Gv, Gsq, gsq, fov,                     the contraction operands
+        Ysq, Xo, r1, rAsq,                     the four sums, accumulated
+        work, stats[4])                        work array; seconds: products, amplitudes, gather, contractions
+
+The tables are those the native program has for its T3 blocks (the maps of
+`xzmaps.F90` correspond to `TripleMap`); without labels ncls = 1, orng =
+(0, no), vrng = (0, nv), qoff = (0, nQ), aoff = (0, nA).
+
+| Operand | Shape (row-major) | Content | From |
+|---|---|---|---|
+| `At` | [no][no][nv][nv] | `At[hi][lo][c][e] = a2[lo hi, e c]` (hi > lo read) | T2 (or r2) |
+| `Ao` | [no][no][nv][no] | `Ao[hi][lo][c][m] = <m c\|\|lo hi>~` | dressed `<ma\|\|ij>` |
+| `Bv` | [nv][no][nQ] | `Bv[e][i][Q] = <Q\|\|e i>~` | dressed `<ab\|\|ei>` on pairs a<b |
+| `Bo` | [no][no][nQ] | `Bo[m][i][Q] = a2[m i, Q]` | T2 (or r2) on pairs a<b |
+| `Gv` | [no][nQ][nv] | `Gv[m][Q][y] = <y m\|\|Q>~` | dressed `<am\|\|ef>` on pairs e<f |
+| `Gsq` | [no][no][no][nv] | `Gsq[hi][lo][x][d] = <lo hi\|\|d x>~` | dressed `<mn\|\|ei>` |
+| `gsq` | [no][no][nQ] | `gsq[hi][lo][Q] = <lo hi\|\|Q>` | `<mn\|\|ef>` |
+| `fov` | [no][nv] | `f~[m][d]` | dressed Fock matrix |
+| `Ysq` | [no][no][nv][nv] | `Ysq[hi][lo][d][y]` | out |
+| `Xo` | [no][no][nQ] | `Xo[x][m][Q]` | out |
+| `r1` | [no][nv] | R1 from T3 | out |
+| `rAsq` | [no][no][nQ] | `rAsq[hi][lo][Q]` | out |
+
+**Which integrals.**  Classes with at most three virtual indices in the
+triples part: the dressed `<ab||ei>` (v^3 o / 2: built from `<ab||cd>` with
+T1, as W_vvvo of the CCSDT step without its T2 and T3 terms), `<am||ef>~`
+(v^3 o / 2), `<ma||ij>~`, `<mn||ei>~`, `<mn||ef>`, f~.  `<ab||cd>` enters
+only through the T1 dressing of `<ab||ei>` and the CCSD part of the step.
+
+**The batch loop** (`cc3fly.Fly.batches`, `run`):
+
+    zero Ysq, Xo, r1, rAsq
+    for k = 0 .. no-1, j = 0 .. k-1, class s:
+        the i of class s below j, in ranges of at most nwork / per_i(g) (g = s + class(j) + class(k)):
+            call zc_cc3_batch(.., i0, i1, j, k, ..)
+    fold (o^2 v^2 work; P = (lo < hi), Q = (a < b)):
+        R1[i, a]  += r1[i][a]
+        R2[P, Q]  += rAsq[hi][lo][Q] + Ysq[hi][lo][a][b] - Ysq[hi][lo][b][a] + Xo[hi][lo][Q] - Xo[lo][hi][Q]
+
+The batches write overlapping parts of the four sums, so the loop over
+batches is sequential and the threads work inside a batch (ranks of an MPI
+run: each rank its own four sums over its share of the pairs (j, k),
+summed at the end - the sums are of the size of T2).
+
+**Memory plan in terms of a work array.**  Fixed per iteration: the eight
+operands and four sums of the table (2 (o^2 v^2 + o^3 v) + (v + o) o nQ +
+o nQ v + o^3 v + o^2 nQ + o v, and 2 o^2 nQ + o^2 v^2 + o v for the sums).
+Per batch: `ni (3 H_g + nA_g)` elements, H_g = sum over the virtual classes
+s of n_s nQ(g - s), nA_g the virtual triples of group g - `zc_cc3_work`.
+The smallest plan is one triple of the largest group; any larger work
+array is used for longer ranges of i (fewer, larger products).  The kernel
+allocates only its task list and one integer per (triple, way) of the
+group (`3 nA_g` int64) per call.
+
+**What the folded EOM needs from the solver.**
+
+- vectors of singles and doubles only; a sigma routine with one more
+  argument, the frequency;
+- per sigma vector: `<ab||ei>'` and `<ma||ij>'` (the derivatives of the
+  two drive integrals along r1: section 3; `eom_opt.sigma`, the block
+  `if cc3:` of the derivative of W_vvvo, and `d_ovoo`), then
+  `zc_cc3_batch` over all batches twice: nset = 2 with (t2, `<ma||ij>'`,
+  `<ab||ei>'`, t2) and (r2, `<ma||ij>~`, `<ab||ei>~`, r2), omega in the
+  denominator, the contraction operands of the ground state -> sigma_1,
+  sigma_2; and nset = 1 with the operands of the ground state, omega = 0,
+  and the contraction operands of H' (`Gv = -r1[n,y] <n m||Q>`, `Gsq` from
+  `<mn||ei>' = <mn||ef> r1[i,f]`, `gsq = 0`, `fov = f'[m,e]`) -> sigma_2
+  only;
+- an outer loop per root over the frequency (`ccn.folded_roots`): the
+  eigensolver at fixed omega started from the last vector, omega replaced
+  by the secant step, convergence when the eigenvalue reproduces omega.
+  The solver of `xzeoms.inc` serves as the inner solver if it can be
+  restarted from one vector with a new matrix; the singles-doubles stage
+  it has is the start.
+- With T3 stored (the route of `xzccsdt ccsdt_eom`) nothing is folded and
+  the existing solver applies as it is: the sigma vector of section 3,
+  i.e. the EOM-CCSDT one with the ring and ladder operators left out and
+  the drive operators without their T2 and T3 parts.
+
+**Checks for the port**: the numbers of sections 7 and 9; for one batch,
+the four sums against pass 1 over the stored T3 of the closed form
+(`tests/test_cc3fly.py::test_spin_orbitals`).

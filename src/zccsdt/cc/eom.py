@@ -809,7 +809,7 @@ def ghost_short(eris, t1, t2, t3=None, kind='ip'):
 
 def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_cycle=60, guess=None,
            nguess=None, guess_tol=1e-4, opts=None, mem_mb=2000.0, verbose=False, plan=None, ground=None,
-           stdout=None, singles=None, name='EE', shift=None, sector=None, complete=False, extra=2):
+           stdout=None, singles=None, name='EE', shift=None, sector=None, complete=False, extra=2, model='cc'):
     '''EOM-EE-CCSDT for converged amplitudes (t3 flat in the layout of the
     engine of ``eris``; None: EOM-EE-CCSD for CCSD amplitudes): the
     ``nroots`` lowest excitation energies and right-hand vectors.
@@ -840,6 +840,9 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     the single excitations are fewer than the vectors wanted, the guess
     goes on with unit vectors on the lowest doubles; if fewer roots than
     asked for can be started, that is said (a warning), not passed over.
+    ``model``: 'cc2' (t3 None) or 'cc3': the amplitudes are those of that
+    model and the matrix is its Jacobian (docs/ccn.md) - the excitation
+    energies of CC2 / CC3 linear response.
     ``conv_tol``: the norm of the residual of a normalized vector.
     ``opts``: solver.Options for max_memory, max_disk, incore_complete.
     Returns a Result.'''
@@ -855,7 +858,7 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
     if plan.mapped:
         disk.require(plan.disk, 'the vectors of the EOM subspace', opts.max_disk)
     t_all = time.perf_counter()
-    g = ground if ground is not None else eom_opt.prepare(eris, t1, t2, t3, opts, mem_mb)
+    g = ground if ground is not None else eom_opt.prepare(eris, t1, t2, t3, opts, mem_mb, model=model)
     sizes = g.sizes(shift)
     nocc, nvir = g.om.n, g.vm.n
     times = {'prepare': time.perf_counter() - t_all}
@@ -894,7 +897,8 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
         return apply
 
     say('EOM-%s-%s: %d roots, vectors of %d + %d + %d elements, %s' % (
-        name, 'CCSDT' if with3 else 'CCSD', nroots, sizes[0], sizes[1], sizes[2], 'real' if dtype.kind == 'f' else 'complex'))
+        name, {'cc2': 'CC2', 'cc3': 'CC3'}.get(g.model, 'CCSDT' if with3 else 'CCSD'), nroots, sizes[0], sizes[1], sizes[2],
+        'real' if dtype.kind == 'f' else 'complex'))
     if shift is not None:
         m1, m2 = g.masks(shift)
         say('  label shift: %d classes; %d singles, %d doubles and %d triples have it'

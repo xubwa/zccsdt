@@ -180,8 +180,22 @@ class DenseT3:
                 t3pack.axpby(Bdrv[:nvir].reshape(nvir, nocc, vm.npair),
                              np.asarray(Wv, dtype=dtype).transpose(1, 2, 0), 1.0, 0.0)
                 Bdrv[nvir:] = t2P_flat
-                t3kern.pass2(T3p, om, vm, self.nb, WringT, Adrv, Bdrv, R, self.io)
+                if WringT is None:      # no ring term (CC3): the drive terms, T3 is not read
+                    t3kern.drive(om, vm, self.nb, Adrv, Bdrv, R, self.io)
+                else:
+                    t3kern.pass2(T3p, om, vm, self.nb, WringT, Adrv, Bdrv, R, self.io)
                 del Bdrv
+            elif WringT is None:
+                WvT2 = np.ascontiguousarray(Wv.transpose(1, 2, 0)).reshape(nvir, -1)
+                for pb in _batches(0, om.npair, self.nb):
+                    nbp = len(pb)
+                    Z = np.zeros((nbp, nvir * nocc, vm.npair), dtype=dtype)
+                    Zf = Z.reshape(nbp * nvir, nocc * vm.npair)
+                    gemm(t2mn[pb].transpose(0, 2, 1).reshape(nbp * nvir, nvir), WvT2,
+                         Zf, alpha=-1.0, beta=1.0)
+                    gemm(Wo[:, :, pb].transpose(2, 1, 0).reshape(nbp * nvir, nocc),
+                         t2P_flat, Zf, alpha=-1.0, beta=1.0)
+                    t3pack.add_reduce_split(R, Z, om, vm, pb)
             else:
                 WvT2 = np.ascontiguousarray(Wv.transpose(1, 2, 0)).reshape(nvir, -1)  # [e,(i,Q)]
                 for pb in _batches(0, om.npair, self.nb):
@@ -210,7 +224,9 @@ class DenseT3:
                     X = gemm(Wpp, T.reshape(vm.npair, -1))
                     t3pack.add_reduce_pair_first(R, X, vm, rows)
         with timer('hh_ladder'):
-            if isinstance(O6, t3kern.OccOperator):
+            if O6 is None:
+                pass
+            elif isinstance(O6, t3kern.OccOperator):
                 O6.apply(T3p, R, None, occ_cols(om.ntri, np.dtype(dtype).itemsize, self.mem_mb),
                          self.io)
             elif t3kern.USE_C:
@@ -640,9 +656,10 @@ class SpinBlockT3:
         with timer('pass2'):
             self._pass2(T3, WringT, t2mn, Wv, Wo, t2P, Rd)
         with timer('pp_ladder'):
-            self._ppl(T3, Wpp, Rd)
+            if Wpp is not None:
+                self._ppl(T3, Wpp, Rd)
         with timer('hh_ladder'):
-            for g in L.stored:
+            for g in (L.stored if O6 is not None else ()):
                 I = slice(om.tri_off[g], om.tri_off[g + 1])
                 A = slice(vm.tri_off[g], vm.tri_off[g + 1])
                 Og = O6.matrix((I.start, I.stop)) if isinstance(O6, t3kern.OccOperator) else O6[I, I]
@@ -665,7 +682,9 @@ class SpinBlockT3:
         for delta in self.deltas:
             a, i = self._rows(delta)
             flat = a * nocc + i
-            Wd[delta] = np.ascontiguousarray(WringT[flat[:, None], flat])
+            # (no ring term: a zero operator in this reference path)
+            Wd[delta] = np.zeros((len(flat), len(flat)), dtype=dtype) if WringT is None \
+                else np.ascontiguousarray(WringT[flat[:, None], flat])
         top = 1 if self.L.flip else self.npg - 1   # flip: targets g <= 1 need gP <= 1
         for gP in range(top + 1):
             for pb in _batches(om.pair_off[gP], om.pair_off[gP + 1], self.nb):
@@ -946,7 +965,7 @@ def _spin_block_c_methods():
                 self._ppl_c(T3, Wpp, R)
         scratch.unmap(T3)               # (the blocked gathers leave the unmapping to here)
         with timer('hh_ladder'):
-            for g in L.stored:
+            for g in (L.stored if O6 is not None else ()):
                 if L.nI[g] == 0 or L.nA[g] == 0:
                     continue
                 I = slice(om.tri_off[g], om.tri_off[g + 1])
@@ -976,7 +995,8 @@ def _spin_block_c_methods():
         for delta in self.deltas:
             a, i = self._rows(delta)
             flat = a * nocc + i
-            Wd[delta] = np.ascontiguousarray(WringT[flat[:, None], flat], dtype=dtype)
+            if WringT is not None:
+                Wd[delta] = np.ascontiguousarray(WringT[flat[:, None], flat], dtype=dtype)
             nD[delta] = len(a)
         # drive right-hand sides B[(e|m), (i, Q)] per (gQ, s_i), e and m of spin gQ - s_i
         Bd = {}
@@ -1014,22 +1034,26 @@ def _spin_block_c_methods():
                         zoff[k, gQ] = off
                         off += nD[gP - gQ] * nQg[gQ]
                 tmax = max(nD[gP - gQ] * nQg[gQ] for gQ in gQs) * nbp
-                ws = self._workspace(off + tmax)
+                ring = WringT is not None   # (None: the drive terms alone - CC3; T3 is not read)
+                ws = self._workspace(off + (tmax if ring else 0))
                 Z = ws[:off]
+                if not ring:
+                    t3kern.zero(Z)
                 for gQ in gQs:
                     delta = gP - gQ
                     Qlo, Qhi = vm.pair_off[gQ], vm.pair_off[gQ + 1]
                     nQ, nr = Qhi - Qlo, nD[delta]
-                    T = ws[off:off + nbp * nr * nQ]
-                    r0 = 0
-                    t_ = timer('pass2.gather'); t_.__enter__()
-                    for sd, sm in self.dsub[delta]:
-                        d, m = self.vrng[sd], self.orng[sm]
-                        if len(d) and len(m):
-                            _cgather(self, T3, pb, d, m, Qlo, Qhi, T, r0 * nQ, nr * nQ)
-                        r0 += len(d) * len(m)
-                    t_.__exit__(None, None, None)
-                    T = T.reshape(nbp, nr, nQ)
+                    if ring:
+                        T = ws[off:off + nbp * nr * nQ]
+                        r0 = 0
+                        t_ = timer('pass2.gather'); t_.__enter__()
+                        for sd, sm in self.dsub[delta]:
+                            d, m = self.vrng[sd], self.orng[sm]
+                            if len(d) and len(m):
+                                _cgather(self, T3, pb, d, m, Qlo, Qhi, T, r0 * nQ, nr * nQ)
+                            r0 += len(d) * len(m)
+                        t_.__exit__(None, None, None)
+                        T = T.reshape(nbp, nr, nQ)
                     # rows (a, i) only for target groups that are computed:
                     # g = gP + s(i) must be stored (all for UCCSDT; with spin
                     # flip the pairs gP = 1 only need i alpha)
@@ -1042,7 +1066,7 @@ def _spin_block_c_methods():
                     t_ = timer('pass2.ring'); t_.__enter__()
                     # one product per pair of the batch and block of rows: all
                     # of them in one parallel region (blas.gemm_tasks)
-                    if sub:
+                    if sub and ring:
                         tasks = np.empty((len(sub), nbp, 9), dtype=np.int64)
                         for j, (r0, n) in enumerate(sub):
                             tasks[j] = (n, nQ, nr, r0 * nr, nr, 0, nQ, 0, nQ)

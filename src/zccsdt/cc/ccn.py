@@ -1,0 +1,223 @@
+'''The approximate iterative coupled-cluster models CC2, CC3 and CC4 on
+packed amplitudes (docs/ccn.md; the dense reference: zccsdt.cc.ccn_ref).
+
+CC2   cc2_update_amps(): the CCSD step of ccsdt_opt with the doubles
+      equation <D| V~ + [F, T2] |0> (the singles equation is that of CCSD).
+CC3   with T3 stored: ccsdt_opt.update_amps(model='cc3') - the CCSDT step
+      without the ring term and the two ladders of the triples equation and
+      with the drive operators of the dressed integrals alone - in the
+      blocks of the symmetry labels, real or complex, with the memory plans
+      of CCSDT.
+Excitation energies: zccsdt.cc.eom with the Ground of
+eom_opt.prepare(model=), whose sigma vector is the Jacobian of the model.
+
+F is the Fock matrix of the integral container as it is (its occupied and
+virtual blocks; not dressed with T1, not assumed diagonal).
+'''
+
+import numpy as np
+
+from zccsdt.blas import gemm
+from zccsdt.cc import ccsdt_opt, t3pack
+from zccsdt.timing import timer
+
+
+def folded_roots(apply_at, precond, guesses, store, nroots, conv_tol=1e-6, omega_tol=1e-10, omega0=0.0,
+                 guess_tol=1e-3, max_outer=30, max_cycle=60, max_space=None, log=None, start=None):
+    '''The ``nroots`` lowest roots of a folded, frequency-dependent
+    eigenproblem A(omega) x = omega x (docs/ccn.md, section 4), each of them
+    to self-consistency in omega.
+
+    ``apply_at(omega)`` returns the operator apply(x, out) of
+    zccsdt.cc.eom.davidson for the matrix at that frequency; ``precond``,
+    ``guesses`` (vectors of ``store``) as there.  First all roots at
+    ``omega0`` to ``guess_tol``; then root by root, from the lowest:
+    omega <- the eigenvalue of A(omega) whose vector follows the root, by
+    Davidson iterations started from the vector of the step before (with a
+    threshold that follows |lambda(omega) - omega| down to ``conv_tol``),
+    until the eigenvalue lambda(omega) is within ``omega_tol`` of omega with
+    the residual below ``conv_tol``.  The frequencies are those of the
+    secant method for lambda(omega) = omega (the plain fixed-point iteration
+    converges at the rate of the weight of the folded rank in the state).
+
+    ``start`` = [(omega, vector)] in the place of the first stage (and of
+    ``guesses``): the roots of a cheaper matrix, e.g. of A_PP.
+
+    Returns a zccsdt.cc.eom.Solved (history: per root the frequencies of
+    the outer steps) with nsigma the number of applications in all.'''
+    from zccsdt.cc import eom
+    if start is None:
+        nroots = min(nroots, len(guesses))
+        space = max_space or 8 + 4 * nroots
+        first = eom.davidson(apply_at(omega0), precond, guesses, store, nroots, guess_tol,
+                             max(space, len(guesses) + nroots), max_cycle)
+        order = np.argsort(first.e.real, kind='stable')
+        start = [(float(first.e[k].real), first.vectors[k]) for k in order]
+        nsigma, niter = first.nsigma, first.niter
+    else:
+        start = list(start)[:nroots]
+        space = max_space or 8 + 4 * len(start)
+        nsigma = niter = 0
+    es, vecs, conv, resid, history = [], [], [], [], []
+    for k, (omega, x) in enumerate(start):
+        steps, gap, ok, prev = [omega], 1.0, False, None
+        for outer in range(max_outer):
+            tol = float(min(guess_tol, max(conv_tol, 0.1 * gap)))
+            sol = eom.davidson(apply_at(omega), precond, [x], store, 1, tol, max(12, space // 2), max_cycle, follow=True)
+            nsigma += sol.nsigma
+            niter += sol.niter
+            x, lam = sol.vectors[0], float(sol.e[0].real)
+            gap = abs(lam - omega)              # how far omega is from the eigenvalue of A(omega)
+            if log is not None:
+                log(k, outer + 1, lam, gap, float(sol.residuals[0]), sol.nsigma)
+            if gap < omega_tol and tol <= conv_tol and sol.converged[0]:
+                omega, ok = lam, True
+                steps.append(omega)
+                break
+            # the next frequency: lambda(omega), or the secant step for lambda(omega) = omega
+            # from the last two evaluations (the slope is small: the weight of the folded rank)
+            nxt = lam
+            if prev is not None and abs(omega - prev[0]) > 1e-14:
+                slope = (lam - prev[1]) / (omega - prev[0])
+                if abs(slope) < 0.5:
+                    nxt = omega + (lam - omega) / (1.0 - slope)
+            prev, omega = (omega, lam), nxt
+            steps.append(omega)
+        es.append(omega)
+        vecs.append(x)
+        conv.append(ok)
+        resid.append(float(sol.residuals[0]))
+        history.append(steps)
+    return eom.Solved(np.array(es, dtype=complex), vecs, np.array(conv), np.array(resid), niter, nsigma, 0, history)
+
+
+def eom_folded(eris, t1, t2, nroots=3, conv_tol=1e-6, omega_tol=None, guess_tol=1e-4, opts=None, mem_mb=2000.0,
+               max_cycle=60, max_outer=30, verbose=False, stdout=None, ground=None, extra=2):
+    '''Excitation energies of CC3 without stored triples: the ``nroots``
+    lowest totally symmetric roots of the folded eigenproblem
+    [A_PP + A_PQ (omega - A_QQ)^-1 A_QP] R_P = omega R_P in the space of
+    singles and doubles (docs/ccn.md, section 4), each to self-consistency
+    in omega (folded_roots), started from the roots of the singles-doubles
+    block A_PP (no triples work).  t1, t2: the CC3 amplitudes.  Returns a
+    zccsdt.cc.eom.Result (r3 None; the vectors are normalized over their
+    singles and doubles, the weights are those of the two ranks).'''
+    import sys
+    import time
+    from zccsdt.cc import eom, eom_opt
+    out = stdout or sys.stdout
+    t_all = time.perf_counter()
+    g = ground if ground is not None else eom_opt.prepare(eris, t1, t2, None, opts, mem_mb, model='cc3', fly=True)
+    nocc, nvir = g.om.n, g.vm.n
+    sizes = g.sizes()[:2]
+    dtype = g.dtype
+
+    def say(msg):
+        if verbose:
+            print(msg, file=out, flush=True)
+
+    def apply_at(omega):
+        def apply(x, y):
+            s1, s2, _ = eom_opt.sigma(g, x[0].reshape(nocc, nvir), x[1], sd=omega is None, omega=omega)
+            y[0][:] = s1.ravel()
+            y[1][:] = s2.ravel()
+        return apply
+    say('EOM-EE-CC3 (triples folded, not stored): %d roots, vectors of %d + %d elements, %s' % (
+        nroots, sizes[0], sizes[1], 'real' if dtype.kind == 'f' else 'complex'))
+    store = eom.Store(sizes, dtype)
+    precond = eom.make_precond(g, False)
+    want = nroots + extra
+    gs = []
+    for k in eom.singles_guess(g, want, eom.symmetric_singles(eris, 0)):
+        v = store.new()
+        v[0][k] = 1.0
+        gs.append(v)
+    if not gs:
+        raise ValueError('no single excitation to start from')
+    t0 = time.perf_counter()
+    nsolve = min(len(gs), want)
+    first = eom.davidson(apply_at(None), precond, gs, store, nsolve, guess_tol, 4 * nsolve + 16, max_cycle)
+    order = np.argsort(first.e.real, kind='stable')[:min(nroots, nsolve)]
+    say('  singles-doubles block: %s  (%d sigma vectors, %.1f s)' % (
+        ' '.join('%.6f' % first.e[k].real for k in order), first.nsigma, time.perf_counter() - t0))
+
+    def log(k, outer, lam, gap, res, nsig):
+        say('  root %d  step %d  omega = %.12f  |lambda(omega) - omega| = %.1e  |residual| %.1e  %d sigma vectors'
+            % (k + 1, outer, lam, gap, res, nsig))
+    tol_w = max(1e-10, 1e-2 * conv_tol) if omega_tol is None else omega_tol
+    t0 = time.perf_counter()
+    sol = folded_roots(apply_at, precond, None, store, nroots, conv_tol, tol_w, guess_tol=1e-3, max_outer=max_outer,
+                       max_cycle=max_cycle, log=log, start=[(float(first.e[k].real), first.vectors[k]) for k in order])
+    srt = np.argsort(sol.e.real, kind='stable')
+    vec = [sol.vectors[k] for k in srt]
+    wts = np.array([[float(np.vdot(p, p).real) for p in v] + [0.0] for v in vec])
+    res = eom.Result(e=sol.e.real[srt], e_imag=sol.e.imag[srt], converged=sol.converged[srt], residuals=sol.residuals[srt],
+                     r1=[v[0].reshape(nocc, nvir) for v in vec], r2=[v[1].reshape(g.om.npair, g.vm.npair) for v in vec],
+                     r3=None, weights=wts, niter=sol.niter, nsigma=sol.nsigma, guess=first,
+                     history=[sol.history[k] for k in srt], ground=g,
+                     timings={'guess': t0 - t_all, 'iterations': time.perf_counter() - t0, 'total': time.perf_counter() - t_all})
+    say('  root   omega / Eh       omega / eV   |residual|   %R1   %R2')
+    for k in range(len(res.e)):
+        say('  %3d  %14.10f  %11.6f   %.1e%s  %5.1f %5.1f' % (
+            k + 1, res.e[k], res.e[k] * eom.HARTREE_EV, res.residuals[k], ' ' if res.converged[k] else '!',
+            100 * wts[k][0] / wts[k].sum(), 100 * wts[k][1] / wts[k].sum()))
+    say('  %d sigma vectors with triples; %.1f s' % (sol.nsigma, res.timings['total']))
+    return res
+
+
+def cc2_doubles(t1, t2, eris, vvvv_pp, vvoo_pp, om, vm, t2pp=None, tau=None):
+    '''The doubles residual of CC2, packed [(i<j), (a<b)]:
+        <ab||ij>~ + P(ab) f_bc t_ijac - P(ij) f_kj t_ikab,
+    <ab||ij>~ fully T1-dressed (vvoo_pp of ccsdt_opt.dressed_vvoo_pp plus
+    the ladder of the dressed <ab||de>~ with tau1), f the Fock matrix as it
+    is.  ``tau``: in the place of tau1 (the Jacobian: its derivative).'''
+    nocc, nvir = t1.shape
+    mm, nn = om.pairs[:, 0], om.pairs[:, 1]
+    dt = np.result_type(t2, vvoo_pp)
+    if t2pp is None:
+        t2pp = t3pack.pack_last2(np.ascontiguousarray(t2[mm, nn], dtype=dt), vm)
+    if tau is None:
+        tau = ccsdt_opt._tau1_pairs(t1, om, vm)
+    tau = np.ascontiguousarray(tau, dtype=dt)
+    R2 = np.array(vvoo_pp, dtype=dt, order='C', copy=True)
+    for h, (lo, hi) in enumerate(vm.blocks):
+        if hi > lo:
+            X = gemm(np.ascontiguousarray(vvvv_pp[h], dtype=dt), np.ascontiguousarray(tau[:, lo:hi].T))
+            t3pack.axpby(R2[:, lo:hi], X.T)
+    f = np.asarray(eris.fock)
+    foo, fvv = np.asarray(f[:nocc, :nocc], dtype=dt), np.asarray(f[nocc:, nocc:], dtype=dt)
+    gemm(np.asfortranarray(ccsdt_opt.occ_pair_one_body(foo, om).T), np.ascontiguousarray(t2pp, dtype=dt), R2, beta=1.0)
+    Y = gemm(np.ascontiguousarray(t2[mm, nn], dtype=dt).reshape(-1, nvir), np.ascontiguousarray(fvv.T))
+    t3pack.add_asym_last2(R2, Y.reshape(-1, nvir, nvir), vm)
+    return R2
+
+
+def cc2_update_amps(opts, t1, t2, eris):
+    '''One Jacobi step of CC2 in the T1-dressed formalism (the layouts and
+    products of ccsdt_opt.ccsd_update_amps; the integrals of CCSD, <ab||cd>
+    included - this is CC2 as a member of the hierarchy, not the o^2 v^3
+    algorithm that never forms <ab||cd>).'''
+    einsum = np.einsum
+    nocc, nvir = t1.shape
+    om, vm = t3pack.maps_for(eris)
+    if ccsdt_opt._is_spin_eris(eris):
+        raise NotImplementedError('CC2: for integrals without spin blocks (spin orbitals or spinors)')
+    mm, nn = om.pairs[:, 0], om.pairs[:, 1]
+    md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
+    mo_e = eris.mo_energy
+    eia = mo_e[:nocc, None] - (mo_e[None, nocc:] + opts.level_shift)
+    with timer('t1_dress'):
+        fdr = ccsdt_opt.dress_fock(eris, t1)
+        ge = {k: ccsdt_opt.dress_block(eris, t1, k) for k in ('oooo', 'ovvo', 'oovv', 'ooov', 'vovv')}
+        vvvv_pp = ccsdt_opt.dressed_vvvv_pp(eris, t1, om, vm)
+        Bv = ccsdt_opt.bra_dressed_vvvo_pp(eris, t1, om, vm)
+    with timer('ccsd'):
+        goovv = ge['oovv']
+        t2mn = t2[mm, nn]
+        Feff_vv = fdr[nocc:, nocc:] - einsum('Paf,Pdf->ad', t2mn, goovv[mm, nn])
+        Feff_oo = fdr[:nocc, :nocc] + einsum('mnP,inP->mi', goovv[:, :, md, ne], t2[:, :, md, ne])
+        Weff_ovvo = ge['ovvo'] + einsum('mnde,inae->madi', goovv, t2, optimize=True)
+        vvoo_pp = ccsdt_opt.dressed_vvoo_pp(eris, t1, Bv, om, vm)
+        # (the singles equation is that of CCSD; its doubles part is not used)
+        R1, _ = ccsdt_opt.ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv, Feff_oo, Weff_ovvo, om, vm)
+        R2 = cc2_doubles(t1, t2, eris, vvvv_pp, vvoo_pp, om, vm)
+    return t1 + R1 / eia, t3pack.t2_update(t2, R2, om, vm, mo_e[:nocc], mo_e[nocc:] + opts.level_shift)

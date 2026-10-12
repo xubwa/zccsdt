@@ -564,6 +564,54 @@ nroots=..)` with the amplitudes of `zccsdt.cc.solver.kernel(eris, 'ccsd')`;
 on CFOUR's spinors with `zccsdt.cfour.from_cfour` it reproduces
 `xx2ceomcc` (`bench/cfour/eom_ccsd.sh`).
 
+### The hierarchy CC2, CCSD, CC3, CCSDT: approximate models and their excitation energies
+
+```python
+import zccsdt
+cc2 = zccsdt.CC2(mf).run()               # GHF or X2C reference; RHF / UHF / ROHF are taken as GHF spin orbitals
+ccsd = zccsdt.CCSD(mf).run()             # (CCSD on the doubles level of the CCSDT code, for the ladder)
+cc3 = zccsdt.CC3(mf).run()               # T3 stored, as CCSDT: label blocks, real arithmetic, memory plans
+e, res = cc3.eom_ee(nroots=4)            # CC3 linear-response excitation energies (the eigenvalues of its Jacobian)
+e, res = cc3.eom_ee(nroots=2, shift=2)   # in the blocks of a label shift of a linear molecule
+e_ip, _ = cc3.eom_ip(nroots=2)           # ionization energies; eom_ea likewise
+
+fly = zccsdt.CC3(mf)
+fly.store_t3 = False                     # no T3: the triples per batch of occupied triples, o^3 v^4, CCSD memory
+fly.kernel()
+e, res = fly.eom_ee(nroots=4)            # the folded, frequency-dependent eigenproblem; the same numbers
+```
+
+The classes `GCC2`, `GCCSD`, `GCC3` (`zccsdt.ccn`) are `GCCSDT` with
+another model: every option of this document (`frozen`, `conv_tol`,
+`max_memory`, `symmetry`, `real_spinors`, ..), the output, and `eom_ee`,
+`eom_ip`, `eom_ea` with their options apply, with the Jacobian of the
+model in the eigenproblem.  `cc.model` is `'cc2'`, `'ccsd'`, `'cc3'`
+(`'ccsdt'` for `zccsdt.CCSDT`).  The definitions - which terms each model
+keeps, what F is for spinors that are not canonical - and the validation
+are in `docs/ccn.md`.
+
+| Model | Equations | Amplitudes | Cost per iteration | Excitation energies |
+|---|---|---|---|---|
+| `CC2` | singles of CCSD; doubles `<D\| V~ + [F, T2] \|0>` | T1, T2 | that of this code's CCSD step (it uses the integrals of CCSD, `<ab\|\|cd>` included; the AO-driven CC2 that never forms them is `zccsdt.zccsd`, docs/ccn.md) | `eom_ee`; `eom_ip` / `eom_ea` through the ghost spinor at full length |
+| `CCSD` | | T1, T2 | o^2 v^4 | EOM-CCSD, the same |
+| `CC3` | singles and doubles of CCSDT; triples `<T\| [V~, T2] + [F, T3] \|0>` | T1, T2, T3 (stored) | o^3 v^4: no ring term, no ladders on T3 | `eom_ee` with label shifts, `eom_ip` / `eom_ea` with short vectors, as EOM-CCSDT; a sigma vector reads R3 once and T3 once |
+| `CC3`, `store_t3 = False` | the same | T1, T2; the triples are made per batch of occupied triples, contracted and discarded (`docs/ccn.md` 9) | o^3 v^4; a work array of `mem_mb` at most, no array of the size of T3; in the blocks of the labels too; canonical spinors | `eom_ee`: the totally symmetric states, each root self-consistent in its frequency (`res.history[k]`: the frequencies of its steps); no label shifts, no IP / EA |
+| `CCSDT` | | T1, T2, T3 | o^4 v^4, o^3 v^5 | EOM-CCSDT |
+
+`ccsdt_q()`, `solve_lambda()`, `make_rdm1()` are defined for CCSDT
+amplitudes and raise `NotImplementedError` in these classes.  On the level
+of the engines: `zccsdt.cc.solver.kernel(eris, 'cc2' | 'cc3')` and
+`zccsdt.cc.eom.kernel(eris, t1, t2, t3, model='cc2' | 'cc3')`; without
+stored triples `solver.Options(store_t3=False)` and
+`zccsdt.cc.ccn.eom_folded(eris, t1, t2, nroots=..)`.
+
+`store_t3 = False` is the form for large cases: T3 of 26 + 120 spinors is
+5.8 GB on the packed layout, the work array of a batch 23 MB per occupied
+triple.  It needs canonical spinors (off-diagonal Fock elements below 1e-6
+in the occupied and in the virtual block; a `NotImplementedError` says so
+otherwise) and the pp operator in memory.  With T3 stored the spinors may
+be rotated among the occupied and among the virtual ones.
+
 ### Integrals from another program, and for another program
 
 The classes for spin orbitals and spinors also run on an integral container

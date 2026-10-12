@@ -42,6 +42,8 @@ class Options:
     incore_complete: bool = False   # keep all DIIS vectors in memory (as in PySCF)
     mem_mb: float = 2000.0      # batch buffer budget of the packed-T3 code
     spin_flip: bool = False     # closed-shell alpha/beta symmetry (RCCSDT)
+    store_t3: bool = True       # CC3 only.  False: no T3 is stored - the triples are made per
+                                # batch of occupied triples and contracted (zccsdt.cc.cc3fly)
     verbose: bool = False
     max_memory: float = None    # MB for the whole process, as in PySCF (default:
                                 # 80% of what the node and the job limit leave)
@@ -140,7 +142,8 @@ def diis_plan_for(eris, dtype, opts, plan):
 def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     '''Solve CCSD or CCSDT.  Returns a Result; t3 is kept packed.
     method: 'ccsd', 'ccsdt' (packed-T3 implementation) or 'ccsdt_ref'
-    (the ported reference implementation, for validation).
+    (the ported reference implementation, for validation); 'cc2', 'cc3':
+    the approximate models (docs/ccn.md), CC3 with T3 stored as in CCSDT.
 
     For 'ccsdt', ``opts.max_memory`` (MB; default: 80% of what the node and
     the memory cgroups of the process leave) decides where the large arrays
@@ -157,8 +160,13 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     tensors), normt, diis (vectors in the subspace), wall, cpu (seconds).'''
     opts = opts or Options()
     method = method.lower()
-    assert method in ('ccsd', 'ccsdt', 'ccsdt_ref')
-    with_t3 = method != 'ccsd'
+    # the approximate models (docs/ccn.md): CC3 is the CCSDT code with the triples equation
+    # of model 'cc3' (T3 stored), CC2 the CCSD-level step of zccsdt.cc.ccn
+    model = method
+    if method == 'cc3':
+        method = 'ccsdt' if opts.store_t3 else 'cc3_fly'
+    assert method in ('ccsd', 'cc2', 'cc3_fly', 'ccsdt', 'ccsdt_ref')
+    with_t3 = method not in ('ccsd', 'cc2', 'cc3_fly')
     nocc = eris.nocc
     nvir = eris.fock.shape[0] - nocc
     if t1 is None or t2 is None:
@@ -232,9 +240,15 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                         rbuf = adiis.buffers(_parts(t1, t2, t3))[0][2] if r3_file else None
                     t1n, t2n, t3n = ccsdt_opt.update_amps(opts, t1, t2, t3, eris,
                                                           mem_mb=opts.mem_mb, out=rbuf,
-                                                          plan=plan)
+                                                          plan=plan, model=model)
                 else:
                     t1n, t2n, t3n = ccsdt.update_amps(opts, t1, t2, t3, eris)
+            elif method == 'cc2':
+                from zccsdt.cc import ccn
+                t1n, t2n = ccn.cc2_update_amps(opts, t1, t2, eris)
+                t3n = None
+            elif method == 'cc3_fly':
+                t1n, t2n, t3n = ccsdt_opt.update_amps(opts, t1, t2, None, eris, mem_mb=opts.mem_mb, model='cc3')
             else:
                 t1n, t2n = ccsdt_opt.ccsd_update_amps(opts, t1, t2, eris)
                 t3n = None

@@ -549,12 +549,14 @@ def _tau1_pairs(t1, om, vm):
 
 
 def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None, inplace=False,
-                 oovo_extra=None):
+                 oovo_extra=None, t2_terms=True):
     '''W_vvvo[Q(a<b), e, i] of the T3 drive term (without the T3 dressing):
     the fully T1-dressed <ab||ei> = Bv + sum_f ~<ab||ef> t1[i,f] (Bv: bra-dressed
     vvvo, Vd: dressed packed vvvv), plus the T2 terms with the dressed oovo,
     ovvv and Fock.  oovo_extra (P, e, i) is added to the packed oovo of the
-    t2 x oovo GEMM (used to remove the T2 part when Vd includes it).'''
+    t2 x oovo GEMM (used to remove the T2 part when Vd includes it).
+    ``t2_terms`` False: the fully T1-dressed <ab||ei> alone (the drive
+    operator of CC3).'''
     nocc, nvir = t1.shape
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
@@ -571,6 +573,8 @@ def wvvvo_packed(Bv, Vd, t1, t2, fov, ge, om, vm, xterm=None, inplace=False,
             for h, (lo, hi) in enumerate(vm.blocks):
                 if hi > lo:
                     t3pack.pair_t1_contract(W[lo:hi], Vd[h], t1, vm, block=h)
+    if not t2_terms:
+        return W
     # + 0.5 sum_mn ~<mn||ei> t2[mn,ab] - sum_m f[m,e] t2[m,i,a,b]
     #   = sum_{m<n} t2[mn,ab] (~oovo[mn,e,i] - f[m,e] d[n,i] + f[n,e] d[m,i])
     with timer('wv.oovo'):
@@ -1054,7 +1058,7 @@ def _kept_operator(eris, sizes, dtype):
     return held[1][0] if one else dict(enumerate(held[1]))
 
 
-def _pp_sweep(eng, plan, eris, t1, t2pp, goovv_pp, Feff_vv, om, vm, T3p, Wv, R3):
+def _pp_sweep(eng, plan, eris, t1, t2pp, goovv_pp, Feff_vv, om, vm, T3p, Wv, R3, t3_ladder=True):
     '''The terms with the packed dressed <ab||de>, one slab of its rows at a
     time (plan.pp_bytes): sum_f ~<ab||ef> t1[i,f] added to Wv, the CCSD ladder
     (returned, packed (P, Q)) and the T3 pp ladder, accumulated in R3.  The
@@ -1113,9 +1117,10 @@ def _pp_sweep(eng, plan, eris, t1, t2pp, goovv_pp, Feff_vv, om, vm, T3p, Wv, R3)
         calls[0] += 1
         return first() if calls[0] == 1 else again()
 
-    with timer('pp_ladder'):
-        eng.pp_ladder_rows(T3p, sweep, R3, order=order, max_rows=max_rows)
-    if calls[0] == 0:                           # no triples: the other terms remain
+    if t3_ladder:
+        with timer('pp_ladder'):
+            eng.pp_ladder_rows(T3p, sweep, R3, order=order, max_rows=max_rows)
+    if calls[0] == 0:                           # no triples (or no ladder on T3: CC3): the other terms remain
         for _ in first():
             pass
     return lad
@@ -1212,7 +1217,77 @@ def _pp_sweep_spin(eng, plan, eris, t1, t2pp, Feff_vv, om, vm, T3p, Wv, R3):
     return lad
 
 
-def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, capture=None):
+def fock_diag_add(eris, dtype, T3, R, shift_layout=None):
+    '''R += [F_diagonal, T3]: (the sum of the diagonal Fock elements of the
+    virtual triple - that of the occupied triple) T3, block by block of the
+    layout of the engine of ``eris`` (flat arrays), or of ``shift_layout``
+    (t3shift.ShiftLayout).'''
+    from zccsdt.cc import zeta_opt
+    om, vm = t3pack.maps_for(eris)
+    f = np.asarray(eris.fock).diagonal().real
+    eo, ev = f[:om.n][om.triples].sum(axis=1), f[om.n:][vm.triples].sum(axis=1)
+    blocks = zeta_opt._blocks(eris, dtype) if shift_layout is None else [(None, None) + b for b in shift_layout.blocks()]
+    for _, _, where, shape, I, A in blocks:
+        if not shape[0] or not shape[1]:
+            continue
+        Tb, Rb = T3[where].reshape(shape), R[where].reshape(shape)
+        if t3kern.USE_C:
+            t3kern.fock_diag(Tb, Rb, eo[I], ev[A])
+        else:
+            Rb += Tb * (ev[A][None, :] - eo[I][:, None])
+    return R
+
+
+# Off-diagonal elements of the occupied and of the virtual block of the Fock matrix below
+# this are the noise of an SCF (1e-6 to 1e-8 with the usual thresholds, mostly inside
+# degenerate levels) and are left out of the triples equation of CC3: the spinors count
+# as canonical.  The energy changes by less than this times the triples contribution.
+FOCK_OFFDIAG_TOL = 1e-6
+
+
+def fock_canonical(eris, om, vm, tol=None):
+    '''(eo, ev): the diagonal of the Fock matrix, for the codes that solve
+    the equation of the highest rank in closed form; NotImplementedError
+    if its occupied or its virtual block is not diagonal.'''
+    no = om.n
+    f = np.asarray(eris.fock)
+    d = f.diagonal().real
+    off = max(abs(f[:no, :no] - np.diag(d[:no])).max(initial=0), abs(f[no:, no:] - np.diag(d[no:])).max(initial=0))
+    if off > (FOCK_OFFDIAG_TOL if tol is None else tol):
+        raise NotImplementedError('triples made per batch: canonical spinors (the Fock matrix has off-diagonal '
+                                  'elements of %.1e in its occupied or virtual block); with T3 stored there is '
+                                  'no such restriction' % off)
+    return d[:no].copy(), d[no:].copy()
+
+
+def fock_offdiag(eris, om, vm, dtype, tol=None):
+    '''(Wpp, O6) of the off-diagonal part of the Fock operator on packed
+    triples, for the engine's residual: the pp-ladder operator
+    1/2 A[f_ad delta_be] (a list by pair block) and the occupied operator
+    of -f_mi, without the diagonal elements - or None where the block of
+    the Fock matrix is diagonal to FOCK_OFFDIAG_TOL (canonical spinors:
+    both).'''
+    tol = FOCK_OFFDIAG_TOL if tol is None else tol
+    no = om.n
+    f = np.asarray(eris.fock)
+    fo = np.array(f[:no, :no], dtype=dtype)
+    fv = np.array(f[no:, no:], dtype=dtype)
+    np.fill_diagonal(fo, 0)
+    np.fill_diagonal(fv, 0)
+    Wpp = O6 = None
+    if abs(fv).max(initial=0) > tol:
+        Wpp = []
+        for h, (lo, hi) in enumerate(vm.blocks):
+            W = np.zeros((hi - lo, hi - lo), dtype=dtype)
+            if hi > lo:
+                add_one_body_pairs(W, fv, vm, 0.5, block=h)
+            Wpp.append(W)
+    if abs(fo).max(initial=0) > tol:
+        O6 = t3kern.OccOperator(om, np.zeros((no,) * 4, dtype=dtype), fo, dtype)
+    return Wpp, O6
+
+
+def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, capture=None, model='ccsdt'):
     '''One Jacobi step.  T3p is packed (notri, nvtri) or flat; returns
     (t1new, t2new, T3p_new) with T3p_new flat.  ``out``: a flat array of the
     size of T3p for the new T3 (e.g. a mapped file; default: a new array).
@@ -1220,26 +1295,46 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
     dict that receives the dressed integrals and the intermediates of the
     step (the operands of the T3 passes among them) for a code that
     linearizes it (zccsdt.cc.eom_opt); for dense integrals with the dressed
-    operator in memory.'''
+    operator in memory.  ``model`` 'cc3': the triples equation of CC3
+    (docs/ccn.md) - of the terms with T3 only the Fock operator as it is
+    (its occupied and virtual blocks, not dressed), and the drive terms
+    with the T1-dressed integrals alone; the singles and doubles equations
+    are unchanged.  With T3p = None (model 'cc3' only) no T3 is stored:
+    its contributions to the singles and doubles equations are made per
+    batch of occupied triples (zccsdt.cc.cc3fly; canonical spinors), and
+    the third return value is None.'''
     from zccsdt.scratch import io_desc
+    cc3 = model == 'cc3'
+    if model not in ('ccsdt', 'cc3'):
+        raise ValueError(model)
     plan = plan or MemoryPlan()
     if plan.mem_mb is not None:
         mem_mb = plan.mem_mb
     _STEPS[0] += 1
     nocc, nvir = t1.shape
     om, vm = t3pack.maps_for(eris)
-    dtype = np.result_type(t1, t2, T3p, eris.oovv, eris.fock)
+    # CC3 without stored triples (zccsdt.cc.cc3fly): T3p is None, and the T3 terms of
+    # the singles and doubles equations come from the batches of occupied triples
+    fly = T3p is None
+    if fly and not cc3:
+        raise ValueError('update_amps without T3: model cc3 (the triples made per batch)')
+    dtype = np.result_type(t1, t2, eris.oovv, eris.fock, *([] if fly else [T3p]))
     eng = engine_for(eris, dtype, mem_mb, flip=getattr(opts, 'spin_flip', False))
-    eng.io = io_desc(T3p, out)          # T3 / the new T3 as mapped arrays of a scratch file
-    T3p = np.ascontiguousarray(np.asarray(T3p, dtype=dtype).ravel())
+    if not fly:
+        eng.io = io_desc(T3p, out)          # T3 / the new T3 as mapped arrays of a scratch file
+        T3p = np.ascontiguousarray(np.asarray(T3p, dtype=dtype).ravel())
     mo_e = eris.mo_energy
     eia = mo_e[:nocc, None] - (mo_e[None, nocc:] + opts.level_shift)
     mm, nn = om.pairs[:, 0], om.pairs[:, 1]
     md, ne = vm.pairs[:, 0], vm.pairs[:, 1]
 
     spin = _is_spin_eris(eris)
+    if cc3 and spin:
+        raise NotImplementedError('CC3: for integrals without spin blocks (spin orbitals or spinors)')
     # the dressed packed vvvv in slabs of rows
     sliced = plan.pp_bytes is not None and sliceable(eris, eng)
+    if fly and sliced:
+        raise NotImplementedError('CC3 without stored triples: with the pp operator in memory')
     if capture is not None and (spin or sliced):
         raise NotImplementedError('capture: for dense integrals and the pp operator in memory')
     # memory is short: no ovvv-sized array is kept for the next iteration
@@ -1293,23 +1388,27 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
             t3pack.axpby(G_mQ[:, :, nocc:], t3pack.pack_last2(ge['ovvv'], vm).transpose(0, 2, 1),
                          -1.0, 0.0)
         G_mQ = G_mQ.reshape(nocc * vm.npair, nocc + nvir)
-    with timer('pass1'):
-        Xacc, Yall, r1, rA = eng.pass1(T3p, G_Pd, G_mQ, goovv_pp, fov)
+    Xacc = Yall = B0 = C0 = None
+    if not fly:
+        with timer('pass1'):
+            Xacc, Yall, r1, rA = eng.pass1(T3p, G_Pd, G_mQ, goovv_pp, fov)
     # sum ~<ak||Q> t2[i,k,Q] with the pass-1 operand G_mQ[(k,Q), no + a] = ~<ak||Q>,
     # which is then dropped (ovvv-sized arrays are dropped as soon as they
     # have been used: they decide how much memory a run needs at least)
     r1_vovv = gemm(np.ascontiguousarray(t2P).reshape(nocc, -1), G_mQ[:, nocc:])
     if capture is not None:
         capture.update(G_Pd=G_Pd, G_mQ=G_mQ, goovv_pp=goovv_pp, goovv_P=goovv_P)
+    G_fly = G_mQ if fly else None
     del G_mQ
-    C0 = -2 * Xacc[nvir:].transpose(1, 0, 2)               # [i, j, Q]
-    dWo = Yall[:, :, :nocc].transpose(2, 1, 0)             # [m, a, P(ij)]
-    B0 = -2 * Yall[:, :, nocc:].transpose(0, 2, 1)         # [P, a, b]
-    r1 = r1.T
-    # T3 contributions to the T1 / T2 residuals (r2 packed over i<j, a<b)
-    rB = 0.5 * (B0[:, md, ne] - B0[:, ne, md])
-    rC = -0.5 * (C0[mm, nn] - C0[nn, mm])
-    r2_t3 = rA + rB + rC
+    if not fly:
+        C0 = -2 * Xacc[nvir:].transpose(1, 0, 2)               # [i, j, Q]
+        dWo = Yall[:, :, :nocc].transpose(2, 1, 0)             # [m, a, P(ij)]
+        B0 = -2 * Yall[:, :, nocc:].transpose(0, 2, 1)         # [P, a, b]
+        r1 = r1.T
+        # T3 contributions to the T1 / T2 residuals (r2 packed over i<j, a<b)
+        rB = 0.5 * (B0[:, md, ne] - B0[:, ne, md])
+        rC = -0.5 * (C0[mm, nn] - C0[nn, mm])
+        r2_t3 = rA + rB + rC
 
     # ---- effective intermediates for the T3 residual
     with timer('intermediates'):
@@ -1331,9 +1430,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
             capture.update(Bv=Bv.copy(), ovvv=ge['ovvv'])
         # W_vvvo is built in Bv from here on.  Its T3 part first, so that the
         # pass-1 result can go: Wv[Q, e, i] += Xacc[e, i, Q]
-        with timer('wv.dWv'):
-            t3pack.add_transposed(Bv.reshape(vm.npair, -1),
-                                  Xacc[:nvir].reshape(nvir * nocc, vm.npair))
+        if not cc3:                 # (CC3: no T3 in the drive operators)
+            with timer('wv.dWv'):
+                t3pack.add_transposed(Bv.reshape(vm.npair, -1),
+                                      Xacc[:nvir].reshape(nvir * nocc, vm.npair))
         del Xacc
         oovo_extra = None
         if spin:     # vvvv_pp includes t2pp^T oovv: remove sum_f oovv[P,(e,f)] t1[i,f]
@@ -1344,7 +1444,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
                                          om, vm, rows=om.blocks)
                 oovo_extra = -Z
         Wv = wvvvo_packed(Bv, vvvv_pp, t1, t2, fov, ge, om, vm, xterm, inplace=True,
-                          oovo_extra=oovo_extra)
+                          oovo_extra=oovo_extra, t2_terms=not cc3)
         del Bv
         t_.__exit__(None, None, None)
         t_ = timer('imd.Wvooo'); t_.__enter__()
@@ -1354,11 +1454,30 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
         A = transposed(t2, (0, 2, 1, 3)).reshape(nocc * nvir, nocc * nvir)
         Wvooo = govoo.copy()
         # tmp2[m,b,i,j] = sum_ne ooov[m,n,i,e] t2[j,n,b,e]
-        Oo = np.ascontiguousarray(np.asarray(ooov).transpose(0, 2, 1, 3), dtype=dtype)
-        tmp2 = gemm(Oo.reshape(nocc * nocc, nocc * nvir), A.T).reshape(
-            nocc, nocc, nocc, nvir).transpose(0, 3, 1, 2)
-        Wvooo -= (tmp2 - tmp2.transpose(0, 1, 3, 2)).transpose(0, 1, 3, 2)
-        if spin:
+        if not cc3:
+            Oo = np.ascontiguousarray(np.asarray(ooov).transpose(0, 2, 1, 3), dtype=dtype)
+            tmp2 = gemm(Oo.reshape(nocc * nocc, nocc * nvir), A.T).reshape(
+                nocc, nocc, nocc, nvir).transpose(0, 3, 1, 2)
+            Wvooo -= (tmp2 - tmp2.transpose(0, 1, 3, 2)).transpose(0, 1, 3, 2)
+        if cc3:                     # the dressed <ma||ij> alone
+            ge.pop('ovvv', None)
+            Wo = np.ascontiguousarray(Wvooo[:, :, nn, mm])
+            if fly:
+                # the triples of every batch of occupied triples from the drive terms,
+                # contracted into the singles and doubles equations and discarded
+                from zccsdt.cc import cc3fly
+                t_.__exit__(None, None, None)
+                with timer('cc3fly'):
+                    fl = cc3fly.Fly(om, vm, dtype, *fock_canonical(eris, om, vm), mem_mb=mem_mb)
+                    with timer('cc3fly.operands'):
+                        drive = fl.drive_operands(t2, t2P, Wv, Wvooo)
+                        contr = fl.contraction_operands(G_fly, ge['oovo'], goovv_P, fov)
+                    r1, r2_t3 = fl.run([drive], contr)
+                    if capture is not None:
+                        capture.update(fly=fl, fly_drive=drive, fly_contract=contr)
+                    del drive, contr, G_fly
+                t_ = timer('imd.Wvooo'); t_.__enter__()
+        elif spin:
             o_, v_ = eris.spaces['o'], eris.spaces['v']
             T2s = SpinTensor.from_dense(t2, (o_, o_, v_, v_), sig=(-1, -1, 1, 1))
             ovvv_t2 = s_einsum('mbef,ijef->mbij', ges['ovvv'], T2s).to_dense()
@@ -1366,8 +1485,9 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
             ovvv_t2 = gemm(np.ascontiguousarray(ge['ovvv'], dtype=dtype).reshape(nocc * nvir, -1),
                            t2.reshape(nocc * nocc, -1).T).reshape(nocc, nvir, nocc, nocc)
             del ge['ovvv']
-        Wvooo -= (0.5 * ovvv_t2).transpose(0, 1, 3, 2)
-        Wo = Wvooo[:, :, nn, mm] + dWo                   # [m, a, P(ij)]
+        if not cc3:
+            Wvooo -= (0.5 * ovvv_t2).transpose(0, 1, 3, 2)
+            Wo = Wvooo[:, :, nn, mm] + dWo                   # [m, a, P(ij)]
         t_.__exit__(None, None, None)
         t_ = timer('imd.ring_F'); t_.__enter__()
         # X[(m d), (i a)] = sum_ne <mn||de> t2[i,n,a,e]: the T2 part of W_ovvo;
@@ -1405,7 +1525,7 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
                 lad = _pp_sweep_spin(eng, plan, eris, t1, t2pp_v, Feff_vv, om, vm, T3p, Wv, R3)
             else:
                 lad = _pp_sweep(eng, plan, eris, t1, t2pp_v, goovv_pp, Feff_vv, om, vm, T3p,
-                                Wv, R3)
+                                Wv, R3, t3_ladder=not cc3)
             t_ = timer('ccsd'); t_.__enter__()
         R1, R2 = ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv,
                                       Feff_oo, None, om, vm, r1_vovv, ladder_t2,
@@ -1443,8 +1563,20 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
     del ge, Yall, B0, C0, goovv_P, goovv_mn, goovo_mn, G_Pd
     if spin:
         del ges
-    R = eng.residual(T3p, WringT, t2mn, Wv, Wo, t2P, Wpp, O6,
-                     out=out if R3 is None else R3, clear=R3 is None)
+    if fly:
+        return t1new, t2new, None
+    if cc3:
+        # drive terms + [F, T3] with the Fock matrix as it is: its diagonal by a pass over
+        # T3, what it has off the diagonal (spinors that are not canonical) by the operators
+        Wpp3, O63 = fock_offdiag(eris, om, vm, dtype)
+        del Wpp, O6, WringT
+        R = eng.residual(T3p, None, t2mn, Wv, Wo, t2P, Wpp3, O63,
+                         out=out if R3 is None else R3, clear=R3 is None)
+        with timer('t3_fock'):
+            fock_diag_add(eris, dtype, T3p, R.reshape(-1))
+    else:
+        R = eng.residual(T3p, WringT, t2mn, Wv, Wo, t2P, Wpp, O6,
+                         out=out if R3 is None else R3, clear=R3 is None)
 
     with timer('t3_update'):
         eo = mo_e[:nocc][om.triples].sum(axis=1)

@@ -394,7 +394,8 @@ class ShiftT3:
 
         Wpp: the blocks by their column block h, of shape (pairs of block
         h + sW, pairs of block h) - for sW = 0 the list of the engine.
-        O6: a t3kern.OccOperator (sW = 0), or (W_oooo, F_oo) of shift sW.'''
+        O6: a t3kern.OccOperator (sW = 0), or (W_oooo, F_oo) of shift sW.
+        WringT, Wpp, O6 = None: that term is left out (CC3: all three).'''
         so = sT + sW
         Lin, Lout = self.layout(sT), self.layout(so)
         R = _target(out, (Lout.size,), self.dtype, clear)
@@ -403,11 +404,11 @@ class ShiftT3:
         with timer('pass2'):
             self._pass2(T3, Lin, Lout, WringT, t2mn, Wv, Wo, t2P, R, sW, sa)
         with timer('pp_ladder'):
-            if Lin.size:
+            if Lin.size and Wpp is not None:
                 self._ppl(T3, Lin, Lout, Wpp, R, sW)
         scratch.unmap(T3)
         with timer('hh_ladder'):
-            if Lin.size:
+            if Lin.size and O6 is not None:
                 self._hh(T3, Lin, Lout, O6, R, sW)
         return R
 
@@ -447,7 +448,7 @@ class ShiftT3:
         sT, so = Lin.shift, Lout.shift
         sb = so - sa
         Wd = {}
-        if Lin.size:
+        if Lin.size and WringT is not None:     # (None: no ring term; T3 is not read)
             for din in eng.deltas:
                 dout = din + sW
                 if abs(dout) < nc and nD[din] and nD[dout]:
