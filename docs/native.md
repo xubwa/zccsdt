@@ -3533,7 +3533,7 @@ rank in the plan.  Not started.
 ## 17. CC3
 
     CALC=CC3                    CC3 without stored triples
-    CALC=CC3, EXCITE=EOMEE      CC3, then the folded excited states (label shift 0)
+    CALC=CC3, EXCITE=EOMEE      CC3, then the folded excited states (the label shifts of %xzeom)
     cc3 stored               (a line of %xzccsdt; a check route) CC3 with T3 stored; with
                                 EXCITE=EOMEE its excited states in every label shift
     mpirun -np 4 xzccsdt        the iterations over ranks (both routes)
@@ -3686,9 +3686,50 @@ The outer loop (`xzeom3`, the algorithm of `ccn.folded_roots`):
 Per frequency step a line: root, step, omega, lambda(omega), their
 difference, the largest element of the residual, sigma vectors, seconds;
 per root its omega, the frequencies and sigma vectors it took.  In blocks of
-the labels the totally symmetric states (shift 0); other shifts of `%xzeom`
-are left out with a warning (they are the states of `cc3_stored_eom`).
-Without labels the states of all shifts.  No file `XZEOMR`.
+the labels one problem per label shift of `%xzeom` (below); without labels
+the states of all shifts are roots of one problem.  No file `XZEOMR`.
+
+**Label shifts** (`csrc/cc3_shift.c`, added: `zc_cc3_batchs`, the batch
+kernel with four shifts in classes; all zero it is `zc_cc3_batch`, and the
+native program calls it everywhere).  For a vector of shift s the triples
+of a batch of occupied triples of group g are the virtual triples of group
+g + s:
+
+| argument | meaning | triples of the vector | ground-state triples with H' |
+|---|---|---|---|
+| `st` | of the triples: virtual group g + st (layout of the work, tables, `ev3`) | s | 0 |
+| `sa[z]` | of the amplitudes of drive set z: `At[P][c][e]` with class(c) + class(e) = class(P) + sa, `Bo[m][i][Q]` with group(Q) = class(m) + class(i) + sa | 0 (t2), s (r2) | 0 |
+| `sw[z]` | of its operators: `Ao[P][c][m]` with class(c) + class(m) = class(P) + sw, `Bv[e][i][Q]` with group(Q) = class(e) + class(i) + sw; sa + sw = st | s (H'), 0 | 0 |
+| `sc` | of the contraction operands: Gv with class(y) + class(m) = group(Q) + sc, Gsq with class(x) + class(d) = class(P) - sc, gsq with group(Q) = class(P) - sc, fov with class(d) = class(m) - sc; the four sums have the shift st + sc | 0 | s |
+
+In the kernel that is: the summed index e of a drive product has the class
+class(P) + sa - class(c), m the class class(P) + sw - class(c), per set (one
+class for both in the unshifted kernel); H and the amplitudes are those of
+group g + st; the four contractions take the classes above.  The Fortran
+side passes s = the shift of the vector (`xzefold`), the work per triple is
+that of group g + s, and sigma_1, sigma_2 are masked to the shift as in
+section 16.2.  **What the Python batch route would need** (not changed
+here): `cc3fly.Fly.run` with these four shifts - the kernel is in the
+library's directory already, only not in its build list -, `per_i` and the
+batches with g + st, `eom_opt.sigma` passing (s, {0, s}, {s, 0}, 0) and
+(0, 0, 0, s) for a `shift` in the fly branch (the masks m1, m2 of the shift
+are there), and `ccn.eom_folded` taking the singles of the shift as the
+guess (`eom.symmetric_singles(eris, shift)`).
+
+**More than one rank.**  The folded EOM runs over the ranks (the stored
+route and EOM-CCSDT do not, 16.7): rank 0 runs the solver; it sends the
+converged T1, T2 once, every rank makes the intermediates of the ground
+state, and for every folded sigma vector rank 0 broadcasts the vector, the
+frequency and the shift (`xzefsend`), every rank computes the same sigma
+vector with its share of the batches (`xzfly`: the four sums are summed on
+all ranks) and the other ranks drop theirs.
+
+**A limit of the folded route**: it follows the lowest roots of the
+singles-doubles stage.  A state that is dominated by doubles there lies
+high in that stage and is not found unless enough roots are asked for:
+HBr, shift 4 - the third root with R3 stored, 0.652304807 (weights of R1,
+R2, R3: 0.025, 0.946, 0.028), is missing from three folded roots, which
+give the stored fourth, 0.671637923, as their third.
 
 ### 17.5 Validation
 
@@ -3717,6 +3758,16 @@ roots 3e-11 (H2O), 1.3e-11 (HBr).  The eomtest hook (16.5) on
 `cc3_stored_eom`: the sigma vector against the five-point derivative of
 the CC3 step, 4e-16, 5e-15, 2e-15 (6 classes, real) and 4e-16, 2e-15, 7e-15
 (dense, complex) in sigma_1, sigma_2, sigma_3.
+
+Label shifts in the folded route (HBr, `%xzeom` 2, 4, 6, 0, three roots
+each, 1e-9), against the roots with T3 stored of the table above: shift 2
+0.237157681878, 0.260912563587, 0.336749228828 (2e-11); shift 4
+0.233152111948, 0.544409202278 (9e-11; the third: 17.4); shift 6
+0.738624111778, 0.773900482120, 0.786520835593 (9e-11); shift 0 as
+before.  The same digits in real blocks, complex blocks (`real 0`), with
+one triple per batch on one thread, and with 2 and 3 MPI ranks; complex
+dense on 2 ranks: the 12 roots of the dense table; H2O, 4 roots, 1 and 2
+ranks: 0.284178235134, ..515478, ..9182079, 0.311028170177.
 
 Modes (all the same to the digits printed): HBr in real blocks (6
 classes), complex blocks (`real 0`), real dense (`labels 0`), complex
@@ -3804,15 +3855,12 @@ Omega = 1, 2, 3 are those of shifts 2, 4, 6.)
 
 ### 17.8 Not done
 
-- EOM-CC3 without stored triples in a label shift: the kernel takes the
-  triples of a batch in the group of its occupied triple; a shift needs the
-  virtual triples of group g + s and the operands of a shift (an added
-  kernel or a shift argument).  The states of a shift: `cc3_stored_eom`
-  (T3 and R3 stored, the memory of EOM-CCSDT).
-- EOM over MPI ranks (section 16.7), for both routes: CC3 with
-  EXCITE=EOMEE runs with one rank, and CC3 amplitudes are not reused (no
-  `XZKEY` for them), so the iterations cannot be done over ranks first and
-  the EOM afterwards; a model tag in `XZKEY` would allow it.
+- The folded EOM: states dominated by doubles (17.4: they are not among
+  the lowest roots of the singles-doubles stage); the vectors of the roots
+  (no `XZEOMR`).  The Python batch route has no label shifts (17.4 says
+  what it needs).
+- EOM with T3 stored over MPI ranks (section 16.7); CC3 amplitudes are not
+  reused (no `XZKEY` for them).
 - Spinors that are not canonical: the program stops (17.1); the
   semicanonical rotation of docs/ccn.md, section 1, belongs before the
   integral transformation (CFOUR's spinors are canonical).
