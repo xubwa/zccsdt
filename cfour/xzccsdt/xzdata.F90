@@ -105,6 +105,21 @@ module xzdata
   ! singles and doubles with the triples folded in at a frequency)
   integer :: cc3mode = 0
   character(len=5) :: mname = 'CCSDT'   ! the model of the iterations, for the output
+  ! CC4 (xzcc4.inc; docs/native.md, section 19): the CCSDT step with the T4
+  ! terms of the doubles and triples equations as fixed parts of its
+  ! residuals; T4 is made per occupied quadruple and never stored
+  logical :: cc4 = .false.
+  ! 0: macro / micro iterations - the T4 terms are evaluated, the equations of
+  ! CCSDT with them are iterated to convergence, and so on; 1 (option cc4
+  ! plain): the T4 terms in every iteration; 2 (option cc4 scratch): the same
+  ! from the second-order start, without the CCSDT amplitudes; 3 (option cc4
+  ! confirm): macro / micro with the last evaluation that confirms convergence
+  integer :: cc4mode = 0
+  logical :: cc4start = .false.     ! the CCSDT amplitudes of the file XZAMPS are the start
+  integer(8) :: jd42 = 0, jd43 = 0  ! the T4 terms: of R2 [P][Q], of R3 (as T3 is stored)
+  integer(8) :: nt4 = 0             ! evaluations of the T4 terms
+  real(8) :: e4ccsdt = 0d0          ! the CCSDT correlation energy of the start (0: none)
+  real(8) :: t4sec = 0d0            ! seconds of the evaluations
   logical :: noring = .false.       ! pass 2 in blocks without its ring term (T3 is not read)
   integer(8) :: nc3w = 0            ! elements of the work of one CC3 batch (the plan)
   ! the folded EOM-CC3 sigma vector: on, at the frequency eomega.  nfollow > 0:

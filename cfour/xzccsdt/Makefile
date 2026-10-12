@@ -56,10 +56,10 @@ KCC     ?= $(CC)
 KCFLAGS ?= $(CFLAGS)
 
 # the C kernels that the program calls
-KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda cc3_fly cc3_native cc3_shift
+KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda cc3_fly cc3_native cc3_shift cc4_native
 MODS    := xzkern xzopt xzmem xzdata xzdiis xzpar xzdist xzfrzd xzfrz xzpland xzeomd
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
-INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc xzeom.inc xzeoms.inc xzcc3.inc
+INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc xzeom.inc xzeoms.inc xzcc3.inc xzcc4.inc
 
 OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil xzmpi $(KERNELS)))
 

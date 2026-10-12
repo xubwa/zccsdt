@@ -357,6 +357,36 @@
       real(c_double) :: stats(4)
     end subroutine
 
+    ! ---- CC4 without stored quadruples (csrc/cc4_native.c; docs/native.md, section 19)
+    subroutine N(zc_cc4_divide)(r, ev, eo, n) bind(C)
+      import
+      integer(c_int64_t), value :: n
+      type(*), dimension(*) :: r, ev
+      real(c_double), value :: eo
+    end subroutine
+
+    subroutine N(zc_cc4_sector_t4)(n, kv, modulus, m, ev, eo, kmin, nk, lid_of, lstart, lmem, qmin, nq, &
+                                   off22, nc22, off13, nc13, posv, posq, pos3, b, c, e22, e13) bind(C)
+      import
+      integer(c_int), value :: n, modulus, m, kmin, nk, qmin, nq
+      real(c_double), value :: eo
+      type(*), dimension(*) :: kv, ev, lid_of, lstart, lmem, off22, nc22, off13, nc13, posv, posq, pos3
+      type(*), dimension(*) :: b, c, e22, e13
+    end subroutine
+
+    subroutine N(zc_cc4_red12)(r, tri, nt, n, kv, modulus, qmin, nqg, off, nq, posv, posq, y) bind(C)
+      import
+      integer(c_int64_t), value :: nt
+      integer(c_int), value :: n, modulus, qmin, nqg
+      type(*), dimension(*) :: r, tri, kv, off, nq, posv, posq, y
+    end subroutine
+
+    subroutine N(zc_cc4_addrows)(r, ld, tgt, nr, nc, x) bind(C)
+      import
+      integer(c_int64_t), value :: ld, nr, nc
+      type(*), dimension(*) :: r, tgt, x
+    end subroutine
+
     ! one batch of occupied triples of CC3 without stored triples (csrc/cc3_fly.c)
     subroutine N(zc_cc3_batch)(no, nv, nq, na, ncls, orng, vrng, qoff, aoff, vtri, vsgn, vfree, vpair, &
                                eo, ev3, omega, i0, i1, j, k, nset, at1, ao1, bv1, bo1, at2, ao2, bv2, bo2, &
