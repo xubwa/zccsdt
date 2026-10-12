@@ -14,8 +14,10 @@ against CCSD(T) on the same spinors (docs/ccn.md, section 9):
          over the occupied quadruples, default the cores), of CCSDT and then (Q), of CCSDTQ
 One measurement per process; the line RESULT has the numbers.  X2C-1e
 spinors of PySCF (x2c.UHF).  ZC_MAXMEM (MB): max_memory.  For cc4 the memory is sampled
-by phase (mem_gb: the largest anonymous + shared memory of the process plus the private
-pages of its child processes, and that maximum under each running timer).
+by phase (mem_gb: the largest sum of the proportional set sizes of the process and of its
+child processes - every page once, shared arrays included; mem_parts_gb: the anonymous
+memory of the process, the private pages of the children, the rest; mem_by_phase_gb: the
+maximum under each running timer and in each part of the pass over the quadruples).
 '''
 import argparse
 import json
@@ -56,11 +58,13 @@ rec = dict(what=a.what, threads=nthr, basis=a.basis, frozen=a.frozen, nvir=a.nvi
 
 
 class Memory:
-    '''Resident memory by phase, sampled by a thread: RssAnon + RssShmem of
-    this process plus the private pages of its children (the processes of
-    the pass over the quadruples).'''
+    '''Resident memory by phase, sampled by a thread: the proportional set
+    sizes of this process and of its children (the processes of the pass
+    over the quadruples) summed - every page once, the arrays they share
+    included - with the anonymous memory of this process and the private
+    pages of the children as parts.'''
 
-    def __init__(self, dt=0.5):
+    def __init__(self, dt=1.0):
         import threading
         self.dt, self.peak, self.by, self.parts = dt, 0, {}, (0, 0, 0)
         self._done = threading.Event()
@@ -68,23 +72,20 @@ class Memory:
 
     def sample(self):
         from zccsdt.cc import cc4fly
-        anon = shm = 0
-        with open('/proc/self/status') as f:
-            for line in f:
-                if line.startswith('RssAnon'):
-                    anon = 1024 * int(line.split()[1])
-                elif line.startswith('RssShmem'):
-                    shm = 1024 * int(line.split()[1])
+        phase = timing._stack[-1] if timing._stack else '-'
+        if cc4fly.PHASE[0]:
+            phase = 'cc4.pass:' + cc4fly.PHASE[0]
+        me = os.getpid()
         try:
-            with open('/proc/self/task/%d/children' % os.getpid()) as f:
+            with open('/proc/self/task/%d/children' % me) as f:
                 kids = [int(x) for x in f.read().split()]
         except OSError:
             kids = []
+        anon = memory.resident()
         priv = sum(cc4fly.private_bytes(k) for k in kids)
-        phase = timing._stack[-1] if timing._stack else '-'
-        tot = anon + shm + priv
+        tot = cc4fly.pss_bytes(me) + sum(cc4fly.pss_bytes(k) for k in kids)
         if tot > self.peak:
-            self.peak, self.parts = tot, (anon, shm, priv)
+            self.peak, self.parts = tot, (anon, priv, tot - anon - priv)
         self.by[phase] = max(self.by.get(phase, 0), tot)
 
     def _run(self):

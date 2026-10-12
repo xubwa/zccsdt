@@ -4,9 +4,12 @@
 under the path of the timers that enclose it, so that the time of a stage
 can be shown next to the times of its parts (tree) while report() keeps the
 flat view by name.  The CPU time is that of the whole process, i.e. of all
-threads, so CPU / wall is the number of cores kept busy.
+threads, and of its child processes that have ended (cpu(): the processes
+of a pass over the quadruples of CC4), so CPU / wall is the number of cores
+kept busy.
 '''
 
+import os
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -17,16 +20,22 @@ _calls = defaultdict(int)
 _stack = []
 
 
+def cpu():
+    '''CPU seconds of this process and of its child processes that have ended.'''
+    t = os.times()
+    return time.process_time() + t[2] + t[3]
+
+
 @contextmanager
 def timer(name):
     _stack.append(name)
     path = tuple(_stack)
-    w0, c0 = time.perf_counter(), time.process_time()
+    w0, c0 = time.perf_counter(), cpu()
     try:
         yield
     finally:
         _wall[path] += time.perf_counter() - w0
-        _cpu[path] += time.process_time() - c0
+        _cpu[path] += cpu() - c0
         _calls[path] += 1
         _stack.pop()
 

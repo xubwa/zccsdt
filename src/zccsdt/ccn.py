@@ -266,6 +266,7 @@ class GCC4(_Model):
         'cc4.dress': ('dressing (Q)', 'T1 dressing of the integrals of the quadruples'),
         'cc4.pack': ('T3 packed', 'T3 on the packed block'),
         'cc4.setup': ('setup', 'quadruples: operands'),
+        'cc4.pass': ('quadruples', 'quadruples: the pass over the occupied quadruples'),
         'cc4.fork': ('processes', 'quadruples: starting the processes'),
         'cc4.xo': ('Xo', 'quadruples: T2 intermediate Xo'),
         'cc4.xv': ('Xv', 'quadruples: T2 <vv||vv> intermediate'),

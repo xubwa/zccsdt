@@ -449,7 +449,9 @@ class BackBlocks(Back):
 
 # ------------------------------------------------------------ memory plan
 
-WORKER_HEAP = 64 << 20          # private pages of a forked process besides its work arrays
+# private pages of a forked process besides its work arrays: the buffers of its BLAS and what it
+# writes of the pages of the parent (measured: 50 to 70 MB, HBr with 28 and 60 virtual spinors)
+WORKER_HEAP = 80 << 20
 SMALL = 20_000_000              # elements of T4 below which a pass is not worth other processes
 PER_WORKER = 32                 # occupied quadruples per process, at least
 LEAN = True                     # the kernel zc_cc4_sector_row where the library has it (False: tests)
@@ -624,12 +626,24 @@ def plans(eris, dtype, opts):
             step = None
         if step is not None and not (step.t3_file or step.pp_file or step.pp_bytes is not None):
             return step, full
-        step = ccsdt_opt.plan_for(eris, dtype, opts, reserve=full.floor + extra)
+        try:
+            step = ccsdt_opt.plan_for(eris, dtype, opts, reserve=full.floor + extra)
+        except MemoryError as err:
+            raise MemoryError('CC4: the pass over the quadruples takes at least %.0f MB, the dressed integrals '
+                              'and T3 on the packed block %.0f MB of the budget of %.0f MB; beside them: %s'
+                              % (full.floor / 1e6, extra / 1e6, budget / 1e6, err)) from None
     cached = ccsdt_opt.cached_bytes(eris)
     return step, plan(no, nv, isz, budget + cached - step.need - extra, lab, mod, workers)
 
 
 # ------------------------------------------------------------ processes over the quadruples
+
+PHASE = [None]          # what the pass with processes is at: 'fork', 'xo', 'xv', 'quadruples' (for a sampler)
+
+
+def _phase(name):
+    PHASE[0] = name
+
 
 def _shared(shape, dtype):
     '''An array of zeros that forked processes share (anonymous shared
@@ -651,15 +665,27 @@ def _single_thread():
             pass
 
 
+def _rollup(pid, keys):
+    try:
+        with open('/proc/%d/smaps_rollup' % pid) as f:
+            return 1024 * sum(int(line.split()[1]) for line in f if line.startswith(keys))
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
 def private_bytes(pid):
     '''Private pages of a process (its own arrays and what it has written
     of the pages shared with its parent), from /proc/pid/smaps_rollup; 0 if
     unknown.'''
-    try:
-        with open('/proc/%d/smaps_rollup' % pid) as f:
-            return 1024 * sum(int(line.split()[1]) for line in f if line.startswith(('Private_Dirty', 'Private_Clean')))
-    except (OSError, ValueError, IndexError):
-        return 0
+    return _rollup(pid, ('Private_Dirty', 'Private_Clean'))
+
+
+def pss_bytes(pid):
+    '''The proportional set size of a process: its private pages and its
+    share of the pages it has in common with others (the arrays that the
+    processes of a pass share, each page counted once over all of them);
+    0 if unknown.'''
+    return _rollup(pid, ('Pss:',))
 
 
 class _Workers:
@@ -901,21 +927,22 @@ def run_sectors(ints, e, labels, modulus, t2, T3, omega=0.0, drives=None, back_i
     if not par:
         b = ps.buffers()
         XVs, last = [{} for _ in qs], None
-        for l, xs, Is in schedule:
-            with timer('cc4.xv'):
-                if last != l:
-                    XVs, last = [{} for _ in qs], l
-                for (q, _), XV, sd in zip(qs, XVs, secs):
-                    for x in [x for x in XV if x not in xs]:
-                        del XV[x]
-                    for x in xs:
-                        if int(x) not in XV:
-                            XV[int(x)] = S.xv_blocks(sd, q, int(x), l)
-            for I in Is:
-                with timer('cc4.rhs'):
-                    M = ps.rhs(b, int(I), XVs)
-                with timer('cc4.back'):
-                    ps.sums(b, int(I), M, R2, R3)
+        with timer('cc4.pass'):
+            for l, xs, Is in schedule:
+                with timer('cc4.xv'):
+                    if last != l:
+                        XVs, last = [{} for _ in qs], l
+                    for (q, _), XV, sd in zip(qs, XVs, secs):
+                        for x in [x for x in XV if x not in xs]:
+                            del XV[x]
+                        for x in xs:
+                            if int(x) not in XV:
+                                XV[int(x)] = S.xv_blocks(sd, q, int(x), l)
+                for I in Is:
+                    with timer('cc4.rhs'):
+                        M = ps.rhs(b, int(I), XVs)
+                    with timer('cc4.back'):
+                        ps.sums(b, int(I), M, R2, R3)
         if stats is not None:
             stats.update(workers=1, private=0, shared=0)
         return R2, R3
@@ -957,49 +984,57 @@ def run_sectors(ints, e, labels, modulus, t2, T3, omega=0.0, drives=None, back_i
     def payload_chunk(n):
         return 1
 
-    t0 = time.perf_counter()
-    pool = _Workers(pl.workers, serve)
-    ok = False
-    try:
-        timing.add('cc4.fork', time.perf_counter() - t0)
+    # (cc4.pass: its CPU time has that of the processes, which have ended when it closes)
+    with timer('cc4.pass'):
+        _phase('fork')
         t0 = time.perf_counter()
-        cpu = sum(pool.map('xo', None, max(1, min(pl.xo_workers, pl.workers, no))))
-        timing.add('cc4.xo', time.perf_counter() - t0, cpu)
-        where, metas, last = [{} for _ in qs], [{} for _ in qs], None
-        tr = tb = cpu = wall = 0.0
-        for l, xs, Is in schedule:
-            with timer('cc4.xv'):
-                if last != l:
-                    where, metas, last = [{} for _ in qs], [{} for _ in qs], l
-                need = [int(x) for x in xs]
-                for (q, _), sd, a, wh, meta in zip(qs, secs, arenas, where, metas):
-                    for x in [x for x in wh if x not in need]:
-                        del wh[x], meta[x]
-                    free = [n for n in range(nslot) if n not in wh.values()]
-                    for x in need:
-                        if x in wh:
-                            continue
-                        wh[x] = free.pop()
-                        o, meta[x] = wh[x] * slab, {}
-                        for ke, blk in S.xv_blocks(sd, q, x, l).items():
-                            a[o:o + blk.size] = blk.ravel()
-                            meta[x][ke] = (o, blk.shape[0], blk.shape[1])
-                            o += blk.size
-                        assert o <= (wh[x] + 1) * slab
+        pool = _Workers(pl.workers, serve)
+        ok = False
+        try:
+            timing.add('cc4.fork', time.perf_counter() - t0)
+            _phase('xo')
             t0 = time.perf_counter()
-            res = pool.map('quads', (np.asarray(Is), metas), max(1, min(pl.workers, len(Is))))
-            wall += time.perf_counter() - t0
-            tr, tb, cpu = tr + sum(r[0] for r in res), tb + sum(r[1] for r in res), cpu + sum(r[2] for r in res)
-        # the wall time of the processes shared out by what they spent in the two parts
-        tot = max(tr + tb, 1e-30)
-        timing.add('cc4.rhs', wall * tr / tot, cpu * tr / tot)
-        timing.add('cc4.back', wall * tb / tot, cpu * tb / tot)
-        if stats is not None:
-            stats.update(workers=pl.workers, private=pool.private(),
-                         shared=R2.nbytes + R3.nbytes + sum(a.nbytes for a in arenas) + sum(q.Xo.nbytes for q, _ in qs))
-        ok = True
-    finally:
-        pool.close(kill=not ok)
+            cpu = sum(pool.map('xo', None, max(1, min(pl.xo_workers, pl.workers, no))))
+            timing.add('cc4.xo', time.perf_counter() - t0, cpu)
+            where, metas, last = [{} for _ in qs], [{} for _ in qs], None
+            tr = tb = cpu = wall = 0.0
+            for l, xs, Is in schedule:
+                _phase('xv')
+                with timer('cc4.xv'):
+                    if last != l:
+                        where, metas, last = [{} for _ in qs], [{} for _ in qs], l
+                    need = [int(x) for x in xs]
+                    for (q, _), sd, a, wh, meta in zip(qs, secs, arenas, where, metas):
+                        for x in [x for x in wh if x not in need]:
+                            del wh[x], meta[x]
+                        free = [n for n in range(nslot) if n not in wh.values()]
+                        for x in need:
+                            if x in wh:
+                                continue
+                            wh[x] = free.pop()
+                            o, meta[x] = wh[x] * slab, {}
+                            for ke, blk in S.xv_blocks(sd, q, x, l).items():
+                                a[o:o + blk.size] = blk.ravel()
+                                meta[x][ke] = (o, blk.shape[0], blk.shape[1])
+                                o += blk.size
+                            assert o <= (wh[x] + 1) * slab
+                _phase('quadruples')
+                t0 = time.perf_counter()
+                res = pool.map('quads', (np.asarray(Is), metas), max(1, min(pl.workers, len(Is))))
+                wall += time.perf_counter() - t0
+                tr, tb, cpu = tr + sum(r[0] for r in res), tb + sum(r[1] for r in res), cpu + sum(r[2] for r in res)
+            # the wall time of the processes shared out by what they spent in the two parts
+            tot = max(tr + tb, 1e-30)
+            timing.add('cc4.rhs', wall * tr / tot, cpu * tr / tot)
+            timing.add('cc4.back', wall * tb / tot, cpu * tb / tot)
+            if stats is not None:
+                stats.update(workers=pl.workers, private=pool.private(),
+                             shared=R2.nbytes + R3.nbytes + sum(a.nbytes for a in arenas)
+                             + sum(q.Xo.nbytes for q, _ in qs))
+            ok = True
+        finally:
+            _phase(None)
+            pool.close(kill=not ok)
     return R2, R3
 
 
@@ -1016,6 +1051,22 @@ def run_for(eris, ints, e, t2, T3, **kw):
 
 # ------------------------------------------------------------ the iteration
 
+def _blocks(eris, dtype):
+    """(the layout of the blocks of T3 of these integrals, the lexicographic
+    numbers of its occupied and of its virtual triples per block), or None
+    where T3 is not in plain blocks of labels (the packed block itself, or
+    blocks related by a spin flip)."""
+    from zccsdt.cc import ccsdt_opt
+    om, vm = t3pack.maps_for(eris)
+    if om.spins is None:
+        return None
+    L = ccsdt_opt.engine_for(eris, dtype).L
+    if L.flip:
+        return None
+    lo, lv = ccsdt_opt._lex(om), ccsdt_opt._lex(vm)
+    return L, [(g, lo[om.tri_off[g]:om.tri_off[g + 1]], lv[vm.tri_off[g]:vm.tri_off[g + 1]]) for g in L.stored]
+
+
 def add_quadruples(eris, t1, t2, t3, t2n, t3n, plan_=None, level_shift=0.0, stats=None):
     '''The quadruples of CC4 in a Jacobi step of CCSDT: the new T2
     ``t2n`` and T3 ``t3n`` (the layout of ``t3``: the blocks of the labels
@@ -1031,16 +1082,30 @@ def add_quadruples(eris, t1, t2, t3, t2n, t3n, plan_=None, level_shift=0.0, stat
         ints = t4engine.Dressed.from_eris(eris, t1)
     with timer('cc4.pack'):
         dtype = np.result_type(t2, t3, ints.oovv)
-        T3p = np.ascontiguousarray(ccsdt_opt.packed_t3(eris, np.asarray(t3)), dtype=dtype)
+        blocks = _blocks(eris, dtype)
+        if blocks is None:
+            T3p = np.ascontiguousarray(ccsdt_opt.packed_t3(eris, np.asarray(t3)), dtype=dtype)
+        else:                       # every block to its places, one after the other
+            T3p = np.zeros((comb(no, 3), comb(nv, 3)), dtype=dtype)
+            for g, I, A in blocks[1]:
+                if len(I) and len(A):
+                    T3p[I[:, None], A[None, :]] = blocks[0].block(t3, g)
     r2, r3 = run_for(eris, ints, e, t2, T3p, plan_=plan_, stats=stats)
     del ints, T3p
     with timer('cc4.update'):
         d2 = eo[P.tuples(no, 2)].sum(axis=1)[:, None] - ev[P.tuples(nv, 2)].sum(axis=1)[None, :]
         t2n = t2n + P.unpack(r2 / d2, no, nv, 2)
         eo3, ev3 = eo[P.tuples(no, 3)].sum(axis=1), P.tuple_sums(ev, 3)
-        for j0 in range(0, len(eo3), 64):       # (no array of the size of T3 for the denominators)
-            r3[j0:j0 + 64] /= eo3[j0:j0 + 64, None] - ev3[None, :]
-        blk = ccsdt_opt.blocked_t3(eris, r3)
-        del r3
-        t3n += blk.reshape(np.shape(t3n))
+        if blocks is None:
+            for j0 in range(0, len(eo3), 64):       # (no array of the size of T3 for the denominators)
+                r3[j0:j0 + 64] /= eo3[j0:j0 + 64, None] - ev3[None, :]
+            blk = ccsdt_opt.blocked_t3(eris, r3)
+            del r3
+            t3n += blk.reshape(np.shape(t3n))
+        else:                       # (what is outside the blocks vanishes by symmetry)
+            for g, I, A in blocks[1]:
+                if len(I) and len(A):
+                    blk = r3[I[:, None], A[None, :]]
+                    blk /= eo3[I][:, None] - ev3[A][None, :]
+                    blocks[0].block(t3n, g)[...] += blk
     return t2n

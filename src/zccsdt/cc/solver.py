@@ -25,7 +25,7 @@ from zccsdt.cc import ccsd, ccsdt, ccsdt_opt, t3pack
 from zccsdt import scratch
 from zccsdt.cc.diis import DIIS
 from zccsdt.scratch import Scratch
-from zccsdt.timing import timer
+from zccsdt.timing import cpu as timing_cpu, timer
 
 
 @dataclass
@@ -258,7 +258,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                          incore=opts.incore_complete or dplan.n_file == 0,
                          in_memory=dplan.n_memory)
         for icycle in range(opts.max_cycle):
-            t0, c0 = time.perf_counter(), time.process_time()
+            t0, c0 = time.perf_counter(), timing_cpu()
             if with_t3:
                 if method == 'ccsdt':
                     if not diis_t3:
@@ -320,7 +320,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                 opts.callback(dict(cycle=icycle + 1, e_corr=float(np.real(e_new)),
                                    de=float(np.real(de)), norms=tuple(norms), normt=normt,
                                    diis=len(adiis.xs), wall=timings[-1],
-                                   cpu=time.process_time() - c0))
+                                   cpu=timing_cpu() - c0))
             if abs(de) < opts.conv_tol and normt < opts.conv_tol_normt:
                 conv = True
                 break
