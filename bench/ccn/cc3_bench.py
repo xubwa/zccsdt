@@ -10,8 +10,12 @@ against CCSD(T) on the same spinors (docs/ccn.md, section 9):
          ccsd_t : NITER CCSD iterations and (T) of zccsdt.zccsd.DirectZCCSD
   --nvir keep the lowest N virtual spinors; --symmetry 0: the packed layout
   (no label blocks); --real 0: the spinors as the SCF left them (complex).
+         cc4 | q | ccsdtq : NITER iterations of zccsdt.CC4 (no stored T4; --workers N: processes
+         over the occupied quadruples, default the cores), of CCSDT and then (Q), of CCSDTQ
 One measurement per process; the line RESULT has the numbers.  X2C-1e
-spinors of PySCF (x2c.UHF).  ZC_MAXMEM (MB): max_memory.
+spinors of PySCF (x2c.UHF).  ZC_MAXMEM (MB): max_memory.  For cc4 the memory is sampled
+by phase (mem_gb: the largest anonymous + shared memory of the process plus the private
+pages of its child processes, and that maximum under each running timer).
 '''
 import argparse
 import json
@@ -34,6 +38,7 @@ ap.add_argument('--niter', type=int, default=4)
 ap.add_argument('--symmetry', type=int, default=1)
 ap.add_argument('--real', type=int, default=1)
 ap.add_argument('--sigma', type=int, default=0)
+ap.add_argument('--workers', type=int, default=0)
 a = ap.parse_args()
 maxmem = float(os.environ['ZC_MAXMEM']) if os.environ.get('ZC_MAXMEM') else None
 mol = gto.M(atom=a.geom, basis=a.basis, verbose=0)
@@ -48,6 +53,59 @@ if a.nvir:
 nthr = int(os.environ.get('OMP_NUM_THREADS', 0))
 rec = dict(what=a.what, threads=nthr, basis=a.basis, frozen=a.frozen, nvir=a.nvir, symmetry=a.symmetry, real=a.real,
            host=os.uname().nodename, job=os.environ.get('SLURM_JOB_ID'))
+
+
+class Memory:
+    '''Resident memory by phase, sampled by a thread: RssAnon + RssShmem of
+    this process plus the private pages of its children (the processes of
+    the pass over the quadruples).'''
+
+    def __init__(self, dt=0.5):
+        import threading
+        self.dt, self.peak, self.by, self.parts = dt, 0, {}, (0, 0, 0)
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def sample(self):
+        from zccsdt.cc import cc4fly
+        anon = shm = 0
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('RssAnon'):
+                    anon = 1024 * int(line.split()[1])
+                elif line.startswith('RssShmem'):
+                    shm = 1024 * int(line.split()[1])
+        try:
+            with open('/proc/self/task/%d/children' % os.getpid()) as f:
+                kids = [int(x) for x in f.read().split()]
+        except OSError:
+            kids = []
+        priv = sum(cc4fly.private_bytes(k) for k in kids)
+        phase = timing._stack[-1] if timing._stack else '-'
+        tot = anon + shm + priv
+        if tot > self.peak:
+            self.peak, self.parts = tot, (anon, shm, priv)
+        self.by[phase] = max(self.by.get(phase, 0), tot)
+
+    def _run(self):
+        while not self._done.wait(self.dt):
+            try:
+                self.sample()
+            except (OSError, ValueError, IndexError):
+                pass
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._done.set()
+        self._thread.join()
+
+    def record(self):
+        gb = lambda x: round(x / 1e9, 3)                                   # noqa: E731
+        return dict(mem_gb=gb(self.peak), mem_parts_gb=[gb(x) for x in self.parts],
+                    mem_by_phase_gb={k: gb(v) for k, v in sorted(self.by.items(), key=lambda kv: -kv[1])[:8]})
 
 
 def stages(snap, depth=2):
@@ -74,17 +132,24 @@ if a.what == 'ccsd_t':
                e_corr=float(cc.e_corr), e_t=float(np.real(et)), nocc=int(cc.nocc), nmo=int(cc.nmo),
                rss_gb=memory.resident() / 1e9, dtype=str(cc.t2.dtype))
 elif a.what in ('cc4', 'q', 'ccsdtq'):
-    # CC4 without stored T4 (the CCSDT step on the packed layout, the quadruples in the sectors
-    # of the labels), (Q) after NITER iterations of CCSDT (in blocks), CCSDTQ (in blocks)
+    # CC4 without stored T4 (the CCSDT step in blocks, the quadruples in the sectors of the
+    # labels), (Q) after NITER iterations of CCSDT (in blocks), CCSDTQ (in blocks)
     cls = {'cc4': zccsdt.CC4, 'q': zccsdt.CCSDT, 'ccsdtq': zccsdt.CCSDTQ}[a.what]
     cc = cls(mf, frozen=frozen)
     cc.verbose, cc.max_cycle = 0, a.niter
     cc.symmetry, cc.real_spinors = bool(a.symmetry), bool(a.real)
     if maxmem:
         cc.max_memory = maxmem
+    if a.what == 'cc4' and a.workers:
+        cc.workers = a.workers
     snap = timing.snapshot()
     t0 = time.perf_counter()
-    cc.kernel()
+    with Memory() as mem:
+        cc.kernel()
+    if a.what == 'cc4':
+        q = cc.plan_quadruples
+        rec.update(mem.record(), workers=q.workers, xo_workers=q.xo_workers, plan_q_gb=q.need / 1e9,
+                   plan_step_gb=cc.plan_used.need / 1e9, stats=cc.quadruples_stats, maxmem=maxmem)
     rec.update(total=time.perf_counter() - t0, iterations=[round(float(x), 3) for x in cc.timings],
                e_corr=float(np.real(cc.e_corr)), nocc=int(cc.t1.shape[0]), nvir_active=int(cc.t1.shape[1]),
                dtype=str(cc.t2.dtype), peak_gb=(getattr(cc, 'peak_memory', 0) or 0) / 1e9,

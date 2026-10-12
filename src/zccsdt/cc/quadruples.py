@@ -180,7 +180,9 @@ def explicit_plan(no, nv, isz, cols22, cols13, xv, rows):
 class Quadruples:
     '''r and z of (Q) for one occupied quadruple at a time.'''
 
-    def __init__(self, eris, t2, t3, plan_=None, left_only=False):
+    def __init__(self, eris, t2, t3, plan_=None, left_only=False, xo=None):
+        '''``xo``: an array [C(no,3), no, C(nv,2)] for the intermediate Xo that
+        the caller fills (form_xo for all m; default: formed here).'''
         check_canonical(eris)
         self.nocc = no = eris.nocc
         self.nvir = nv = np.asarray(eris.fock).shape[0] - no
@@ -215,21 +217,13 @@ class Quadruples:
         self.t2_xp = np.ascontiguousarray(t2[:, :, a2, b2], dtype=dtype)                # [i, m, (ab)]
         self.t2_px = np.ascontiguousarray(t2[i2, j2].transpose(0, 2, 1), dtype=dtype)   # [(ij), e, a]
         with timer('q.xo'):
-            # Xo[(jkl), m, (cd)], for one m at a time: G[l, (jk), (cd)] and P(l/jk) of it
-            self.Xo = np.empty((comb(no, 3), no, nQ), dtype=dtype)
-            oooo_t = np.ascontiguousarray(np.asarray(eris.oooo)[:, :, i2, j2].transpose(0, 2, 1), dtype=dtype)
-            ovvo = np.asarray(eris.ovvo)
-            t2_pc = np.ascontiguousarray(t2[i2, j2], dtype=dtype).reshape(len(i2) * nv, nv)     # [(jk) c, e]
-            G = np.empty((no, len(i2), nQ), dtype=dtype)
-            for m in range(no):
-                for l in range(no):
-                    # sum_e t(jk,ce) <md||el> as [(jk), c, d], then c < d of its antisymmetric part
-                    K = gemm(t2_pc, np.ascontiguousarray(ovvo[m, :, :, l].T, dtype=dtype)).reshape(-1, nv, nv)
-                    np.subtract(K[:, a2, b2], K[:, b2, a2], out=G[l])
-                    # + 1/2 sum_n <mn||jk> t(nl,cd)
-                    gemm(oooo_t[m], self.t2_xp[:, l], G[l], alpha=0.5, beta=1.0)
-                self.Xo[:, m] = P.fold(G, self.so12, 0, 1)
-            del G, K, oooo_t, t2_pc
+            # Xo[(jkl), m, (cd)]
+            if xo is None:
+                self.Xo = np.empty((comb(no, 3), no, nQ), dtype=dtype)
+                self.form_xo(eris, range(no))
+            else:                       # (the caller's array: it fills it, form_xo)
+                assert xo.shape == (comb(no, 3), no, nQ) and xo.dtype == dtype
+                self.Xo = xo
         # the work arrays of one quadruple (after the arrays that Xo is formed with)
         self.w22 = np.empty(nQ * pl.cols22, dtype=dtype)
         self.z = np.empty(nA, dtype=dtype)
@@ -239,6 +233,25 @@ class Quadruples:
         self.LC, self.RC = np.empty((6 * no, nv), dtype=dtype), np.empty((6 * no, nA3), dtype=dtype)
         self.rt3, self.rtt = np.empty(nA, dtype=dtype), np.empty(nA, dtype=dtype)
         self._xv = (None, None, {})
+
+    def form_xo(self, eris, ms):
+        '''Xo[(jkl), m, (cd)] for the m of ``ms``, one m at a time:
+        G[l, (jk), (cd)] and P(l/jk) of it.'''
+        no, nv, nQ, dtype, t2 = self.nocc, self.nvir, self.nQ, self.dtype, self.t2
+        i2, j2 = _pairs(no)
+        a2, b2 = _pairs(nv)
+        oooo_t = np.ascontiguousarray(np.asarray(eris.oooo)[:, :, i2, j2].transpose(0, 2, 1), dtype=dtype)
+        ovvo = np.asarray(eris.ovvo)
+        t2_pc = np.ascontiguousarray(t2[i2, j2], dtype=dtype).reshape(len(i2) * nv, nv)     # [(jk) c, e]
+        G = np.empty((no, len(i2), nQ), dtype=dtype)
+        for m in ms:
+            for l in range(no):
+                # sum_e t(jk,ce) <md||el> as [(jk), c, d], then c < d of its antisymmetric part
+                K = gemm(t2_pc, np.ascontiguousarray(ovvo[m, :, :, l].T, dtype=dtype)).reshape(-1, nv, nv)
+                np.subtract(K[:, a2, b2], K[:, b2, a2], out=G[l])
+                # + 1/2 sum_n <mn||jk> t(nl,cd)
+                gemm(oooo_t[m], self.t2_xp[:, l], G[l], alpha=0.5, beta=1.0)
+            self.Xo[:, m] = P.fold(G, self.so12, 0, 1)
 
     # ---- the intermediate of T2 with <vv||vv>, for pairs (x, l)
 
