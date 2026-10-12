@@ -497,7 +497,9 @@ subroutine N(xzfold3)(no, nv, npo, nvp, opa, opb, vpa, vpb, ysq, xo, r1k, ras, w
   end do
 end subroutine
 
-! Ao[hi][lo][c][m] = <mc||lo hi>~ = ovood[m][c][lo][hi], for all (hi, lo)
+! Ao[hi][lo][c][m] = ovood[m][c][hi][lo], for all (hi, lo): the operand of
+! the drive term that pass 2 has as wo[m][c][(lo<hi)] = - ovood[m][c][lo][hi]
+! (xzwo, xzwo3; the dressed <mc||lo hi> in the convention of the kernel)
 subroutine N(xzao3)(no, nv, ovood, ao)
   implicit none
   integer(8), intent(in) :: no, nv
@@ -509,7 +511,7 @@ subroutine N(xzao3)(no, nv, ovood, ao)
     do l = 0, no - 1
       do c = 0, nv - 1
         do m = 0, no - 1
-          ao(m, c, l, h) = ovood(h, l, c, m)
+          ao(m, c, l, h) = ovood(l, h, c, m)
         end do
       end do
     end do
