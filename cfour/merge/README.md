@@ -10,32 +10,45 @@ are.  The directory is generated; the sources stay here.
 |---|---|
 | `assemble.sh` | writes the directory from the repository as it is |
 | `regress.sh` | two binaries on the regression cases, compared |
+| `test/` | the test of the package (`ZMAT`, `GENBAS`, `run.sh`): copied to `test/` of the directory |
 
 ## The merge
 
 1. Assemble into the CFOUR source tree (`NAME`: the directory, default
-   `xzccsdt`; the program is `x<NAME>` unless `--prog` says otherwise):
+   `zccsdt`; the program is `x<NAME>`, i.e. `xzccsdt`, CFOUR's convention,
+   unless `--prog` says otherwise):
 
-       cfour/merge/assemble.sh --cfour <cfour> --out <cfour>/xzccsdt [--name xzccsdt] [--prog xxzccsdt]
+       cfour/merge/assemble.sh --cfour <cfour> --out <cfour>/zccsdt
 
 2. Add the name to the list of program directories in `<cfour>/Makefile.in`
    (and in `<cfour>/Makefile` of a tree that is already configured) - the one
    line of CFOUR that changes:
 
-       sox2chfcd x2ciimcd x2ceomccdencd x2cmp xzccsdt
+       sox2chfcd x2ciimcd x2ceomccdencd x2cmp zccsdt
 
 3. Build as any directory of CFOUR: `./configure ...; make` at the top, or
-   `make` in `<cfour>/xzccsdt` of a built tree (it needs `lib/libx2cint.a`,
-   `lib/liblibr.a` and the modules of `libx2c`).  Result: `bin/xxzccsdt`.
+   `make` in `<cfour>/zccsdt` of a built tree (it needs `lib/libx2cint.a`,
+   `lib/liblibr.a` and the modules of `libx2c`).  Result: `bin/xzccsdt`.
    For the program over MPI ranks, in the directory:
 
-       make XZMPI=1 MPICC=mpiicc          # -> bin/xxzccsdt_mpi, beside the serial one
+       make XZMPI=1 MPICC=mpiicc          # -> bin/xzccsdt_mpi, beside the serial one
+
+   (`./configure` or `./config.status` write `make.config` anew: the x2cso
+   build needs `-mcmodel=medium` in its line `fcflags:=` for vdint, which
+   CFOUR's configure does not add.)
 
 4. Check (in a job; reference binaries: `make` and `make MPI=1` in
-   `cfour/xzccsdt` of this repository):
+   `cfour/xzccsdt` of this repository; `--ref-args` for a reference built
+   before the program took its job from the ZMAT alone, commit a38e493):
 
-       cfour/merge/regress.sh --ref build/xzccsdt/xzccsdt     --new <cfour>/bin/xxzccsdt --eom
-       cfour/merge/regress.sh --ref build/xzccsdt_mpi/xzccsdt --new <cfour>/bin/xxzccsdt_mpi --np 2
+       <cfour>/zccsdt/test/run.sh <cfour>/bin
+       cfour/merge/regress.sh --ref build/xzccsdt/xzccsdt     --new <cfour>/bin/xzccsdt --eom
+       cfour/merge/regress.sh --ref build/xzccsdt_mpi/xzccsdt --new <cfour>/bin/xzccsdt_mpi --np 2
+
+   The binaries take no argument: `regress.sh` sets `CALC` (`PROPS`,
+   `EXCITE`) of the ZMAT of each case and runs `xjoda` again before each
+   step (`--cfourbin`); the steps after the first take the files `XZAMPS`,
+   `XZLAMB` of the first.
 
 5. When this repository changes: run `assemble.sh` again with the same
    arguments (it empties the directory, which it recognises by its file
@@ -82,10 +95,17 @@ are.  The directory is generated; the sources stay here.
     and the objects of the modules it uses.  CFOUR's `config/mkdep90.py`
     (`.f90deps`) reads `use` only in the compiled file itself, and here most
     of them are in the includes.
-- A `README` (what the program is, the commit, how to regenerate, the origin
-  of every file).
+- A `README` (what the program is, how to build it in a built tree, how
+  to run it - the ZMAT keywords -, the test, the commit, how to regenerate,
+  the origin of every file).
+- `test/`: `cfour/merge/test` (HF / 6-31G, X2C-1e, `%dglin`, `CALC=CCSDT`;
+  `GENBAS` with CFOUR's entries `F:6-31G`, `H:6-31G` unchanged; `run.sh
+  <cfour>/bin` runs the chain and the program twice in a new directory and
+  prints PASS or FAIL).
 
-No source of the repository had to be changed for CFOUR's rules.
+For CFOUR's rules the modules `xzfrzd` and `xzpland` are in files of their
+own: `config/mkdep90.py` makes a file that defines a module and uses it
+depend on itself, and make then prints `Circular ... dependency dropped`.
 
 ## MPI
 
@@ -153,17 +173,15 @@ through this Makefile, a CFOUR configured with `--enable-mpi`.
 
 ## Open points
 
-- **The name.**  Directory `xzccsdt` gives the program `xxzccsdt` by CFOUR's
-  convention (`--name`, `--prog`).  The repository's own build, its
-  documentation, the output files of the ranks (`xzccsdt.rNNNN`) and the
-  Python front end (`python -m zccsdt.cfour --chain`) say `xzccsdt`.
+- **The name.**  Directory `zccsdt`, program `xzccsdt` (CFOUR's
+  convention x + directory), as the repository's own build.
 - **`-xHost`** (`XZ_ARCH`): CFOUR's flags name no instruction set; the
   timings of docs/native.md are with it.  A binary built with it runs only on
   processors that have the instruction set of the build host.
 - **Messages of the build that are CFOUR's**: `-extend_source ... deprecated`
-  (its `FCFLAGS`), and `Circular ../xzccsdt/xzplan.o <- ../xzccsdt/xzplan.o
-  dependency dropped` (`mkdep90.py` writes a dependency of a file on itself
-  when it uses a module that it defines); both harmless.
+  (its `FCFLAGS`).  `make -n` at the top level still prints `Circular`
+  lines for `libx2c/x2cint1e.o`, `x2cint1eqp.o` and `sox2catm/fermi2p.o`
+  (CFOUR's own files); none for `zccsdt` since the module split.
 - **`make clean`** without `XZMPI=1` leaves `bin/x<NAME>_mpi` (CFOUR's rule
   removes `INST_PROGS`).
 - **A CFOUR configured with `--enable-mpi`** (read, not run): the serial
@@ -171,12 +189,30 @@ through this Makefile, a CFOUR configured with `--enable-mpi`.
   initialise MPI twice (`xzmpi_init`, then `MPI_INIT` in libr's
   `initenv('MODULE')` on rank 0) - `xzccsdt.f` would have to leave out the
   call of `initenv` in that case.
-- GENBAS and the driver (`xcfour`, the scripts that call the chain) are not
-  part of this: the program is called by hand or by the front end.
+- The driver (`xcfour`, the scripts that call the chain) is not part of
+  this: the program is called by hand or by the front end, without
+  arguments; the job comes from the ZMAT (docs/native.md, section 1).
 - Nothing in `make.rules`, `make.config.in` or `configure.ac` has to change.
   Optional: the program's name in `openmp_whitelist` of `make.rules.in`.
 
 ## Results
+
+**2026-10-12, the interface without arguments** (node c510, 8 threads).
+Reference: the repository binaries of 2026-10-10 (with arguments,
+`--ref-args`); under test: `bin/xzccsdt` (`bin/xzccsdt_mpi`) of the private
+tree `cfour_merge_test/serial`, assembled as `zccsdt` (commit a38e493 and
+the kit of this commit), driven by the ZMAT with `xjoda` run again before
+each step.  `make` and `make -n` in the directory: no `Circular` line.
+
+| binaries | runs | printed lines | differ | density files: byte-identical / all | largest difference of an element |
+|---|---|---|---|---|---|
+| `xzccsdt` vs repository (arguments), serial, with `eom` | 28 + 28, all exit 0 | 307 | 0 | 26 / 49 | 5.6e-17 |
+
+The steps after the first (`(q)`, `density`, `eom`) took `XZAMPS` and
+`XZLAMB` of the first (no `converged in` line, as the reference with its
+arguments).  `test/run.sh <tree>/bin`: PASS (E(SCF) -100.064473416710,
+E(CCSDT) -100.196412399000, the second run takes `XZAMPS`; the repository
+binary with the argument `ccsdt` gives the same numbers).
 
 2026-10-10, node c510 (8 cores), `regress.sh`; reference = the binaries of
 `cfour/xzccsdt/Makefile` (`make`, `make MPI=1`) of the same sources, built
@@ -198,9 +234,9 @@ density files.
 
 | binaries | runs | printed lines | differ | density files: byte-identical / all | largest difference of an element |
 |---|---|---|---|---|---|
-| `xxzccsdt` vs repository, serial (with `eom`) | 28 + 28, all exit 0 | 307 | 0 | 26 / 49 | 5.6e-17 |
-| `xxzccsdt_mpi` vs repository `MPI=1`, 2 ranks | 21 + 21, all exit 0 | 203 | 0 | 25 / 49 | 5.6e-17 |
-| `xxzccsdt_mpi` vs repository `MPI=1`, 4 ranks | 21 + 21, all exit 0 | 203 | 0 | 21 / 49 | 5.6e-17 |
+| `xxzccsdt` (old name) vs repository, serial (with `eom`) | 28 + 28, all exit 0 | 307 | 0 | 26 / 49 | 5.6e-17 |
+| `xxzccsdt_mpi` (old name) vs repository `MPI=1`, 2 ranks | 21 + 21, all exit 0 | 203 | 0 | 25 / 49 | 5.6e-17 |
+| `xxzccsdt_mpi` (old name) vs repository `MPI=1`, 4 ranks | 21 + 21, all exit 0 | 203 | 0 | 21 / 49 | 5.6e-17 |
 
 (Differences of 1e-17 in elements of 1e-2: taken to be the order of sums
 over threads; one binary run twice was not compared.)  The printed lines of the serial program and of 2
