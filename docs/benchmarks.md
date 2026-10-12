@@ -4025,6 +4025,71 @@ and the t2 `<ov||vv>` term of W_vvvo 6 %.
 The same per-cycle numbers side by side: 68 minutes for 30 + 186 complex
 dense on 16 cores, 5.2 minutes for 28 + 330 real in blocks on 24.
 
+## The approximate models CC2, CC3, CC4 (2026-10-12)
+
+`docs/ccn.md` has the definitions, the validation (CFOUR's EOMEE-CC2 /
+CC3 and MRCC's CC3 / CC4 for H2O, the dense reference and limits for the
+rest) and the porting notes; here the timings and the ladder.
+
+**CC3 with and without stored triples against CCSDT and CCSD(T)** (job
+31901611, node c521, Xeon Gold 6248R, 24 threads, MKL; seconds per
+iteration after the first, peak memory; a sigma vector: with R3 stored one
+of EOM-CC3 / EOM-CCSDT, without stored triples one folded sigma vector):
+
+| | o + v | CC3, no T3 | CC3, T3 stored | CCSDT | DirectZCCSD: CCSD iteration; (T) |
+|---|---|---|---|---|---|
+| HBr / cc-pVQZ-DK, X2C, 10 frozen, lowest 120 virtual; real, label blocks | 26 + 120 | 2.54 s, 4.2 GB | 3.63 s, 6.5 GB | 6.28 s, 6.9 GB | 0.58 s (complex, Kramers); 4.6 s |
+| sigma vector | | 4.2 s | 5.4 s | 9.8 s | |
+| the same on the packed layout (real) | 26 + 120 | 11.6 s, 5.0 GB | 27.1 s, 21.6 GB | 84.2 s, 22.7 GB | |
+| sigma vector | | 23.9 s | 35.7 s | 152 s | |
+| H2O / cc-pVTZ, X2C, all electrons; complex, dense | 10 + 106 | 1.42 s, 3.4 GB | 2.43 s, 4.2 GB | 6.58 s, 5.0 GB | 0.04 s; 0.24 s |
+| sigma vector | | 2.65 s | 3.97 s | 11.7 s | |
+
+Threads for CC3 without T3 (whole iteration, 1 / 8 / 24): HBr in blocks
+13.6 / 3.28 / 2.54 s; H2O complex 18.6 / 2.91 / 1.42 s.
+
+**CC4 against CCSDT, (Q) and CCSDTQ**: the job (31906712; HBr / cc-pVDZ-DK
+26 + 28 with CCSDTQ, HBr / cc-pVTZ-DK 26 + 60 without it) had not run at
+the time of writing.  Measured on the shared tunnel node (8 threads, other
+jobs on it; orders of magnitude only): HBr / cc-pVDZ-DK, 28 frozen
+(8 + 28, labels): a CC4 iteration 0.50 s, a CCSDT iteration 0.07 s, (Q)
+0.27 s, a CCSDTQ iteration (blocks) 0.19 s; H2O / 6-31G (10 + 16, packed):
+CC4 to convergence 9.4 s, CCSDTQ 8.4 s.  At these sizes CC4 without T4 is
+no cheaper than CCSDTQ with T4 in blocks: its cost is (Q) per iteration
+(o^4 v^5 / 8), which wins over o^5 v^5, o^4 v^6 only for many virtual
+spinors.
+
+**The ladder** (`bench/ccn/ladder.py`; tunnel node):
+
+| Model | H2O / 6-31G: E / Eh | lowest triplet / eV | lowest singlet / eV | HBr / cc-pVDZ-DK, 8 + 28: E / Eh | lowest totally symmetric state / eV |
+|---|---|---|---|---|---|
+| CC2 | -76.113595476239 | 7.600970 | 8.370858 | -2604.972364669698 | 6.718960 |
+| CCSD | -76.119346380616 | 7.650348 | 8.386475 | -2604.987068094058 | 6.654323 |
+| CC3 | -76.120380732033 | 7.745192 | 8.477051 | -2604.989093782339 | 6.625943 |
+| CCSDT | -76.120425238933 | 7.750656 | 8.481456 | -2604.989303191227 | 6.622629 |
+| CC4 | -76.120890191123 | 7.752726 | 8.484003 | -2604.989515873733 | 6.623558 |
+| CCSDTQ | -76.120856115043 | 7.754539 (MRCC LR-CCSDTQ) | 8.486226 (MRCC) | -2604.989534096446 | - |
+| FCI | -76.120867535917 | 7.755438 | 8.487146 | - | - |
+
+H2O / 6-31G: RHF as spin orbitals, all electrons, the basis entries and
+the geometry (bohr) of section 7 (E(SCF) = -75.983948495279, the same in
+CFOUR and MRCC); FCI of PySCF (`fci.FCI`, the states told apart by their
+<S^2>).  HBr / cc-pVDZ-DK: X2C spinors of PySCF (x2c.UHF, `conv_tol`
+1e-12), 28 spinors frozen, the m_j-adapted real spinors; the lowest state
+of label shift 0 (CC4: the folded problem in the sectors of the labels,
+the totally symmetric states).  CCSDTQ has no excitation energies in this
+program (no Jacobian route): those of MRCC's LR-CCSDTQ on the same basis
+and geometry for H2O (totals -75.835882067845 and -75.808993052699, its
+E(CCSDTQ) -76.120856115034).  The CC2, CCSD, CC3 numbers of H2O are those
+validated against CFOUR, CCSDT and CCSDTQ against MRCC (to 1e-11 Eh and
+1e-10 Eh in the excitation energies); `bench/ccn/ladder.py`.
+
+For H2O CC4 overshoots in the ground state - 3.4e-5 Eh below CCSDTQ and
+2.3e-5 Eh below FCI (its quadruples lack the terms of CCSDTQ that damp
+them) - for HBr it is 1.8e-5 Eh above CCSDTQ; its excitation energies lie
+between those of CCSDT and CCSDTQ for H2O.  CC3 is within 0.006 eV of
+CCSDT for H2O and 0.004 eV for HBr.
+
 ## Correctness references
 
 | Reference | Agreement | Test |

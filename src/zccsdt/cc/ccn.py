@@ -223,6 +223,119 @@ def cc2_update_amps(opts, t1, t2, eris):
     return t1 + R1 / eia, t3pack.t2_update(t2, R2, om, vm, mo_e[:nocc], mo_e[nocc:] + opts.level_shift)
 
 
+# ------------------------------------------------------------ CC4 with T4 stored
+
+def cc4_rhs(t2, T3, ints, batch_bytes=None):
+    '''The right-hand side of the quadruples equation of CC4,
+    <Q| [V~, T3] + 1/2 [[V~, T2], T2] |0> (packed [C(o,4), C(v,4)]), from
+    the T4 equation of CCSDTQ (zccsdt.cc.t4engine.residual) with T4 = 0:
+    that is a polynomial in (T2, T3) - [V~, T3] is the part linear in T3,
+    1/2 [[V~, T2], T2] the part quadratic in T2 at T3 = 0, and the other
+    terms are of the orders T2 T3, T3 T3 and T2^3 - so the two parts are
+    exact combinations of four evaluations:
+        [V~, T3]             = (R(0, T3) - R(0, -T3)) / 2
+        1/2 [[V~, T2], T2]   = (R(T2, 0) + R(-T2, 0)) / 2.'''
+    from math import comb
+    from zccsdt.cc import t4engine
+    no, nv = ints.nocc, ints.nvir
+    T4 = np.zeros((comb(no, 4), comb(nv, 4)), dtype=np.result_type(t2, T3, ints.oovv))
+    z2, z3 = np.zeros_like(t2), np.zeros_like(T3)
+    r = [t4engine.residual(a2, a3, T4, ints, batch_bytes)[0] for a2, a3 in ((z2, T3), (z2, -T3), (t2, z3), (-t2, z3))]
+    return 0.5 * (r[0] - r[1] + r[2] + r[3])
+
+
+def cc4_kernel(eris, conv_tol=1e-10, conv_tol_normt=1e-8, max_cycle=200, diis_space=8, verbose=False,
+               t1=None, t2=None, t3=None, model='cc4', store_t4=True):
+    '''CC4 with T4 stored (docs/ccn.md, section 11): the singles, doubles
+    and triples equations of CCSDTQ (the CCSDT step and the T4 terms of the
+    T4 engine), the quadruples equation [F, T4] = -([V~, T3] + 1/2 [[V~, T2],
+    T2]) solved in closed form for the semicanonical spinors (cc4_rhs).
+    Everything in memory, dense layout: the reference of the route without
+    stored T4.  ``model`` 'ccsdtq': the full quadruples equation (the limit;
+    zccsdt.cc.ccsdtq does that in production).  ``store_t4`` False: no T4
+    - the quadruples of every occupied quadruple are made from the current
+    amplitudes, contracted into the doubles and triples equations and
+    discarded (zccsdt.cc.cc4fly).  Returns a solver.Result with t4 (packed;
+    None without T4) and the semicanonical integrals.'''
+    import time
+    from math import comb
+    from zccsdt.cc import ccsd, ccsdt_opt, solver, t4engine, t4pack as P
+    from zccsdt.cc.diis import DIIS
+    eris, rotation = semicanonicalize(eris)
+    no = eris.nocc
+    nv = np.asarray(eris.fock).shape[0] - no
+    if t1 is None or t2 is None:
+        t1, t2 = solver.init_amps(eris)
+    dtype = np.result_type(t1, t2, eris.oovv, eris.fock)
+    t1, t2 = t1.astype(dtype), t2.astype(dtype)
+    nI3, nA3, nI, nA = comb(no, 3), comb(nv, 3), comb(no, 4), comb(nv, 4)
+    T3 = np.zeros(nI3 * nA3, dtype=dtype) if t3 is None else np.array(t3, dtype=dtype).ravel()
+    T4 = np.zeros((nI, nA), dtype=dtype) if store_t4 else None
+    e = np.asarray(eris.fock).diagonal().real
+    eo, ev = e[:no], e[no:]
+    d2 = eo[P.tuples(no, 2)].sum(axis=1)[:, None] - ev[P.tuples(nv, 2)].sum(axis=1)[None, :]
+    d3 = (eo[P.tuples(no, 3)].sum(axis=1)[:, None] - P.tuple_sums(ev, 3)[None, :]).ravel()
+    d4 = eo[P.tuples(no, 4)].sum(axis=1)[:, None] - P.tuple_sums(ev, 4)[None, :]
+    step = solver.Options()
+    plan = ccsdt_opt.plan_for(eris, dtype, solver.Options(incore_complete=True))
+    adiis = DIIS(space=diis_space, incore=True)
+    e_old = ccsd.energy(t1, t2, eris)
+    conv, timings = False, []
+    for cycle in range(max_cycle):
+        t0 = time.perf_counter()
+        t1n, t2n, t3n = ccsdt_opt.update_amps(step, t1, t2, T3, eris, plan=plan)
+        ints = t4engine.Dressed.from_eris(eris, t1)
+        if not store_t4:
+            from zccsdt.cc import cc4fly
+            r2, r3 = cc4fly.run_for(eris, ints, e, t2, T3)
+            del ints
+            t2n = t2n + P.unpack(r2 / d2, no, nv, 2)
+            t3n = t3n + r3.ravel() / d3
+            normt = float(np.linalg.norm(t1n - t1) + np.linalg.norm(t2n - t2) + 6 * np.linalg.norm(t3n - T3))
+            t1, t2, T3 = solver._from_parts(adiis.update(solver._parts(t1n, t2n, t3n)), no, nv, True)
+            T3 = np.array(T3)
+            e_new = ccsd.energy(t1, t2, eris)
+            timings.append(time.perf_counter() - t0)
+            if verbose:
+                print('cycle %3d  E_corr = %.15f  dE = %.3e  |dt| = %.3e' % (cycle + 1, e_new.real, (e_new - e_old).real, normt))
+            done = abs(e_new - e_old) < conv_tol and normt < conv_tol_normt
+            e_old = e_new
+            if done:
+                conv = True
+                break
+            continue
+        # the T4 terms of the doubles and triples equations (they do not depend on T2, T3)
+        R4, r3, r2 = t4engine.residual(np.zeros_like(t2), np.zeros_like(T3), T4, ints)
+        if model == 'cc4':
+            T4n = cc4_rhs(t2, T3, ints) / d4
+        else:
+            R4 = t4engine.residual(t2, T3, T4, ints)[0]
+            T4n = T4 + R4 / d4
+        del ints, R4
+        t2n = t2n + P.unpack(r2 / d2, no, nv, 2)
+        t3n = t3n + r3.ravel() / d3
+        normt = float(np.linalg.norm(t1n - t1) + np.linalg.norm(t2n - t2) + 6 * np.linalg.norm(t3n - T3)
+                      + 24 * np.linalg.norm(T4n - T4))
+        parts = adiis.update(solver._parts(t1n, t2n, t3n) + [T4n.ravel()])
+        t1, t2, T3 = solver._from_parts(parts[:3], no, nv, True)
+        T3 = np.array(T3)
+        T4 = parts[3].reshape(nI, nA).copy()
+        e_new = ccsd.energy(t1, t2, eris)
+        timings.append(time.perf_counter() - t0)
+        if verbose:
+            print('cycle %3d  E_corr = %.15f  dE = %.3e  |dt| = %.3e' % (cycle + 1, e_new.real, (e_new - e_old).real, normt))
+        done = abs(e_new - e_old) < conv_tol and normt < conv_tol_normt
+        e_old = e_new
+        if done:
+            conv = True
+            break
+    adiis.close()
+    res = solver.Result(e_corr=e_old, e_tot=eris.e_hf + float(np.real(e_old)), converged=conv, ncycle=cycle + 1,
+                        t1=t1, t2=t2, t3=T3, timings=timings, eris=eris, rotation=rotation)
+    res.t4 = T4
+    return res
+
+
 # ------------------------------------------------------------ semicanonical spinors
 
 def fock_groups(f, labels=None):

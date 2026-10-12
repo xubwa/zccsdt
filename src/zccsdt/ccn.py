@@ -233,7 +233,58 @@ def CC3(mf, frozen=None, mo_coeff=None, mo_occ=None):
     return _for_reference(GCC3, 'CC3', mf, frozen, mo_coeff, mo_occ)
 
 
-def __getattr__(name):
-    if name in ('CC4', 'GCC4'):
-        raise AttributeError('zccsdt.%s: CC4 is not implemented yet (docs/ccn.md)' % name)
-    raise AttributeError(name)
+class GCC4(_Model):
+    __doc__ = '''CC4 on a GHF or two-component spinor (X2C) reference: the singles,
+    doubles and triples equations of CCSDTQ, the quadruples equation
+    <Q| [V~, T3] + 1/2 [[V~, T2], T2] + [F, T4] |0> (docs/ccn.md, section 11),
+    on semicanonical spinors.
+
+    store_t4 : bool
+        False (default): no T4 - the quadruples of every occupied quadruple
+        are made from the current amplitudes, contracted into the doubles
+        and triples equations and discarded (zccsdt.cc.cc4fly); memory of
+        CCSDT.  True: T4 stored, from the T4 engine of CCSDTQ (the
+        reference route, everything in memory).
+    The packed layout of T3 (the blocks of the symmetry labels are not used
+    by CC4).  eom_ee(): the folded eigenproblem in the space of singles,
+    doubles and triples, R4 folded in at the frequency of every root.
+
+''' + GCCSDT.__doc__
+    _title = 'GCC4'
+    _subtitle = 'CC4 on spin orbitals or spinors (GHF, X2C), real or complex'
+    _method = 'CC4'
+    model = 'cc4'
+    store_t4 = False
+    _block_iterations = False
+    _keys = GCCSDT._keys | {'store_t4', 't4'}
+
+    def _solve(self, eris, plan, t1, t2, t3, callback):
+        from zccsdt.cc import ccn as K
+        res = K.cc4_kernel(eris, self.conv_tol, self._conv_tol_normt(), self.max_cycle, self.diis_space,
+                           t1=t1, t2=t2, t3=t3, store_t4=self.store_t4)
+        self._eris = res.eris
+        self.t4 = res.t4
+        return res
+
+    def eom_ee(self, nroots=3, conv_tol=1e-6, shift=None, **kwargs):
+        '''The ``nroots`` lowest excitation energies of CC4 (Hartree) and the
+        Solved of zccsdt.cc.ccn.folded_roots: the folded problem, each root
+        self-consistent in its frequency (zccsdt.cc.cc4fly.eom).'''
+        from zccsdt.cc import cc4fly
+        if self.t1 is None:
+            raise RuntimeError('GCC4.eom_ee(): no amplitudes (kernel() first)')
+        if shift not in (None, 0):
+            raise NotImplementedError('CC4: the states of all labels together (no label shifts)')
+        e, sol = cc4fly.eom(self._eris, self.t1, self.t2, self.t3, nroots, conv_tol, **kwargs)
+        self.eom, self.e_ee = sol, e
+        return e, sol
+
+    def eom_ip(self, nroots=3, **kwargs):
+        raise NotImplementedError('CC4: ionized and attached states are not implemented')
+
+    eom_ea = eom_ip
+
+
+def CC4(mf, frozen=None, mo_coeff=None, mo_occ=None):
+    '''CC4 for the reference ``mf`` (GCC4), as CC2().'''
+    return _for_reference(GCC4, 'CC4', mf, frozen, mo_coeff, mo_occ)

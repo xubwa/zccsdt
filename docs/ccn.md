@@ -606,3 +606,159 @@ the active spinors per label block, before the integral transformation).
 **Checks for the port**: the numbers of sections 7 and 9; for one batch,
 the four sums against pass 1 over the stored T3 of the closed form
 (`tests/test_cc3fly.py::test_spin_orbitals`).
+
+## 11. CC4
+
+`zccsdt.CC4(mf)` (`GCC4`; `store_t4 = False` by default), `ccn.cc4_kernel`
+(T4 stored, or `store_t4=False`), `zccsdt.cc.cc4fly` (the quadruples per
+occupied quadruple; the folded excitation energies `cc4fly.eom`),
+`tests/test_cc4.py`.
+
+**T4 stored** (`ccn.cc4_kernel`, the reference route).  An iteration is
+the CCSDT step, the T4 terms of the doubles and triples equations from the
+T4 engine of CCSDTQ (`t4engine.residual` with T2 = T3 = 0: those terms do
+not depend on them), and the quadruples equation in closed form,
+T4 = ([V~, T3] + 1/2 [[V~, T2], T2]) / D4 on semicanonical spinors.  The
+right-hand side comes from the same engine, unchanged: with T4 = 0 its R4
+is a polynomial in (T2, T3) whose other terms have the orders T2 T3,
+T3 T3 and T2^3, so `ccn.cc4_rhs` takes `[V~, T3] = (R(0, T3) - R(0, -T3))
+/ 2` and `1/2 [[V~, T2], T2] = (R(T2, 0) + R(-T2, 0)) / 2`, exact
+combinations of four evaluations.  Dense layout, in memory; five T4-engine
+residuals per iteration.
+
+**Without stored T4** (`cc4fly.run`, the production route).  For every
+occupied quadruple I:
+
+1. the right-hand side r[A] = <Q| [V~, T3] + 1/2 [[V~, T2], T2] |0> of its
+   virtual quadruples A: the quantity r of the (Q) correction
+   (`quadruples.Quadruples.right`: five products, the splits of the
+   quadruple stacked along the summed index, the reductions of
+   `csrc/tnpack.c`; its intermediates Xo and Xv) with the T1-dressed blocks
+   in the place of the bare ones.  The class is used as it is, on a
+   container of the dressed blocks (`cc4fly._Shim`): it reads `<ab||ei>`
+   and `<ma||ij>` as conjugates of `<ie||ab>` and `<ij||ma>`, which holds
+   for bare integrals only, so the container holds the conjugated dressed
+   blocks there;
+2. the row t4[I, A] = r / (e_I - e_A + omega);
+3. the four sums of T4 in the equations of CCSDTQ (`cc4fly.Back`): the
+   row expanded as [(ab), (ef)] and [e, (abc)] (`tn_expand`), then
+   - R2[P, :] += sgn X22 <P'||:> over the six splits (P | P'): one product
+     with the six rows of `<mn||ef>` stacked;
+   - R3[J] += sgn f~[m, :] X13 over the four splits (m | J);
+   - R3[J] -= the reduction (c | ab) of sgn <cm||ef>~ X22^T over the four
+     splits (`tn_reduce`);
+   - R3[(P, k)] -= sgn sgn' <P'||e k>~ X13 over the six splits (P | P') and
+     the k outside P: one product (o x v x C(v,3)) and a scatter of its
+     rows.
+
+Nothing of the size of T4 is stored; the memory is that of CCSDT (T3 and
+the operands of its step) plus that of (Q) (its Xv for the pairs (x, l) of
+one l at a time, as its plan holds them, and the products of one
+quadruple).
+
+**Work per iteration** (multiply-adds; o, v active occupied and virtual):
+the CCSDT step, the (Q) products o^4 v^4 (v + o) / 12 with o^2 v^5 / 4 for
+Xv, and the four sums: o^4 v^5 / 24 (with `<cm||ef>`) + o^5 v^4 / 24 (with
+`<mn||ek>`) + lower terms.  So o^4 v^5 / 8 beyond the CCSDT step (against
+o^5 v^5 and o^4 v^6 per iteration of CCSDTQ).
+
+**Excitation energies** (`cc4fly.eom`; `GCC4.eom_ee`).  CCSDTQ has no
+Jacobian route here, so only the folded form: vectors of singles,
+doubles and triples, R4 folded in at the frequency of every root
+(`cc4fly.sigma`):
+
+    sigma_P = (the EOM-CCSDT sigma vector at the CC4 amplitudes, eom_opt.sigma)
+            + the T4 terms with T4 of the ground state and the integrals of H' = [H~, R1]
+            + the T4 terms with r4 and the integrals of H~,
+    r4 = ([V', T3] + [V~, R3] + [[V', T2], T2] / 2 + [[V~, R2], T2]) / (omega + e_I - e_A):
+
+the right-hand side of r4 by polarization - half the difference of the
+(Q) quantity at (t2 + r2, T3 + R3) and at (t2 - r2, T3 - R3), plus the one
+of the integrals of H' at (t2, T3) - so three (Q) passes for r4 and one for
+T4 per sigma vector; the integrals of H' by the five-point formula on the
+dressing (`cc4fly.dressed_derivative`, exact: the dressing is a polynomial
+of degree four at most in t1).  The roots: those of the singles-doubles
+block as the start, then `ccn.folded_roots` per root.
+
+**Validation** (`tests/test_cc4.py`; agreements observed in brackets).
+
+| Check | Agreement |
+|---|---|
+| T4 stored against the dense reference `ccn_ref` (LiH / STO-3G; H2O / STO-3G frozen core, complex spin orbitals; H2O all electrons) | 1e-11 Eh (4e-13) |
+| MRCC's CC4 (closed-shell code, its own integrals), H2O / STO-3G and H2O / 6-31G (basis and geometry of section 7) | 1e-10 Eh (STO-3G: the twelve digits of MRCC; 6-31G: 8e-13 without T4, 4e-13 stored) |
+| the full quadruples equation in the same driver against `zccsdt.cc.ccsdtq` | 1e-12 Eh (1e-17) |
+| four electrons, H4 / STO-3G: CCSDTQ = FCI, CC4 not | 1e-10 Eh |
+| without T4 against T4 stored: energy | 1e-12 Eh (2e-16) |
+| the four sums for a random T4 against the T4 engine; the T4 rows against the closed form; the whole pass at the CC4 amplitudes; real and complex | 1e-13 relative (1e-16) |
+| folded roots against all eigenvalues of the dense CC4 Jacobian (LiH, real and complex) | 1e-9 Eh (4e-12) |
+
+H2O / 6-31G (10 + 16): 10 s for CC4 without T4, 52 s with T4 stored (the
+tunnel node, 8 threads, shared).
+
+**Symmetry labels** (`cc4fly.run_sectors`; used wherever the integrals
+carry labels that the (Q) sector code takes).  The products of an occupied
+quadruple in the blocks of its total label (`quadruples_sym`: one block
+per label of a pair on two pairs, one per label of an index on an index
+and a triple; the Xv blocks of every drive from a `Sectors` of its own,
+whose cache of `<bc||ef>` blocks belongs to its integrals); the row over
+the denominator written into the places of the blocks by the existing
+kernel `zc_qg_sector_vectors` (csrc/tnpack.c: the left-hand quadruples of
+the (Q) gradient - here with the third product zero and omega added to
+eo; its two-pair blocks come out conjugated and are conjugated back); the
+four sums block by block (products of the blocks with the integral blocks
+of the labels, `zc_rows_cols_add`, `tn_reduce`).  The CCSDT step inside
+CC4 runs on the packed layout (`GCC4` has no T3 blocks).  The excitation
+energies in sectors are those of the totally symmetric states (label
+shift 0): the quadruples of a sector follow the label of the occupied
+quadruple, so every vector is projected on shift 0 (`eom.Sector`).
+Against the packed route (`tests/test_cc4.py::test_symmetry_sectors`):
+HBr / cc-pVDZ-DK, 28 frozen (8 + 28, six classes): energy 3e-17; the two
+lowest totally symmetric roots 1e-11; LiH / 6-31G: 1.5e-10.
+
+**Not done.**  Label shifts, IP and EA for CC4; the CCSDT step of CC4 in
+label blocks.
+
+**Porting to the native program.**  No new kernel: the forward of a
+quadruple is the (Q) quantity r that the native program computes already
+(docs/native.md, section 5), with the dressed blocks `<cd||el>~`,
+`<md||kl>~`, `<cd||ef>~`, `<mn||kl>~`, `<md||el>~` (those of the T4 engine,
+`t4engine.Dressed`) in the place of the bare ones - and without the
+conjugation shortcuts, which the dressed blocks do not have; the row
+divided by D4 (+ omega); the four sums of item 3 with `zc_tn_expand`,
+`zc_tn_reduce` (csrc/tnpack.c, already linked) and GEMMs.  Integrals with
+at most three virtual indices besides the packed `<ab||cd>~` of the (Q)
+intermediate Xv.  The loop over the quadruples is the (Q) schedule (by the
+largest index l, Xv for the pairs (x, l)); R2 and R3 are accumulated over
+all quadruples (per rank, summed at the end); the folded EOM needs what
+section 10 lists for CC3, with four forward passes per sigma vector.
+
+## 12. The ladder
+
+| Model | H2O / 6-31G: E / Eh | lowest triplet / eV | lowest singlet / eV | HBr / cc-pVDZ-DK, 8 + 28: E / Eh | lowest totally symmetric state / eV |
+|---|---|---|---|---|---|
+| CC2 | -76.113595476239 | 7.600970 | 8.370858 | -2604.972364669698 | 6.718960 |
+| CCSD | -76.119346380616 | 7.650348 | 8.386475 | -2604.987068094058 | 6.654323 |
+| CC3 | -76.120380732033 | 7.745192 | 8.477051 | -2604.989093782339 | 6.625943 |
+| CCSDT | -76.120425238933 | 7.750656 | 8.481456 | -2604.989303191227 | 6.622629 |
+| CC4 | -76.120890191123 | 7.752726 | 8.484003 | -2604.989515873733 | 6.623558 |
+| CCSDTQ | -76.120856115043 | 7.754539 (MRCC LR-CCSDTQ) | 8.486226 (MRCC) | -2604.989534096446 | - |
+| FCI | -76.120867535917 | 7.755438 | 8.487146 | - | - |
+
+H2O / 6-31G: RHF as spin orbitals, all electrons, the basis entries and
+the geometry (bohr) of section 7 (E(SCF) = -75.983948495279, the same in
+CFOUR and MRCC); FCI of PySCF (`fci.FCI`, the states told apart by their
+<S^2>).  HBr / cc-pVDZ-DK: X2C spinors of PySCF (x2c.UHF, `conv_tol`
+1e-12), 28 spinors frozen, the m_j-adapted real spinors; the lowest state
+of label shift 0 (CC4: the folded problem in the sectors of the labels,
+the totally symmetric states).  CCSDTQ has no excitation energies in this
+program (no Jacobian route): those of MRCC's LR-CCSDTQ on the same basis
+and geometry for H2O (totals -75.835882067845 and -75.808993052699, its
+E(CCSDTQ) -76.120856115034).  The CC2, CCSD, CC3 numbers of H2O are those
+validated against CFOUR, CCSDT and CCSDTQ against MRCC (to 1e-11 Eh and
+1e-10 Eh in the excitation energies); `bench/ccn/ladder.py`.
+
+For H2O CC4 overshoots in the ground state - 3.4e-5 Eh below CCSDTQ and
+2.3e-5 Eh below FCI (its quadruples lack the terms of CCSDTQ that damp
+them) - for HBr it is 1.8e-5 Eh above CCSDTQ; its excitation energies lie
+between those of CCSDT and CCSDTQ for H2O.  CC3 is within 0.006 eV of
+CCSDT for H2O and 0.004 eV for HBr.

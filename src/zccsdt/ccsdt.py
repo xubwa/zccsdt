@@ -1138,7 +1138,7 @@ class GCCSDT(UCCSDT):
             self._sorted = (o, v)
         C = (np.asarray(self.mo_coeff) if real is None else real)[:, cols]
         self.semicanonical = None
-        if self.model in ('cc2', 'cc3'):
+        if self.model in ('cc2', 'cc3', 'cc4'):
             # the approximate models: semicanonical spinors (zccsdt.cc.ccn; invariant models), made
             # before the integrals - within the labels of the iterations, real spinors stay real
             from zccsdt.cc import ccn

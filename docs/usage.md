@@ -597,6 +597,8 @@ are in `docs/ccn.md`.
 | `CC3` | singles and doubles of CCSDT; triples `<T\| [V~, T2] + [F, T3] \|0>` | T1, T2, T3 (stored) | o^3 v^4: no ring term, no ladders on T3 | `eom_ee` with label shifts, `eom_ip` / `eom_ea` with short vectors, as EOM-CCSDT; a sigma vector reads R3 once and T3 once |
 | `CC3`, `store_t3 = False` | the same | T1, T2; the triples are made per batch of occupied triples, contracted and discarded (`docs/ccn.md` 9) | o^3 v^4; a work array of `mem_mb` at most, no array of the size of T3; in the blocks of the labels too; canonical spinors | `eom_ee`: the totally symmetric states, each root self-consistent in its frequency (`res.history[k]`: the frequencies of its steps); no label shifts, no IP / EA |
 | `CCSDT` | | T1, T2, T3 | o^4 v^4, o^3 v^5 | EOM-CCSDT |
+| `CC4` | singles, doubles, triples of CCSDTQ; quadruples `<Q\| [V~, T3] + 1/2 [[V~, T2], T2] + [F, T4] \|0>` | T1, T2, T3; T4 made per occupied quadruple and discarded (`store_t4 = True`: stored, the reference route) | the CCSDT step (packed layout) + o^4 v^5 / 8 (the (Q) products and the back contraction; in the sectors of the labels where the integrals have them) | `eom_ee`: the folded problem (R4 folded in); with labels the totally symmetric states; no label shifts, no IP / EA |
+| `CCSDTQ` | | T1 .. T4 | o^5 v^5, o^4 v^6 | none |
 
 `ccsdt_q()`, `solve_lambda()`, `make_rdm1()` are defined for CCSDT
 amplitudes and raise `NotImplementedError` in these classes.  On the level
