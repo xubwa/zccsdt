@@ -7,8 +7,9 @@
 module xzpland
   implicit none
   integer, parameter :: npar = 8
-  ! 1 nqs, 2 nbt, 3 nbp, 4 nba, 5 qxv, 6 qc22, 7 qc13, 8 qrows
-  integer(8) :: plo(npar), phi(npar)
+  ! 1 nqs, 2 nbt, 3 nbp, 4 nba, 5 qxv, 6 qc22, 7 qc13, 8 qrows; 9 nc3w (CC3
+  ! without stored triples: elements of the work of a batch of occupied triples)
+  integer(8) :: plo(npar + 1), phi(npar + 1)
   integer(8) :: pslot = 0, pchunk = 0
   logical :: pfile = .true.
   logical :: planq = .false.          ! only (Q) is planned (a rank that does no iterations)
@@ -36,6 +37,8 @@ contains
       qc13 = v
     case (8)
       qrows = v
+    case (9)
+      nc3w = v
     end select
   end subroutine
 end module xzpland

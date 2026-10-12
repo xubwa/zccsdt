@@ -613,7 +613,8 @@ subroutine N(xzbp2task)(w, kt3, gp, gq, p, nq, wd, adrv, bd, npart, nu, u0, vp, 
   nr = ndel(delta)
   nri = xzndel(din)
   qlo = vpoff(gq)
-  if (nri > 0) then
+  ! (noring, CC3: the drive terms alone; T is not gathered)
+  if (nri > 0 .and. .not. noring) then
     ! T[(d, m)][Q] of the pair on the pairs (d, m) of its delta (zero where
     ! the triples of m and P have no block in the layout of T)
     r0 = 0

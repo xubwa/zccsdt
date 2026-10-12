@@ -327,6 +327,8 @@ contains
     integer :: larg
     slices = .false.
     if (nrank == 1) return
+    ! (CC3 without stored triples has no T3 to slice: rank 0 does the DIIS of T1 and T2)
+    if (cc3mode == 2) return
     ! (the default with more than one rank; XZ_SLICES=0: rank 0 sends T3,
     ! takes the sum of the residual and holds the DIIS vectors alone)
     slices = .true.

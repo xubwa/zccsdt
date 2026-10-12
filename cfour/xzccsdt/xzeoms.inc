@@ -582,6 +582,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     it = it + 1
     nit = it
     call N(xzesmall)(n, gm, msub, ev, ym)
+    if (nfollow > 0) call follow()
     needdiag = .false.
     ! the converged roots among the eigenvectors, by their overlap
     call mark_converged()
@@ -593,6 +594,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
       mkeep = min(n, max(nroot + 2, 1_8), msub - nun)
       call compact()
       call N(xzesmall)(n, gm, msub, ev, ym)
+      if (nfollow > 0) call follow()
       call mark_converged()
       ntarget = min(nroot, n)
     end if
@@ -649,6 +651,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   !      iterated on: the records of the converged roots are dropped.
   if (needdiag) then
     call N(xzesmall)(n, gm, msub, ev, ym)
+    if (nfollow > 0) call follow()
     call mark_converged()
   end if
   nfound = min(nroot, n)
@@ -707,6 +710,57 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
 
 contains
 
+  ! (nfollow = m > 0: the m eigenpairs whose vectors have the largest weight on
+  ! the first m vectors of the basis - those the solver started from, or the
+  ! followed Ritz vectors after a compaction - go first, in the order of their
+  ! energies; the others follow in theirs)
+  subroutine follow()
+    integer(8) :: jj, kk, m, nsel
+    real(8) :: wgt(msub)
+    integer(8) :: sel(msub), rest(msub)
+    logical :: taken(msub)
+    complex(8) :: et(msub)
+    ZT :: yt(msub, msub)
+    m = min(nfollow, n)
+    if (m <= 0) return
+    do jj = 1, n
+      wgt(jj) = sum(abs(ym(1:m, jj))**2)
+    end do
+    taken = .false.
+    do kk = 1, m
+      best = -1d0
+      sel(kk) = 1
+      do jj = 1, n
+        if (taken(jj)) cycle
+        if (wgt(jj) > best) then
+          best = wgt(jj)
+          sel(kk) = jj
+        end if
+      end do
+      taken(sel(kk)) = .true.
+    end do
+    ! the selected in the order of their energies (ev is sorted: by index)
+    nsel = 0
+    do jj = 1, n
+      if (taken(jj)) then
+        nsel = nsel + 1
+        sel(nsel) = jj
+      end if
+    end do
+    kk = 0
+    do jj = 1, n
+      if (.not. taken(jj)) then
+        kk = kk + 1
+        rest(kk) = jj
+      end if
+    end do
+    sel(m + 1:n) = rest(1:n - m)
+    et(1:n) = ev(sel(1:n))
+    yt(1:n, 1:n) = ym(1:n, sel(1:n))
+    ev(1:n) = et(1:n)
+    ym(1:n, 1:n) = yt(1:n, 1:n)
+  end subroutine
+
   ! the vector at kxa joins the basis: its sigma vector, the new row and
   ! column of the projected matrix
   subroutine add_vector()
@@ -714,7 +768,7 @@ contains
     call N(xzevput)(w, 1, n + 1, kxa)
     ts = omp_get_wtime()
     call N(xzesig)(w, kxa, kxb, sd)
-    if (sd) then
+    if (sd .and. .not. efold) then
       teomsd = teomsd + omp_get_wtime() - ts
       neomsd = neomsd + 1
     else
@@ -908,6 +962,11 @@ subroutine N(xzeom)(w, ecorr)
 
   nsd = no * nv + npo * nvp
   dense = ncls == 1
+  ! CC3 without stored triples: the folded problem (xzcc3.inc)
+  if (cc3mode == 2) then
+    call N(xzeom3)(w, ecorr)
+    return
+  end if
   m0 = xzmark()
   call N(xzeomkeep)()
   if (.not. dense) jobase_s = xzget(nto, 'layout of the label shift')
@@ -1244,7 +1303,7 @@ subroutine N(xzeomtest)(w, seedtext)
     call N(xzetaxpy)(ov, cf(ic), w(jt1), w(kr), w(kt1))
     call N(xzetaxpy)(ov * ov, cf(ic), w(jt2), w(kt2r), w(kt2))
     call N(xzetaxpy)(n3, cf(ic), w(jt3), w(kr + NW * nsd), w(kt3))
-    call N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
+    call N(xzstepm)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     call N(xzetres)(w, cw(ic), w(kt1), w(kt2), w(kt3), w(kt1n), w(kt2n), w(kr3), w(kfd), w(kfd + NW * ov), &
                     w(kfd + NW * nsd))
   end do

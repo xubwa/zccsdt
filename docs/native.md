@@ -31,7 +31,10 @@ CCSDT with the files for `xx2czvec`, frozen and dropped spinors included
 (section 13), validated against the Python hand-over of section 10 and
 through `xx2czvec` and `xsox2cprop`.  Excited states: EOM-EE-CCSDT
 (`EXCITE=EOMEE`) in all four modes, in blocks for the states of a label shift,
-with CFOUR's solver design and input - section 16; one MPI rank.
+with CFOUR's solver design and input - section 16; one MPI rank.  CC3:
+without stored triples (the batches of `csrc/cc3_fly.c`, over MPI ranks;
+EOM-CC3 folded, the totally symmetric states) and, as a check, with T3
+stored (its EOM in every label shift) - section 17.
 
 **The program takes no argument** (since commit a38e493): the job comes from
 the ZMAT as joda stored it, and the steps that were arguments before (`(q)`,
@@ -302,6 +305,7 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzdfrz.inc`, `xzfrz.F90` | frozen and dropped spinors in the density stage: the contractions with integrals of one such index, the rotations, the rows and columns of `xfull`; the integrals through CFOUR's `int_mintv2e` and `vtranpsog` |
 | `xzq.inc`, `xzqs.inc` | (Q) and (Q)_Lambda: the task loop and the dense quadruple; the quadruple in sectors of the labels |
 | `xzeom.inc`, `xzeoms.inc`, `xzeomd.F90` | EOM-EE-CCSDT: the intermediates of the ground state and the sigma vector; the solver, the driver and the test hooks; the input (flags, ZMAT sections), the label shifts and their layout, the results (section 16) |
+| `xzcc3.inc` | CC3 (section 17): the step without stored triples, the batches of occupied triples and their fold, the diagonal Fock operator of T3, the folded EOM sigma vector and its driver |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
 Kernels of `csrc/` that are called: `zc_t3_pass1r`, `zc_t3_pass2r` (the
@@ -1126,6 +1130,7 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
 - Excited states: EOM-EE-CCSDT energies and right-hand vectors are there
   (section 16); not done: left-hand vectors and properties, IP / EA, more
   than one MPI rank, restart and root following (16.9).
+- CC3: section 17.8.
 - The relaxed density for `xsox2cprop` (`denfinal`): the density stage and
   the files of `xx2czvec` are there for CCSDT, with frozen and dropped
   spinors (section 13).  Not done there: the contributions of (Q); the held
@@ -3524,3 +3529,257 @@ rank in the plan.  Not started.
   vectors, 6 did not converge in 40 iterations).
 - The residuals of all roots in one pass over the subspace; the dense small
   terms of a sigma vector and the o v^3 arrays in blocks of the labels.
+## 17. CC3
+
+    CALC=CC3                    CC3 without stored triples
+    CALC=CC3, EXCITE=EOMEE      CC3, then the folded excited states (label shift 0)
+    XZ_CC3=stored               (environment, a check route) CC3 with T3 stored; with
+                                EXCITE=EOMEE its excited states in every label shift
+    mpirun -np 4 xzccsdt        the iterations over ranks (both routes)
+
+The job comes from the ZMAT as for every method (section 1); `CALC=CC3` is
+joda's level 32, and EXCITE=EOMEE is read in either of joda's forms.  The
+validation and timings below were run while the program still took the
+method as an argument (`cc3`, `cc3_eom`, `cc3_stored`, `cc3_stored_eom`:
+the four cases above).  CC3 amplitudes are never reused from `XZAMPS`: a
+CC3 run does not read `XZKEY` and removes it after writing its amplitudes,
+so no CCSDT run takes them and no CC3 run takes those of CCSDT.
+
+CC3 of docs/ccn.md: the singles and doubles equations of CCSDT, the triples
+equation to the lowest order, `<T| [V~, T2] + [F, T3] |0> = 0`, F the Fock
+operator of the reference.  The two routes of the Python program, with its
+numbers as the reference: T3 stored (a switch of the CCSDT step,
+`ccsdt_opt.update_amps(model='cc3')`) and no T3 (the batches of occupied
+triples, `cc.cc3fly`, the kernel `csrc/cc3_fly.c` - docs/ccn.md, sections 9
+and 10).  The model is the variable `cc3mode` of `xzdata` (0 CCSDT, 1 CC3
+with T3 stored, 2 without); the output says CC3 where it said CCSDT, the
+energy goes to JOBARC as `TOTENERG`, the amplitudes to `XZAMPS` (without T3
+there: its count in the header is 0), the excited states to `XZEOM` and
+`TOTENER2` (section 16.1).
+
+### 17.1 The Fock operator: canonical spinors
+
+The triples equation takes F as the diagonal of the spinor energies
+(`scf2ceig`; `[F, T3]` is `(e_abc - e_ijk) T3`), which is the model only for
+canonical spinors.  The program has no Fock matrix of its own; it reads that
+of CFOUR's SCF in the AO basis (JOBARC `scf2cfck`) with its spinors
+(`scf2ccmo`), transforms it to the active spinors and prints the largest
+elements off the diagonal - nothing is cut and nothing rotated:
+
+    Fock matrix of CC3: the spinor energies of scf2ceig; the Fock matrix of the SCF (scf2cfck, scf2ccmo)
+      on the active spinors: largest |F_oo| off the diagonal   3.31E-13,  |F_vv|   5.27E-13,  |F_ov|   3.00E-12;  |F_pp - e_p|   3.44E-15
+
+(HBr / cc-pVDZ-DK with `%dglin`; H2O / 6-31G: 1.3e-13, 1.1e-13, 4.3e-13,
+3.8e-15.)  Above 1e-6 off the diagonal of F_oo or F_vv the run stops with a
+message (`XZ_FOCKTOL` raises it); without the two records, or when the
+diagonal of that matrix is not `scf2ceig` (integral files written by
+another program, e.g. `bench/cfour/labelled_run.py`), the line says that the
+reader has the orbital energies only and canonical spinors are assumed.
+
+### 17.2 T3 stored (`cc3mode` 1)
+
+The CCSDT step of section 4 (`xzstep.inc`) with the T3 couplings of the
+triples equation off, as the Python stored route:
+
+| stage of the CCSDT step | CC3 |
+|---|---|
+| pass 1 (T3 -> T1, T2, W_vvvo, W_vooo) | the T3 terms of R1 and R2 kept; the T3 parts of W_vvvo, W_vooo not added |
+| W_vvvo | the T1-dressed `<ab\|\|ei>` alone (`xzbv` and the rows of the dressed `<ab\|\|cd>` in the sweep; no `xzwvoovo`, `xzwvx`) |
+| W_vooo | the dressed `<ma\|\|ij>` alone (`xzwo3`) |
+| sweep | the CCSD ladder and the part of W_vvvo; the pp operator of T3 and its ladder left out |
+| pass 2 | the drive terms alone, T3 not read: dense `zc_t3_driver` (`csrc/cc3_native.c`, the drive of `zc_t3_drive` for a range of pairs with the buffer of the caller - so the batches go to the MPI ranks as those of pass 2), in blocks `xzbpass2` with `noring` (the gather and the ring product skipped) |
+| hh ladder, F_oo | `[F, T3]` by its diagonal (`zc_t3_fdiag`, per block; with slices on the rows of the rank) |
+| update, DIIS, MPI | as CCSDT |
+
+The excited states (`cc3_stored_eom`): the EOM-CCSDT sigma vector of
+section 16.2 with the same switches - `<ab||ei>' = - P(ab) r1[m][a]
+~<mb||ei> + W_pp r1` less the F_vv and the T2 parts of W_pp (`xzewv0`,
+`xzwvt2out`), `<ma||ij>'` the derivative of the dressed integral alone,
+the pass 1 over R3 without its parts of W', no pp ladders of R3 and of T3,
+`[F, R3]` by the diagonal, the T3 residual with the derivatives of the
+drive operators only - in every label shift and mode, with the solver and
+input of section 16.
+
+### 17.3 No stored triples (`cc3mode` 2)
+
+`xzstep3` (`xzcc3.inc`): the CCSD part of the CCSDT step - the dressing,
+the vovv term of R1 from the pass-1 operand G, the dressed `<ab||ij>`,
+W_ovvo, F_vv, F_oo, the sweep over the rows of the dressed `<ab||cd>` with
+the CCSD ladder and their part of the dressed `<ab||ei>` - then the T3 terms
+of R1 and R2 from all batches of occupied triples (`xzfly`), then the CCSD
+part and the Jacobi step (`xzccsd`).  The operands of `zc_cc3_batch`
+(docs/ccn.md, section 10) in the native layouts:
+
+| operand | from |
+|---|---|
+| At | T2 `[i][j][a][b]` as it is |
+| Ao `[hi][lo][c][m]` | the dressed ovoo block `ovood[m][c][hi][lo]` (`xzao3`) - the operand that pass 2 has as `wo[m][c][(lo<hi)] = - ovood[m][c][lo][hi]`; the table of docs/ccn.md writes it in the convention of the Python containers |
+| Bv `[e][i][Q]` | W_vvvo of CC3 transposed (`xzbvq`) |
+| Bo | `t2[m][i][Q]` as it is |
+| Gv `[m][Q][y]` | the columns `no + y` of the pass-1 operand G (`xzgvq`) |
+| Gsq | the dressed `<mn\|\|ie>` as it is |
+| gsq | `joovvp` (`<mn\|\|Q>`): the negative of the kernel's `<lo hi\|\|Q>`, so the singles term is folded in with the other sign |
+| fov | the dressed `f[m][e]` |
+
+n3 is 0 in this mode: T3, its residual and the T3 parts of the DIIS
+vectors are empty regions, DIIS runs on T1 and T2, the slices of section 15
+are off.  The batches: per pair (j < k) and class s of i the i < j of class
+s, as many per call as the work of a batch holds - a parameter of the plan
+(section 4): at least one occupied triple of the largest group
+(`zc_cc3_work`), raised up to 2 GB or all the triples of a pair, after the
+slab of the dressed `<ab||cd>` (the batches of pass 1, pass 2 and the pp
+ladder are not used); `XZ_CC3W=n` gives it (elements, at least one triple).
+The plan prints it:
+
+    CC3: the work of a batch of occupied triples:          41958 elements (       0.3 MB; one triple:         6993)
+
+and the floor stops the run with the words needed as any other (section 4).
+
+**MPI.**  Every rank runs `xzstep3` on the amplitudes that rank 0 sends;
+in `xzfly` it does the pairs (j, k) that the cost model gives it - the cost
+of a pair the work of its batches (triples times the work per triple of
+their group), the most expensive first, each to the rank with the least so
+far; every rank makes the same list - and the four sums (o^2 v^2 + 2 o^2
+v(v-1)/2 + o v numbers) are summed on all ranks (`xzmpi_allsum_w`, chunked,
+`MPI_Allreduce`).  The fold, the CCSD part (rank 0) and DIIS (rank 0) follow.
+
+### 17.4 EOM-CC3 folded (`cc3_eom`)
+
+The folded eigenproblem of docs/ccn.md, section 4, in the space of singles
+and doubles.  The sigma vector at a frequency omega (`xzesig` with
+`efold`): the singles-doubles block of section 16 (the sigma vector without
+R3 and without the terms of T3) plus `xzefold`:
+
+- `<ab||ei>'` (`xzewv0` with the dressed `<mb||ei>`, the sweep over W_pp
+  with r1, the F_vv and T2 parts taken out) and `<ma||ij>'` of H'
+  (`xzehs`);
+- the batches with nset = 2: (t2, Ao', Bv', t2) and (r2, Ao, Bv, r2) over
+  `omega + e_ijk - e_abc`, contracted with the operands of the ground state
+  -> sigma_1, sigma_2;
+- the batches with nset = 1: the operands of the ground state, omega = 0,
+  contracted with those of H' - `Gv' = sum_n r1[n][y] <mn||Q>` (`xzgv1`),
+  `<mn||ie>'`, f' - -> sigma_2.
+
+The operands of the ground-state batches (Ao, Bv, Gv) are kept with the
+intermediates of section 16.2 (`e3ao`, `e3bv`, `e3gv`); a sigma vector takes
+o^3 v + 2 o v^2 (v-1)/2 more for its own and the four sums.
+
+The outer loop (`xzeom3`, the algorithm of `ccn.folded_roots`):
+
+1. the roots of the singles-doubles block from unit vectors on the lowest
+   single excitations (roots + 2 of them), to 1e-4 (no triples);
+2. root by root, from the lowest: the solver of section 16.3 on the matrix
+   at a fixed omega, started from the vectors of the step before and
+   following the roots with the largest weight on them (`nfollow`), with a
+   threshold that follows `|lambda(omega) - omega|` down to `ESTATE_CONV`;
+   omega replaced by lambda(omega), or by the secant step of the last two;
+   converged when `|lambda - omega|` is below `ESTATE_CONV / 100`
+   (`XZ_OMEGATOL`) and the residual below `ESTATE_CONV`.  Roots of stage 1
+   closer than 5e-4 Eh to a neighbour (`XZ_FOLDWIN`) form a cluster, solved
+   together at every frequency and taken by their place in it: following
+   one vector alone ran the second component of the nearly degenerate
+   lowest triplet of H2O (split by 2.8e-7 Eh) into the first (the Python
+   folded solver has the same weakness: its third root of that case is
+   2.3e-7 off).
+
+Per frequency step a line: root, step, omega, lambda(omega), their
+difference, the largest element of the residual, sigma vectors, seconds;
+per root its omega, the frequencies and sigma vectors it took.  In blocks of
+the labels the totally symmetric states (shift 0); other shifts of `%xzeom`
+are left out with a warning (they are the states of `cc3_stored_eom`).
+Without labels the states of all shifts.  No file `XZEOMR`.
+
+### 17.5 Validation
+
+Native against the Python program (the CC3 branch, commit c21f2b5, on the
+same files: `zccsdt.cfour.from_cfour`, `GCC3.from_integrals`, `store_t3`
+True / False, `eom_ee`; conv_tol 1e-12, roots 1e-9).  Reference directories
+of section 16.5; H2O with `%eomthrs 1e-9` and four roots of shift 0.
+
+| case | quantity | Python | native |
+|---|---|---|---|
+| H2O / 6-31G, X2C-1e (10 + 16), complex dense, CC_CONV=9 | E_corr(CC3), T3 stored | -0.13646018280846 | -0.136460182812 |
+| | no T3 | -0.13646018280879 | -0.136460182806 |
+| | EOM-CC3, T3 stored, shift 0 | 0.284178235164, ..515488, ..9182094, 0.311028170186 | 0.284178235179, ..515466, ..9182095, 0.311028170220 |
+| | EOM-CC3 folded | (0.284178235126, ..514353, ..8954671: the third off by 2.3e-7, 0.311028170190) | 0.284178235134, ..515478, ..9182079, 0.311028170177 |
+| HBr / cc-pVDZ-DK, `%dglin`, 28 frozen (8 + 28), CC_CONV=10 | E_corr(CC3), T3 stored (blocks and dense) | -0.14264585619981 | -0.142645856200 |
+| | no T3 | -0.14264585620031 | -0.142645856200 |
+| | EOM-CC3, T3 stored, shift 0 | 0.243652194013, 0.244106956035, 0.336657669623 | 0.243652193990, ..6955, ..9613 |
+| | shift 2 | 0.237157681885, 0.260912563601, 0.336749228834 | 0.237157681858, ..563598, ..228823 |
+| | shift 4 | 0.233152111958, 0.544409202291, 0.652304807416 | 0.233152111958, ..202364, ..807412 |
+| | shift 6 | 0.738624111774, 0.773900482145, 0.786520835590 | 0.738624111703, ..482154, ..835680 |
+| | EOM-CC3 folded, shift 0 | | 0.243652194009, 0.244106956022, 0.336657669619 |
+
+Largest differences: energies 3.5e-12 (H2O, CC_CONV=9: the convergence),
+2e-13 (HBr); roots with T3 stored 9e-11, folded against Python's stored
+roots 3e-11 (H2O), 1.3e-11 (HBr).  The XZ_EOMTEST hook (16.5) on
+`cc3_stored_eom`: the sigma vector against the five-point derivative of
+the CC3 step, 4e-16, 5e-15, 2e-15 (6 classes, real) and 4e-16, 2e-15, 7e-15
+(dense, complex) in sigma_1, sigma_2, sigma_3.
+
+Modes (all the same to the digits printed): HBr in real blocks (6
+classes), complex blocks (`XZ_REAL=0`), real dense (`XZ_LABELS=0`), complex
+dense; the labelled PySCF spinors and the same with phases (`hbr_lab`,
+`hbr_ph`: -0.142645856190 / ..191 with and without T3); one triple per batch
+(`XZ_CC3W=1`); 1 and 8 threads; the MPI build with 2, 3 and 4 ranks on one
+node (T3 stored also with `XZ_SLICES=0`): E(CC3) -2604.989088528366 / ..367
+and -76.169163882631 / ..625 in every run.  The folded roots in real and
+complex blocks, with one triple per batch and on one thread: equal to all
+12 decimals of `XZEOM`; without labels, real and complex (12 roots of all
+shifts), against the stored dense roots: 5e-11.  The memory floor:
+`XZ_MAXCOR` below the least that CC3 takes stops with the words needed;
+just above it the batches get smaller (11 928 elements instead of 41 958)
+and the energy is the same.  `regress.sh` (serial with `--eom`, and 2
+ranks) against the binary before this work: REGRESSION OK after each of the
+three steps.
+
+### 17.6 Timings
+
+Job 31905441, node c048 (2 x Xeon Gold 6248R), 24 threads on the cores of
+socket 1 with its memory, no other job on the node, the binary built there
+from commit 12da931 (`cc3_time.sbatch` of the work directory).  HBr /
+cc-pVQZ-DK, X2C-1e, `%dglin`, `DROPMO=1>5`, `%vircut 4.124587`: 26 + 120,
+real, 10 classes (the case of 16.6; the chain took 23 s).  CC_CONV=8,
+`%eomthrs 1e-6`, three roots of shift 0, MEMORY_SIZE 60 GB.  Measured once.
+
+| | CC3, no T3 (`cc3_eom`) | CC3, T3 stored (`cc3_stored_eom`) | CCSDT (`ccsdt`, `XZ_NCYC=6`) |
+|---|---|---|---|
+| s per iteration | 1.54 (15 cycles) | 2.13 (17 cycles) | 4.10 |
+| relative to CCSDT | 0.38 | 0.52 | 1 |
+| a sigma vector | 2.58 s (folded, at one omega) | 3.23 s (EOM-CC3 with R3) | (16.6: 7.78 s on another node) |
+| sigma vectors for 3 roots | 51 (26 + 7 + 18; 4, 3, 5 frequencies) | 34 | |
+| EOM in all | 157 s | 171 s | |
+| work array used | 4.0 GB | 39.6 GB (34 GB of it the subspace) | 14.5 GB (8 DIIS vectors in it) |
+| peak resident set | 4.3 GB | 36.5 GB | 10.8 GB |
+| E(CC3) / roots / Eh | -2605.341236402851; 0.242409172773, 0.242857579014, 0.332737188934 | -2605.341236402876; 0.242409336079, 0.242857728239, 0.332737269979 | |
+
+The roots of the two routes differ by up to 1.6e-7 Eh at this threshold
+(the largest element of a residual 1e-6: the error of 16.3), the energies
+by 2.5e-11 (CC_CONV=8).  Of an iteration without T3, the batches are 14.8 s
+of 23.2 s (64 %; 11.3 of 24 cores busy): products 3.5, amplitudes 2.1,
+gather 4.0, contractions 5.2 s (the kernel's clocks); the rest is the CCSD
+part of the step.  A folded sigma vector is two passes over the batches
+(105 s of the 131 s of 51 sigma vectors) and the singles-doubles terms (41
+s).  Against the Python program (docs/ccn.md, section 9, job 31901611,
+another node of the same type, PySCF's spinors): an iteration 2.54 s
+without T3 and 3.63 s with T3 stored, a sigma vector 4.2 and 5.4 s.
+
+### 17.7 ThF+
+
+(job and numbers: below)
+
+### 17.8 Not done
+
+- EOM-CC3 without stored triples in a label shift: the kernel takes the
+  triples of a batch in the group of its occupied triple; a shift needs the
+  virtual triples of group g + s and the operands of a shift (an added
+  kernel or a shift argument).  The states of a shift: `cc3_stored_eom`
+  (T3 and R3 stored, the memory of EOM-CCSDT).
+- EOM over MPI ranks (section 16.7), for both routes: CC3 with
+  EXCITE=EOMEE runs with one rank, and CC3 amplitudes are not reused (no
+  `XZKEY` for them), so the iterations cannot be done over ranks first and
+  the EOM afterwards; a model tag in `XZKEY` would allow it.
+- Spinors that are not canonical: the program stops (17.1); the
+  semicanonical rotation of docs/ccn.md, section 1, belongs before the
+  integral transformation (CFOUR's spinors are canonical).
+- IP / EA, left-hand vectors, properties of CC3; CC2 and CC4.

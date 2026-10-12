@@ -21,6 +21,14 @@ module xzkern
       type(*), dimension(*) :: x
     end subroutine
 
+    ! elements of the work of a batch of ni occupied triples of group g (csrc/cc3_fly.c)
+    function zc_cc3_work(ncls, g, ni, vrng, qoff, aoff) bind(C) result(n)
+      import
+      integer(c_int64_t), value :: ncls, g, ni
+      integer(c_int64_t) :: vrng(*), qoff(*), aoff(*)
+      integer(c_int64_t) :: n
+    end function
+
     subroutine zc_tn_zero(p, nbytes) bind(C)
       import
       type(*), dimension(*) :: p

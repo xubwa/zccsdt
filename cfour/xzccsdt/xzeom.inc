@@ -59,13 +59,20 @@ subroutine N(xzeomkeep)()
   et2pp = xzget(NW * npo * nvp, 'T2 [P][Q]')
   ewkl = xzget(NW * npo * npo, 'W_oooo')
   ekk = xzget(NW * no * no * npo, '<mn||Q> t2[P][Q]')
-  eo6 = xzget(NW * nto * nto, 'occupied operator')
+  ! (CC3: no operator on occupied triples)
+  eo6 = xzget(merge(0_8, NW * nto * nto, cc3mode /= 0), 'occupied operator')
   ewo = xzget(NW * ov * npo, 'W_vooo')
   egpd = xzget(NW * ny * npo * nv, 'pass-1 operand')
   egmq = xzget(NW * no * nvp * ny, 'pass-1 operand G')
   ed = xzget(NW * ov * nvp, 'dressed <ov||vv>')
   ebv = xzget(NW * nvp * ov, 'bra-dressed <vv||vo>')
   ewv = xzget(NW * nvp * ov, 'W_vvvo')
+  if (cc3mode == 2) then
+    ! the operands of the CC3 batches of the ground state (the folded sigma vector)
+    e3ao = xzget(NW * no * no * ov, 'CC3: Ao')
+    e3bv = xzget(NW * nv * no * nvp, 'CC3: Bv')
+    e3gv = xzget(NW * no * nvp * nv, 'CC3: Gv')
+  end if
 end subroutine
 
 ! ---------------------------------------------------------------------------
@@ -122,9 +129,11 @@ subroutine N(xzeomim)(w)
     call xztoc(5, 'once: T1 dressing, operands')
   end if
 
-  ! ---- pass 1 over T3: the T3 parts of W_vvvo and W_vooo
+  ! ---- pass 1 over T3: the T3 parts of W_vvvo and W_vooo (not in CC3; CC3
+  !      without stored triples has no T3)
   m1 = xzmark()
-  if (dense) then
+  if (cc3mode == 2) then
+  else if (dense) then
     kbuf = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
     if (.not. xzdry) then
       call zc_vzero_d(NW * ny * no * nvp, w(kxacc))
@@ -149,19 +158,26 @@ subroutine N(xzeomim)(w)
     call N(xzbv)(no, nv, npo, nvp, nba, w(jt1), w(ktau), w(jovvq), w(jooov), w(jovvo), &
                  w(jopa), w(jopb), w(jvpa), w(jvpb), w(ebv), w(kg2), w(kyb))
     call N(xzecopy)(nvp * ov, w(ebv), w(ewv))
-    call N(zc_add_transposed)(w(ewv), w(kxacc), nvp, ov, ov, nvp, one)
-    call N(xzwvoovo)(no, nv, npo, nvp, w(et2pp), w(eooovd), w(efov), w(jopa), w(jopb), w(ewv), w(kg2))
-    call N(xzwvx)(no, nv, nvp, nba, w(jt2), w(ed), w(jvpa), w(jvpb), w(ewv), w(ka2), w(ku), &
-                  w(kxb), w(kyb))
+    ! (CC3: the drive operators are the T1-dressed integrals alone)
+    if (cc3mode == 0) then
+      call N(zc_add_transposed)(w(ewv), w(kxacc), nvp, ov, ov, nvp, one)
+      call N(xzwvoovo)(no, nv, npo, nvp, w(et2pp), w(eooovd), w(efov), w(jopa), w(jopb), w(ewv), w(kg2))
+      call N(xzwvx)(no, nv, nvp, nba, w(jt2), w(ed), w(jvpa), w(jvpb), w(ewv), w(ka2), w(ku), &
+                    w(kxb), w(kyb))
+    end if
     call xztoc(5, 'once: W_vvvo')
-    call N(xzwo)(no, nv, npo, nvp, w(jt2), w(et2pp), w(eooovd), w(eovood), w(ed), w(kyall), &
-                 w(jopa), w(jopb), w(ewo), w(ktmp), w(ktmp2), w(kb2))
+    if (cc3mode == 0) then
+      call N(xzwo)(no, nv, npo, nvp, w(jt2), w(et2pp), w(eooovd), w(eovood), w(ed), w(kyall), &
+                   w(jopa), w(jopb), w(ewo), w(ktmp), w(ktmp2), w(kb2))
+    else
+      call N(xzwo3)(no, nv, npo, w(eovood), w(jopa), w(jopb), w(ewo))
+    end if
     call N(xzweff)(no, nv, nvp, w(jt2), w(et2p), w(joovv), w(joovvp), w(eovvod), w(efoo), w(efvv), &
                    w(eweff), w(efevv), w(efeoo), w(ka2), w(kb2), w(kx2))
     call N(xzewkl)(no, npo, nvp, w(eooood), w(jgpp), w(et2pp), w(jopa), w(jopb), w(ewkl))
     if (npo > 0) call N(zc_gemm)(0_4, 1_4, no * no, npo, nvp, one, w(joovvp), nvp, w(et2pp), nvp, zero, &
                                  w(ekk), npo)
-    call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(ewkl), w(efeoo), w(eo6))
+    if (cc3mode == 0) call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(ewkl), w(efeoo), w(eo6))
     call xztoc(5, 'once: W_vooo, W_ovvo, F, O')
   end if
 
@@ -192,6 +208,13 @@ subroutine N(xzeomim)(w)
                                    w(kpib), nv, w(efevv), nv, half)
     end do
     call xztoc(5, 'once: pp operator in place')
+    if (cc3mode == 2) then
+      ! the operands of the CC3 batches of the ground state (docs/native.md, section 17)
+      call N(xzao3)(no, nv, w(eovood), w(e3ao))
+      call N(xzbvq)(no, nv, nvp, w(ewv), w(e3bv))
+      call N(xzgvq)(no, nv, nvp, w(egmq), w(e3gv))
+      call xztoc(5, 'once: CC3 operands')
+    end if
   end if
   call xzrel(ms)
 end subroutine
@@ -217,7 +240,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
   integer(8) :: kdwv, kdwo, kxacc, kyall, kr1c, kra, kgpd, kgmq, kzpp, kbuf, kg2, kyb, ku, kxb, ktmp, ktmp2
   integer(8) :: kzero3, kwring, kadrv, kdo6, kslab, kgq, kgh, kpib, ktv, kxpp, kbd, ktb, kz, nbdw
   integer(8) :: h, hr, lo, lo2, nqh, nqr, q0, nq, i0, nb, p0, x0
-  logical :: dense, with3
+  logical :: dense, with3, fold
   real(8) :: stats(4)
   ZT :: one, zero, half, mone
   one = 1
@@ -229,6 +252,10 @@ subroutine N(xzesig)(w, kv, ks, sd)
   nsd = ov + npo * nvp
   dense = ncls == 1
   with3 = .not. sd
+  ! the folded sigma vector of CC3 without stored triples (efold, at the
+  ! frequency eomega): the singles-doubles block and the triples folded in
+  ! (N(xzefold)); the vectors are singles and doubles
+  fold = sd .and. efold .and. cc3mode == 2
   s = eshift
   if (dense) s = 0
   kr1 = kv
@@ -316,7 +343,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
     kbd = xzget(NW * nbdw, 'pass-2 operand B')
     kwring = xzget(NW * ov2, 'pass-2 operand W')
     kadrv = xzget(NW * npo * nv * ny, 'pass-2 operand A')
-    kdo6 = xzget(NW * nto * nto, 'occupied operator, derivative')
+    kdo6 = xzget(merge(0_8, NW * nto * nto, cc3mode /= 0), 'occupied operator, derivative')
     m3 = xzmark()
     ! ---- pass 1 over R3 with the integrals of the ground state, over T3 with H'
     call xzshctx(s, 0_8, 0_8)
@@ -348,8 +375,11 @@ subroutine N(xzesig)(w, kv, ks, sd)
       call N(xzr2t3)(no, nv, npo, nvp, w(jopa), w(jopb), w(jvpa), w(jvpb), w(kyall), w(kxacc), w(kra))
       call N(xzeaxpy)(npo * nvp, w(kra), w(ks2))
       call zc_vzero_d(NW * nvp * ov, w(kdwv))
-      call N(zc_add_transposed)(w(kdwv), w(kxacc), nvp, ov, ov, nvp, one)
-      call N(xzeyo)(no, nv, npo, w(kyall), w(kdwo))
+      ! (CC3: no T3 parts in the derivatives of the drive operators)
+      if (cc3mode == 0) then
+        call N(zc_add_transposed)(w(kdwv), w(kxacc), nvp, ov, ov, nvp, one)
+        call N(xzeyo)(no, nv, npo, w(kyall), w(kdwo))
+      end if
       call xztoc(5, 'small terms')
     end if
     ! (of H' only <mn||ei>', <am||ef>' and f'[m][e] are not zero)
@@ -393,25 +423,39 @@ subroutine N(xzesig)(w, kv, ks, sd)
     ktmp = xzget(NW * no * no * ov, 'work of W_vooo')
     ktmp2 = xzget(NW * no * no * ov, 'work of W_vooo 2')
     if (.not. xzdry) then
-      ! - P(ab) sum_m r1[m][a] W_ovvo[m][b][e][i]: <ab||ei>' (first part) and the term t2 x <mb||ef>'
-      do x0 = 0, nv - 1, nba
-        nb = min(nba, nv - x0)
-        call N(zc_gemm)(1_4, 0_4, nb, nv * nv * no, no, one, w(kr1 + NW * x0), nv, w(eweff), nv * nv * no, zero, &
-                        w(kyb), nv * nv * no)
-        call N(zc_pair_antisym_batch_add)(w(kdwv), w(kyb), nv, nvp, w(jvpa), w(jvpb), nv * no, x0, x0 + nb, mone)
-      end do
-      ! the F_vv part of W_pp r1 is taken out again
-      call N(xzewvf)(no, nv, nvp, w(efevv), w(kr1), w(jvpa), w(jvpb), w(kdwv), w(ka2))
-      ! - f'[m][e] t2[mi][ab], and the T2 terms of W_vvvo with r2
-      call zc_vzero_d(NW * no * no * ov, w(kzero3))
-      call N(xzwvoovo)(no, nv, npo, nvp, w(et2pp), w(kzero3), w(kdfov), w(jopa), w(jopb), w(kdwv), w(kg2))
-      call N(xzwvoovo)(no, nv, npo, nvp, w(kr2pp), w(eooovd), w(efov), w(jopa), w(jopb), w(kdwv), w(kg2))
-      call N(xzwvx)(no, nv, nvp, nba, w(kr2), w(ed), w(jvpa), w(jvpb), w(kdwv), w(ka2), w(ku), &
-                    w(kxb), w(kyb))
-      call xztoc(5, 'W_vvvo derivative')
-      call N(xzewo)(no, nv, npo, nvp, w(jt2), w(kr2), w(kr2pp), w(eooovd), w(kdooov), w(kdovoo), w(ed), &
-                    w(kr1), w(ekk), w(jopa), w(jopb), w(kdwo), w(ktmp), w(ktmp2), w(kb2))
+      if (cc3mode == 0) then
+        call N(xzewv0)(w, kr1, eweff, kdwv, kyb, ka2)
+        ! - f'[m][e] t2[mi][ab], and the T2 terms of W_vvvo with r2
+        call zc_vzero_d(NW * no * no * ov, w(kzero3))
+        call N(xzwvoovo)(no, nv, npo, nvp, w(et2pp), w(kzero3), w(kdfov), w(jopa), w(jopb), w(kdwv), w(kg2))
+        call N(xzwvoovo)(no, nv, npo, nvp, w(kr2pp), w(eooovd), w(efov), w(jopa), w(jopb), w(kdwv), w(kg2))
+        call N(xzwvx)(no, nv, nvp, nba, w(kr2), w(ed), w(jvpa), w(jvpb), w(kdwv), w(ka2), w(ku), &
+                      w(kxb), w(kyb))
+        call xztoc(5, 'W_vvvo derivative')
+        call N(xzewo)(no, nv, npo, nvp, w(jt2), w(kr2), w(kr2pp), w(eooovd), w(kdooov), w(kdovoo), w(ed), &
+                      w(kr1), w(ekk), w(jopa), w(jopb), w(kdwo), w(ktmp), w(ktmp2), w(kb2))
+      else
+        ! CC3: <ab||ei>' = - P(ab) r1[m][a] ~<mb||ei> + (W_pp r1 less its F_vv and T2 parts), <ma||ij>'
+        call N(xzewv0)(w, kr1, eovvod, kdwv, kyb, ka2)
+        call N(xzwvt2out)(no, nv, npo, nvp, w(et2pp), w(kdooov), w(jopa), w(jopb), w(kdwv), w(kg2))
+        call xztoc(5, 'W_vvvo derivative')
+        call N(xzwo3)(no, nv, npo, w(kdovoo), w(jopa), w(jopb), w(kdwo))
+      end if
       call xztoc(5, 'small terms')
+    end if
+    call xzrel(m1)
+  end if
+  if (fold) then
+    ! ---- CC3, folded: <ab||ei>' (its W_pp r1 part in the sweep below)
+    kdwv = xzget(NW * nvp * ov, 'W_vvvo derivative')
+    m1 = xzmark()
+    kg2 = xzget(NW * npo * ov, 'work [P][e][i]')
+    kyb = xzget(NW * nba * nv * nv * no, 'batch of W_vvvo terms Y')
+    if (.not. xzdry) then
+      call zc_vzero_d(NW * nvp * ov, w(kdwv))
+      call N(xzewv0)(w, kr1, eovvod, kdwv, kyb, ka2)
+      call N(xzwvt2out)(no, nv, npo, nvp, w(et2pp), w(kdooov), w(jopa), w(jopb), w(kdwv), w(kg2))
+      call xztoc(5, 'W_vvvo derivative')
     end if
     call xzrel(m1)
   end if
@@ -443,11 +487,12 @@ subroutine N(xzesig)(w, kv, ks, sd)
         call N(zc_gemm)(0_4, 0_4, npo, nqh, npo, mone, w(kc1), npo, w(et2pp + NW * lo), nvp, one, &
                         w(ks2 + NW * lo), nvp)
       end if
-      if (with3) call N(zc_pair_t1_contract)(w(kdwv + NW * lo * ov), w(jvvvv + NW * vvoff(h)), w(kr1), nqh, nv, &
-                                             nqh, w(kpib), no)
+      if (with3 .or. fold) call N(zc_pair_t1_contract)(w(kdwv + NW * lo * ov), w(jvvvv + NW * vvoff(h)), w(kr1), &
+                                                       nqh, nv, nqh, w(kpib), no)
       call xztoc(5, 'pp terms of sigma_2, W_pp r1')
     end if
-    if (.not. with3) cycle
+    ! (CC3: no pp ladder of R3)
+    if (.not. with3 .or. cc3mode /= 0) cycle
     do q0 = 0, nqh - 1, nqs
       nq = min(nqs, nqh - q0)
       if (dense) then
@@ -488,17 +533,27 @@ subroutine N(xzesig)(w, kv, ks, sd)
       if (.not. xzdry) then
         stats = 0
         do p0 = 0, npo - 1, nbp
-          call N(zc_t3_pass2r)(w(kr3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
-                               w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), &
-                               w(kwring), w(kadrv), w(kbd), w(ks3), c_null_ptr, stats, w(ktb), w(kz))
+          if (cc3mode /= 0) then
+            call N(zc_t3_driver)(nto, nvt, no, nv, npo, nvp, w(jofree), w(jopair), w(jvfree), w(jvpair), &
+                                 nbp, p0, min(p0 + nbp, npo), w(kadrv), w(kbd), w(ks3), stats, w(kz))
+          else
+            call N(zc_t3_pass2r)(w(kr3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
+                                 w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), &
+                                 w(kwring), w(kadrv), w(kbd), w(ks3), c_null_ptr, stats, w(ktb), w(kz))
+          end if
         end do
       end if
     else
+      noring = cc3mode /= 0
       call N(xzbpass2)(w, kr3, ks3, w(kwring), w(kadrv), w(kbd), 1_8, 0_8, w(kbd), w(kbd))
+      noring = .false.
     end if
     if (.not. xzdry) then
       call xztoc(5, 'R3: pass 2')
-      if (dense) then
+      if (cc3mode /= 0) then
+        ! CC3: [F, R3] with the diagonal of F
+        call N(xzfdiag)(w, kr3, ks3, s, bof_in, .false.)
+      else if (dense) then
         call N(zc_t3_occop)(w(eo6), w(kr3), nto, nvt, ncb, c_null_ptr, w(ks3))
       else
         call N(xzbocc)(w, kr3, ks3, w(eo6))
@@ -547,7 +602,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
         ! sigma_2[P][q] += sum_Q' <q||Q'>' t2[P][Q']
         if (npo > 0) call N(zc_gemm)(0_4, 1_4, npo, nq, nqh, one, w(et2pp + NW * lo), nvp, w(kslab), nqh, one, &
                                      w(ks2 + NW * (lo2 + q0)), nvp)
-        if (with3) then
+        if (with3 .and. cc3mode == 0) then
           if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nqh, npo, one, w(kr2pp + NW * (lo2 + q0)), nvp, &
                                        w(jgpp + NW * lo), nvp, one, w(kslab), nqh)
           call N(zc_pair_one_body_add)(w(kslab), nq, nqh, w(jvpa + lo2 + q0), w(jvpb + lo2 + q0), w(kpib), nv, &
@@ -555,7 +610,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
         end if
         call xztoc(5, 'pp operator derivative: rows')
       end if
-      if (.not. with3) cycle
+      ! (CC3: no pp ladder of T3)
+      if (.not. with3 .or. cc3mode /= 0) cycle
       if (dense) then
         if (xzdry) cycle
         do i0 = 0, nto - 1, nbt
@@ -584,7 +640,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
       else
         call N(xzbbd)(w(ewv), w(kr2p), w(kbd))
       end if
-      call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(kdwkl), w(kdfeoo), w(kdo6))
+      if (cc3mode == 0) call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(kdwkl), w(kdfeoo), w(kdo6))
       call xztoc(5, 'small terms')
     end if
     if (dense) then
@@ -593,17 +649,26 @@ subroutine N(xzesig)(w, kv, ks, sd)
       if (.not. xzdry) then
         stats = 0
         do p0 = 0, npo - 1, nbp
-          call N(zc_t3_pass2r)(w(jt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
-                               w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), &
-                               w(kwring), w(kadrv), w(kbd), w(ks3), c_null_ptr, stats, w(ktb), w(kz))
+          if (cc3mode /= 0) then
+            call N(zc_t3_driver)(nto, nvt, no, nv, npo, nvp, w(jofree), w(jopair), w(jvfree), w(jvpair), &
+                                 nbp, p0, min(p0 + nbp, npo), w(kadrv), w(kbd), w(ks3), stats, w(kz))
+          else
+            call N(zc_t3_pass2r)(w(jt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
+                                 w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), &
+                                 w(kwring), w(kadrv), w(kbd), w(ks3), c_null_ptr, stats, w(ktb), w(kz))
+          end if
         end do
       end if
     else
+      noring = cc3mode /= 0
       call N(xzbpass2)(w, jt3, ks3, w(kwring), w(kadrv), w(kbd), 1_8, 0_8, w(kbd), w(kbd))
+      noring = .false.
     end if
     if (.not. xzdry) then
       call xztoc(5, 'T3: pass 2')
-      if (dense) then
+      if (cc3mode /= 0) then
+        ! (CC3: the bare F has no derivative)
+      else if (dense) then
         call N(zc_t3_occop)(w(kdo6), w(jt3), nto, nvt, ncb, c_null_ptr, w(ks3))
       else
         call N(xzbocc)(w, jt3, ks3, w(kdo6))
@@ -613,6 +678,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
   end if
   call xzrel(m1)
   call xzshctx(0_8, 0_8, 0_8)
+  ! ---- CC3, folded: the triples at the frequency eomega, made per batch
+  if (fold) call N(xzefold)(w, kr1, kr2, kr2p, kdwv, kdovoo, kdooov, kdfov, ks1, ks2)
 
   ! ---- with labels: sigma_1 and sigma_2 on the elements of the shift
   if (.not. dense .and. .not. xzdry) then
