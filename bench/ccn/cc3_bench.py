@@ -73,6 +73,27 @@ if a.what == 'ccsd_t':
     rec.update(integrals=stamps[0] - t0, iterations=[round(float(x), 3) for x in it], t=time.perf_counter() - t1,
                e_corr=float(cc.e_corr), e_t=float(np.real(et)), nocc=int(cc.nocc), nmo=int(cc.nmo),
                rss_gb=memory.resident() / 1e9, dtype=str(cc.t2.dtype))
+elif a.what in ('cc4', 'q', 'ccsdtq'):
+    # CC4 without stored T4 (the CCSDT step on the packed layout, the quadruples in the sectors
+    # of the labels), (Q) after NITER iterations of CCSDT (in blocks), CCSDTQ (in blocks)
+    cls = {'cc4': zccsdt.CC4, 'q': zccsdt.CCSDT, 'ccsdtq': zccsdt.CCSDTQ}[a.what]
+    cc = cls(mf, frozen=frozen)
+    cc.verbose, cc.max_cycle = 0, a.niter
+    cc.symmetry, cc.real_spinors = bool(a.symmetry), bool(a.real)
+    if maxmem:
+        cc.max_memory = maxmem
+    snap = timing.snapshot()
+    t0 = time.perf_counter()
+    cc.kernel()
+    rec.update(total=time.perf_counter() - t0, iterations=[round(float(x), 3) for x in cc.timings],
+               e_corr=float(np.real(cc.e_corr)), nocc=int(cc.t1.shape[0]), nvir_active=int(cc.t1.shape[1]),
+               dtype=str(cc.t2.dtype), peak_gb=(getattr(cc, 'peak_memory', 0) or 0) / 1e9,
+               rss_gb=memory.resident() / 1e9, stages=stages(snap, 3))
+    if a.what == 'q':
+        snap = timing.snapshot()
+        t0 = time.perf_counter()
+        eq = cc.ccsdt_q()
+        rec.update(q=time.perf_counter() - t0, e_q=float(eq), q_stages=stages(snap, 2), rss_q_gb=memory.resident() / 1e9)
 else:
     cls = zccsdt.CCSDT if a.what == 'ccsdt' else zccsdt.CC3
     cc = cls(mf, frozen=frozen)

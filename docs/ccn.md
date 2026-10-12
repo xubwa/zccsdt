@@ -695,10 +695,28 @@ block as the start, then `ccn.folded_roots` per root.
 H2O / 6-31G (10 + 16): 10 s for CC4 without T4, 52 s with T4 stored (the
 tunnel node, 8 threads, shared).
 
-**Not done.**  The blocks of the symmetry labels (the route without T4 runs
-on the packed layout; the (Q) code has its sectors, `quadruples_sym.py`,
-which the same construction would use); label shifts, IP and EA for CC4;
-the timing job of the task (CC4 against CCSDT and (Q) on HBr).
+**Symmetry labels** (`cc4fly.run_sectors`; used wherever the integrals
+carry labels that the (Q) sector code takes).  The products of an occupied
+quadruple in the blocks of its total label (`quadruples_sym`: one block
+per label of a pair on two pairs, one per label of an index on an index
+and a triple; the Xv blocks of every drive from a `Sectors` of its own,
+whose cache of `<bc||ef>` blocks belongs to its integrals); the row over
+the denominator written into the places of the blocks by the existing
+kernel `zc_qg_sector_vectors` (csrc/tnpack.c: the left-hand quadruples of
+the (Q) gradient - here with the third product zero and omega added to
+eo; its two-pair blocks come out conjugated and are conjugated back); the
+four sums block by block (products of the blocks with the integral blocks
+of the labels, `zc_rows_cols_add`, `tn_reduce`).  The CCSDT step inside
+CC4 runs on the packed layout (`GCC4` has no T3 blocks).  The excitation
+energies in sectors are those of the totally symmetric states (label
+shift 0): the quadruples of a sector follow the label of the occupied
+quadruple, so every vector is projected on shift 0 (`eom.Sector`).
+Against the packed route (`tests/test_cc4.py::test_symmetry_sectors`):
+HBr / cc-pVDZ-DK, 28 frozen (8 + 28, six classes): energy 3e-17; the two
+lowest totally symmetric roots 1e-11; LiH / 6-31G: 1.5e-10.
+
+**Not done.**  Label shifts, IP and EA for CC4; the CCSDT step of CC4 in
+label blocks.
 
 **Porting to the native program.**  No new kernel: the forward of a
 quadruple is the (Q) quantity r that the native program computes already
@@ -713,3 +731,34 @@ intermediate Xv.  The loop over the quadruples is the (Q) schedule (by the
 largest index l, Xv for the pairs (x, l)); R2 and R3 are accumulated over
 all quadruples (per rank, summed at the end); the folded EOM needs what
 section 10 lists for CC3, with four forward passes per sigma vector.
+
+## 12. The ladder
+
+| Model | H2O / 6-31G: E / Eh | lowest triplet / eV | lowest singlet / eV | HBr / cc-pVDZ-DK, 8 + 28: E / Eh | lowest totally symmetric state / eV |
+|---|---|---|---|---|---|
+| CC2 | -76.113595476239 | 7.600970 | 8.370858 | -2604.972364669698 | 6.718960 |
+| CCSD | -76.119346380616 | 7.650348 | 8.386475 | -2604.987068094058 | 6.654323 |
+| CC3 | -76.120380732033 | 7.745192 | 8.477051 | -2604.989093782339 | 6.625943 |
+| CCSDT | -76.120425238933 | 7.750656 | 8.481456 | -2604.989303191227 | 6.622629 |
+| CC4 | -76.120890191123 | 7.752726 | 8.484003 | -2604.989515873733 | 6.623558 |
+| CCSDTQ | -76.120856115043 | 7.754539 (MRCC LR-CCSDTQ) | 8.486226 (MRCC) | -2604.989534096446 | - |
+| FCI | -76.120867535917 | 7.755438 | 8.487146 | - | - |
+
+H2O / 6-31G: RHF as spin orbitals, all electrons, the basis entries and
+the geometry (bohr) of section 7 (E(SCF) = -75.983948495279, the same in
+CFOUR and MRCC); FCI of PySCF (`fci.FCI`, the states told apart by their
+<S^2>).  HBr / cc-pVDZ-DK: X2C spinors of PySCF (x2c.UHF, `conv_tol`
+1e-12), 28 spinors frozen, the m_j-adapted real spinors; the lowest state
+of label shift 0 (CC4: the folded problem in the sectors of the labels,
+the totally symmetric states).  CCSDTQ has no excitation energies in this
+program (no Jacobian route): those of MRCC's LR-CCSDTQ on the same basis
+and geometry for H2O (totals -75.835882067845 and -75.808993052699, its
+E(CCSDTQ) -76.120856115034).  The CC2, CCSD, CC3 numbers of H2O are those
+validated against CFOUR, CCSDT and CCSDTQ against MRCC (to 1e-11 Eh and
+1e-10 Eh in the excitation energies); `bench/ccn/ladder.py`.
+
+For H2O CC4 overshoots in the ground state - 3.4e-5 Eh below CCSDTQ and
+2.3e-5 Eh below FCI (its quadruples lack the terms of CCSDTQ that damp
+them) - for HBr it is 1.8e-5 Eh above CCSDTQ; its excitation energies lie
+between those of CCSDT and CCSDTQ for H2O.  CC3 is within 0.006 eV of
+CCSDT for H2O and 0.004 eV for HBr.
