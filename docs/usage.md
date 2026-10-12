@@ -364,7 +364,11 @@ symmetry).
   Kallay and Gauss for canonical Hartree-Fock orbitals: `e_q5` is its
   fifth-order part, CCSDT[Q].  It is computed one occupied quadruple at a
   time; `max_memory` decides how many columns of the products are formed
-  at once.
+  at once.  `ccsdt_q(workers=n)` (spinors with symmetry labels): the
+  occupied quadruples in n processes with one thread each, as many as the
+  memory beside the plan holds; by default one process, whose products
+  are too small for the threads of the BLAS (HBr, 26 + 60 spinors:
+  130 s in one process on 24 cores, 27 s in 24).
 - **CCSDTQ** (`zccsdt.cc.ccsdtq`, `zccsdt.cc.t4engine`): `kernel()` runs
   CCSDT and continues from its amplitudes; `kernel(t1, t2, t3, t4)` starts
   from the amplitudes given.  The report has the size of T4, the memory
@@ -597,7 +601,7 @@ are in `docs/ccn.md`.
 | `CC3` | singles and doubles of CCSDT; triples `<T\| [V~, T2] + [F, T3] \|0>` | T1, T2, T3 (stored) | o^3 v^4: no ring term, no ladders on T3 | `eom_ee` with label shifts, `eom_ip` / `eom_ea` with short vectors, as EOM-CCSDT; a sigma vector reads R3 once and T3 once |
 | `CC3`, `store_t3 = False` | the same | T1, T2; the triples are made per batch of occupied triples, contracted and discarded (`docs/ccn.md` 9) | o^3 v^4; a work array of `mem_mb` at most, no array of the size of T3; in the blocks of the labels too; canonical spinors | `eom_ee`: the totally symmetric states, each root self-consistent in its frequency (`res.history[k]`: the frequencies of its steps); no label shifts, no IP / EA |
 | `CCSDT` | | T1, T2, T3 | o^4 v^4, o^3 v^5 | EOM-CCSDT |
-| `CC4` | singles, doubles, triples of CCSDTQ; quadruples `<Q\| [V~, T3] + 1/2 [[V~, T2], T2] + [F, T4] \|0>` | T1, T2, T3; T4 made per occupied quadruple and discarded (`store_t4 = True`: stored, the reference route) | the CCSDT step (packed layout) + o^4 v^5 / 8 (the (Q) products and the back contraction; in the sectors of the labels where the integrals have them) | `eom_ee`: the folded problem (R4 folded in); with labels the totally symmetric states; no label shifts, no IP / EA |
+| `CC4` | singles, doubles, triples of CCSDTQ; quadruples `<Q\| [V~, T3] + 1/2 [[V~, T2], T2] + [F, T4] \|0>` | T1, T2, T3; T4 made per occupied quadruple and discarded (`store_t4 = True`: stored, the reference route) | the CCSDT step (T3 in the blocks of the labels, its memory plan) + o^4 v^5 / 8 (the (Q) products and the back contraction; in the sectors of the labels where the integrals have them, the occupied quadruples in `workers` processes) | `eom_ee`: the folded problem (R4 folded in); with labels the totally symmetric states; no label shifts, no IP / EA |
 | `CCSDTQ` | | T1 .. T4 | o^5 v^5, o^4 v^6 | none |
 
 `ccsdt_q()`, `solve_lambda()`, `make_rdm1()` are defined for CCSDT
@@ -610,6 +614,25 @@ stored triples `solver.Options(store_t3=False)` and
 `store_t3 = False` is the form for large cases: T3 of 26 + 120 spinors is
 5.8 GB on the packed layout, the work array of a batch 23 MB per occupied
 triple.  It needs the pp operator in memory.
+
+`CC4` (`store_t4 = False`, the default) iterates as `CCSDT` does - T3 in
+the blocks of the labels, the memory plan with its scratch files, DIIS -
+and adds the pass over the occupied quadruples to every iteration.  With
+symmetry labels the pass runs in `cc.workers` processes at most (default:
+the cores of the process; one thread each), forked from the calculation:
+they read its arrays and add to shared ones.  Its memory is planned with
+that of the CCSDT step from `max_memory`: the report has a line
+`quadruples` with the bytes of the pass and the number of processes, and
+a `MemoryError` with the numbers comes before the first iteration if the
+least does not fit - the dressed integrals, T3 and R3 on the packed block
+[C(o,3), C(v,3)], the intermediate Xo (C(o,3) o C(v,2)) and the blocks of
+one occupied quadruple.  With less memory than all processes take there
+are fewer of them; every pass is planned again from what is resident
+when it starts (`cc.plan_quadruples`: the plan of the last pass,
+`cc.quadruples_stats`: its processes, their private memory, the shared
+arrays).  Without labels (`symmetry = False`, complex spinors) the pass
+is one process on the packed layout, with the threads of the BLAS.
+docs/ccn.md, section 11.
 
 The approximate models run on semicanonical spinors: where F_oo or F_vv
 of the active spinors has an off-diagonal element that is not exactly

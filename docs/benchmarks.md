@@ -4048,16 +4048,49 @@ of EOM-CC3 / EOM-CCSDT, without stored triples one folded sigma vector):
 Threads for CC3 without T3 (whole iteration, 1 / 8 / 24): HBr in blocks
 13.6 / 3.28 / 2.54 s; H2O complex 18.6 / 2.91 / 1.42 s.
 
-**CC4 against CCSDT, (Q) and CCSDTQ**: the job (31906712; HBr / cc-pVDZ-DK
-26 + 28 with CCSDTQ, HBr / cc-pVTZ-DK 26 + 60 without it) had not run at
-the time of writing.  Measured on the shared tunnel node (8 threads, other
-jobs on it; orders of magnitude only): HBr / cc-pVDZ-DK, 28 frozen
-(8 + 28, labels): a CC4 iteration 0.50 s, a CCSDT iteration 0.07 s, (Q)
-0.27 s, a CCSDTQ iteration (blocks) 0.19 s; H2O / 6-31G (10 + 16, packed):
-CC4 to convergence 9.4 s, CCSDTQ 8.4 s.  At these sizes CC4 without T4 is
-no cheaper than CCSDTQ with T4 in blocks: its cost is (Q) per iteration
-(o^4 v^5 / 8), which wins over o^5 v^5, o^4 v^6 only for many virtual
-spinors.
+**CC4 against CCSDT, (Q) and CCSDTQ** (HBr X2C, real, label blocks: cc-pVDZ-DK
+with 10 spinors frozen, 26 + 28, and cc-pVTZ-DK with the lowest 60 virtual
+spinors, 26 + 60; the 24 cores of one socket of a Xeon Gold 6248R, MKL;
+seconds per iteration after the first, (Q) once; `bench/ccn/cc3_bench.py`).
+Before: job 31906712 (node c596) with the first driver - the quadruples in
+one process, the CCSDT step on the packed layout, the denominators of T4
+as an array [C(o,4), C(v,4)].  Now: job 31909245 (a step of it, 2026-10-12) on c118 (the same
+processor; the node otherwise idle), commit 84133f1 - the occupied
+quadruples in 24 processes, the CCSDT step in label blocks, memory by
+plan (docs/ccn.md, section 11).  The other columns are of the second job;
+the first had 0.27 and 1.0 s for CCSDT, 50.5 and 128.5 s for (Q), 17.0 s
+for CCSDTQ.
+
+| case | CCSDT it | (Q), one process | (Q), 24 processes | CC4 it, before | CC4 it | CCSDTQ it | CC4 memory, before | CC4 memory |
+|---|---|---|---|---|---|---|---|---|
+| 26 + 28 | 0.28 s | 50.4 s | 3.6 s | 103 s | 6.3 s | 18.5 s | 4.9 GB | 2.8 GB |
+| 26 + 60 | 1.03 s | 129.9 s | 27.1 s | 334 s | 43.9 s | - | 66.3 GB | 5.3 GB |
+
+(Memory: before, the peak anonymous memory of the process; now, the sum of
+the proportional set sizes of the process and its 24 children.)  One CC4
+iteration with 1 / 8 / 24 cores: 93.6 / 13.4 / 6.3 s at 26 + 28, 481 / 91 / 44 s
+at 26 + 60.  With 24 threads and one process an iteration took as long as
+on one core: the products of a quadruple in the blocks of the labels are
+too small for the threads of the BLAS.  The parts of an iteration at
+26 + 60: the rows of T4 21.02 s, the four sums 15.71 s, Xo 1.79 s, Xv 1.36 s, starting the processes 0.18 s, dressing 0.14 s, T3 to the packed block 0.24 s, the operands 0.15 s, R3 back from the packed block 0.30 s, the CCSDT step with DIIS 1.05 s.
+
+Under `max_memory` (26 + 60; the whole process):
+
+| `max_memory` | processes (quadruples; Xo) | plan of the pass | measured peak, all processes | of which the calculation itself; private pages of the processes | s / iteration |
+|---|---|---|---|---|---|
+| none (80 % of what the job has) | 24; 24 | 10.1 GB | 5.3 GB | 2.4 GB; 1.1 GB | 43.9 |
+| 12000 MB | 24; 22 | 9.4 GB | 5.3 GB | 2.5 GB; 1.2 GB | 43.8 |
+| 8000 MB | 24; 10 | 5.4 GB | 5.0 GB | 2.5 GB; 0.9 GB | 44.2 |
+
+and `max_memory` 6000 MB ends before the first iteration
+(`MemoryError`, the numbers of the floors in it): the floor is the sum of
+the least of the CCSDT step and of the pass, above what such a run would
+take (docs/ccn.md, section 11).
+
+A CC4 iteration is 1.6 (Q) evaluations of 24 processes at 26 + 60
+and 1.7 at 26 + 28 - the (Q) products without the disconnected
+one, the row of T4 written to the places of the blocks, and the four sums
+back - and a third of a CCSDTQ iteration at 26 + 28 (T4 in blocks).
 
 **The ladder** (`bench/ccn/ladder.py`; tunnel node):
 
