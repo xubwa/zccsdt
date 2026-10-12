@@ -207,6 +207,7 @@ each step.  `make` and `make -n` in the directory: no `Circular` line.
 | binaries | runs | printed lines | differ | density files: byte-identical / all | largest difference of an element |
 |---|---|---|---|---|---|
 | `xzccsdt` vs repository (arguments), serial, with `eom` | 28 + 28, all exit 0 | 307 | 0 | 26 / 49 | 5.6e-17 |
+| `xzccsdt_mpi` (`make XZMPI=1 MPICC=mpiicc`) vs repository `MPI=1` (arguments), 2 ranks | 21 + 21, all exit 0 | 203 | 0 | 21 / 49 | 5.6e-17 |
 
 The steps after the first (`(q)`, `density`, `eom`) took `XZAMPS` and
 `XZLAMB` of the first (no `converged in` line, as the reference with its
