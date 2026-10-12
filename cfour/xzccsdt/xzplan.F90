@@ -59,7 +59,7 @@ integer(8) function xzpeak_cc(w)
     end if
   end if
   ! the excited states (rank 0): after the amplitudes
-  if (with_eom .and. .not. xzworker()) then
+  if (with_eom .and. (.not. xzworker() .or. cc3mode == 2)) then
     if (nwe == 2) then
       call xzeom_z(w, e)
     else

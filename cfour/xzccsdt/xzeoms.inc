@@ -767,6 +767,7 @@ contains
     real(8) :: ts
     call N(xzevput)(w, 1, n + 1, kxa)
     ts = omp_get_wtime()
+    if (efold) call N(xzefsend)(w, kxa)
     call N(xzesig)(w, kxa, kxb, sd)
     if (sd .and. .not. efold) then
       teomsd = teomsd + omp_get_wtime() - ts

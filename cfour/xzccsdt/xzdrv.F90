@@ -89,7 +89,8 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a)') ' @XZCCSDT-F, fewer than three occupied or virtual spinors: no triples.'
     call xzerrex
   end if
-  if (with_eom .and. nrank > 1) then
+  ! (the folded EOM-CC3 runs over the ranks: its batches of occupied triples are dealt out)
+  if (with_eom .and. nrank > 1 .and. cc3mode /= 2) then
     write(6, '(a)') ' @XZCCSDT-F, the excited states (EOM) run with one rank: the sigma vectors are not distributed.'
     write(6, '(a)') '             Run CALC=CCSDT (without EXCITE) over the ranks, then EXCITE=EOMEE with one rank:'
     write(6, '(a)') '             the second run takes the amplitudes of the file XZAMPS of the first.'
