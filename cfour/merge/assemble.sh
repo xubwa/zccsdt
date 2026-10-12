@@ -384,7 +384,12 @@ what the ZMAT asks for (as joda stored it in JOBARC):
       (or DERIV_LEV=1)                  dii0, daa0, dpopo, dpvpv for xx2czvec
                                         (then xx2czvec, xsox2cprop)
     CALC=MP2                            the MP2 energy of the integral files (a check)
-    CALC=CC3                            not in this version (stops)
+    CALC=CC3                            CC3 without stored triples (the triples made per
+                                        batch of occupied triples; canonical spinors)
+    CALC=CC3,EXCITE=EOMEE               CC3, then EOM-EE-CC3 from the folded problem in
+                                        singles and doubles, each root self-consistent
+                                        in omega: the totally symmetric states (label
+                                        shift 0 of %xzeom) only for now; one MPI rank
 
 CC_CONV (the amplitudes to 10^-CC_CONV, the energy to 10^-(CC_CONV+2)),
 CC_MAXCYC, MEMORY_SIZE (all working memory is CFOUR's work array), DROPMO /
@@ -397,7 +402,15 @@ sums of the spinor energies, CC_CONV).  If they fit the present run they
 are taken and the iterations skipped - e.g. CALC=CCSDT, then (xjoda again
 with) CALC=CCSDT(Q) or EXCITE=EOMEE in the same directory computes only the
 new part; the output says "taken" or "solved here".  Remove the files to
-force a new solution.
+force a new solution.  CC3 amplitudes are solved in every run (a CC3 run
+does not read XZKEY and removes it).
+
+CC3: the triples equation takes the Fock operator as the diagonal of the
+spinor energies.  The program prints the largest elements of the Fock
+matrix of the SCF off the diagonal on the active spinors and stops above
+XZ_FOCKTOL (default 1e-6).  XZ_CC3=stored: CC3 with T3 stored (the memory
+of CCSDT; a check route, and with EXCITE=EOMEE the states of every label
+shift of %xzeom).
 
 Environment: OMP_NUM_THREADS (threads); XZ_LABTOL (default 1e-8: the
 largest integral that the symmetry labels forbid and that is taken as
@@ -415,8 +428,8 @@ Test
 HF / 6-31G (CFOUR's GENBAS entries), X2C-1e, %dglin (labels of dgcosym,
 real arithmetic), CALC=CCSDT: runs the chain in a new directory below the
 current one (or \$XZTEST_DIR), then $prog a second time (which must take
-XZAMPS), and compares E(SCF) and E(CCSDT) with the reference numbers; PASS
-or FAIL.  A few seconds.  Do not run it with a source directory as the
+XZAMPS), then with CALC=CC3 (xjoda again), and compares E(SCF), E(CCSDT)
+and E(CC3) with the reference numbers; PASS or FAIL.  A few seconds.  Do not run it with a source directory as the
 current directory.
 
 Origin

@@ -12,13 +12,15 @@
 # dgcosym, real arithmetic), CALC=CCSDT.  In a new directory below the
 # current one (or $XZTEST_DIR): xjoda, xsox2catm, xsox2chf, xx2cvtran,
 # xzccsdt; then xzccsdt once more, which must take the amplitudes of the
-# first run (file XZAMPS) instead of iterating.  Compared with the reference
-# numbers below: E(SCF) and E(CCSDT) to 1e-8 Eh.  Prints PASS or FAIL;
+# first run (file XZAMPS) instead of iterating; then CALC=CC3 (xjoda again):
+# CC3 without stored triples.  Compared with the reference numbers below:
+# E(SCF), E(CCSDT) and E(CC3) to 1e-8 Eh.  Prints PASS or FAIL;
 # exit status 0 on PASS.  A few seconds (OMP_NUM_THREADS threads).
 #
 set -u
 ref_scf=-100.064473416710
 ref_cc=-100.196412399000
+ref_cc3=-100.196407469096
 tol=1e-8
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -40,6 +42,10 @@ for p in xjoda xsox2catm xsox2chf xx2cvtran; do
 done
 "$xz" > xzccsdt.out 2>&1 || { echo "FAIL: xzccsdt stopped (exit $?), see $d/xzccsdt.out"; exit 1; }
 "$xz" > xzccsdt.2.out 2>&1 || { echo "FAIL: xzccsdt (second run) stopped (exit $?), see $d/xzccsdt.2.out"; exit 1; }
+# CC3 (without stored triples): CALC of the ZMAT, xjoda again, the program
+sed -i 's/CALC=CCSDT,/CALC=CC3,/' ZMAT
+"$bin/xjoda" > xjoda.cc3.out 2>&1 || { echo "FAIL: xjoda (CALC=CC3) stopped (exit $?), see $d/xjoda.cc3.out"; exit 1; }
+"$xz" > xzccsdt.cc3.out 2>&1 || { echo "FAIL: xzccsdt (CALC=CC3) stopped (exit $?), see $d/xzccsdt.cc3.out"; exit 1; }
 
 val() { awk -v k="$2" '$1 == k { v = $NF } END { print v }' "$1"; }
 bad=0
@@ -58,5 +64,7 @@ check 'E(CCSDT), XZAMPS taken' "$(val xzccsdt.2.out 'E(CCSDT)')" $ref_cc
 grep -q 'symmetry labels: the file dgcosym' xzccsdt.out || { echo "  the labels of dgcosym were not used"; bad=1; }
 grep -q 'taken, the CCSDT iterations are skipped' xzccsdt.2.out || { echo "  the second run did not take XZAMPS"; bad=1; }
 grep -q 'CCSDT converged in' xzccsdt.2.out && { echo "  the second run iterated"; bad=1; }
+check 'E(CC3)' "$(val xzccsdt.cc3.out 'E(CC3)')" $ref_cc3
+grep -q 'CC3 converged in' xzccsdt.cc3.out || { echo "  the CC3 run did not iterate (CCSDT amplitudes taken?)"; bad=1; }
 if [ $bad = 0 ]; then echo "PASS"; else echo "FAIL (outputs in $d)"; fi
 exit $bad

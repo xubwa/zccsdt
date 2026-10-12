@@ -65,7 +65,7 @@ are.  The directory is generated; the sources stay here.
   `#include` of the typed sources (`*.inc`, `xztype.h`; `-I.` is added).
 - The C kernels of `csrc/` that the program links: `KERNELS` of
   `cfour/xzccsdt/Makefile`, read at assembly time (now `ccsdt_t3.c`,
-  `t3pack.c`, `tnpack.c`, `lambda_t3.c`, `qlambda.c`).
+  `t3pack.c`, `tnpack.c`, `lambda_t3.c`, `qlambda.c`, `cc3_fly.c`, `cc3_native.c`).
 - The routines of other program directories of CFOUR that the program
   calls: every variable of `cfour/xzccsdt/Makefile` of the form
   `X := $(addprefix $(CFOUR)/<directory>/, a.o b.o)`, read at assembly time -
@@ -98,7 +98,7 @@ are.  The directory is generated; the sources stay here.
 - A `README` (what the program is, how to build it in a built tree, how
   to run it - the ZMAT keywords -, the test, the commit, how to regenerate,
   the origin of every file).
-- `test/`: `cfour/merge/test` (HF / 6-31G, X2C-1e, `%dglin`, `CALC=CCSDT`;
+- `test/`: `cfour/merge/test` (HF / 6-31G, X2C-1e, `%dglin`, `CALC=CCSDT`, then `CALC=CC3`;
   `GENBAS` with CFOUR's entries `F:6-31G`, `H:6-31G` unchanged; `run.sh
   <cfour>/bin` runs the chain and the program twice in a new directory and
   prints PASS or FAIL).
