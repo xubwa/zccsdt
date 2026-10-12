@@ -38,7 +38,10 @@ def hbr():
     assert np.size(cc.t3) < T3.size             # (the iterations ran in the blocks of the labels)
     ints = t4engine.Dressed.from_eris(eris, cc.t1)
     e = np.asarray(eris.fock).diagonal().real
-    return mf, cc, eris, ints, e, T3
+    yield mf, cc, eris, ints, e, T3
+    # (the work array of the block engine stays allocated and counts as held in the plans of
+    # later calculations of the process: tests/test_cc_outcore.py expects none)
+    ccsdt_opt.release_cached(eris)
 
 
 def _err(a, b):
