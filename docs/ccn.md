@@ -433,6 +433,42 @@ T3 stored.
 | the three lowest roots (totally symmetric states in blocks) against `eom_ee` with R3 stored; conv_tol 1e-9 | 1e-9 Eh (observed 1e-11) |
 | spinors that are not canonical | `NotImplementedError` with the size of the off-diagonal Fock elements |
 
+**Timings** (job 31901611, node c521, 2 x 24 cores Xeon Gold 6248R, 24
+threads, MKL; `bench/ccn/cc3_bench.py`, commit 63ee1d2; seconds per
+iteration after the first, peak memory of the iterations; a sigma vector:
+with R3 stored one sigma vector of EOM-CC3 / EOM-CCSDT, without stored
+triples one folded sigma vector at a frequency):
+
+| | o + v | CC3, no T3 | CC3, T3 stored | CCSDT | CCSD of DirectZCCSD; (T) |
+|---|---|---|---|---|---|
+| HBr / cc-pVQZ-DK, X2C, 10 frozen, lowest 120 virtual; real, label blocks | 26 + 120 | 2.54 s, 4.2 GB | 3.63 s, 6.5 GB | 6.28 s, 6.9 GB | 0.58 s (complex, Kramers); (T) 4.6 s |
+| sigma vector | | 4.2 s | 5.4 s | 9.8 s | |
+| the same on the packed layout (real) | 26 + 120 | 11.6 s, 5.0 GB | 27.1 s, 21.6 GB | 84.2 s, 22.7 GB | |
+| sigma vector | | 23.9 s | 35.7 s | 152 s | |
+| H2O / cc-pVTZ, X2C, all electrons; complex, dense | 10 + 106 | 1.42 s, 3.4 GB | 2.43 s, 4.2 GB | 6.58 s, 5.0 GB | 0.04 s; (T) 0.24 s |
+| sigma vector | | 2.65 s | 3.97 s | 11.7 s | |
+
+- Without stored triples an iteration of 26 + 120 in blocks is 1.31 s of
+  batches (11.7 cores busy on 24) and 1.2 s of the CCSD part of the CCSDT
+  step (dressing 0.50, W_vvvo 0.32, the CCSD residual 0.16).  In a folded
+  sigma vector (two passes over the batches, three drive terms) the
+  batches take 2.38 s: drive products 0.73, contractions 0.71, gather
+  0.56, amplitudes 0.35 (the times the kernel reports).  The gather and the
+  amplitudes are memory passes of a third of the time: the next thing to
+  make faster.
+  Against DirectZCCSD, the production CCSD(T) of spinors (complex, Kramers
+  pairs, AO ladder), a CC3 iteration costs 4.4 CCSD iterations; CC3 to
+  convergence (about 15 iterations) is 8 times CCSD(T) here.
+- Threads (whole iteration, CC3 without T3): HBr in blocks 13.6 / 3.28 /
+  2.54 s on 1 / 8 / 24 threads (5.4 times faster on 24: the small products
+  of the blocks and the CCSD part); H2O dense complex 18.6 / 2.91 / 1.42 s
+  (13 times).
+- Without labels the batches are the large products of the dense layout
+  and CC3 without T3 is 2.3 times faster than with T3 stored and 7.3 times
+  faster than CCSDT, at a quarter of their memory; in the blocks of the
+  labels the stored T3 is small (82 million elements) and the gain is 1.4
+  and 2.5.
+
 ## 10. Porting CC3 to the native program
 
 What a Fortran driver needs for CC3 without stored triples; nothing here
