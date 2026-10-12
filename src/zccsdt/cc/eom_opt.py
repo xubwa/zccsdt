@@ -60,10 +60,17 @@ class Ground:
     T3: np.ndarray              # flat, layout of the engine; None: EOM-CCSD
     c: dict                     # the capture of ccsdt_opt.update_amps and what is made of it
     change: float = 0.0         # |Jacobi step - amplitudes| at these amplitudes
+    model: str = 'cc'           # 'cc': CCSD / CCSDT; 'cc2', 'cc3': the Jacobian of that model (docs/ccn.md)
 
     @property
     def with_t3(self):
         return self.T3 is not None
+
+    @property
+    def fly(self):
+        '''CC3 without stored triples: the vectors have two ranks, and the
+        triples part of the Jacobian is folded in at a frequency omega.'''
+        return self.model == 'cc3' and self.T3 is None
 
     def sizes(self, shift=None):
         '''Lengths of the three parts of a vector (``shift``: of a vector
@@ -96,21 +103,35 @@ def _dtau(t1, r1, om, vm):
     return x + t1[mm][:, :, None] * r1[nn][:, None, :] - t1[nn][:, :, None] * r1[mm][:, None, :]
 
 
-def prepare(eris, t1, t2, T3=None, opts=None, mem_mb=2000.0):
+def prepare(eris, t1, t2, T3=None, opts=None, mem_mb=2000.0, model='cc', fly=False):
     '''The Ground of converged amplitudes: t1, t2 dense, T3 flat in the
     layout of the engine of ``eris`` (None: EOM-CCSD on CCSD amplitudes).
-    One amplitude step with its operands kept.'''
+    One amplitude step with its operands kept.  ``model``: 'cc2' (T3 None)
+    or 'cc3' for the Jacobian of that model at its amplitudes.  ``fly``
+    (model 'cc3', T3 None): no T3 is stored; sigma(omega=) then folds the
+    triples in at the frequency omega (zccsdt.cc.cc3fly).'''
     from zccsdt.cc import solver
     opts = opts or solver.Options()
+    model = {'ccsd': 'cc', 'ccsdt': 'cc'}.get(model, model)
+    if model not in ('cc', 'cc2', 'cc3') or (model == 'cc2' and T3 is not None) \
+            or (model == 'cc3' and (T3 is None) != bool(fly)) or (fly and model != 'cc3'):
+        raise ValueError('model %r with%s T3' % (model, 'out' if T3 is None else ''))
     om, vm = t3pack.maps_for(eris)
     dtype = np.dtype(np.result_type(t1, t2, eris.oovv, eris.fock, *([] if T3 is None else [T3])))
     eng = ccsdt_opt.engine_for(eris, dtype, mem_mb)
     t1 = np.ascontiguousarray(t1, dtype=dtype)
     t2 = np.ascontiguousarray(t2, dtype=dtype)
-    T = np.zeros(eng.size, dtype=dtype) if T3 is None else np.ascontiguousarray(np.asarray(T3, dtype=dtype).ravel())
+    if fly:
+        T = None
+    else:
+        T = np.zeros(eng.size, dtype=dtype) if T3 is None else np.ascontiguousarray(np.asarray(T3, dtype=dtype).ravel())
     c = {}
     with timer('eom.prepare'):
-        n1, n2, n3 = ccsdt_opt.update_amps(opts, t1, t2, T, eris, mem_mb=mem_mb, plan=ccsdt_opt.MemoryPlan(), capture=c)
+        n1, n2, n3 = ccsdt_opt.update_amps(opts, t1, t2, T, eris, mem_mb=mem_mb, plan=ccsdt_opt.MemoryPlan(), capture=c,
+                                           model='cc3' if model == 'cc3' else 'ccsdt')
+        if model == 'cc2':
+            from zccsdt.cc import ccn
+            n1, n2 = ccn.cc2_update_amps(opts, t1, t2, eris)
         change = float(np.linalg.norm(n1 - t1) + np.linalg.norm(n2 - t2))
         if T3 is not None:
             change += 6.0 * float(solver._diff_norm(n3, T))
@@ -140,7 +161,10 @@ def prepare(eris, t1, t2, T3=None, opts=None, mem_mb=2000.0):
         if T3 is None:
             for k in ('G_Pd', 'Wv', 'Wo'):
                 c.pop(k, None)
-    return Ground(eris, om, vm, eng, dtype, t1, t2, None if T3 is None else T, c, change)
+        if fly:
+            for k in ('WringT', 'O6'):
+                c.pop(k, None)
+    return Ground(eris, om, vm, eng, dtype, t1, t2, None if T3 is None else T, c, change, model)
 
 
 def _pass1(g, T, G_Pd, G_mQ, gpp, fov, shifts=None, **kw):
@@ -161,7 +185,7 @@ def _pass1(g, T, G_Pd, G_mQ, gpp, fov, shifts=None, **kw):
     return r1.T, r2, Xacc[:nvir].reshape(nvir * nocc, vm.npair), Yall[:, :, :nocc].transpose(2, 1, 0)
 
 
-def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
+def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None, omega=None):
     '''(sigma_1[i,a], sigma_2[(i<j),(a<b)], sigma_3 flat) for the vector
     (r1, r2p, R3) - see the module; ``out``: a flat array for sigma_3.
     ``sd``: the singles-doubles block only - no R3 and none of the terms of
@@ -172,7 +196,11 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
     l_a - l_i (l_a + l_b - l_i - l_j) = shift, R3 and sigma_3 are flat in
     the layout g.shifter().layout(shift).  None: a totally symmetric
     vector in the layout of T3 (the same as shift = 0, by the engine
-    itself).'''
+    itself).
+
+    ``omega``: for a Ground of CC3 without stored triples (g.fly) - the
+    folded sigma vector A_PP r + A_PQ (omega - A_QQ)^-1 A_QP r of the vector
+    (r1, r2p); the third return value is None.'''
     s = 0 if shift is None else int(shift)
     sh = None if shift is None else g.shifter()
     om, vm, eng, dt, c = g.om, g.vm, g.eng, g.dtype, g.c
@@ -229,22 +257,36 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
     del G, L
     dtau = _dtau(t1, r1, om, vm)                                # [P, a, b]
     xp = r2p + t3pack.pack_last2(dtau, vm)                      # (r2 + dtau1)[P, Q]
-    # P(ab) (F'_bc t_ijac + F_bc r_ijac); half of the second is in the ladder operator
-    z = 0.5 * (r2mn - dtau)
-    Y = gemm(z.reshape(-1, nvir), np.asarray(c['Feff_vv'], dtype=dt).T)
-    gemm(t2mn.reshape(-1, nvir), np.ascontiguousarray(dFvv.T), Y, beta=1.0)
-    t3pack.add_asym_last2(s2, Y.reshape(-1, nvir, nvir), vm)
-    del Y, z, dtau
-    # 1/2 W_klij r_klab + 1/2 W'_klij t_klab, with F_oo and F'_oo
-    dWkl = np.array(dWoooo[mm, nn][:, mm, nn], dtype=dt, order='C')
-    dWkl += ccsdt_opt.occ_pair_one_body(dFoo, om)
-    gemm(np.asfortranarray(c['Wkl'].T), r2p, s2, beta=1.0)
-    gemm(np.asfortranarray(dWkl.T), t2pp, s2, beta=1.0)
-    # ring: t x W' + r x W
-    X2 = gemm(A, dBr)
-    gemm(Ar, c['Br'], X2, beta=1.0)
-    t3pack.add_asym_pack4(s2, X2.reshape(nocc, nvir, nocc, nvir), om, vm, axes=(0, 2, 1, 3))
-    del X2, dBr
+    cc2 = g.model == 'cc2'
+    if cc2:
+        # CC2: sigma_2 = <ab||ij>' + [F, R2] with the Fock matrix as it is.  The ladder of the
+        # dressed <ab||de>~ acts on dtau1 alone (the ket part of <ab||ij>'): the pp operator
+        # below is applied to dtau1, and its T2 and F_vv parts are taken out again
+        xp = t3pack.pack_last2(dtau, vm)
+        f0 = np.asarray(g.eris.fock)
+        Y = gemm((-0.5 * dtau).reshape(-1, nvir), np.asarray(c['Feff_vv'], dtype=dt).T)
+        gemm(r2mn.reshape(-1, nvir), np.ascontiguousarray(f0[nocc:, nocc:].T, dtype=dt), Y, beta=1.0)
+        t3pack.add_asym_last2(s2, Y.reshape(-1, nvir, nvir), vm)
+        del Y, dtau
+        gemm(np.asfortranarray(ccsdt_opt.occ_pair_one_body(np.asarray(f0[:nocc, :nocc], dtype=dt), om).T), r2p, s2, beta=1.0)
+    else:
+        # P(ab) (F'_bc t_ijac + F_bc r_ijac); half of the second is in the ladder operator
+        z = 0.5 * (r2mn - dtau)
+        Y = gemm(z.reshape(-1, nvir), np.asarray(c['Feff_vv'], dtype=dt).T)
+        gemm(t2mn.reshape(-1, nvir), np.ascontiguousarray(dFvv.T), Y, beta=1.0)
+        t3pack.add_asym_last2(s2, Y.reshape(-1, nvir, nvir), vm)
+        del Y, z, dtau
+        # 1/2 W_klij r_klab + 1/2 W'_klij t_klab, with F_oo and F'_oo
+        dWkl = np.array(dWoooo[mm, nn][:, mm, nn], dtype=dt, order='C')
+        dWkl += ccsdt_opt.occ_pair_one_body(dFoo, om)
+        gemm(np.asfortranarray(c['Wkl'].T), r2p, s2, beta=1.0)
+        gemm(np.asfortranarray(dWkl.T), t2pp, s2, beta=1.0)
+        # ring: t x W' + r x W
+        X2 = gemm(A, dBr)
+        gemm(Ar, c['Br'], X2, beta=1.0)
+        t3pack.add_asym_pack4(s2, X2.reshape(nocc, nvir, nocc, nvir), om, vm, axes=(0, 2, 1, 3))
+        del X2
+    del dBr
     t_.__exit__(None, None, None)
 
     # ---- pp: <ab||de>' = -P(ab) r1[m,a] <mb||de>~ packed, its ladder with t2 (the one
@@ -262,7 +304,7 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
         nq2 = hi2 - lo2
         blk = np.zeros((nq2, nq), dtype=dt)
         if nq:
-            if nq2:
+            if nq2 and not cc2:
                 Gh = np.ascontiguousarray(G_Q if nq == vm.npair else G_Q[:, :, lo:hi]).reshape(nocc, -1)
                 nb = max(1, int(1e9 // (nvir * nq * blk.itemsize)))
                 for xb in range(0, nvir, nb):
@@ -274,7 +316,7 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
             # 1/2 <ab||cd>~ (r2 + dtau1): the ladder operator of T3 less its T2 part
             t3pack.axpby(s2[:, lo:hi], gemm(Wpp[h], np.ascontiguousarray(xp[:, lo:hi].T)).T)
             s2[:, lo:hi] -= (xp[:, lo:hi] @ gpp[:, lo:hi].T) @ t2pp[:, lo:hi]
-            if with3 and nq2:
+            if with3 and nq2 and g.model != 'cc3':
                 gemm(np.asfortranarray(r2p[:, lo2:hi2].T), np.ascontiguousarray(gpp[:, lo:hi]), blk, beta=1.0)
                 if s == 0:
                     ccsdt_opt.add_one_body_pairs(blk, dFvv, vm, 0.5, block=h)
@@ -291,34 +333,42 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
     labelled = om.spins is not None
     if labelled:
         m1, m2 = g.masks(s)
-    if not with3:
+    fly = g.fly and not sd
+    if fly and (omega is None or sh is not None):
+        raise ValueError('CC3 without stored triples: sigma(omega=) for totally symmetric vectors')
+    if not with3 and not fly:
         if labelled:
             s1 *= m1
             s2 *= m2
         return s1, s2, None
 
     # ---- pass 1 over R3 with the integrals of the ground state, over T3 with H'
-    with timer('eom.pass1'):
-        a1, a2, Xv, dWo = _pass1(g, R3, c['G_Pd'], c['G_mQ'], gpp, fov, None if sh is None else (s, 0))
-        s1 += a1
-        s2 += a2
-        G1 = np.zeros_like(c['G_Pd'])
-        G1[nvir:] = d_oovo[mm, nn].transpose(2, 0, 1)
-        G2 = np.zeros((nocc * vm.npair, nocc + nvir), dtype=dt)
-        gemm(np.asfortranarray(goovv_P.reshape(nocc, -1).T), r1, G2[:, nocc:], alpha=-1.0)   # <am||Q>' = -r1[n,a] <nm||Q>
-        if sh is None:
-            s2 += _pass1(g, g.T3, G1, G2, np.zeros_like(gpp), dfov)[1]
-        else:       # (of H' only <mn||ei>', <am||ef>' and f'[m,e] are not zero)
-            s2 += _pass1(g, g.T3, G1, G2, None, dfov, (0, s), xe=False, yj=False)[1]
-        del G1, G2
+    cc3 = g.model == 'cc3'
+    Xv = None
+    if not fly:
+        with timer('eom.pass1'):
+            a1, a2, Xv, dWo = _pass1(g, R3, c['G_Pd'], c['G_mQ'], gpp, fov, None if sh is None else (s, 0))
+            s1 += a1
+            s2 += a2
+            G1 = np.zeros_like(c['G_Pd'])
+            G1[nvir:] = d_oovo[mm, nn].transpose(2, 0, 1)
+            G2 = np.zeros((nocc * vm.npair, nocc + nvir), dtype=dt)
+            gemm(np.asfortranarray(goovv_P.reshape(nocc, -1).T), r1, G2[:, nocc:], alpha=-1.0)   # <am||Q>' = -r1[n,a] <nm||Q>
+            if sh is None:
+                s2 += _pass1(g, g.T3, G1, G2, np.zeros_like(gpp), dfov)[1]
+            else:       # (of H' only <mn||ei>', <am||ef>' and f'[m,e] are not zero)
+                s2 += _pass1(g, g.T3, G1, G2, None, dfov, (0, s), xe=False, yj=False)[1]
+            del G1, G2
 
     # ---- the derivatives of W_vvvo and W_vooo
     with timer('eom.Wv'):
         dWv = np.zeros((vm.npair, nvir, nocc), dtype=dt)
-        t3pack.add_transposed(dWv.reshape(vm.npair, -1), np.ascontiguousarray(Xv))
+        if not cc3:
+            t3pack.add_transposed(dWv.reshape(vm.npair, -1), np.ascontiguousarray(Xv))
         del Xv
         # -P(ab) r1[m,a] W_ovvo[m,b,e,i]: <ab||ei>' and the t2 x <mb||ef>' term
-        L = gemm(np.asfortranarray(r1.T), c['Wmbei'])
+        # (CC3: the dressed <mb||ei>~ alone - the drive operator is <ab||ei>')
+        L = gemm(np.asfortranarray(r1.T), np.ascontiguousarray(ovvo, dtype=dt).reshape(nocc, -1) if cc3 else c['Wmbei'])
         t3pack.pair_antisym_add(dWv, L, vm, (nvir * nvir * nocc, nvir * nocc, nocc, 1), alpha=-1.0)
         del L
         # sum_f <ab||ef>~ r1[i,f], from the ladder operator: its T2 part gives
@@ -333,9 +383,59 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None):
         dWv -= 0.5 * (F[md][:, :, None] * r1.T[ne][:, None, :] - F[ne][:, :, None] * r1.T[md][:, None, :])
         dWv[q, ne] += 0.5 * Fr[md]
         dWv[q, md] -= 0.5 * Fr[ne]
-        zero = np.zeros((nocc, nocc, nvir, nocc), dtype=dt)
-        ccsdt_opt.wvvvo_packed(dWv, None, t1, t2, dfov, {'oovo': zero}, om, vm, xterm=lambda W: None, inplace=True)
-        ccsdt_opt.wvvvo_packed(dWv, None, t1, r2, fov, ge, om, vm, inplace=True)
+        if cc3:     # the T2 part of the ladder operator on r1 is taken out too
+            gemm(np.asfortranarray(t2pp.T), np.ascontiguousarray(d_oovo[mm, nn], dtype=dt).reshape(om.npair, -1),
+                 dWv.reshape(vm.npair, -1), alpha=-1.0, beta=1.0)
+        else:
+            zero = np.zeros((nocc, nocc, nvir, nocc), dtype=dt)
+            ccsdt_opt.wvvvo_packed(dWv, None, t1, t2, dfov, {'oovo': zero}, om, vm, xterm=lambda W: None, inplace=True)
+            ccsdt_opt.wvvvo_packed(dWv, None, t1, r2, fov, ge, om, vm, inplace=True)
+    if fly:
+        # The triples folded in at the frequency omega (docs/ccn.md, section 4):
+        #   r3 = (drive[t2; <ab||ei>', <ma||ij>'] + drive[r2; <ab||ei>~, <ma||ij>~]) / (omega - (e_abc - e_ijk))
+        # contracted with the integrals of H~ into sigma_1 and sigma_2, and the triples of
+        # the ground state contracted with those of H' = [H~, R1] into sigma_2; both made
+        # per batch of occupied triples and discarded
+        fl, d0 = c['fly'], c['fly_drive']
+        with timer('eom.fly'):
+            with timer('cc3fly.operands'):
+                d1 = fl.drive_operands(t2, t2P, dWv, d_ovoo)
+                d2 = (transposed(r2, (1, 0, 3, 2), dt), d0[1], d0[2], np.ascontiguousarray(r2P, dtype=dt))
+            del dWv
+            a1, a2 = fl.run([d1, d2], c['fly_contract'], omega=omega)
+            s1 += a1
+            s2 += a2
+            del d1, d2
+            with timer('cc3fly.operands'):
+                G2 = gemm(np.asfortranarray(goovv_P.reshape(nocc, -1).T), r1, alpha=-1.0)      # <am||Q>' [(m, Q), a]
+                contr = fl.contraction_operands(G2, d_oovo, np.zeros_like(goovv_P), dfov)
+                del G2
+            s2 += fl.run([d0], contr)[1]
+        if labelled:
+            s1 *= m1
+            s2 *= m2
+        return s1, s2, None
+    if cc3:
+        # sigma_3 = [F, R3] + drive(t2; <ab||ei>', <ma||ij>') + drive(r2; <ab||ei>~, <ma||ij>~):
+        # T3 is not read
+        dWo = np.ascontiguousarray(d_ovoo[:, :, nn, mm])
+        Wpp3 = O63 = None           # (the Fock operator of the semicanonical spinors: its diagonal)
+        if sh is not None:
+            with timer('eom.r3'):
+                S3 = sh.residual(R3, s, None, t2mn, dWv, dWo, t2P, Wpp3, O63, sW=0, sa=0, out=out)
+                ccsdt_opt.fock_diag_add(g.eris, dt, R3, S3.reshape(-1), shift_layout=sh.layout(s))
+            with timer('eom.t3'):
+                sh.residual(g.T3, 0, None, r2mn, c['Wv'], c['Wo'], r2P, None, None, sW=s, sa=s, out=S3, clear=False)
+        else:
+            with timer('eom.r3'):
+                S3 = eng.residual(R3, None, t2mn, dWv, dWo, t2P, Wpp3, O63, out=out)
+                ccsdt_opt.fock_diag_add(g.eris, dt, np.asarray(R3).reshape(-1), S3.reshape(-1))
+            with timer('eom.t3'):
+                eng.residual(g.T3, None, r2mn, c['Wv'], c['Wo'], r2P, None, None, out=S3, clear=False)
+        if labelled:
+            s1 *= m1
+            s2 *= m2
+        return s1, s2, S3.reshape(-1)
     with timer('eom.small'):
         def t2_ooov(o_, a_):        # tmp2[m,b,i,j] = sum_ne o[m,n,i,e] t[j,n,b,e]
             Oo = np.ascontiguousarray(np.asarray(o_).transpose(0, 2, 1, 3), dtype=dt)

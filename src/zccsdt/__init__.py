@@ -19,9 +19,14 @@ from pyscf import lib as _pyscf_lib      # noqa: E402, F401
 
 # the PySCF-style front end (zccsdt.ccsdt), imported on first use
 _FRONT = ('CCSDT', 'RCCSDT', 'UCCSDT', 'GCCSDT', 'CCSDTQ', 'GCCSDTQ')
+# the approximate models and the rest of the ladder (zccsdt.ccn; docs/ccn.md)
+_CCN = ('CC2', 'CCSD', 'CC3', 'CC4', 'GCC2', 'GCCSD', 'GCC3', 'GCC4')
 
 
 def __getattr__(name):
+    if name in _CCN:
+        from zccsdt import ccn
+        return getattr(ccn, name)
     if name in _FRONT:
         from zccsdt import ccsdt
         return getattr(ccsdt, name)

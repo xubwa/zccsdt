@@ -432,7 +432,7 @@ class DirectZCCSD(_zccsd.ZCCSD):
     max_disk = None
 
     _keys = {'max_disk', 'ladder', 'cderi', 'max_error', 'eris', 'ovvv_direct', 'socutils_amps', 'three_m',
-             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density', 'e_t',
+             'kramers', 'ao_ladder', 'with_mmf', 'feri', 'ao2mo_outcore', '_t_density', 'e_t', '_cc2', 'e_cc2', 't1_cc2',
              '_l_with_t', '_t_gradient'}
 
     def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None,
@@ -592,6 +592,57 @@ class DirectZCCSD(_zccsd.ZCCSD):
         if eris.ovvv is None:
             eris.ovvv = get_ovvv(eris)              # from the packed array or the AO integrals
         return gccsd_t.kernel(self, eris, t1, t2, self.verbose)
+
+    # ---- CC2 on the Cholesky vectors (zccsdt.zccsd.cc2; docs/ccn.md, section 8)
+
+    def cc2_engine(self):
+        '''The zccsdt.zccsd.cc2.Engine of this calculation: the active
+        spinors, their Fock matrix and the Cholesky vectors of the scalar AO
+        integrals - ``cderi`` if given, else decomposed to ``max_error``
+        (``ladder = 'ao'``: to 1e-10, the exact integrals to that; there is
+        no integral-direct CC2).  No integral of the spinors is made.'''
+        from zccsdt.zccsd import cc2
+        eris = _PhysicistsERIs()
+        eris._common_init_(self, self.mo_coeff)
+        mol = self.mol
+        nao = mol.nao_nr()
+        mog = np.vstack(mol.sph2spinor_coeff()).dot(eris.mo_coeff)
+        cderi = self.cderi
+        if cderi is None:
+            from socutils.mcscf import zmc_ao2mo
+            err = self.max_error if self.ladder == 'chol' else 1e-10
+            import contextlib
+            import io
+            buf = io.StringIO()         # (the decomposition prints its progress whatever ``verbose``)
+            with contextlib.redirect_stdout(buf):
+                cderi = zmc_ao2mo.chunked_cholesky(mol, max_error=err, verbose=self.verbose > 4,
+                                                   cmax=8 if self.ladder == 'chol' else max(8, (nao + 1) // 2 + 1))
+            if self.verbose > 4:
+                self.stdout.write(buf.getvalue())
+        L = np.asarray(cderi).reshape(-1, nao, nao)
+        self._cc2 = cc2.Engine(mog, eris.nocc, eris.fock, L, eris.e_hf, self.max_memory, self.verbose, self.stdout)
+        logger.info(self, 'CC2 on Cholesky vectors: %s', self._cc2.describe())
+        return self._cc2
+
+    def cc2(self, t1=None):
+        '''The CC2 ground state on the Cholesky vectors: (E_corr, t1); the
+        doubles are never stored.  self.e_cc2, self.t1_cc2;
+        conv_tol, conv_tol_normt, max_cycle, diis_space as for CCSD.'''
+        eng = getattr(self, '_cc2', None) or self.cc2_engine()
+        self.e_cc2, self.t1_cc2 = eng.kernel(t1, self.conv_tol, self.conv_tol_normt, self.max_cycle, self.diis_space)
+        logger.note(self, 'E(CC2) = %.15g  E_corr = %.15g  (%d iterations%s)', eng.e_hf + self.e_cc2, self.e_cc2,
+                    eng.cycles, '' if eng.converged else ', NOT converged')
+        return self.e_cc2, self.t1_cc2
+
+    def cc2_ee(self, nroots=3, conv_tol=1e-6, **kwargs):
+        '''The ``nroots`` lowest excitation energies of CC2 (linear response;
+        folded doubles, each root self-consistent in its frequency) after
+        cc2(): (energies in Hartree, the Solved of zccsdt.cc.ccn.folded_roots).'''
+        eng = getattr(self, '_cc2', None)
+        if eng is None or eng.Y0 is None:
+            self.cc2()
+            eng = self._cc2
+        return eng.eom_ee(nroots, conv_tol, **kwargs)
 
     # (the vvvv-free EOM-CCSD entry points of socutils are not copied: EOM
     # stays in socutils.cc.eom_zccsd_direct)

@@ -100,6 +100,27 @@ def pp_ladder(T3p, om, vm, batch, Wpp, R, io=None):
     _record('ppl', st)
 
 
+def drive(om, vm, batch, Adrv, Bdrv, R, io=None):
+    '''Pass 2 without the ring term (the triples equation of CC3): the two
+    drive terms reduced into R; no rank-3 array is read.'''
+    dt = R.dtype
+    Adrv, Bdrv = (_c(x, dt) for x in (Adrv, Bdrv))
+    st = np.zeros(4)
+    getattr(_lib, 'zc_t3_drive_' + _sfx(dt))(
+        _i(om.ntri), _i(vm.ntri), _i(om.n), _i(vm.n), _i(om.npair), _i(vm.npair),
+        _p(om.free_c), _p(om.pair_c), _p(vm.free_c), _p(vm.pair_c), _i(batch),
+        _p(Adrv), _p(Bdrv), _p(R), _io(io), _p(st))
+    _record('pass2', st)
+
+
+def fock_diag(T3p, R, eo, ev):
+    '''In place: R[I, A] += (ev[A] - eo[I]) T3p[I, A] (2-d arrays): the
+    diagonal part of [F, T3].'''
+    getattr(_lib, 'zc_t3_fdiag_' + _sfx(T3p.dtype))(
+        _p(T3p), _p(R), _i(T3p.shape[0]), _i(T3p.shape[1]),
+        _p(_c(eo, np.float64)), _p(_c(ev, np.float64)))
+
+
 def update_into_r(T3p, R, eo, ev, io=None):
     '''In place: R <- T3p + R / (eo[:, None] - ev[None, :]).'''
     getattr(_lib, 'zc_t3_update_' + _sfx(T3p.dtype))(
