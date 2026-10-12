@@ -3,12 +3,19 @@
 # regress.sh: two builds of the native program on the regression cases - the
 # one of CFOUR's make against the one of the repository's Makefile.
 #
-#   cfour/merge/regress.sh --ref BIN --new BIN [--np N] [--cases "c1 c2 ..."]
+#   cfour/merge/regress.sh --ref BIN --new BIN [--ref-args] [--np N] [--cases "c1 c2 ..."]
 #                          [--refdir DIR] [--scratch DIR] [--threads T] [--eom]
+#                          [--cfourbin DIR]
 #
 #   --ref BIN      the reference binary (build/xzccsdt/xzccsdt of the repository;
 #                  with --np: build/xzccsdt_mpi/xzccsdt)
-#   --new BIN      the binary under test (<cfour>/bin/x<NAME>; with --np: x<NAME>_mpi)
+#   --new BIN      the binary under test (<cfour>/bin/xzccsdt; with --np: xzccsdt_mpi)
+#   --ref-args     the reference binary is one of before the interface without
+#                  arguments (commit a38e493): it is given the method as its
+#                  argument.  Otherwise (and always for --new) the method is set
+#                  in the ZMAT and xjoda is run again before the program
+#   --cfourbin DIR the xjoda for that (default ~/apps/cfour-x2cso/bin); the ZMAT of a
+#                  case has CALC=... followed by a comma
 #   --np N         both through "mpirun -np N" (the MPI environment must be set)
 #   --refdir DIR   the run directories of the cases, one per case, each with the
 #                  files of xjoda .. xx2cvtran (default
@@ -21,8 +28,10 @@
 #                  never a source directory
 #
 # Per case and binary, in a copy of the run directory: "ccsdt(q)_l" (CCSDT,
-# the Lambda equations, (Q)_Lambda), "(q)" from XZAMPS, "density" from XZAMPS
-# and XZLAMB (the seven files of xx2czvec).  Compared: the exit status, the
+# the Lambda equations, (Q)_Lambda; ZMAT: CALC=CCSDT(Q)_L), "(q)" from XZAMPS
+# (CALC=CCSDT(Q), the amplitudes taken), "density" from XZAMPS and XZLAMB
+# (CALC=CCSDT,PROPS=FIRST_ORDER: the seven files of xx2czvec), with --eom
+# "eom" (CALC=CCSDT,EXCITE=EOMEE).  Compared: the exit status, the
 # mode (labels, real or complex), the cycles, every energy as printed (12
 # decimals), and the density files (bytes; where they differ, the largest
 # difference of an element).  Exit status 0 if nothing printed differs and
@@ -32,7 +41,7 @@
 # binary for the default cases).
 #
 set -u
-ref=; new=; np=0; threads=8; eom=0
+ref=; new=; np=0; threads=8; eom=0; refargs=0; cfourbin=$HOME/apps/cfour-x2cso/bin
 refdir=/scratch16/lcheng24/xwang405/zccsdt_ref
 scratch=/tmp/$USER.xzregress
 cases="h2o_631g hbr_fc hbr_lab hbr_ph hbr_dglin_fc hbr_dglin_fc_vc hbrp_dglin_fc"
@@ -46,7 +55,9 @@ while [ $# -gt 0 ]; do
     --scratch) scratch=$2; shift 2 ;;
     --threads) threads=$2; shift 2 ;;
     --eom) eom=1; shift ;;
-    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+    --ref-args) refargs=1; shift ;;
+    --cfourbin) cfourbin=$2; shift 2 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "regress.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -65,8 +76,17 @@ fi
 
 # one binary on all cases: the lines to compare in $scratch/WHO.txt, the density
 # files in $scratch/WHO.den/
+# the ZMAT keywords of a method of the old interface
+zkw() {
+  case $1 in
+    'ccsdt(q)_l') echo 'CALC=CCSDT(Q)_L' ;;
+    '(q)') echo 'CALC=CCSDT(Q)' ;;
+    density) echo 'CALC=CCSDT,PROPS=FIRST_ORDER' ;;
+    eom) echo 'CALC=CCSDT,EXCITE=EOMEE' ;;
+  esac
+}
 runset() {
-  local who=$1 bin=$2 c m f n d o st
+  local who=$1 bin=$2 useargs=$3 c m f n d o st
   local txt=$scratch/$who.txt
   mkdir -p "$scratch/$who.den" "$scratch/$who.out"
   : > "$txt"
@@ -78,7 +98,7 @@ runset() {
     for f in "$refdir/$c"/*; do
       n=$(basename "$f")
       case $n in
-        XZAMPS|XZLAMB|XZEOM*|EOMC[0-9]*|EOMH[0-9]*|XZDIIS*|XZQCHK.*|xzccsdt.r*|xfull|dpoo|dpvv|dii0|daa0|dpopo|dpvpv|denfinal|*.out|*.log|README) ;;
+        XZAMPS|XZLAMB|XZKEY|XZEOM*|EOMC[0-9]*|EOMH[0-9]*|XZDIIS*|XZQCHK.*|xzccsdt.r*|xfull|dpoo|dpvv|dii0|daa0|dpopo|dpvpv|denfinal|*.out|*.log|README) ;;
         *) [ -f "$f" ] && cp -p "$f" "$d/" ;;
       esac
     done
@@ -86,10 +106,17 @@ runset() {
     [ $eom = 1 ] && [ "$np" -eq 0 ] && methods="$methods eom"
     for m in $methods; do
       o=$scratch/$who.out/$c.$(echo "$m" | tr -d '()').out
+      args=$m
+      if [ "$useargs" = 0 ]; then
+        args=
+        sed -i -e 's/,EXCITATION=[0-9]*//' -e 's/,PROPS=[A-Z_]*//' -e 's/,EXCITE=[A-Z]*//' \
+               -e "s/CALC=[^,]*,/$(zkw "$m"),/" "$d/ZMAT"
+        (cd "$d" && "$cfourbin/xjoda" > "$o.xjoda" 2>&1)
+      fi
       if [ "$np" -gt 0 ]; then
-        (cd "$d" && mpirun -np "$np" "$bin" "$m" > "$o" 2>&1)
+        (cd "$d" && mpirun -np "$np" "$bin" $args > "$o" 2>&1)
       else
-        (cd "$d" && "$bin" "$m" > "$o" 2>&1)
+        (cd "$d" && "$bin" $args > "$o" 2>&1)
       fi
       st=$?
       {
@@ -118,8 +145,8 @@ runset() {
   echo "$who ($bin): $(grep -c '| exit 0 |' "$txt") runs with exit 0, $(grep -c '| exit [1-9]' "$txt") failed, $(grep -c ' E[(\[]' "$txt") energy lines"
 }
 
-runset ref "$ref"
-runset new "$new"
+runset ref "$ref" $refargs
+runset new "$new" 0
 
 bad=0
 if diff "$scratch/ref.txt" "$scratch/new.txt" > "$scratch/diff.txt"; then

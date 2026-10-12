@@ -8,13 +8,14 @@ C THE SCHEDULER IS IN FORTRAN (XZDRV AND BELOW), THE KERNELS ARE THE C
 C KERNELS OF ZCCSDT (CSRC/).  ALL WORKING MEMORY IS THE ARRAY THAT CRAPSI
 C ALLOCATES: ICORE(I0), MAXCOR DOUBLE WORDS (MEMORY_SIZE OF THE ZMAT).
 C
-C   xzccsdt [method]      method: ccsdt, ccsdt[q], ccsdt(q), or (q) / [q]
-C                         for the correction alone from the amplitudes
-C                         of an earlier run (file XZAMPS); lambda: the
-C                         Lambda equations of CCSDT for these amplitudes
-C                         (file XZLAMB); ccsdt(q)_l, ccsdt[q]_l, or
-C                         (q)_l / [q]_l from XZAMPS and XZLAMB; default:
-C                         what CALC of the ZMAT asks for (JOBARC)
+C   xzccsdt               no argument: the job is what the ZMAT asks for
+C                         (the flags of joda in JOBARC; XZJOB in xzdrv.F90):
+C                         CALC=CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2;
+C                         with CALC=CCSDT, EXCITE=EOMEE (EOM-EE-CCSDT) or
+C                         PROPS / DERIV_LEV (the density files of xx2czvec).
+C                         The amplitudes and lambda of an earlier run (files
+C                         XZAMPS, XZLAMB, XZKEY) are taken when they belong
+C                         to these integrals (XZREUSE)
 C
 C BUILT WITH MPI, THE ITERATIONS (CCSDT, LAMBDA) AND (Q) RUN OVER RANKS.
 C RANK 0 IS THE CFOUR PROGRAM (CRAPSI, JOBARC, THE OUTPUT); THE OTHER
