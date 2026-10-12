@@ -26,6 +26,9 @@ def lih():
     mf.kernel()
     eris = E.from_scf(mf, packed_vvvv=False)
     res = solver.kernel(E.from_scf(mf), 'cc2', solver.Options(conv_tol=1e-13, conv_tol_normt=1e-11))
+    if res.rotation is not None:     # (solver.kernel solves for semicanonical spinors: back to those of mf)
+        from zccsdt.cc import ccn
+        res.t1, res.t2 = ccn.back_t1(res.t1, res.rotation), ccn.back_t2(res.t2, res.rotation)
     return mol, mf, eris, res, cc2.cholesky_exact(mol)
 
 

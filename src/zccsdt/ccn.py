@@ -100,7 +100,7 @@ class GCC3(_Doubles):
         from the drive terms, contracted into the singles and doubles
         equations and discarded (zccsdt.cc.cc3fly): o^3 v^4 per iteration
         and the memory of a CCSD step, in the blocks of the labels too.
-        Canonical spinors.  eom_ee(): the totally symmetric states, from
+        (Semicanonical spinors: the front end rotates them.)  eom_ee(): the totally symmetric states, from
         the folded, frequency-dependent eigenproblem in the space of
         singles and doubles (each root self-consistent in omega); the same
         numbers as with T3 stored.

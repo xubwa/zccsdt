@@ -1136,9 +1136,25 @@ class GCCSDT(UCCSDT):
             o, v = (x[np.argsort(two_m[x], kind='stable')] for x in (np.asarray(o), np.asarray(v)))
             cols = np.concatenate((fo, o, v))
             self._sorted = (o, v)
-        out = eris.from_scf(self._scf, mo_coeff=(np.asarray(self.mo_coeff) if real is None else real)[:, cols],
+        C = (np.asarray(self.mo_coeff) if real is None else real)[:, cols]
+        self.semicanonical = None
+        if self.model in ('cc2', 'cc3'):
+            # the approximate models: semicanonical spinors (zccsdt.cc.ccn; invariant models), made
+            # before the integrals - within the labels of the iterations, real spinors stay real
+            from zccsdt.cc import ccn
+            lab = np.round(2 * self._axial_mj[cols[len(fo):]]).astype(np.int64) if real is not None else None
+            C, self.semicanonical = ccn.semicanonical_columns(self._scf, C, np.asarray(self.mo_occ)[cols], len(fo),
+                                                             len(o), lab, real is not None)
+        out = eris.from_scf(self._scf, mo_coeff=C,
                             mo_occ=np.asarray(self.mo_occ)[cols], frozen=len(fo), packed_vvvv=True,
                             max_memory=self.max_memory, real=real is not None)
+        if self.semicanonical is not None:
+            # (what the one Fock build here and that of from_scf differ by: the rounding)
+            no_ = len(o)
+            f = np.asarray(out.fock)
+            f[:no_, :no_] = np.diag(f.diagonal()[:no_])
+            f[no_:, no_:] = np.diag(f.diagonal()[no_:])
+            out.semicanonical = self.semicanonical
         if real is not None:
             # the symmetry label of the axis: 2 m_j, which adds without a modulus
             out.labels = np.round(2 * self._axial_mj[cols[len(fo):]]).astype(np.int64)

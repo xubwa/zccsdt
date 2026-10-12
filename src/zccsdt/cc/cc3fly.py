@@ -1,7 +1,8 @@
 '''CC3 without stored triples: the scheduler of csrc/cc3_fly.c (docs/ccn.md,
 sections 9 and 10).
 
-For canonical spinors the triples equation of CC3 is solved in closed form,
+For semicanonical spinors (the front end and solver.kernel make them; F_oo, F_vv
+diagonal) the triples equation of CC3 is solved in closed form,
 
     t3[ijk, abc] = drive[t2; <ab||ei>~, <ma||ij>~] / (e_i + e_j + e_k - e_a - e_b - e_c),
 

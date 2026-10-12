@@ -607,10 +607,17 @@ stored triples `solver.Options(store_t3=False)` and
 
 `store_t3 = False` is the form for large cases: T3 of 26 + 120 spinors is
 5.8 GB on the packed layout, the work array of a batch 23 MB per occupied
-triple.  It needs canonical spinors (off-diagonal Fock elements below 1e-6
-in the occupied and in the virtual block; a `NotImplementedError` says so
-otherwise) and the pp operator in memory.  With T3 stored the spinors may
-be rotated among the occupied and among the virtual ones.
+triple.  It needs the pp operator in memory.
+
+The approximate models run on semicanonical spinors: where F_oo or F_vv
+of the active spinors has an off-diagonal element that is not exactly
+zero (the noise of a converged SCF, 1e-10 for tight thresholds), the front
+end rotates the active occupied and the active virtual spinors among
+themselves, within the symmetry labels, before the integrals are made
+(`cc.semicanonical`: the rotation; amplitudes and vectors refer to the
+rotated spinors).  `solver.kernel` does the same with given integrals
+(`Result.eris`, `Result.rotation`).  The models are invariant: the
+energies do not change.
 
 ### Integrals from another program, and for another program
 

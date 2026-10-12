@@ -42,6 +42,7 @@ def test_spin_orbitals(cplx):
     work array, the folded sigma vector.'''
     for mf, frozen in ((water_ghf('sto-3g'), 2), (scf.addons.convert_to_ghf(_scf('lih')), 0)):
         eris = E.from_scf(mf, mo_coeff=_spin_mixed(mf)[0] if cplx else mf.mo_coeff, frozen=frozen)
+        eris = ccn.semicanonicalize(eris)[0]        # (the amplitudes of solver.kernel refer to these)
         a = solver.kernel(eris, 'cc3', solver.Options(**TIGHT))
         b = solver.kernel(eris, 'cc3', solver.Options(store_t3=False, **TIGHT))
         assert b.t3 is None and b.converged and abs(a.e_corr - b.e_corr) < 1e-12
@@ -128,11 +129,28 @@ def test_label_blocks_and_front_end(lih_x2c, sym):
         b.eom_ip(nroots=2)
 
 
-def test_not_canonical():
-    '''The closed form of the triples needs canonical spinors: said, not
-    computed wrongly (with T3 stored there is no such restriction).'''
-    from test_ccn import _rotated
-    mf = scf.addons.convert_to_ghf(_scf('lih'))
-    eris = E.from_scf(mf, mo_coeff=_rotated(mf))
-    with pytest.raises(NotImplementedError, match='canonical'):
-        solver.kernel(eris, 'cc3', solver.Options(store_t3=False))
+def test_semicanonical_front_end_and_solver():
+    '''An SCF converged with its noise in the blocks of F: the front end
+    rotates the spinors before the integrals are made, solver.kernel turns
+    the given integrals; the two and the batch route agree to 1e-12, and
+    the off-diagonal elements the front end saw are reported.'''
+    mol = gto.M(atom='Li 0 0 0; H 0 0 1.5957', basis='6-31g', verbose=0)
+    mf = x2c.UHF(mol)
+    mf.conv_tol = 1e-7                  # (a loose SCF: noise of 1e-5 in the blocks)
+    mf.kernel()
+    out = {}
+    for sym in (True, False):
+        cc = zccsdt.CC3(mf)
+        cc.symmetry, cc.verbose = sym, 0
+        cc.conv_tol, cc.conv_tol_normt = 1e-13, 1e-10
+        cc.kernel()
+        assert cc.semicanonical is not None and cc._eris.semicanonical is not None
+        out[sym] = cc
+    a = out[True]
+    eris = E.from_scf(mf)
+    f = np.asarray(eris.fock)
+    no = eris.nocc
+    assert abs(f[:no, :no] - np.diag(f.diagonal()[:no])).max() > 1e-9
+    for store in (True, False):
+        r = solver.kernel(eris, 'cc3', solver.Options(store_t3=store, **TIGHT))
+        assert r.rotation is not None and abs(r.e_corr - a.e_corr) < 1e-12 and abs(out[False].e_corr - a.e_corr) < 1e-12

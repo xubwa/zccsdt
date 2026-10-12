@@ -67,6 +67,8 @@ class Result:
     timings: list = None        # wall time per iteration
     plan: object = None         # the MemoryPlan of a CCSDT run
     diis_plan: object = None    # where its DIIS vectors were (zccsdt.disk.DiisPlan)
+    eris: object = None         # CC2 / CC3: the integrals of the spinors the amplitudes refer to
+    rotation: object = None     # (U_o, U_v) if those are the given ones made semicanonical
 
 
 def init_amps(eris):
@@ -167,6 +169,16 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
         method = 'ccsdt' if opts.store_t3 else 'cc3_fly'
     assert method in ('ccsd', 'cc2', 'cc3_fly', 'ccsdt', 'ccsdt_ref')
     with_t3 = method not in ('ccsd', 'cc2', 'cc3_fly')
+    rotation = None
+    if model in ('cc2', 'cc3'):
+        # the models with the full Fock blocks are invariant under rotations among the occupied
+        # and among the virtual spinors: they are solved for semicanonical ones (exactly diagonal
+        # blocks), and the amplitudes refer to those (Result.eris, Result.rotation)
+        from zccsdt.cc import ccn
+        eris, rotation = ccn.semicanonicalize(eris)
+        if rotation is not None and (t1 is not None or t2 is not None or t3 is not None):
+            raise ValueError('starting amplitudes for spinors that are not semicanonical: give those of '
+                             'zccsdt.cc.ccn.semicanonicalize(eris)')
     nocc = eris.nocc
     nvir = eris.fock.shape[0] - nocc
     if t1 is None or t2 is None:
@@ -305,4 +317,4 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     e_corr = e_old
     return Result(e_corr=e_corr, e_tot=eris.e_hf + e_corr.real, converged=conv,
                   ncycle=icycle + 1, t1=t1, t2=t2, t3=t3, timings=timings, plan=plan,
-                  diis_plan=dplan)
+                  diis_plan=dplan, eris=eris if model in ('cc2', 'cc3') else None, rotation=rotation)

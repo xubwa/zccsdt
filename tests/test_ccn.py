@@ -21,19 +21,11 @@ from conftest import water_ghf
 from test_ccsdtq_ref import _scf, _spin_mixed
 from test_eom_opt import pack2, pack3, random_case
 from zccsdt import eris as E
-from zccsdt.cc import ccn_ref as C, ccsdtq_ref as R, eom, eom_opt as EO, solver, t3pack
+from zccsdt.cc import ccn, ccn_ref as C, ccsdtq_ref as R, eom, eom_opt as EO, solver, t3pack
 from zccsdt.genbas import read_genbas
 
 TIGHT = dict(conv_tol=1e-12, conv_tol_normt=1e-10)
 
-
-@pytest.fixture(autouse=True)
-def _fock_as_it_is(monkeypatch):
-    '''The comparisons with the dense reference are to rounding: the Fock
-    operator of the triples equation with every off-diagonal element (by
-    default those below 1e-6, the noise of an SCF, are left out).'''
-    from zccsdt.cc import ccsdt_opt
-    monkeypatch.setattr(ccsdt_opt, 'FOCK_OFFDIAG_TOL', 1e-13)
 
 
 @pytest.mark.parametrize('cplx', [False, True])
@@ -46,7 +38,9 @@ def test_ground_state_against_the_reference(model, cplx):
     res = solver.kernel(eris, model, solver.Options(**TIGHT))
     assert res.converged and abs(res.e_corr - ref.e_corr) < 1e-11
     assert res.t1.dtype == (np.complex128 if cplx else np.float64)
-    assert abs(res.t2 - ref.amps[1]).max() < 1e-8
+    # (the amplitudes refer to the semicanonical spinors if the SCF left noise in the blocks)
+    t2 = res.t2 if res.rotation is None else ccn.back_t2(res.t2, res.rotation)
+    assert abs(t2 - ref.amps[1]).max() < 1e-8
     full = solver.kernel(eris, {'cc2': 'ccsd', 'cc3': 'ccsdt'}[model], solver.Options(**TIGHT))
     assert 1e-7 < abs(full.e_corr - res.e_corr) < 1e-2
 
@@ -58,6 +52,7 @@ def test_sigma_against_the_reference(name, cplx, model):
     '''The Jacobian of the model at amplitudes that solve nothing.'''
     with3 = model == 'cc3'
     eris, amps, r = random_case(name, cplx, with3)
+    eris = ccn.semicanonicalize(eris)[0]        # (the production code takes the diagonal of F)
     fock, g, mo_e, no = R.integrals(eris)
     om, vm = t3pack.maps_for(eris)
     gs = EO.prepare(eris, amps[0], amps[1], pack3(amps[2], om, vm).ravel() if with3 else None, model=model)
@@ -90,27 +85,37 @@ def _rotated(mf, seed=7, frozen=0):
 
 def test_spinors_that_are_not_canonical():
     '''CC2 and CC3 are invariant to rotations among the occupied and among
-    the virtual spin orbitals: F is the Fock matrix as it is, and its
-    off-diagonal part goes through the operators of the T3 passes.'''
+    the virtual spin orbitals: solver.kernel solves them for the
+    semicanonical ones (Result.eris, Result.rotation), with T3 stored and
+    without; the amplitudes turned back are those of the rotated spin
+    orbitals in the dense reference.'''
     mf = scf.addons.convert_to_ghf(_scf('lih'))
     e0 = E.from_scf(mf)
     e1 = E.from_scf(mf, mo_coeff=_rotated(mf))
     f = np.asarray(e1.fock)
     no = e1.nocc
     assert abs(f[:no, :no] - np.diag(f.diagonal()[:no])).max() > 1e-2 and abs(f[:no, no:]).max() < 1e-8
-    for model in ('cc2', 'cc3'):
+    for model, store in (('cc2', True), ('cc3', True), ('cc3', False)):
         a = solver.kernel(e0, model, solver.Options(**TIGHT))
-        b = solver.kernel(e1, model, solver.Options(max_cycle=400, **TIGHT))
+        b = solver.kernel(e1, model, solver.Options(max_cycle=400, store_t3=store, **TIGHT))
         assert a.converged and b.converged and abs(a.e_corr - b.e_corr) < 1e-10
+        assert b.rotation is not None and b.eris is not e1
+        fb = np.asarray(b.eris.fock)
+        assert not (fb[:no, :no] - np.diag(fb.diagonal()[:no])).any() and not (fb[no:, no:] - np.diag(fb.diagonal()[no:])).any()
+        if not store:       # the roots of the batch route: the folded problem
+            rb = ccn.eom_folded(b.eris, b.t1, b.t2, nroots=4, conv_tol=1e-8)
+            assert rb.converged.all() and _in(rb.e, ra.e) < 1e-9 and abs(rb.e[0] - ra.e[0]) < 1e-9
+            continue
         # (with the guess of rotated spin orbitals not every component of a triplet is
         # found: the roots there are among those of the canonical ones)
         ra = eom.kernel(e0, a.t1, a.t2, a.t3, nroots=8, conv_tol=1e-8, model=model)
-        rb = eom.kernel(e1, b.t1, b.t2, b.t3, nroots=4, conv_tol=1e-8, model=model, max_cycle=200)
+        rb = eom.kernel(b.eris, b.t1, b.t2, b.t3, nroots=4, conv_tol=1e-8, model=model, max_cycle=200)
         assert ra.converged.all() and rb.converged.all() and _in(rb.e, ra.e) < 1e-9 and abs(rb.e[0] - ra.e[0]) < 1e-9
         # the dense reference at the rotated spin orbitals
         fock, g, mo_e, _ = R.integrals(e1)
         ref = C.kernel(fock, g, mo_e, no, model, max_cycle=400)
         assert abs(ref.e_corr - b.e_corr) < 1e-10
+        assert abs(ccn.back_t1(b.t1, b.rotation) - ref.amps[0]).max() < 1e-8
 
 
 @pytest.fixture(scope='module')

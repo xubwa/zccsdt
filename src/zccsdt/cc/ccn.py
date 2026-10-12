@@ -221,3 +221,147 @@ def cc2_update_amps(opts, t1, t2, eris):
         R1, _ = ccsdt_opt.ccsd_residual_packed(t1, t2, fdr, ge, vvvv_pp, vvoo_pp, Feff_vv, Feff_oo, Weff_ovvo, om, vm)
         R2 = cc2_doubles(t1, t2, eris, vvvv_pp, vvoo_pp, om, vm)
     return t1 + R1 / eia, t3pack.t2_update(t2, R2, om, vm, mo_e[:nocc], mo_e[nocc:] + opts.level_shift)
+
+
+# ------------------------------------------------------------ semicanonical spinors
+
+def fock_groups(f, labels=None):
+    '''Groups of the indices of a block of the Fock matrix that it couples:
+    the connected components of its nonzero elements (exact zeros, as the
+    spin blocks of spin orbitals of pure spin have them), within the
+    symmetry labels if given.  A list of index arrays, each in increasing
+    order.'''
+    from scipy.sparse.csgraph import connected_components
+    n = f.shape[0]
+    link = np.asarray(f) != 0
+    if labels is not None:
+        lab = np.asarray(labels)
+        link &= lab[:, None] == lab[None, :]
+    ncomp, comp = connected_components(link, directed=False)
+    return [np.flatnonzero(comp == c) for c in range(ncomp)]
+
+
+def semicanonical_rotation(f, nocc, labels=None):
+    '''The unitary matrix U (block diagonal: occupied, virtual) that makes
+    the occupied and the virtual block of the Fock matrix ``f`` diagonal,
+    group by group of fock_groups (labels, spin blocks and real arithmetic
+    kept: U is real for a real f), with the eigenvalues in increasing order
+    inside a group and every column turned so that its largest element is
+    real and positive; and the eigenvalues.  None if both blocks are
+    exactly diagonal: nothing to do.  The models with the full blocks of F
+    are invariant under such rotations (docs/ccn.md, section 1).'''
+    f = np.asarray(f)
+    n = f.shape[0]
+    off = f - np.diag(f.diagonal())
+    off[:nocc, nocc:] = off[nocc:, :nocc] = 0
+    if not off.any():
+        return None
+    U = np.zeros((n, n), dtype=f.dtype)
+    e = f.diagonal().real.copy()
+    for lo, hi in ((0, nocc), (nocc, n)):
+        blk = f[lo:hi, lo:hi]
+        lab = None if labels is None else np.asarray(labels)[lo:hi]
+        for g in fock_groups(blk, lab):
+            sub = blk[np.ix_(g, g)]
+            sub = 0.5 * (sub + sub.conj().T)
+            w, u = np.linalg.eigh(sub)
+            big = u[np.argmax(abs(u), axis=0), np.arange(len(g))]
+            u = u * (abs(big) / big)[None, :]
+            U[np.ix_(lo + g, lo + g)] = u
+            e[lo + g] = w
+    return U, e
+
+
+def semicanonical_columns(mf, C, mo_occ, nfrozen, nocc, labels=None, real=False):
+    '''The columns ``C`` (frozen occupied, active occupied, active virtual;
+    occupations ``mo_occ``) with the active occupied and the active virtual
+    ones rotated among themselves so that the Fock matrix of the SCF object
+    ``mf`` (one Fock build of its density) is diagonal in both blocks
+    (semicanonical_rotation); C itself if it already is, exactly.  The
+    frozen columns are not touched.  For the front end: before the
+    integrals are made.'''
+    dm = mf.make_rdm1(C, mo_occ)
+    fock_ao = mf.get_fock(dm=dm)
+    Ca = C[:, nfrozen:]
+    f = Ca.conj().T @ fock_ao @ Ca
+    if real:
+        f = f.real
+    rot = semicanonical_rotation(f, nocc, labels)
+    if rot is None:
+        return C, None
+    out = np.array(C, copy=True)
+    out[:, nfrozen:] = Ca @ rot[0]
+    return out, rot
+
+
+def _rotate(x, mats):
+    '''x with every axis k transformed by mats[k] (x'[.. p ..] = sum_a
+    M[a, p] x[.. a ..]; None: unchanged).'''
+    for k, M in enumerate(mats):
+        if M is not None:
+            x = np.moveaxis(np.tensordot(x, M, axes=([k], [0])), -1, k)
+    return x
+
+
+def semicanonicalize(eris, labels=None):
+    '''(eris', U): an integral container of the same spinors rotated among
+    the occupied and among the virtual ones so that the occupied and the
+    virtual block of its Fock matrix are diagonal, with every block of
+    integrals transformed (<pq||rs>' = sum U*_ap U*_bq U_cr U_ds <ab||cd>),
+    or (eris, None) if the blocks are diagonal already.  For integrals given
+    as they are (from_integrals, tests); <ab||cd> on pairs is unpacked to
+    v^4 numbers for the transformation - the front end rotates the spinors
+    before the integrals are made instead (semicanonical_columns).
+    Amplitudes of eris' refer to the rotated spinors; t1 back is
+    U_o t1 U_v^H (back_t1, back_t2).'''
+    import copy
+    from zccsdt.cc import ccsdt as ccsdt_ref
+    no = eris.nocc
+    lab = labels if labels is not None else (getattr(eris, 'labels', None) if not getattr(eris, 'modulus', 0) else None)
+    rot = semicanonical_rotation(np.asarray(eris.fock), no, lab)
+    if rot is None:
+        return eris, None
+    U, e = rot
+    Uo, Uv = U[:no, :no], U[no:, no:]
+    dt = np.result_type(eris.fock, eris.oovv, U)
+    sp = {'o': Uo, 'v': Uv}
+    out = copy.copy(eris)
+    out.__dict__ = {k: v for k, v in eris.__dict__.items() if not k.startswith('_')}
+    for key in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv'):
+        x = getattr(eris, key, None)
+        if x is None:
+            continue
+        mats = [sp[c].conj() if k < 2 else sp[c] for k, c in enumerate(key)]
+        setattr(out, key, np.ascontiguousarray(_rotate(np.asarray(x, dtype=dt), mats)))
+    pp = getattr(eris, '_vvvv_pp', None)
+    if pp is not None:
+        nv = Uv.shape[0]
+        a, b = np.triu_indices(nv, 1)
+        full = np.zeros((nv, nv, nv, nv), dtype=dt)
+        P = np.asarray(pp)
+        full[a[:, None], b[:, None], a[None, :], b[None, :]] = P
+        full[b[:, None], a[:, None], a[None, :], b[None, :]] = -P
+        full[a[:, None], b[:, None], b[None, :], a[None, :]] = -P
+        full[b[:, None], a[:, None], b[None, :], a[None, :]] = P
+        full = _rotate(full, [Uv.conj(), Uv.conj(), Uv, Uv])
+        out._vvvv_pp = np.ascontiguousarray(full[a[:, None], b[:, None], a[None, :], b[None, :]])
+        del full
+    f = U.conj().T @ np.asarray(eris.fock, dtype=dt) @ U
+    f[:no, :no] = np.diag(e[:no])
+    f[no:, no:] = np.diag(e[no:])
+    out.fock = f if np.iscomplexobj(eris.fock) or np.iscomplexobj(U) else f.real
+    out.mo_energy = e.copy()
+    out.source = (getattr(eris, 'source', '') or '') + ' (semicanonical)'
+    out.semicanonical = (Uo, Uv)
+    return out, (Uo, Uv)
+
+
+def back_t1(t1, rot):
+    '''t1[i, a] of the rotated spinors in the spinors before the rotation.'''
+    Uo, Uv = rot
+    return Uo.conj() @ t1 @ Uv.T
+
+
+def back_t2(t2, rot):
+    Uo, Uv = rot
+    return _rotate(t2, [Uo.conj().T, Uo.conj().T, Uv.T, Uv.T])

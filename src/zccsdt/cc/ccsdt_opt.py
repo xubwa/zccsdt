@@ -1238,53 +1238,14 @@ def fock_diag_add(eris, dtype, T3, R, shift_layout=None):
     return R
 
 
-# Off-diagonal elements of the occupied and of the virtual block of the Fock matrix below
-# this are the noise of an SCF (1e-6 to 1e-8 with the usual thresholds, mostly inside
-# degenerate levels) and are left out of the triples equation of CC3: the spinors count
-# as canonical.  The energy changes by less than this times the triples contribution.
-FOCK_OFFDIAG_TOL = 1e-6
-
-
-def fock_canonical(eris, om, vm, tol=None):
-    '''(eo, ev): the diagonal of the Fock matrix, for the codes that solve
-    the equation of the highest rank in closed form; NotImplementedError
-    if its occupied or its virtual block is not diagonal.'''
+def fock_canonical(eris, om, vm):
+    '''(eo, ev): the diagonal of the Fock matrix - the Fock operator of the
+    triples equation of CC3, whose occupied and virtual blocks are diagonal
+    for the semicanonical spinors that solver.kernel and the front end make
+    (zccsdt.cc.ccn.semicanonicalize).'''
     no = om.n
-    f = np.asarray(eris.fock)
-    d = f.diagonal().real
-    off = max(abs(f[:no, :no] - np.diag(d[:no])).max(initial=0), abs(f[no:, no:] - np.diag(d[no:])).max(initial=0))
-    if off > (FOCK_OFFDIAG_TOL if tol is None else tol):
-        raise NotImplementedError('triples made per batch: canonical spinors (the Fock matrix has off-diagonal '
-                                  'elements of %.1e in its occupied or virtual block); with T3 stored there is '
-                                  'no such restriction' % off)
+    d = np.asarray(eris.fock).diagonal().real
     return d[:no].copy(), d[no:].copy()
-
-
-def fock_offdiag(eris, om, vm, dtype, tol=None):
-    '''(Wpp, O6) of the off-diagonal part of the Fock operator on packed
-    triples, for the engine's residual: the pp-ladder operator
-    1/2 A[f_ad delta_be] (a list by pair block) and the occupied operator
-    of -f_mi, without the diagonal elements - or None where the block of
-    the Fock matrix is diagonal to FOCK_OFFDIAG_TOL (canonical spinors:
-    both).'''
-    tol = FOCK_OFFDIAG_TOL if tol is None else tol
-    no = om.n
-    f = np.asarray(eris.fock)
-    fo = np.array(f[:no, :no], dtype=dtype)
-    fv = np.array(f[no:, no:], dtype=dtype)
-    np.fill_diagonal(fo, 0)
-    np.fill_diagonal(fv, 0)
-    Wpp = O6 = None
-    if abs(fv).max(initial=0) > tol:
-        Wpp = []
-        for h, (lo, hi) in enumerate(vm.blocks):
-            W = np.zeros((hi - lo, hi - lo), dtype=dtype)
-            if hi > lo:
-                add_one_body_pairs(W, fv, vm, 0.5, block=h)
-            Wpp.append(W)
-    if abs(fo).max(initial=0) > tol:
-        O6 = t3kern.OccOperator(om, np.zeros((no,) * 4, dtype=dtype), fo, dtype)
-    return Wpp, O6
 
 
 def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, capture=None, model='ccsdt'):
@@ -1296,12 +1257,12 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
     step (the operands of the T3 passes among them) for a code that
     linearizes it (zccsdt.cc.eom_opt); for dense integrals with the dressed
     operator in memory.  ``model`` 'cc3': the triples equation of CC3
-    (docs/ccn.md) - of the terms with T3 only the Fock operator as it is
-    (its occupied and virtual blocks, not dressed), and the drive terms
-    with the T1-dressed integrals alone; the singles and doubles equations
-    are unchanged.  With T3p = None (model 'cc3' only) no T3 is stored:
+    (docs/ccn.md) - of the terms with T3 only the Fock operator (its
+    diagonal: the spinors are semicanonical, solver.kernel and the front
+    end see to it), and the drive terms with the T1-dressed integrals
+    alone; the singles and doubles equations are unchanged.  With T3p = None (model 'cc3' only) no T3 is stored:
     its contributions to the singles and doubles equations are made per
-    batch of occupied triples (zccsdt.cc.cc3fly; canonical spinors), and
+    batch of occupied triples (zccsdt.cc.cc3fly), and
     the third return value is None.'''
     from zccsdt.scratch import io_desc
     cc3 = model == 'cc3'
@@ -1566,11 +1527,10 @@ def update_amps(opts, t1, t2, T3p, eris, mem_mb=2000, out=None, plan=None, captu
     if fly:
         return t1new, t2new, None
     if cc3:
-        # drive terms + [F, T3] with the Fock matrix as it is: its diagonal by a pass over
-        # T3, what it has off the diagonal (spinors that are not canonical) by the operators
-        Wpp3, O63 = fock_offdiag(eris, om, vm, dtype)
+        # drive terms + [F, T3]: the diagonal of the Fock matrix of the semicanonical
+        # spinors, one pass over T3
         del Wpp, O6, WringT
-        R = eng.residual(T3p, None, t2mn, Wv, Wo, t2P, Wpp3, O63,
+        R = eng.residual(T3p, None, t2mn, Wv, Wo, t2P, None, None,
                          out=out if R3 is None else R3, clear=R3 is None)
         with timer('t3_fock'):
             fock_diag_add(eris, dtype, T3p, R.reshape(-1))

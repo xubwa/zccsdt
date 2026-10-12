@@ -48,17 +48,34 @@ the integral container has it**: `sum_pq f[p,q] p+ q` with the matrix
 
   the terms `'R2: [F,T2]'`, `'R3: [F,T3]'`, `'R4: [F,T4]'` of
   `ccsdtq_terms.GROUPS` with f in the place of f~.
-- It is not assumed diagonal.  For canonical spinors the term is the
-  orbital-energy denominator; for spinors rotated among the occupied or
-  among the virtual ones the off-diagonal elements act on the amplitudes,
-  and the energies do not change (`tests/test_ccn.py`,
-  `test_spinors_that_are_not_canonical`: 1e-10).  Off-diagonal elements
-  below 1e-6 (`ccsdt_opt.FOCK_OFFDIAG_TOL`) are the noise of an SCF - 1e-6
-  to 1e-8 with the usual thresholds, mostly inside degenerate levels - and
-  are left out of the triples equation: the spinors then count as
-  canonical, the two o^3 v^3 operator passes are saved, and the closed form
-  of section 9 applies; the energy changes by less than that times the
-  triples contribution.
+- It is not assumed diagonal: with the full blocks the models are
+  invariant under rotations among the occupied and among the virtual
+  spinors (the dense reference keeps the full blocks; `tests/test_ccn.py`,
+  `test_spinors_that_are_not_canonical`: energies and roots to 1e-10).
+- **The production code runs on semicanonical spinors**, where F_oo and
+  F_vv are exactly diagonal and [F, T_n] is the orbital-energy
+  denominator.  Whenever an off-diagonal element of F_oo or F_vv of the
+  active spinors is not exactly zero, they are rotated - F_oo and F_vv
+  diagonalized group by group (the symmetry labels of the iterations, the
+  spin blocks of spin orbitals of pure spin: the connected components of
+  the nonzero elements), so labels and real arithmetic stay; frozen
+  spinors are not touched (`zccsdt.cc.ccn.semicanonical_rotation`):
+  - the front end (`GCC2`, `GCC3`) rotates the spinors before the
+    integrals are made (`ccn.semicanonical_columns`: one Fock build), and
+    `cc.semicanonical` holds the rotation; amplitudes and vectors refer to
+    the rotated spinors, `cc._eris` to their integrals;
+  - `solver.kernel(eris, 'cc2' | 'cc3')` on given integrals turns the
+    container (`ccn.semicanonicalize`: every block, `<ab||cd>` on pairs
+    unpacked to v^4 numbers) and returns `Result.eris` and
+    `Result.rotation`; `ccn.back_t1`, `back_t2` turn amplitudes back.
+  The noise this removes in a converged SCF is small but not zero: max
+  |F_oo|, |F_vv| off the diagonal 3e-10 for HBr / cc-pVDZ with
+  conv_tol 1e-10 and conv_tol_grad 1e-8, both for socutils' SpinorSCF with
+  X2CAMF and for PySCF's x2c.UHF (the numbers came out the same); up to
+  1e-5 for looser SCFs.  CFOUR's spinors (`zccsdt.cfour`) are read with
+  the Fock matrix as the diagonal of their energies: exactly canonical,
+  nothing is rotated.  A converged SCF and the same SCF semicanonicalized
+  give the same energies to 1e-12 (`tests/test_cc3fly.py`).
 - **Hartree-Fock reference** (f[i,a] = 0, every case of the front end):
   nothing else can be meant.  `exp(-T1) F exp(T1) = F + [F, T1]` then, and
   `[F, T1]` is a pure excitation operator, which commutes with T_n.
@@ -190,9 +207,8 @@ passed as `None` is left out (`DenseT3.residual`, `SpinBlockT3`,
 `t3shift.ShiftT3.residual`); the drive terms without the ring term, which
 never gather T3, are the kernel `zc_t3_drive` (dense layout) and the
 existing drive products (blocks); `[F, T3]` is a pass
-`R += (e_abc - e_ijk) T3` (`zc_t3_fdiag`), and what the Fock matrix has
-off its diagonal goes through the pp and the occupied operator
-(`ccsdt_opt.fock_offdiag`: `None` for canonical spinors).
+`R += (e_abc - e_ijk) T3` (`zc_t3_fdiag`): the spinors are semicanonical
+(section 1), and the sigma vector likewise.
 
 CC2 (`g.model = 'cc2'`): sigma_1 as EOM-CCSD; sigma_2 = `<ab||ij>'` -
 the bra part `-P(ab) r1[m,a] <mb||ij>~`, the ket part with the bra-dressed
@@ -220,9 +236,8 @@ the ground state,
 per occupied triple (quadruple), contracted into the equations of the
 lower ranks and discarded: neither T_n nor R_n is stored.  The two forms
 give the same numbers (`tests/test_ccn_ref.py`, `test_folded_eigenproblem`:
-1e-10 for CC2, CC3 and CC4).  For spinors that are not canonical in the
-occupied or in the virtual block the folded form first rotates them there
-(the models are invariant).
+1e-10 for CC2, CC3 and CC4).  The spinors are semicanonical (section 1),
+so A_QQ is diagonal.
 
 ## 5. Scaling and storage
 
@@ -327,7 +342,13 @@ profiled.**  With vectors that reproduce the AO integrals to rounding it is
 the CC2 of sections 1 to 3: energy to 1e-11 Eh, sigma vectors to 1e-9 of
 their size, roots to 1e-9 (`tests/test_zccsd_cc2.py`; LiH / 6-31G, X2C);
 at the default `max_error = 1e-5` of the class the decomposition costs
-2e-7 Eh in the energy and 5e-7 Eh in the excitation energies there.  Not
+2e-7 Eh in the energy and 5e-7 Eh in the excitation energies there.  **Decided for the production route** (the user, 10-12): the SCF and the
+CC use the same Cholesky vectors - a CD-HF reference, as CFOUR's chain
+`xsox2chfcd` -> `x2ccccd` does (socutils' SCF with those vectors, or
+CFOUR's CD-HF spinors), so that the reference Fock matrix is that of the
+Hamiltonian the correlation sees - with the semicanonical spinors of
+section 1.  The prototype's mix, the Fock matrix of the exact SCF with
+Cholesky integrals for the correlation, is not to be kept.  Not
 done: the production standard (profile at 30 + 400 spinors, Kramers pairs,
 three real products per complex one, the memory plan checked on a large
 case), an integral-direct variant without Cholesky vectors, IP and EA.
@@ -344,7 +365,7 @@ sources.
 `eom_opt.prepare(.., model='cc3', fly=True)` and `sigma(.., omega=)`,
 `ccn.eom_folded`.
 
-**The equations.**  For canonical spinors the triples equation of CC3 is
+**The equations.**  For semicanonical spinors (section 1) the triples equation of CC3 is
 solved in closed form, with the operands of the drive terms of the CCSDT
 step (`docs/factorization.md` 2.2),
 
@@ -431,7 +452,8 @@ T3 stored.
 | ground state against T3 stored: the same, and LiH / 6-31G with X2C spinors (4 + 18) on the packed layout and in the blocks of 6 classes | 1e-12 Eh (observed 8e-15) |
 | the folded sigma vector against the Jacobian with R3 stored, folded by hand (two of its sigma vectors and a division), at two frequencies; all of the cases above | 1e-11 of the largest element (observed 1e-14) |
 | the three lowest roots (totally symmetric states in blocks) against `eom_ee` with R3 stored; conv_tol 1e-9 | 1e-9 Eh (observed 1e-11) |
-| spinors that are not canonical | `NotImplementedError` with the size of the off-diagonal Fock elements |
+| spinors rotated among the occupied and among the virtual ones (the given integrals made semicanonical by solver.kernel): energy, roots of the folded problem | 1e-10, 1e-9 |
+| an SCF converged loosely (noise of 1e-5 in F_oo, F_vv): the front end (spinors rotated before the integrals), solver.kernel on the integrals of the SCF (container turned), label blocks and packed, T3 stored and not | 1e-12 Eh |
 
 **Timings** (job 31901611, node c521, 2 x 24 cores Xeon Gold 6248R, 24
 threads, MKL; `bench/ccn/cc3_bench.py`, commit 63ee1d2; seconds per
@@ -572,6 +594,14 @@ group (`3 nA_g` int64) per call.
   the existing solver applies as it is: the sigma vector of section 3,
   i.e. the EOM-CCSDT one with the ring and ladder operators left out and
   the drive operators without their T2 and T3 parts.
+
+**Semicanonical spinors.**  The kernel takes the denominators from eo
+and ev3 (the diagonal of F) and nothing else of F: the driver must give it
+semicanonical spinors.  The native program reads CFOUR's spinors, which
+are canonical (the Fock matrix of the files is the diagonal of the SCF
+energies; nothing to rotate); a driver that takes spinors from elsewhere
+rotates them first, as section 1 describes (diagonalize F_oo and F_vv of
+the active spinors per label block, before the integral transformation).
 
 **Checks for the port**: the numbers of sections 7 and 9; for one batch,
 the four sums against pass 1 over the stored T3 of the closed form

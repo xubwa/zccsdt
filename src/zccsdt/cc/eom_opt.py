@@ -164,8 +164,6 @@ def prepare(eris, t1, t2, T3=None, opts=None, mem_mb=2000.0, model='cc', fly=Fal
         if fly:
             for k in ('WringT', 'O6'):
                 c.pop(k, None)
-        if model == 'cc3':          # the Fock operator of the triples equation, off its diagonal
-            c['Wpp3'], c['O63'] = ccsdt_opt.fock_offdiag(eris, om, vm, dtype)
     return Ground(eris, om, vm, eng, dtype, t1, t2, None if T3 is None else T, c, change, model)
 
 
@@ -421,7 +419,7 @@ def sigma(g, r1, r2p, R3=None, out=None, sd=False, shift=None, omega=None):
         # sigma_3 = [F, R3] + drive(t2; <ab||ei>', <ma||ij>') + drive(r2; <ab||ei>~, <ma||ij>~):
         # T3 is not read
         dWo = np.ascontiguousarray(d_ovoo[:, :, nn, mm])
-        Wpp3, O63 = c['Wpp3'], c['O63']
+        Wpp3 = O63 = None           # (the Fock operator of the semicanonical spinors: its diagonal)
         if sh is not None:
             with timer('eom.r3'):
                 S3 = sh.residual(R3, s, None, t2mn, dWv, dWo, t2P, Wpp3, O63, sW=0, sa=0, out=out)
