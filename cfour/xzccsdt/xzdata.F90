@@ -107,9 +107,11 @@ module xzdata
   character(len=5) :: mname = 'CCSDT'   ! the model of the iterations, for the output
   logical :: noring = .false.       ! pass 2 in blocks without its ring term (T3 is not read)
   integer(8) :: nc3w = 0            ! elements of the work of one CC3 batch (the plan)
-  ! the folded EOM-CC3 sigma vector: on, at the frequency eomega; efollow: the
-  ! solver follows the root with the largest overlap with its first vector
-  logical :: efold = .false., efollow = .false.
+  ! the folded EOM-CC3 sigma vector: on, at the frequency eomega.  nfollow > 0:
+  ! the solver follows the nfollow roots with the largest weight on its first
+  ! nfollow vectors (those it started from), in the order of their energies
+  logical :: efold = .false.
+  integer(8) :: nfollow = 0
   real(8) :: eomega = 0d0
   real(8) :: tfly(4) = 0d0          ! seconds of the CC3 kernel: products, amplitudes, gather, contractions
   ! (Q) reads T3 (and Lambda3) where the files XZAMPS (XZLAMB) are mapped,

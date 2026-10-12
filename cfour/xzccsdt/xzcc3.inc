@@ -552,3 +552,316 @@ subroutine N(xzgvq)(no, nv, nvp, gmq, gv)
     end do
   end do
 end subroutine
+
+! Gv'[m][Q][y] = sum_n r1[n][y] <mn||Q>: the operand Gv of H' = [H~, R1]
+subroutine N(xzgv1)(no, nv, nvp, r1, oovvp, gv)
+  use xzkern
+  implicit none
+  integer(8), intent(in) :: no, nv, nvp
+  ZT, intent(in) :: r1(0:nv-1, 0:no-1)                         ! [n][y]
+  ZT, intent(in) :: oovvp(0:nvp-1, 0:no-1, 0:no-1)             ! [m][n][Q]
+  ZT, intent(out) :: gv(0:nv-1, 0:nvp-1, 0:no-1)               ! [m][Q][y]
+  integer(8) :: m
+  ZT :: one, zero
+  one = 1
+  zero = 0
+  do m = 0, no - 1
+    call N(zc_gemm)(1_4, 0_4, nvp, nv, no, one, oovvp(0, 0, m), nvp, r1, nv, zero, gv(0, 0, m), nv)
+  end do
+end subroutine
+
+! ---------------------------------------------------------------------------
+! The folded part of the EOM-CC3 sigma vector of (r1, r2) at the frequency
+! eomega (docs/ccn.md, sections 4 and 9; eom_opt.sigma with omega):
+!   r3 = (drive[t2; <ab||ei>', <ma||ij>'] + drive[r2; <ab||ei>~, <ma||ij>~])
+!        / (omega + e_ijk - e_abc), contracted with the integrals of H~
+!        -> sigma_1, sigma_2
+!   t3 of the ground state, made again, contracted with the integrals of
+!        H' = [H~, R1] (Gv', <mn||ie>', f'[m][e]; gsq = 0) -> sigma_2
+! kdwv: <ab||ei>' [Q][e][i]; kdovoo: <ma||xy>' (xzehs); kdooov: <mn||ie>';
+! kdfov: f'[m][e]; ks1 [i][a], ks2 [P][Q] accumulated.
+subroutine N(xzefold)(w, kr1, kr2, kr2p, kdwv, kdovoo, kdooov, kdfov, ks1, ks2)
+  use xzdata
+  use xzmem
+  use xzkern
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kr1, kr2, kr2p, kdwv, kdovoo, kdooov, kdfov, ks1, ks2
+  integer(8) :: m, kao1, kbv1, kgv1
+  m = xzmark()
+  kao1 = xzget(NW * no * no * no * nv, 'CC3: Ao derivative')
+  kbv1 = xzget(NW * nv * no * nvp, 'CC3: Bv derivative')
+  kgv1 = xzget(NW * no * nvp * nv, 'CC3: Gv derivative')
+  if (.not. xzdry) then
+    call xztic()
+    call N(xzao3)(no, nv, w(kdovoo), w(kao1))
+    call N(xzbvq)(no, nv, nvp, w(kdwv), w(kbv1))
+    call N(xzgv1)(no, nv, nvp, w(kr1), w(joovvp), w(kgv1))
+    call xztoc(5, 'CC3: operands of a sigma vector')
+  end if
+  call N(xzfly)(w, 2_8, jt2, kao1, kbv1, et2p, kr2, e3ao, e3bv, kr2p, e3gv, eooovd, joovvp, efov, eomega, &
+                ks1, .false., ks2)
+  call N(xzfly)(w, 1_8, jt2, e3ao, e3bv, et2p, jt2, e3ao, e3bv, et2p, kgv1, kdooov, joovvp, kdfov, 0d0, &
+                0_8, .false., ks2)
+  call xzrel(m)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! EOM-CC3 without stored triples: the folded eigenproblem
+!   [A_PP + A_PQ (omega - A_QQ)^-1 A_QP] R_P = omega R_P
+! in the space of singles and doubles (docs/ccn.md, section 4), each root to
+! self-consistency in omega (the algorithm of ccn.folded_roots):
+!   1. the roots of the singles-doubles block A_PP from unit vectors on the
+!      lowest single excitations (no triples work), to 1e-4;
+!   2. root by root, from the lowest: the solver of xzeoms.inc on the
+!      matrix at a fixed omega, started from the vectors of the step before,
+!      following the roots with the largest weight on them (nfollow), to a
+!      threshold that follows |lambda(omega) - omega| down to ESTATE_CONV;
+!      the roots of the singles-doubles stage that lie closer than 5e-4 Eh
+!      (XZ_FOLDWIN) to a neighbour form a cluster: solved together at every
+!      frequency, the root taken by its place in the cluster (a nearly
+!      degenerate level is not split reliably by following one vector);
+!      omega replaced by lambda(omega), or by the secant step for
+!      lambda(omega) = omega from the last two steps; until |lambda - omega|
+!      is below ESTATE_CONV / 100 (XZ_OMEGATOL) with the residual below
+!      ESTATE_CONV.
+! The totally symmetric states (label shift 0) in blocks of the labels;
+! without labels the states of all shifts (the sum of the roots asked for).
+! States of other shifts: cc3_stored_eom.
+subroutine N(xzeom3)(w, ecorr)
+  use xzdata
+  use xzmem
+  use xzkern
+  use xzeomd
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  real(8), intent(in) :: ecorr
+  integer(8) :: m0, nsd, kxa, kxb, kst, kx, nroot, nkeep, nsing, msd, msf, msub, peak, avail, k, ish
+  integer(8) :: nfound, nsgd, nitd, nsig, nit, nf1, outer, nsigr, i, a, r, kk, ca, cb, nc, jc
+  integer(8), allocatable :: singles(:), lead(:, :), cyc(:), c1(:), l1(:, :)
+  complex(8), allocatable :: ee(:), e1(:)
+  real(8), allocatable :: rmax(:), rnorm(:), wts(:, :), x1mx(:), x1nm(:), w1(:, :)
+  ZT, allocatable :: vlead(:, :), v1(:, :)
+  real(8) :: omega, lam, gap, tol, otol, prevo, prevl, slope, nxt, t0, tr, tsg0, cwin
+  logical :: haveprev, ok, dense
+  character(len=32) :: arg
+  integer :: larg, ios
+  real(8), external :: N(xzeimag)
+  real(8), parameter :: ev = 27.211386245988d0, cm = 219474.6313632d0
+  integer(8), parameter :: maxouter = 30
+
+  nsd = no * nv + npo * nvp
+  dense = ncls == 1
+  m0 = xzmark()
+  call N(xzeomkeep)()
+  eshift = 0
+  n3s = 0
+  nroot = 0
+  do ish = 1, enshift
+    if (dense .or. eshl(ish) == 0) then
+      nroot = nroot + enr(ish)
+    else if (.not. xzdry) then
+      write(6, '(a,i6,a)') ' @XZCCSDT-W, EOM-CC3 without stored triples: the shift ', eshl(ish), &
+        ' is left out (the folded problem has the totally symmetric states; cc3_stored_eom has every shift).'
+    end if
+  end do
+  nkeep = max(nroot, 1_8) + 2
+  msd = min(64_8, 8 + 4 * nkeep)
+  msf = max(12_8, (8 + 4 * nroot) / 2)
+  if (xzdry) then
+    call N(xzeomim)(w)
+    kst = xzget(NW * nkeep * nsd, 'EOM: vectors to start from')
+    kx = xzget(NW * nkeep * nsd, 'EOM: the vectors of a cluster of roots')
+    kxa = xzget(NW * nsd, 'EOM: a vector')
+    kxb = xzget(NW * nsd, 'EOM: its sigma vector')
+    k = xzget(2 * min(64_8, max(msd, msf, 3 * nkeep + 4)) * (NW * nsd + xzalign), 'EOM: the subspace')
+    efold = .true.
+    call N(xzesig)(w, kxa, kxb, .true.)
+    efold = .false.
+    call xzrel(m0)
+    return
+  end if
+  if (nroot == 0) then
+    write(6, '(/,a)') ' @XZCCSDT-W, EOM-CC3 without stored triples: no totally symmetric state asked for (%xzeom).'
+    call xzrel(m0)
+    return
+  end if
+  t0 = omp_get_wtime()
+  call N(xzeomim)(w)
+  teomim = omp_get_wtime() - t0
+  otol = ethr / 100d0
+  call get_environment_variable('XZ_OMEGATOL', arg, larg)
+  if (larg > 0) then
+    read(arg(1:larg), *, iostat=ios) otol
+    if (ios /= 0) otol = ethr / 100d0
+  end if
+  ! roots of the singles-doubles stage closer than cwin: one cluster (XZ_FOLDWIN, Eh)
+  cwin = 5d-4
+  call get_environment_variable('XZ_FOLDWIN', arg, larg)
+  if (larg > 0) then
+    read(arg(1:larg), *, iostat=ios) cwin
+    if (ios /= 0) cwin = 5d-4
+  end if
+  write(6, '(/,a)') '  EOM-EE-CC3 without stored triples: the folded eigenproblem in the space of singles and doubles'
+  write(6, '(a)') '  ' // repeat('-', 98)
+  write(6, '(a,f10.2,a)') '   intermediates of the ground state (with the operands of the CC3 batches): ', teomim, ' s'
+  write(6, '(a,es9.2,a,es9.2,a,i4,a)') '   convergence: the largest element of a residual below ', ethr, &
+    ', |lambda(omega) - omega| below ', otol, ';  at most ', emaxcyc, ' iterations per frequency'
+  if (dense) then
+    write(6, '(a,i4,a)') '   no blocks of labels: the states of all shifts; ', nroot, ' roots'
+  else
+    write(6, '(a,i4,a)') '   the totally symmetric states (label shift 0): ', nroot, ' roots'
+  end if
+  write(6, '(a,i14,a)') '   a vector: ', nsd, ' elements (singles and doubles; the triples are folded in)'
+  write(6, '(a)') '   (the vectors of the roots are not written: no file XZEOMR)'
+  allocate(singles(nkeep), ee(nkeep), rmax(nkeep), rnorm(nkeep), wts(3, nkeep), cyc(nkeep), lead(nlead, nkeep), &
+           vlead(nlead, nkeep), e1(nkeep), x1mx(nkeep), x1nm(nkeep), w1(3, nkeep), c1(nkeep), l1(nlead, nkeep), &
+           v1(nlead, nkeep))
+  call xzesingles(0_8, w(jeps), nkeep, singles, nsing)
+  if (nsing == 0) then
+    write(6, '(a)') ' @XZCCSDT-W, no single excitation of shift 0: no guess.'
+    call xzrel(m0)
+    return
+  end if
+  nkeep = min(nkeep, nsing)
+  nroot = min(nroot, nsing)
+  kst = xzget(NW * nkeep * nsd, 'EOM: vectors to start from')
+  kx = xzget(NW * nkeep * nsd, 'EOM: the vectors of a cluster of roots')
+  kxa = xzget(NW * nsd, 'EOM: a vector')
+  kxb = xzget(NW * nsd, 'EOM: its sigma vector')
+
+  ! ---- 1. the singles-doubles block
+  tr = omp_get_wtime()
+  call xzdry_begin()
+  call N(xzesig)(w, kxa, kxb, .true.)
+  call xzdry_end(peak)
+  avail = xzsize - xztop - (peak - xztop)
+  msub = msd
+  call N(xzesolve)(w, .true., nkeep, max(1d-4, ethr), 60_8, msub, nkeep, 0_8, singles, kxa, kxb, avail, &
+                   ee, rmax, rnorm, wts, cyc, nfound, nsgd, nitd, kst, 0, lead, vlead, .true.)
+  write(6, '(a,i4,a,i5,a,i4,a,f9.2,a)') '   singles-doubles stage: ', nfound, ' roots, ', nsgd, ' sigma vectors, ', nitd, &
+    ' iterations, ', omp_get_wtime() - tr, ' s'
+  write(6, '(a,8f14.8)') '     roots / Eh: ', (dble(ee(k)), k = 1, min(nfound, 8_8))
+
+  ! ---- 2. root by root, to self-consistency in omega
+  efold = .true.
+  call xzdry_begin()
+  call N(xzesig)(w, kxa, kxb, .true.)
+  call xzdry_end(peak)
+  avail = xzsize - xztop - (peak - xztop)
+  write(6, '(a,f10.1,a,f10.1,a)') '   a folded sigma vector takes ', 8d-6 * (peak - xztop), ' MB of the work array; free besides it: ', &
+    8d-6 * avail, ' MB'
+  write(6, '(/,a)') '   root  step         omega / Eh       lambda(omega) / Eh  |lambda-omega|   max |r|   sigma vectors      time/s'
+  nres = 0
+  ca = 1
+  cb = 0
+  nc = 1
+  do k = 1, min(nroot, nfound)
+    tr = omp_get_wtime()
+    tsg0 = teomsig
+    ! the cluster of the root: the roots of the singles-doubles stage closer
+    ! than cwin to their neighbour, solved together at every frequency and
+    ! told apart by their order (a nearly degenerate level is not split by
+    ! following one vector); its vectors start the next frequency and root
+    if (k > cb) then
+      ca = k
+      cb = k
+      do while (cb < nfound)
+        if (dble(ee(cb + 1)) - dble(ee(cb)) >= cwin) exit
+        cb = cb + 1
+      end do
+      nc = cb - ca + 1
+      call N(xzecopy)(nc * nsd, w(kst + NW * nsd * (ca - 1)), w(kx))
+      if (nc > 1) write(6, '(a,i4,a,i4,a,es9.2,a)') '   (roots', ca, ' to', cb, ' of the singles-doubles stage closer than ', &
+        cwin, ' Eh: solved together, by their order)'
+    end if
+    jc = k - ca + 1
+    omega = dble(ee(k))
+    gap = 1d0
+    haveprev = .false.
+    ok = .false.
+    nsigr = 0
+    prevo = 0d0
+    prevl = 0d0
+    do outer = 1, maxouter
+      tol = min(1d-4, max(ethr, 0.1d0 * gap))
+      eomega = omega
+      nfollow = nc
+      msub = min(64_8, max(msf, 3 * nc + 4))
+      t0 = omp_get_wtime()
+      call N(xzesolve)(w, .true., nc, tol, emaxcyc, msub, nc, kx, singles, kxa, kxb, avail, &
+                       e1, x1mx, x1nm, w1, c1, nf1, nsig, nit, kx, 0, l1, v1, .true.)
+      nfollow = 0
+      nsigr = nsigr + nsig
+      if (nf1 < nc) then
+        write(6, '(a,i4,a)') ' @XZCCSDT-W, EOM-CC3: the solver at a frequency found fewer roots than its cluster has (', &
+          nf1, '): the root is left.'
+        exit
+      end if
+      lam = dble(e1(jc))
+      gap = abs(lam - omega)
+      write(6, '(i7,i6,2f22.12,2es12.2,i8,f14.2)') k, outer, omega, lam, gap, x1mx(jc), nsig, omp_get_wtime() - t0
+      flush(6)
+      if (gap < otol .and. tol <= ethr .and. maxval(x1mx(1:nc)) <= tol) then
+        omega = lam
+        ok = .true.
+        exit
+      end if
+      ! the next frequency: lambda(omega), or the secant step for lambda(omega) = omega
+      nxt = lam
+      if (haveprev .and. abs(omega - prevo) > 1d-14) then
+        slope = (lam - prevl) / (omega - prevo)
+        if (abs(slope) < 0.5d0) nxt = omega + (lam - omega) / (1d0 - slope)
+      end if
+      prevo = omega
+      prevl = lam
+      haveprev = .true.
+      omega = nxt
+    end do
+    write(6, '(a,i4,a,f20.12,a,f12.6,a,f14.4,a,i4,a,i6,a,f10.2,a,f8.2,a)') '   root', k, ': omega ', omega, ' Eh = ', &
+      omega * ev, ' eV = ', omega * cm, ' cm-1   (', outer, ' frequencies, ', nsigr, ' sigma vectors, ', &
+      omp_get_wtime() - tr, ' s; ', (teomsig - tsg0) / max(nsigr, 1_8), ' s per sigma vector)'
+    if (.not. ok) write(6, '(a)') '          NOT converged'
+    if (nres < maxres) then
+      nres = nres + 1
+      rshift(nres) = 0
+      rroot(nres) = k
+      rom(nres) = omega
+      rim(nres) = aimag(e1(jc))
+      rmx(nres) = x1mx(jc)
+      rnm(nres) = x1nm(jc)
+      rwt(:, nres) = w1(:, jc)
+      rconv(nres) = ok
+      rcyc(nres) = outer
+      rnsig(nres) = nsigr
+      rli(nres) = 0
+      rla(nres) = 0
+      rlv(nres) = 0d0
+      if (l1(1, jc) >= 0) then
+        rli(nres) = nfrozen + operm(l1(1, jc) / nv) + 1
+        rla(nres) = nfrozen + no + vperm(mod(l1(1, jc), nv)) + 1
+        rlv(nres) = abs(v1(1, jc))
+      end if
+    end if
+    do r = 1, nlead
+      if (l1(r, jc) < 0) cycle
+      if (abs(v1(r, jc)) < 0.05d0 .and. r > 1) cycle
+      i = l1(r, jc) / nv
+      a = mod(l1(r, jc), nv)
+      write(6, '(a,i4,a,i5,a,i4,a,f12.6,a,i5,a,i4,a,f12.6,a,2f10.6)') '   root', k, ': ', &
+        nfrozen + operm(i) + 1, ' (', lab(nfrozen + operm(i)), ',', w(jeps + i), ')  -> ', &
+        nfrozen + no + vperm(a) + 1, ' (', lab(nfrozen + no + vperm(a)), ',', w(jeps + no + a), ')   ', &
+        dble(v1(r, jc)), N(xzeimag)(v1(r, jc))
+    end do
+  end do
+  efold = .false.
+  write(6, '(/,a)') '   root        omega / Eh            eV            cm-1    max |r|      |r|   steps    R1     R2' // &
+                    '          total energy / Eh'
+  do kk = 1, nres
+    write(6, '(i7,f20.12,f14.8,f16.4,2es10.2,i6,2f7.4,f26.12)') rroot(kk), rom(kk), rom(kk) * ev, rom(kk) * cm, &
+      rmx(kk), rnm(kk), rcyc(kk), rwt(1:2, kk), escf + ecorr + rom(kk)
+  end do
+  deallocate(singles, ee, rmax, rnorm, wts, cyc, lead, vlead, e1, x1mx, x1nm, w1, c1, l1, v1)
+  call xzrel(m0)
+end subroutine

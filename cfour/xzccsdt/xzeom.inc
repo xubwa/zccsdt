@@ -59,13 +59,20 @@ subroutine N(xzeomkeep)()
   et2pp = xzget(NW * npo * nvp, 'T2 [P][Q]')
   ewkl = xzget(NW * npo * npo, 'W_oooo')
   ekk = xzget(NW * no * no * npo, '<mn||Q> t2[P][Q]')
-  eo6 = xzget(NW * nto * nto, 'occupied operator')
+  ! (CC3: no operator on occupied triples)
+  eo6 = xzget(merge(0_8, NW * nto * nto, cc3mode /= 0), 'occupied operator')
   ewo = xzget(NW * ov * npo, 'W_vooo')
   egpd = xzget(NW * ny * npo * nv, 'pass-1 operand')
   egmq = xzget(NW * no * nvp * ny, 'pass-1 operand G')
   ed = xzget(NW * ov * nvp, 'dressed <ov||vv>')
   ebv = xzget(NW * nvp * ov, 'bra-dressed <vv||vo>')
   ewv = xzget(NW * nvp * ov, 'W_vvvo')
+  if (cc3mode == 2) then
+    ! the operands of the CC3 batches of the ground state (the folded sigma vector)
+    e3ao = xzget(NW * no * no * ov, 'CC3: Ao')
+    e3bv = xzget(NW * nv * no * nvp, 'CC3: Bv')
+    e3gv = xzget(NW * no * nvp * nv, 'CC3: Gv')
+  end if
 end subroutine
 
 ! ---------------------------------------------------------------------------
@@ -201,6 +208,13 @@ subroutine N(xzeomim)(w)
                                    w(kpib), nv, w(efevv), nv, half)
     end do
     call xztoc(5, 'once: pp operator in place')
+    if (cc3mode == 2) then
+      ! the operands of the CC3 batches of the ground state (docs/native.md, section 17)
+      call N(xzao3)(no, nv, w(eovood), w(e3ao))
+      call N(xzbvq)(no, nv, nvp, w(ewv), w(e3bv))
+      call N(xzgvq)(no, nv, nvp, w(egmq), w(e3gv))
+      call xztoc(5, 'once: CC3 operands')
+    end if
   end if
   call xzrel(ms)
 end subroutine
@@ -226,7 +240,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
   integer(8) :: kdwv, kdwo, kxacc, kyall, kr1c, kra, kgpd, kgmq, kzpp, kbuf, kg2, kyb, ku, kxb, ktmp, ktmp2
   integer(8) :: kzero3, kwring, kadrv, kdo6, kslab, kgq, kgh, kpib, ktv, kxpp, kbd, ktb, kz, nbdw
   integer(8) :: h, hr, lo, lo2, nqh, nqr, q0, nq, i0, nb, p0, x0
-  logical :: dense, with3
+  logical :: dense, with3, fold
   real(8) :: stats(4)
   ZT :: one, zero, half, mone
   one = 1
@@ -238,6 +252,10 @@ subroutine N(xzesig)(w, kv, ks, sd)
   nsd = ov + npo * nvp
   dense = ncls == 1
   with3 = .not. sd
+  ! the folded sigma vector of CC3 without stored triples (efold, at the
+  ! frequency eomega): the singles-doubles block and the triples folded in
+  ! (N(xzefold)); the vectors are singles and doubles
+  fold = sd .and. efold .and. cc3mode == 2
   s = eshift
   if (dense) s = 0
   kr1 = kv
@@ -325,7 +343,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
     kbd = xzget(NW * nbdw, 'pass-2 operand B')
     kwring = xzget(NW * ov2, 'pass-2 operand W')
     kadrv = xzget(NW * npo * nv * ny, 'pass-2 operand A')
-    kdo6 = xzget(NW * nto * nto, 'occupied operator, derivative')
+    kdo6 = xzget(merge(0_8, NW * nto * nto, cc3mode /= 0), 'occupied operator, derivative')
     m3 = xzmark()
     ! ---- pass 1 over R3 with the integrals of the ground state, over T3 with H'
     call xzshctx(s, 0_8, 0_8)
@@ -427,6 +445,20 @@ subroutine N(xzesig)(w, kv, ks, sd)
     end if
     call xzrel(m1)
   end if
+  if (fold) then
+    ! ---- CC3, folded: <ab||ei>' (its W_pp r1 part in the sweep below)
+    kdwv = xzget(NW * nvp * ov, 'W_vvvo derivative')
+    m1 = xzmark()
+    kg2 = xzget(NW * npo * ov, 'work [P][e][i]')
+    kyb = xzget(NW * nba * nv * nv * no, 'batch of W_vvvo terms Y')
+    if (.not. xzdry) then
+      call zc_vzero_d(NW * nvp * ov, w(kdwv))
+      call N(xzewv0)(w, kr1, eovvod, kdwv, kyb, ka2)
+      call N(xzwvt2out)(no, nv, npo, nvp, w(et2pp), w(kdooov), w(jopa), w(jopb), w(kdwv), w(kg2))
+      call xztoc(5, 'W_vvvo derivative')
+    end if
+    call xzrel(m1)
+  end if
 
   ! ---- the sweep over the blocks of the pp operator of the ground state:
   !      its ladders in sigma_2 (with r2 + tau1'; the T2 part of the operator
@@ -455,8 +487,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
         call N(zc_gemm)(0_4, 0_4, npo, nqh, npo, mone, w(kc1), npo, w(et2pp + NW * lo), nvp, one, &
                         w(ks2 + NW * lo), nvp)
       end if
-      if (with3) call N(zc_pair_t1_contract)(w(kdwv + NW * lo * ov), w(jvvvv + NW * vvoff(h)), w(kr1), nqh, nv, &
-                                             nqh, w(kpib), no)
+      if (with3 .or. fold) call N(zc_pair_t1_contract)(w(kdwv + NW * lo * ov), w(jvvvv + NW * vvoff(h)), w(kr1), &
+                                                       nqh, nv, nqh, w(kpib), no)
       call xztoc(5, 'pp terms of sigma_2, W_pp r1')
     end if
     ! (CC3: no pp ladder of R3)
@@ -646,6 +678,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
   end if
   call xzrel(m1)
   call xzshctx(0_8, 0_8, 0_8)
+  ! ---- CC3, folded: the triples at the frequency eomega, made per batch
+  if (fold) call N(xzefold)(w, kr1, kr2, kr2p, kdwv, kdovoo, kdooov, kdfov, ks1, ks2)
 
   ! ---- with labels: sigma_1 and sigma_2 on the elements of the shift
   if (.not. dense .and. .not. xzdry) then
