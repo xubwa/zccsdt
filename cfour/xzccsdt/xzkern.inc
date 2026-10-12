@@ -325,3 +325,33 @@
       integer(c_int64_t), value :: nt
       type(*), dimension(*) :: kv, tri, off, nd, posv, posq, m3, out
     end subroutine
+
+    ! ---- CC3 (docs/native.md, section 17; docs/ccn.md, sections 9 and 10)
+    ! R[I][A] += (ev[A] - eo[I]) T3[I][A]: the diagonal Fock operator (csrc/ccsdt_t3.c)
+    subroutine N(zc_t3_fdiag)(t3, r, nto, nvt, eo, ev) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt
+      type(*), dimension(*) :: t3, r, eo, ev
+    end subroutine
+
+    ! the drive terms of the triples equation for the pairs plo <= P < phi (csrc/cc3_native.c)
+    subroutine N(zc_t3_driver)(nto, nvt, no, nv, npo, nvp, ofree, opair, vfree, vpair, batch, plo, phi, &
+                               adrv, bdrv, r, stats, z) bind(C)
+      import
+      integer(c_int64_t), value :: nto, nvt, no, nv, npo, nvp, batch, plo, phi
+      type(*), dimension(*) :: ofree, opair, vfree, vpair, adrv, bdrv, r, z
+      real(c_double) :: stats(4)
+    end subroutine
+
+    ! one batch of occupied triples of CC3 without stored triples (csrc/cc3_fly.c)
+    subroutine N(zc_cc3_batch)(no, nv, nq, na, ncls, orng, vrng, qoff, aoff, vtri, vsgn, vfree, vpair, &
+                               eo, ev3, omega, i0, i1, j, k, nset, at1, ao1, bv1, bo1, at2, ao2, bv2, bo2, &
+                               gv, gsq, gsqp, fov, ysq, xo, r1, rasq, work, stats) bind(C)
+      import
+      integer(c_int64_t), value :: no, nv, nq, na, ncls, i0, i1, j, k, nset
+      real(c_double), value :: omega
+      type(*), dimension(*) :: orng, vrng, qoff, aoff, vtri, vsgn, vfree, vpair, eo, ev3
+      type(*), dimension(*) :: at1, ao1, bv1, bo1, at2, ao2, bv2, bo2, gv, gsq, gsqp, fov
+      type(*), dimension(*) :: ysq, xo, r1, rasq, work
+      real(c_double) :: stats(4)
+    end subroutine

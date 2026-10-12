@@ -70,7 +70,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     call xzrel(n)
   end if
   if (xzdry) then
-    call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, jt3)
+    call N(xzstepm)(w, jt1, jt2, jt3, kt1n, kt2n, jt3)
     call xzrel(m0)
     return
   end if
@@ -92,7 +92,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
              w(jt3:jt3 + NW * n3 - 1)
     close(74)
     kr3 = N(xzdiis_target)()
-    call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    call N(xzstepm)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
     open(unit=74, file=dbg(1:ldbg) // '.out', form='unformatted', access='stream', status='replace')
     write(74) w(kt1n:kt1n + NW * no * nv - 1), w(kt2n:kt2n + NW * no * no * nv * nv - 1), &
               w(kr3:kr3 + NW * n3 - 1)
@@ -111,7 +111,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   else
     write(6, '(/,a,f20.12)') '  Second-order correlation energy:', eold
   end if
-  write(6, '(/,a)') '  CCSDT iterations'
+  write(6, '(/,a,a,a)') '  ', trim(mname), trim(merge(' iterations (T3 stored)', ' iterations            ', cc3mode == 1))
   write(6, '(a)') '  ' // repeat('-', 98)
   write(6, '(a)') '   cycle     correlation energy      energy change      |dT1|      |dT2|' // &
                   '      |dT3|   DIIS    time/s'
@@ -140,7 +140,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
     end if
     kr3 = N(xzdiis_target)()
-    call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    call N(xzstepm)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
     call xzrebal(1)
     tsg = omp_get_wtime()
     call xztic()
@@ -198,7 +198,7 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
   integer(8) :: kr3
   real(8) :: ctl(2), tsg, t0, norms(3)
   icyc = 0
-  write(6, '(/,a)') '  CCSDT iterations: the batches of this rank'
+  write(6, '(/,a,a,a)') '  ', trim(mname), ' iterations: the batches of this rank'
   if (slices) call zc_vzero_d(NW * n3, w(jt3))
   call xzmpi_barrier()
   do
@@ -220,7 +220,7 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
     call xztoc(1, 'MPI: amplitudes from rank 0')
     dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
     kr3 = N(xzdiis_target)()
-    call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    call N(xzstepm)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
     call xzrebal(1)
     if (slices) then
       ! DIIS on the slice of this rank, then the slices of the new T3 of all ranks

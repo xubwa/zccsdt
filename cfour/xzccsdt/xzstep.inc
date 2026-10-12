@@ -197,15 +197,21 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     call N(xzvvoo)(no, nv, npo, nvp, w(kt1), w(ktau), w(jgpp), w(jooov), w(joooo), w(kwv), &
                    w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2), w(kwkl))
     call xztoc(1, 'dressed <ab||ij>')
-    ! the T3 part: wv[Q][(e, i)] += xacc[(e, i)][Q]
-    call N(zc_add_transposed)(w(kwv), w(kxacc), nvp, ov, ov, nvp, one)
-    call N(xzwvoovo)(no, nv, npo, nvp, w(kt2pp), w(kooovd), w(kfov), w(jopa), w(jopb), w(kwv), w(kg2))
-    call xztoc(1, 'W_vvvo: T3 part, t2 <oo||vo>')
-    call N(xzwvx)(no, nv, nvp, nba, w(kt2), w(kd), w(jvpa), w(jvpb), w(kwv), w(ka2), w(ku), &
-                  w(kxb), w(kyb))
-    call xztoc(1, 'W_vvvo: t2 <ov||vv>')
-    call N(xzwo)(no, nv, npo, nvp, w(kt2), w(kt2pp), w(kooovd), w(kovood), w(kd), w(kyall), &
-                 w(jopa), w(jopb), w(kwo), w(ktmp), w(ktmp2), w(kb2))
+    ! (CC3, cc3mode 1: the drive operators are the T1-dressed integrals alone -
+    ! no T3 and no T2 parts in W_vvvo and W_vooo)
+    if (cc3mode == 0) then
+      ! the T3 part: wv[Q][(e, i)] += xacc[(e, i)][Q]
+      call N(zc_add_transposed)(w(kwv), w(kxacc), nvp, ov, ov, nvp, one)
+      call N(xzwvoovo)(no, nv, npo, nvp, w(kt2pp), w(kooovd), w(kfov), w(jopa), w(jopb), w(kwv), w(kg2))
+      call xztoc(1, 'W_vvvo: T3 part, t2 <oo||vo>')
+      call N(xzwvx)(no, nv, nvp, nba, w(kt2), w(kd), w(jvpa), w(jvpb), w(kwv), w(ka2), w(ku), &
+                    w(kxb), w(kyb))
+      call xztoc(1, 'W_vvvo: t2 <ov||vv>')
+      call N(xzwo)(no, nv, npo, nvp, w(kt2), w(kt2pp), w(kooovd), w(kovood), w(kd), w(kyall), &
+                   w(jopa), w(jopb), w(kwo), w(ktmp), w(ktmp2), w(kb2))
+    else
+      call N(xzwo3)(no, nv, npo, w(kovood), w(jopa), w(jopb), w(kwo))
+    end if
     call xztoc(1, 'W_vooo')
     call N(xzweff)(no, nv, nvp, w(kt2), w(kt2p), w(joovv), w(joovvp), w(kovvod), w(kfoo), w(kfvv), &
                    w(kweff), w(kfevv), w(kfeoo), w(ka2), w(kb2), w(kx2))
@@ -272,14 +278,18 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
         if (npo > 0 .and. (myrank == 0 .or. slices)) call N(zc_gemm)(0_4, 1_4, npo, nq, nqh, one, w(ktt + NW * lo), nvp, &
                                      w(kslab), nqh, zero, w(klad + NW * (lo + q0)), nvp)
         call xztoc(1, 'CCSD pp ladder (GEMM)')
-        call xztic()
-        ! the pp operator of T3: + sum_{m<n} t2[mn][ab] <mn||de> + 1/2 A[F_vv delta]
-        if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nqh, npo, one, w(kt2pp + NW * (lo + q0)), nvp, &
-                                     w(jgpp + NW * lo), nvp, one, w(kslab), nqh)
-        call N(zc_pair_one_body_add)(w(kslab), nq, nqh, w(jvpa + lo + q0), w(jvpb + lo + q0), w(kpib), nv, &
-                                     w(kfevv), nv, half)
-        call xztoc(1, 'dressed <ab||cd> rows')
+        if (cc3mode == 0) then
+          call xztic()
+          ! the pp operator of T3: + sum_{m<n} t2[mn][ab] <mn||de> + 1/2 A[F_vv delta]
+          if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, nqh, npo, one, w(kt2pp + NW * (lo + q0)), nvp, &
+                                       w(jgpp + NW * lo), nvp, one, w(kslab), nqh)
+          call N(zc_pair_one_body_add)(w(kslab), nq, nqh, w(jvpa + lo + q0), w(jvpb + lo + q0), w(kpib), nv, &
+                                       w(kfevv), nv, half)
+          call xztoc(1, 'dressed <ab||cd> rows')
+        end if
       end if
+      ! (CC3: no pp ladder of T3)
+      if (cc3mode /= 0) cycle
       if (dense) then
         if (xzdry) cycle
         do i0 = 0, nto - 1, nbt
@@ -319,7 +329,9 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
                    w(kt1n), w(kt2n), w(ka2), w(kb2), w(kx2))
     call xztoc(1, 'CCSD part')
     call xztic()
-    if (pairhh) then
+    if (cc3mode /= 0) then
+      ! (CC3: of the operator only the diagonal Fock part, applied in the update)
+    else if (pairhh) then
       call N(xzwpair)(no, npo, w(jopa), w(jopb), w(kwkl), w(kfeoo), w(ko6))
     else
       call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(kwkl), w(kfeoo), w(ko6))
@@ -358,14 +370,22 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
       do p0 = 0, npo - 1, nbp
         if (.not. xzmine(p0)) cycle
         call xzbtic()
-        call N(zc_t3_pass2r)(w(kt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
-                             w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), &
-                             w(kwring), w(kadrv), w(kbd), w(kr3), c_null_ptr, stats, w(ktb), w(kz))
+        if (cc3mode /= 0) then
+          ! CC3: the drive terms alone (T3 is not read)
+          call N(zc_t3_driver)(nto, nvt, no, nv, npo, nvp, w(jofree), w(jopair), w(jvfree), w(jvpair), &
+                               nbp, p0, min(p0 + nbp, npo), w(kadrv), w(kbd), w(kr3), stats, w(kz))
+        else
+          call N(zc_t3_pass2r)(w(kt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jofree), w(jopair), &
+                               w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), &
+                               w(kwring), w(kadrv), w(kbd), w(kr3), c_null_ptr, stats, w(ktb), w(kz))
+        end if
         call xzbtoc(p0)
       end do
     end if
   else
+    noring = cc3mode /= 0
     call N(xzbpass2)(w, kt3, kr3, w(kwring), w(kadrv), w(kbd), 1_8, 0_8, w(kbd), w(kbd))
+    noring = .false.
   end if
   dkind = 0
   if (pairhh) then
@@ -395,7 +415,11 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     if (.not. xzdry) then
       tsg = omp_get_wtime()
       call xztic()
-      call N(xzslocc)(w, kt3, kr3, w(ko6))
+      if (cc3mode /= 0) then
+        call N(xzfdiag)(w, kt3, kr3, 0_8, boff, .true.)
+      else
+        call N(xzslocc)(w, kt3, kr3, w(ko6))
+      end if
       call xztoc(1, 'hh ladder, F_oo')
       dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
       tsg = omp_get_wtime()
@@ -415,7 +439,10 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   else if (.not. xzdry .and. myrank == 0) then
     tsg = omp_get_wtime()
     call xztic()
-    if (pairhh) then
+    if (cc3mode /= 0) then
+      ! CC3: [F, T3] with the diagonal of F (CFOUR's spinors are canonical)
+      call N(xzfdiag)(w, kt3, kr3, 0_8, boff, .false.)
+    else if (pairhh) then
       call N(xzhhapply)(1_4, no, npo, nto, nvt, xzhhcols(), w(jotri), w(josgn), w(jofree), w(jopair), w(ko6), &
                         w(kt3), w(kr3), w(khg), w(khx))
     else if (dense) then

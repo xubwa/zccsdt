@@ -96,6 +96,22 @@ module xzdata
   logical :: q_left = .false.       ! (Q) with lambda on the left: (Q)_Lambda
   logical :: with_den = .false.     ! the density and the orbital gradient of CCSDT are (xzden.inc)
   logical :: with_eom = .false.     ! excited states are: EOM-EE-CCSDT (xzeom.inc)
+  ! CC3 (xzcc3.inc; docs/native.md, section 17): the model of the iterations and
+  ! of the EOM sigma vector.  0 CCSDT; 1 CC3 with T3 stored (the CCSDT step with
+  ! the T3 couplings of the triples equation off: no ring, no pp or hh ladder,
+  ! the drive operators without their T2 and T3 parts, the diagonal Fock
+  ! operator); 2 CC3 without stored T3 (the triples made per batch of occupied
+  ! triples and contracted at once: n3 is 0 then, and the EOM vectors are
+  ! singles and doubles with the triples folded in at a frequency)
+  integer :: cc3mode = 0
+  character(len=5) :: mname = 'CCSDT'   ! the model of the iterations, for the output
+  logical :: noring = .false.       ! pass 2 in blocks without its ring term (T3 is not read)
+  integer(8) :: nc3w = 0            ! elements of the work of one CC3 batch (the plan)
+  ! the folded EOM-CC3 sigma vector: on, at the frequency eomega; efollow: the
+  ! solver follows the root with the largest overlap with its first vector
+  logical :: efold = .false., efollow = .false.
+  real(8) :: eomega = 0d0
+  real(8) :: tfly(4) = 0d0          ! seconds of the CC3 kernel: products, amplitudes, gather, contractions
   ! (Q) reads T3 (and Lambda3) where the files XZAMPS (XZLAMB) are mapped,
   ! read-only: one copy in the page cache of a node for all its ranks, not
   ! in the work array (XZ_QMAP=0: a private copy in the work array)
@@ -172,6 +188,10 @@ module xzdata
   integer(8) :: ewkl = 0                    ! W_oooo[K][P]
   integer(8) :: ekk = 0                     ! [m][n][P] = sum_Q <mn||Q> t2[P][Q]
   integer(8) :: eo6 = 0                     ! the operator on occupied triples [I][J]
+  ! (the folded EOM-CC3 sigma vector: the operands of the CC3 batches of the ground state)
+  integer(8) :: e3ao = 0                    ! Ao[hi][lo][c][m] = <mc||lo hi>~
+  integer(8) :: e3bv = 0                    ! Bv[e][i][Q] = W_vvvo[Q][e][i] (the dressed <ab||ei> of CC3)
+  integer(8) :: e3gv = 0                    ! Gv[m][Q][y] = ~<ym||Q>
 
   ! ---- batch sizes: the memory plan (xzplan.F90)
   integer(8) :: nbp = 1             ! occupied pairs of a batch of pass 1 and pass 2

@@ -1264,7 +1264,7 @@ subroutine N(xzeomtest)(w, seedtext)
     call N(xzetaxpy)(ov, cf(ic), w(jt1), w(kr), w(kt1))
     call N(xzetaxpy)(ov * ov, cf(ic), w(jt2), w(kt2r), w(kt2))
     call N(xzetaxpy)(n3, cf(ic), w(jt3), w(kr + NW * nsd), w(kt3))
-    call N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
+    call N(xzstepm)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     call N(xzetres)(w, cw(ic), w(kt1), w(kt2), w(kt3), w(kt1n), w(kt2n), w(kr3), w(kfd), w(kfd + NW * ov), &
                     w(kfd + NW * nsd))
   end do

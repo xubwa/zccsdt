@@ -28,8 +28,9 @@
 module xzpland
   implicit none
   integer, parameter :: npar = 8
-  ! 1 nqs, 2 nbt, 3 nbp, 4 nba, 5 qxv, 6 qc22, 7 qc13, 8 qrows
-  integer(8) :: plo(npar), phi(npar)
+  ! 1 nqs, 2 nbt, 3 nbp, 4 nba, 5 qxv, 6 qc22, 7 qc13, 8 qrows; 9 nc3w (CC3
+  ! without stored triples: elements of the work of a batch of occupied triples)
+  integer(8) :: plo(npar + 1), phi(npar + 1)
   integer(8) :: pslot = 0, pchunk = 0
   logical :: pfile = .true.
   logical :: planq = .false.          ! only (Q) is planned (a rank that does no iterations)
@@ -57,6 +58,8 @@ contains
       qc13 = v
     case (8)
       qrows = v
+    case (9)
+      nc3w = v
     end select
   end subroutine
 end module xzpland
@@ -174,12 +177,12 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   real(8) :: frac
   integer :: larg
 
-  what = 'CCSDT'
+  what = trim(mname)
   if (with_lam) what = 'CCSDT, Lambda'
   if (with_lam .and. .not. with_cc) what = 'Lambda'
   if (with_den) what = trim(what) // ', density'
   if (with_den .and. .not. (with_cc .or. with_lam)) what = 'the density'
-  if (with_eom) what = 'CCSDT, EOM'
+  if (with_eom) what = trim(mname) // ', EOM'
   if (with_eom .and. .not. with_cc) what = 'EOM'
   f = no * nv * nvp                       ! elements of a half-expanded batch of one pair
   ! ---- the smallest and the target batch sizes
@@ -214,8 +217,19 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   phi(7) = max(plo(7), min(nvt, 1073741824_8 / (8 * nwe * nv)))
   plo(8) = (nvp + 15) / 16
   phi(8) = max(plo(8), min(nvp, 1073741824_8 / (16 * nwe * nv * nv)))
+  ! CC3 without stored triples: the work of a batch of occupied triples - at
+  ! least one triple of the largest group (zc_cc3_work), up to 2 GB or all the
+  ! triples of a pair (j, k), as the Python program (cc3fly.Fly)
+  plo(9) = 1
+  phi(9) = 1
+  if (cc3mode == 2) then
+    do k8 = 0, ntg - 1
+      plo(9) = max(plo(9), zc_cc3_work(ncls, k8, 1_8, vcoff, vpoff, vtoff))
+    end do
+    phi(9) = max(plo(9), min(int(2d9 / (8 * nwe), 8), plo(9) * max(no - 2, 1_8)))
+  end if
   ncb = 0
-  do k = 1, npar
+  do k = 1, npar + 1
     call setpar(k, plo(k))
   end do
 
@@ -255,6 +269,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     do k = 1, npar
       call setpar(k, max(1_8, int(rplan(1 + k), 8)))
     end do
+    call setpar(9, max(1_8, int(rplan(16), 8)))
     pslot = 0
     pfile = .false.
     if (slices) then
@@ -286,8 +301,19 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   ! ---- the batches of the iterations, one after the other
   if (.not. planq) then
   do k = 1, 4
+    ! (CC3 without stored triples has no batches of pass 1, pass 2 or the pp ladder)
+    if (cc3mode == 2 .and. (k == 2 .or. k == 3)) cycle
     call raise(k, .true.)
   end do
+  if (cc3mode == 2) then
+    call raise(9, .true.)
+    ! a test hook: XZ_CC3W=n elements of the work of a batch (at least one triple)
+    call get_environment_variable('XZ_CC3W', arg, larg)
+    if (larg > 0) then
+      read(arg(1:larg), *) k8
+      call setpar(9, max(plo(9), k8))
+    end if
+  end if
   end if
   ! ---- the DIIS vectors: the work array if all of them fit, else the file
   pfile = .false.
@@ -390,6 +416,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   write(6, '(a,i8,a,i8)') '     occupied triples of a pp-ladder batch:       ', nbt, '  of ', nto
   write(6, '(a,i8,a,i8)') '     occupied pairs of a batch of pass 1, pass 2: ', nbp, '  of ', npo
   write(6, '(a,i8,a,i8)') '     first indices of a batch of W_vvvo terms:    ', nba, '  of ', nv
+  if (cc3mode == 2) write(6, '(a,i14,a,f10.1,a,i12,a)') '     CC3: the work of a batch of occupied triples: ', nc3w, &
+    ' elements (', 8d-6 * nwe * nc3w, ' MB; one triple: ', plo(9), ')'
   if (.not. (with_cc .or. with_lam)) then
   else if (pslot < 2) then
     write(6, '(a)') '     DIIS: none'
