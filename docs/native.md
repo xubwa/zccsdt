@@ -131,7 +131,7 @@ not smaller.  The output says which: `amplitudes: the file XZAMPS of an
 earlier run belongs to these integrals (XZKEY): taken, the CCSDT iterations
 are skipped` or `amplitudes: solved here`, likewise for lambda.  The labels
 and the arithmetic are decided again from the same files; a file written in
-another mode (`XZ_LABELS`, `XZ_REAL` changed between the runs) stops the run
+another mode (`labels`, `real` changed between the runs) stops the run
 when it is read.  So the steps can be separate runs in one directory:
 `CALC=CCSDT`, then xjoda again with `CALC=CCSDT(Q)` (or `EXCITE=EOMEE`, or
 `PROPS=FIRST_ORDER`) and the program again: only the new part is computed
@@ -245,7 +245,7 @@ Written:
 
 A run that reads `XZAMPS` or `XZLAMB` must run in the mode of the run that wrote it
 (labels used or not, real or complex: both follow from the same integral
-files, so this only matters with `XZ_LABELS` / `XZ_REAL`); the header is
+files, so this only matters with `labels` / `real`); the header is
 checked.
 
 **`XZAMPS` and `XZLAMB` are also what (Q) computes from**: (Q) and (Q)_Lambda
@@ -256,7 +256,7 @@ there (section 5).  This needs no conversion in any mode: the T3 of the file
 is the stored T3 of the program byte for byte - the packed dense array, or
 its blocks one after the other, real (8 bytes) or complex (16) - behind a
 header of 56 bytes and T1 and T2, i.e. at an offset that is a multiple of 8.
-The files must not be changed while a (Q) runs on them.  `XZ_QMAP=0` reads
+The files must not be changed while a (Q) runs on them.  `qmap 0` reads
 T3 (lambda3) into the work array of every rank as before; a run directory on
 a network file system (NFS, Lustre, GPFS, BeeGFS, ...) gets a warning that
 says so - mapping works there, but pages are then read over the network when
@@ -367,7 +367,7 @@ dispatch routine; today the scheduler is one source but two object codes.
 Which instance runs is decided at run time from the integrals: if no
 integral read has an imaginary part above 1e-10 the real one (the integral
 files are complex; the real parts are compacted in place while reading).
-`XZ_REAL=0` forces the complex instance; the test of section 7 runs a real
+`real 0` forces the complex instance; the test of section 7 runs a real
 case through both.
 
 ## 4. Memory: the work array, the stack, the plan
@@ -461,8 +461,8 @@ plan` to the word).
           (private to a rank.  Not in the work array: T3, read where the file XZAMPS is mapped -
            one copy in the page cache of a node for all its ranks:     1591.0 MB)
 
-  With `XZ_QMAP=0` T3 is in the work array of every rank and the line says
-  `(private to a rank, T3 included: XZ_QMAP=0)`.  A run that iterates first
+  With `qmap 0` T3 is in the work array of every rank and the line says
+  `(private to a rank, T3 included: qmap 0)`.  A run that iterates first
   (`ccsdt(q)`) keeps T3 in the work array for the iterations, writes
   `XZAMPS`, releases T3 and maps the file like the other ranks.
 - The excited states (`eom`, `ccsdt_eom`): the dry run goes through the
@@ -493,7 +493,7 @@ plan` to the word).
         the work arrays of the ranks, node by node (MB; rank 0: its plan):
           node of rank     0:    2 ranks, work arrays      72127.4   memory available at the start     171230.4
 
-  (26 + 120 dense real, two ranks on one node, `XZ_SLICES=0`.)
+  (26 + 120 dense real, two ranks on one node, `slices 0`.)
 
   **With several ranks on one node `MEMORY_SIZE` is rank 0's alone**: it
   must leave room for the other ranks of the node (the line above says how
@@ -501,10 +501,10 @@ plan` to the word).
   does not have.  With slices (the default with more than one rank, section
   15) every rank holds its slice of every DIIS vector - in its work array,
   or in its own file `XZDIIS.<rank>` - and takes what rank 0 takes; the
-  description above is that of `XZ_SLICES=0`.
+  description above is that of `slices 0`.
 - With more than one rank the batches of pairs and of triples are what is
   dealt to the ranks, so their targets are capped: at least 8 batches of
-  each kind per rank (`XZ_BPR`).  One rank: the targets of before.
+  each kind per rank (`bpr`).  One rank: the targets of before.
 
 **The smallest MEMORY_SIZE** for o occupied and v virtual spinors, complex,
 dense (one class): with p = v(v-1)/2, f = o v p (the size of `<ov||vv>` on
@@ -528,26 +528,27 @@ exact numbers are printed by every run ("the least that CCSDT takes"):
 
 Real arithmetic halves these; blocks of labels reduce T3 and `<vv||vv>` to
 their allowed parts (section 6).  The (Q) columns of the table are those of
-the private copy (`XZ_QMAP=0`); with the map they are smaller by T3.  **Not
+the private copy (`qmap 0`); with the map they are smaller by T3.  **Not
 done:** T3 of the *iterations* in a mapped scratch file - T3, its residual
 and (in the file-DIIS mode) nothing else of the size of T3 must fit in the
 work array; the map of section 2 is read-only and serves (Q) alone.
 
-Test hooks (environment): `XZ_MAXCOR=n` uses only n words of the work array;
-`XZ_PLAN="nqs nbt nbp nba qxv qc22 qc13 qrows"` gives the batch sizes
-(0: as planned), `XZ_DIIS=m8|f8|m0` the place (memory / file) and number of
-the DIIS vectors (read together with `XZ_PLAN`: `XZ_PLAN="0 0 0 0 0 0 0 0"
-XZ_DIIS=f8` is the planned run with the vectors in the file).  `XZ_QMAP=0`:
-(Q) with a private T3 (above).  `XZ_NCYC`, `XZ_START`, `XZ_HH`: section 12;
-`XZ_QTASKS`, `XZ_QRANKS`, `XZ_QSAMPLE`, `XZ_QSTOP`, `XZ_QCOST`: section 5.
-The iterations over ranks (section 15): `XZ_MPICHUNK=n` (words of a
-message), `XZ_MPITEST=n` (a test of the chunked transfers on arrays of n
-words), `XZ_DIST=digits` (the kinds of batches that are dealt out: 1, 2, 3
+Options of the plan and test hooks (lines of the section `%xzccsdt` of the ZMAT, section 18 -
+where this document names an option, e.g. `labels 0`, it is such a line): `maxcor n` uses only n words of the work array;
+`plan nqs nbt nbp nba qxv qc22 qc13 qrows` gives the batch sizes
+(0: as planned), `diis m8|f8|m0` the place (memory / file) and number of
+the DIIS vectors (read together with `plan`: `plan 0 0 0 0 0 0 0 0` and
+`diis f8` is the planned run with the vectors in the file).  `qmap 0`:
+(Q) with a private T3 (above).  `ncyc`, `start`, `hh`: section 12;
+`qtasks`, `qranks`, `qsample`, `qstop`, `qcost`: section 5.
+The iterations over ranks (section 15): `mpichunk n` (words of a
+message), `mpitest n` (a test of the chunked transfers on arrays of n
+words), `dist digits` (the kinds of batches that are dealt out: 1, 2, 3
 pass 1, pass 2, pp ladder; 4, 5, 6 those of the Lambda equations; `0`:
-rank 0 does all), `XZ_BPR`, `XZ_BCOST=file` (the seconds of every batch),
-`XZ_SLICES=0`, `XZ_REBAL`, `XZ_R0LOAD`, `XZ_WFAIL`.  `XZ_MAXCOR` is read by
-rank 0 only.  The excited states: `XZ_EOMTEST`, `XZ_EOMSIG`, `XZ_EOMSD`,
-`XZ_EOMVEC`, `XZ_EOMCYC` (section 16.8).
+rank 0 does all), `bpr`, `bcost file` (the seconds of every batch),
+`slices 0`, `rebal`, `r0load`, `wfail`.  `maxcor` is read by
+rank 0 only.  The excited states: `eomtest`, `eomsig`, `eomsd`,
+`eomvec` (section 16.8).
 
 Measured (H2O / 6-31G, login node): the same energies to 1e-12 with the work
 array at its floor (2022176 words: DIIS in the file, one pair per batch),
@@ -591,7 +592,7 @@ the list means:
        groups (one largest index l, one Xv):     23;  Xv(x, l):    322 pairs,    500 formed over all ranks
        cost model: the slowest rank   2.50 % above the mean; the repeated Xv   0.25 % of the work
 
-For 26 occupied spinors (the model in blocks, 26 + 78; `XZ_QRANKS="2 3 4 6 8
+For 26 occupied spinors (the model in blocks, 26 + 78; `qranks "2 3 4 6 8
 12 16 24 48"` prints these lines for any numbers of ranks without running
 them):
 
@@ -624,7 +625,7 @@ the elements of its products (`<bc||ef>` on (bc), e times T2 on f, d, in the
 blocks of the classes of x and l).  It was measured, not derived: section 14
 (per group within 5 % on 6 threads and 13 % on 24, where one cost per
 quadruple is off by up to 21 %).
-`XZ_QCOST=file` writes the times of every quadruple and of every Xv of rank
+`qcost file` writes the times of every quadruple and of every Xv of rank
 0 to a file, which is what the model was fitted to.
 
 **The left side** of the correction is an argument of the routine of one
@@ -652,13 +653,13 @@ formed by every rank - the next thing to share (not done).
 
 **Restart, progress, sampling.**  Every rank appends a line per finished
 task to `XZQCHK.<rank>`.  A later run with the same task list (the same
-number of ranks, or the same `XZ_QTASKS`) takes the finished tasks of all
+number of ranks, or the same `qtasks`) takes the finished tasks of all
 such files as done and continues - the first line of a file carries a number
 computed from the list, so the file of another list is not taken (with
 another number of ranks the calculation starts again) -; all ranks read the
 files before any of them writes one; the files are deleted when (Q) has
 finished.  After every task a rank prints the task, its time, the per cent
-of its own work done and the time left by the cost model.  `XZ_QSAMPLE=f`
+of its own work done and the time left by the cost model.  `qsample f`
 (0 < f < 1) does the fraction f of the quadruples of every task, evenly
 spread over the task (at least one), with Xv formed as in the whole
 calculation, and prints the estimated wall time of the whole (Q) (per task:
@@ -666,8 +667,8 @@ the time of Xv plus the time of its quadruples in proportion; the slowest
 rank); no energy is printed and TOTENERG is not written.  (Before 2026-10-09
 a sample took the *first* quadruples of a task, whose sectors are not the
 average ones, and formed Xv again for every task: its estimates are not
-comparable - section 14.)  `XZ_QTASKS=n` asks for about n tasks of equal
-numbers of quadruples instead of the rule above, `XZ_QSTOP=n` ends the run
+comparable - section 14.)  `qtasks n` asks for about n tasks of equal
+numbers of quadruples instead of the rule above, `qstop n` ends the run
 after n tasks of a rank (test hooks of the list and of restart).
 
 ## 6. Symmetry labels and blocks
@@ -693,7 +694,7 @@ Nothing is parsed from the ZMAT.  The output says which it was:
     symmetry labels: none (no file xzlabels; dgcosym: one block, an SCF without %dglin)
     symmetry labels: none (no file xzlabels, no file dgcosym)
 
-`XZ_LABELS=0` switches the labels of either file off.  The labels of either
+`labels 0` switches the labels of either file off.  The labels of either
 file are checked against the integrals (below).  In an MPI run every rank
 reads the two files itself in its run directory; the ranks must find the
 same (section 1: a rank that decides otherwise than rank 0 stops the run).
@@ -758,21 +759,21 @@ say the order of magnitude):
 |---|---|---|---|---|---|
 | `%dglin`, all-electron (36 + 28) | `dgcosym` | real, 6 | -2605.010449740676 | 19 | 0.61 |
 | | hand-written `xzlabels` (2 m_j) | real, 6 | -2605.010449740676 | 19 | 0.63 |
-| | `dgcosym`, `XZ_LABELS=0` | real, 1 | -2605.010449740676 | 19 | 5.70 |
-| | `dgcosym`, `XZ_REAL=0` | complex, 6 | -2605.010449740676 | 19 | 1.37 |
+| | `dgcosym`, `labels 0` | real, 1 | -2605.010449740676 | 19 | 5.70 |
+| | `dgcosym`, `real 0` | complex, 6 | -2605.010449740676 | 19 | 1.37 |
 | | `dgcosym`, 2 ranks x 2 threads | real, 6 | -2605.010449740676 | 19 | 0.75 |
 | | `dgcosym` with two block numbers exchanged | refused (forbidden `<oo||oo>` 1.41), real, 1 | -2605.010449740676 | 19 | 5.78 |
 | | `xzlabels` with modulus 4 | not used (warning), real, 1 | -2605.010449740676 | 19 | 5.74 |
 | the same input, the chain run again | `dgcosym` | real, 6 / 1 | -2605.010449740678 | 19 | 0.63 / 5.74 |
 | `%dglin`, `DROPMO=1>9` (18 + 28 active) | `dgcosym` | real, 6 | -2605.002712127468 | 18 | 0.06 |
-| | `dgcosym`, `XZ_LABELS=0` | real, 1 | -2605.002712127468 | 18 | 0.38 |
+| | `dgcosym`, `labels 0` | real, 1 | -2605.002712127468 | 18 | 0.38 |
 | | `dgcosym`, 2 ranks x 2 threads | real, 6 | -2605.002712127468 | 18 | 0.07 |
 | no `%dglin`, `DROPMO=1>9` | none (`dgcosym`: one block) | complex, 1 | -2605.002712127468 | 18 | 0.99 |
 | `%dglin`, `DROPMO=1>9`, `%vircut` 1.5 (18 + 22 active, 6 dropped) | `dgcosym` | real, 6 / 1 | -2604.991484860860 | 18 | 0.04 / 0.18 |
 | `%dglin`, `%vircut` 1.5 (36 + 22 active) | `dgcosym` | real, 6 / 1 | -2604.998290453414 | 18 | 0.39 / 2.62 |
 | HBr+ doublet, `%dglin` 12 12 / 5 4 / 1 1, `DROPMO=1>9` (17 + 29 active) | `dgcosym` | real, 6 / 1 | -2604.591824417278 | 21 | 0.07 / 0.38 |
 
-("6 / 1": the run with the labels and the run with `XZ_LABELS=0`, the same
+("6 / 1": the run with the labels and the run with `labels 0`, the same
 energy to all digits printed.)  The all-electron case without `%dglin` is
 complex and dense: 18.7 s per cycle against 0.60 s, the same E(CCSDT)
 -2605.010449740676 (measured before this rule, with a hand-written
@@ -838,7 +839,7 @@ What the program does with the labels:
   made, unlike the Python front end, which expands the blocks for (Q).  The
   tasks, ranks, restart and sampling of section 5 are the same code.
 
-`XZ_LABELS=0`: the labels are not used.  **Not done:** labels with a modulus
+`labels 0`: the labels are not used.  **Not done:** labels with a modulus
 - the file format of `xzlabels` has one, the readers pass it on (`modulus` of
 `xzdata.F90`; `xzrddgc` returns one too, 0 for the m_j blocks), and the
 driver decides in one place: with a modulus that is not 0 the program warns
@@ -905,9 +906,9 @@ During development: the first run of the CCSDT step agreed with the Python
 energy; (Q) was off by 4.5e-8 at first, found at the term (the T2 T2 part on
 one index and a triple, by its contribution to z.r per occupied quadruple
 against `quadruples.Quadruples`) - a work region declared too short, which
-overwrote the first Xv.  `XZ_QDEBUG=1` prints the four parts of the
+overwrote the first Xv.  `qdebug 1` prints the four parts of the
 correction (z.[V,T3], z.T2T2, [V,T3].[V,T3], [V,T3].T2T2).
-`XZ_DEBUG=file` does one CCSDT step on amplitudes read from a file and writes
+`debug file` does one CCSDT step on amplitudes read from a file and writes
 the result (for comparisons with `ccsdt_opt.update_amps` on dumped arrays).
 
 **Labels, blocks, real** (HBr / cc-pVDZ-DK, 28 frozen; m_j-adapted spinors
@@ -919,8 +920,8 @@ written by `bench/cfour/labelled_run.py`; 6 classes, T3 17.3 % and
 | real, labels | Python, blocks (`symmetry` True) | -2604.989297832537 |
 | | Python, dense (labels not used) | -2604.989297832537 |
 | | native, blocks, real | -2604.989297832537 |
-| | native, dense, real (`XZ_LABELS=0`) | -2604.989297832537 |
-| | native, blocks, complex (`XZ_REAL=0`) | -2604.989297832537 |
+| | native, dense, real (`labels 0`) | -2604.989297832537 |
+| | native, blocks, complex (`real 0`) | -2604.989297832537 |
 | | native, dense, complex (both) | -2604.989297832537 |
 | complex (a phase on every spinor), labels | Python, blocks | -2604.989297832545 |
 | | native, blocks (complex found) | -2604.989297832545 |
@@ -932,7 +933,7 @@ The same files with the active spinors in a random order (`labelled_run.py
 program's own ordering, with the signs of the pairs that change their order,
 is what is tested): CCSDT, [Q] and (Q) as below in all four native modes.
 
-The real case through the complex path (the override `XZ_REAL=0`) is the
+The real case through the complex path (the override `real 0`) is the
 third and fourth native row.  CCSDT(Q) on the same files: E(CCSDT[Q]) =
 -2604.989486010600, E(CCSDT(Q)) = -2604.989515284235 from Python in blocks,
 Python dense, and the native program in all four modes (blocks and dense,
@@ -950,9 +951,9 @@ ranks; with the phases (complex blocks) -2604.989486010608 and
 | HBr / cc-pVDZ-DK | 1, 2, 4 | -2604.989486010692 | -2604.989515284327 |
 
 (the same to all printed digits for 7, 14, 15, 18, 20 and 25 tasks).  `(q)`
-alone from `XZAMPS`, with 20 tasks asked for, interrupted by `XZ_QSTOP=5` and
+alone from `XZAMPS`, with 20 tasks asked for, interrupted by `qstop 5` and
 started again (serial: 5 tasks restored; 4 ranks: 10 restored): the same
-energies; the checkpoint files are gone afterwards.  `XZ_QSAMPLE=0.3`: 62 of
+energies; the checkpoint files are gone afterwards.  `qsample 0.3`: 62 of
 210 (H2O) and 22 of 70 (HBr) quadruples, the estimate printed, no TOTENERG.
 
 ## 8. Timings
@@ -1022,8 +1023,8 @@ iterations each, E(CCSDT) = -2605.165534626448 in all six runs (job
 | Python, blocks (the files are complex: complex arithmetic) | 0.74 | 15.6 | 1.12 GB | - |
 | Python, dense, complex | 2.34 | 46.1 | 3.46 GB | - |
 | native, blocks, real | 0.16 | 3.3 | 0.33 GB | 236 MB |
-| native, blocks, complex (`XZ_REAL=0`) | 0.35 | 6.9 | 0.60 GB | 463 MB |
-| native, dense, real (`XZ_LABELS=0`) | 0.61 | 11.9 | 1.69 GB | 1589 MB |
+| native, blocks, complex (`real 0`) | 0.35 | 6.9 | 0.60 GB | 463 MB |
+| native, dense, real (`labels 0`) | 0.61 | 11.9 | 1.69 GB | 1589 MB |
 | native, dense, complex (both) | 1.82 | 34.9 | 2.95 GB | 2811 MB |
 
 In blocks the T3 passes are a third of an iteration (native real: pass 1
@@ -1109,7 +1110,7 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   of (Q): 6.9 GB of 11.6 GB per rank for 26 + 160 in real blocks, which is
   what limits the number of ranks on a node now); Xv passed between ranks instead of formed again by the pieces of a
   cut group; the mapped T3 on a network file system (the warning and
-  `XZ_QMAP=0` are there, no such run was made); a cost model with a constant
+  `qmap 0` are there, no such run was made); a cost model with a constant
   of Xv per mode (one constant, between the two measured ones).
 - (Q) in sectors was validated at cc-pVDZ only and not timed; its memory
   plan has one knob (the occupied indices whose Xv is held), no batches of
@@ -1143,7 +1144,7 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   (`%eomnroot`, `%eomthrs`, `%eomndav0`, `%xzeom`, `%xzeomguess`,
   `%xzeomvec`: section 16.1), not `%zccsdt` of the Python front end: the
   method by argument or CALC, thresholds by CC_CONV / CC_MAXCYC (ESTATE_CONV
-  / ESTATE_MAXCYC), everything else by the environment variables named above
+  / ESTATE_MAXCYC), everything else by the options of the section `%xzccsdt` (section 18)
   (test hooks and overrides).
 
 ## 10. Relaxed density through xx2czvec
@@ -1521,8 +1522,8 @@ takes"; below it:
 | the same, DROPMO=1>1, %vircut 1.2 | 8, 10 | complex, dense | 4.5 MB | 8.5 MB | | 0.1 MB |
 | HBr / cc-pVDZ-DK, 28 frozen | 8, 28 | complex, dense | 50.7 MB | 158.8 MB | 28.8 MB | 2.9 MB |
 | the same, labelled real spinors | 8, 28 | real, 6 classes | 18.6 MB | 22.1 MB | | 0.25 MB |
-| | | real, dense (`XZ_LABELS=0`) | 25.5 MB | 79.6 MB | | 1.5 MB |
-| | | complex, 6 classes (`XZ_REAL=0`) | 36.8 MB | 43.8 MB | | 0.5 MB |
+| | | real, dense (`labels 0`) | 25.5 MB | 79.6 MB | | 1.5 MB |
+| | | complex, 6 classes (`real 0`) | 36.8 MB | 43.8 MB | | 0.5 MB |
 
 (the cc-pVTZ cases: under Timings below.)  In blocks the floor is the dense operands,
 not l3: for the labelled HBr case 18.6 MB where the three T3-sized regions
@@ -1632,8 +1633,8 @@ well.
 | the same, DROPMO=1>1, %vircut 1.2 (8 + 10; 6 dropped) | complex, dense | 15 / 15 | 3e-17 | 5e-17 | 4e-18 | -0.06636667305326 (Python ...325) |
 | HBr / cc-pVDZ-DK, X2C-1e, 28 frozen (8 + 28) | complex, dense | 16 / 16 | 1e-17 | 8e-17 | 2e-18 | -0.13899853036388 |
 | the same, m_j-adapted real spinors with labels | real, 6 classes | 16 / 16 | 1e-17 | 1e-16 | 7e-18 | -0.13899853035651 |
-| | real, dense (`XZ_LABELS=0`) | 16 | 3e-17 | 7e-17 | 6e-18 | |
-| | complex, 6 classes (`XZ_REAL=0`) | 16 | 8e-18 | 7e-17 | 7e-18 | |
+| | real, dense (`labels 0`) | 16 | 3e-17 | 7e-17 | 6e-18 | |
+| | complex, 6 classes (`real 0`) | 16 | 8e-18 | 7e-17 | 7e-18 | |
 | | complex, dense (both) | 16 | 1e-17 | 7e-17 | 7e-18 | |
 | the same with a phase on every spinor | complex, 6 classes | 16 / 16 | 2e-17 | 7e-17 | 6e-18 | -0.13899853035992 |
 | the labelled spinors in a random order (`--shuffle`, seed 11; Python dense) | real, 6 classes | 16 / 16 | 1e-17 | 7e-17 | 7e-18 | -0.13899853035651 |
@@ -1642,10 +1643,10 @@ well.
 0.0031.)  The Python Lambda of the labelled directories ran on the packed
 block (below `blocks_min` elements), so the native blocks are compared with
 the dense Python code.  Batches and memory: the same agreement with one
-occupied pair and one triple per batch and with 2 and 3 (`XZ_PLAN`), with
-the DIIS vectors in the file (`XZ_DIIS=f8`), with the work array at the floor
+occupied pair and one triple per batch and with 2 and 3 (`plan`), with
+the DIIS vectors in the file (`diis f8`), with the work array at the floor
 of the plan (H2O / 6-31G: 2861976 words, one pair per batch, 12 triples, DIIS
-in the file) and at 3.5 million words; without DIIS (`XZ_DIIS=m0`) 27 cycles
+in the file) and at 3.5 million words; without DIIS (`diis m0`) 27 cycles
 instead of 15 and lambda to 1e-10.  The first run of the first case gave
 these numbers; no term had to be found.
 
@@ -1668,15 +1669,15 @@ these numbers; no term had to be found.
 The native numbers are those of `ccsdt(q)_l` in one run (serial build), and
 the same to all printed digits from: the three invocations `ccsdt`,
 `lambda`, `(q)_l`; the labelled case dense real, in complex sectors and dense
-complex (`XZ_LABELS`, `XZ_REAL`); Xv for 3 of 7 occupied indices with the
+complex (`labels`, `real`); Xv for 3 of 7 occupied indices with the
 products in batches of 20 and 300 columns, and the work array at the floor of
 (Q)_L (HBr dense: 3594976 words); the MPI build with 1, 2 and 4 ranks from
 the files and with 4 ranks for `ccsdt(q)_l` (H2O, HBr dense, the labelled case
 real and with phases: 5 to 25 tasks); `(q)_l` with 20 tasks asked for,
-stopped by `XZ_QSTOP` after 5 tasks (serial) or 3 (4 ranks) and started again
+stopped by `qstop` after 5 tasks (serial) or 3 (4 ranks) and started again
 (5 and 3 tasks restored; the checkpoint files gone afterwards); `(q)_l` after
 an interrupted `(q)`, whose checkpoint is not taken.  `[q]_l` writes the
-fifth-order energy to `TOTENERG`.  `XZ_QSAMPLE=0.3`: 21 of 70 quadruples
+fifth-order energy to `TOTENERG`.  `qsample 0.3`: 21 of 70 quadruples
 (HBr), the estimate printed, no `TOTENERG`.  CCSDT, [Q] and (Q) of the six
 cases after the changes: the numbers of section 7.
 
@@ -1686,7 +1687,7 @@ Measured on HBr with 10 frozen spinors (26 occupied spinors), m_j-adapted
 real spinors with labels written from Python (`bench/cfour/labelled_run.py`;
 120 virtual spinors: the 120 of lowest energy of cc-pVQZ-DK), whole nodes
 (`sbatch -p parallel -N 1 -n 1 -c 48 --mem=180G`, two sockets of Xeon Gold
-6248R, `MEMORY_SIZE=150 GB`), three cycles per run (`XZ_NCYC=3`: nothing
+6248R, `MEMORY_SIZE=150 GB`), three cycles per run (`ncyc 3`: nothing
 converged, the tables of the stages printed).  The nodes of this partition
 differ by up to 40 % among themselves in these runs (the same binary, 26 +
 120 in blocks on 8 threads: 10.8 s per cycle on c011 and c195, 16.0 s on
@@ -1737,7 +1738,7 @@ blocks and 4 % of a dense one (26 + 78).
   as vector operations over a, threaded over i), the Lambda_2 residual (Y1
   with `~<jo||mb>`, o^4 v^2, a GEMM); the dressed Fock matrix threaded.
 - *Not kept as the default: the hh ladder through occupied pairs*
-  (`xzwpair`, `xzhhapply`; `XZ_HH=pair`): T3 gathered by occupied pair in
+  (`xzwpair`, `xzhhapply`; `hh pair`): T3 gathered by occupied pair in
   chunks of columns, one GEMM with `W(mn,ij) - 1/2 (F_mi d_nj - ...)`, the
   three terms of a triple added to the residual; (o - 2)^2 / (9 o) times
   fewer operations than the operator on triples.  Measured in dense mode (v
@@ -1864,7 +1865,7 @@ wrapper unnecessary.
 modes, with phases and shuffled): CCSDT, [Q], (Q), [Q]_L, (Q)_L and the
 cycles as in the tables, to the 12 decimals printed, with the final commit
 (login node, 4 threads; the labelled case also on 16 and 48 threads); the
-same with `XZ_HH=pair`; one pair and one triple per batch, 2 and 3, the DIIS
+same with `hh pair`; one pair and one triple per batch, 2 and 3, the DIIS
 vectors in the file, and the Lambda equations with the work array at the
 floor of the plan (H2O: 2893968 words, the labelled HBr case 2339480; the
 floors grew by 1 %: a second work array of W_vooo and the buffers per thread
@@ -1888,8 +1889,8 @@ same files (CCSDT and (Q) in blocks, Lambda on the packed block):
 (the Python CCSDT of this job read the files as complex arrays; its own
 numbers for real integrals are in docs/benchmarks.md.)
 
-**Other additions.**  `XZ_NCYC=n`: n cycles of every iteration, then on as
-if converged, with a warning (timing runs).  `XZ_START=ccsd`: T1 and T2 of
+**Other additions.**  `ncyc n`: n cycles of every iteration, then on as
+if converged, with a warning (timing runs).  `start ccsd`: T1 and T2 of
 CFOUR's `xx2cccsd` as the start, from its files `t1guess` (`t1(a, i)`) and
 `t2guess` (`t2(ab, ij)` on a <= b, i <= j, the diagonals zero) of the run
 directory - one unformatted sequential record each, complex, CFOUR's order
@@ -2024,7 +2025,7 @@ those are complex and carry no symmetry labels today: every run through
 the timings (made from a PySCF SCF, `bench/cfour/labelled_run.py`) have no
 `scf2ccmo` of their spinors, so their relaxed density cannot be completed
 by `xx2czvec`; for them the files of the active spinors alone can be
-written (`XZ_DEN_ACTIVE=1`, a test hook: xfull, dpoo, dpvv of the active
+written (`den_active 1`, a test hook: xfull, dpoo, dpvv of the active
 space, the records with a frozen index empty), which is what the block and
 real code paths were validated with.  **Not validated:** the held stage in
 blocks of the labels and in real arithmetic (the code is the same typed
@@ -2073,7 +2074,7 @@ stage is below it.  Run at the floor: H2O `density` (1549104 words), the
 labelled HBr case `ccsdt_density` (2339488), H2O with DROPMO and `%vircut`
 `ccsdt_density` with the held stage (1184944): the same files to 1e-16,
 and 100 words below the error of section 4 with its numbers.  Batches of
-1, 2 and 3 pairs and triples (`XZ_PLAN`): the same files.
+1, 2 and 3 pairs and triples (`plan`): the same files.
 
 ### Validation
 
@@ -2087,8 +2088,8 @@ MO integrals, `cfour.handover_files`; login node unless a job is named):
 | H2O / 6-31G (10 + 16) | complex, dense | 5.8e-17 | 1.7e-16 | 5.2e-18 |
 | HBr / cc-pVDZ-DK, 28 frozen (8 + 28), active part | complex, dense | 6.8e-17 | 2.2e-16 | 5.2e-18 |
 | the same, labelled real spinors, active part | real, 6 classes | 2.4e-17 | 5.6e-17 | 9.5e-18 |
-| | real, dense (`XZ_LABELS=0`) | 2.0e-17 | 5.6e-17 | 2.2e-18 |
-| | complex, 6 classes (`XZ_REAL=0`) | 1.9e-17 | 5.6e-17 | 6.9e-18 |
+| | real, dense (`labels 0`) | 2.0e-17 | 5.6e-17 | 2.2e-18 |
+| | complex, 6 classes (`real 0`) | 1.9e-17 | 5.6e-17 | 6.9e-18 |
 | the same with a phase on every spinor | complex, 6 classes | 2.5e-17 | 5.6e-17 | 1.1e-17 |
 | HBr / cc-pVTZ-DK, 28 frozen (8 + 78), labelled real, active part (job 31789129) | real, 8 classes | 6.8e-17 | 5.6e-17 | 8.7e-18 |
 | | real, dense | 6.6e-17 | 1.6e-19 | 4.3e-18 |
@@ -2180,8 +2181,8 @@ parallel -N 1 -n 1 -c 48 --mem=180G`, snapshot of commit e38fdeb, run
 directories in the node-local `/tmp`).  HBr / cc-pVQZ-DK, 10 frozen spinors,
 26 + 120 active, m_j-adapted real spinors with labels (10 classes; T3 655
 MB, 11 % of the dense array), `MEMORY_SIZE=150 GB`; the iterations three
-cycles each (`XZ_NCYC=3`), the density stage on the amplitudes and lambda
-of those cycles, active part (`XZ_DEN_ACTIVE=1`: the directory has no
+cycles each (`ncyc 3`), the density stage on the amplitudes and lambda
+of those cycles, active part (`den_active 1`: the directory has no
 spinors of CFOUR).  Wall seconds; the two repetitions agree within 3 %:
 
 | | 8 threads | 16 | 24 | 48 |
@@ -2288,7 +2289,7 @@ c105, 24 cores) and the login node.  Scripts, logs and all outputs:
 
 The reason for (B) was the table "1 x 48, 2 x 24, 4 x 12, 6 x 8 ranks x
 threads: 15.0, 8.1, 6.1, 6.8 minutes", read as "the finer split loses to the
-repeated Xv".  Those were *estimates of a 0.5 % sample* (`XZ_QSAMPLE`), and
+repeated Xv".  Those were *estimates of a 0.5 % sample* (`qsample`), and
 the sample of that binary was biased twice: it took the first quadruples of
 every task (sectors that are not the average ones), and it formed Xv again
 for every task.  **The whole calculation, measured** (wall time of `mpirun`,
@@ -2328,7 +2329,7 @@ What is formed by every rank and *does* grow with the number of ranks is
 private array (below).  Sharing Xo as T3 is shared is the next step; it was
 not part of this work.
 
-**The sample** (`XZ_QSAMPLE=0.005`, 74 of 14950 quadruples; each run twice):
+**The sample** (`qsample 0.005`, 74 of 14950 quadruples; each run twice):
 estimated wall time of the whole (Q) against the slowest rank of the whole
 calculation above.
 
@@ -2355,11 +2356,11 @@ tasks and 499 formations (the old list: 101 tasks), and the slowest rank of
 the model 2.5 % above the mean.  Energies do not depend on the number of
 ranks or on the list: 12 decimals at 26 + 160 (above), at 26 + 78 with 1, 2,
 4, 6, 12 ranks in blocks and 1, 4 ranks dense (below), and in the small
-cases with 1 to 4 ranks, with `XZ_QTASKS=20`, interrupted (`XZ_QSTOP`) and
+cases with 1 to 4 ranks, with `qtasks 20`, interrupted (`qstop`) and
 restarted with the same and - the files then being of another list and not
 taken - with another number of ranks (`tq.sh`).
 
-**The model was measured** with `XZ_QCOST` (the wall time of every
+**The model was measured** with `qcost` (the wall time of every
 quadruple and of every Xv of a whole (Q); `fitcost.py`), HBr 26 + 78:
 
 - *Blocks (8 classes).*  The time of a quadruple follows the number of
@@ -2393,10 +2394,10 @@ x 4: 37.8 to 41.4 s).
 the stored T3 of every mode, so no mode needs a conversion or a second file
 (validated: real and complex, blocks and dense, with phases - `tc.sh`: all
 of section 7's small cases, serial and with 2 and 3 ranks, from the files
-and in one run with the iterations, against `XZ_QMAP=0`; identical to 12
+and in one run with the iterations, against `qmap 0`; identical to 12
 decimals).  The plan of a rank (26 + 160, real blocks):
 
-| | old / `XZ_QMAP=0` | mapped |
+| | old / `qmap 0` | mapped |
 |---|---|---|
 | (Q): least, per rank | 10923.9 MB | 9332.9 MB |
 | (Q): with the default plan, per rank | 13159.4 MB | 11568.4 MB, and 1591.0 MB once per node |
@@ -2412,7 +2413,7 @@ the pages of mapped files that it has touched, which it shares):
 | | new | 22609 | 11306 | 1671 | 15721 |
 | (Q), 4 x 12 | old | 50015 | 12700 | 21 | 15106 |
 | | new | 44123 | 11081 | 1671 | 15106 |
-| | new, `XZ_QMAP=0` (sample) | 47523 | 12017 | 21 | 15113 |
+| | new, `qmap 0` (sample) | 47523 | 12017 | 21 | 15113 |
 | (Q), 6 x 8 | old | 73985 | 12474 | 21 | 15137 |
 | | new | 64804 | 10905 | 1671 | 15137 |
 | (Q), 12 x 4 | old | 147134 | 12397 | 21 | 15231 |
@@ -2439,12 +2440,12 @@ which must then fit the page cache of the node once (it had to fit the work
 array of every rank before) - neither was run.
 
 **Not validated:** a run directory on a network file system (the warning of
-section 2 and `XZ_QMAP=0` exist; `xz_fs_local` was not exercised on such a
+section 2 and `qmap 0` exist; `xz_fs_local` was not exercised on such a
 directory); more than one node.
 
 ### (A) The DIIS vectors in the work array or in the file
 
-`XZ_NCYC=6`, the new binary, `XZ_PLAN="0 0 0 0 0 0 0 0"` with `XZ_DIIS=m8`
+`ncyc 6`, the new binary, `plan "0 0 0 0 0 0 0 0"` with `diis m8`
 (all in the work array) or `f8` (the T3 parts in `XZDIIS`); seconds per
 cycle, mean of six and the sixth (5 vectors in the subspace by then; the
 runs in blocks and dense on 48 threads were made twice):
@@ -2453,7 +2454,7 @@ runs in blocks and dense on 48 threads were made twice):
 |---|---|---|---|---|---|
 | 26 + 160, real blocks (T3 1.6 GB) | 24 | 11.50, 11.60 (11.49, 11.60) | 14.17, 16.14 (14.19, 16.41) | 1.9, 17.0 s | 32.8, 9.0 GB |
 | | 48 | 9.40, 9.82 (9.28, 9.11) | 12.96, 15.67 (12.90, 15.82) | 1.5, 19.4 s | |
-| 26 + 120, real dense (`XZ_LABELS=0`; T3 5.8 GB) | 24 | 70.55, 71.77 | 80.11, 88.37 | 5.4, 60.1 s | 103.5, 15.9 GB |
+| 26 + 120, real dense (`labels 0`; T3 5.8 GB) | 24 | 70.55, 71.77 | 80.11, 88.37 | 5.4, 60.1 s | 103.5, 15.9 GB |
 | | 48 | 48.09, 48.83 (47.95, 48.19) | 59.04, 67.29 (59.19, 68.72) | 3.3, 69.9 s | |
 
 With five vectors in the subspace a cycle with the file is 23 to 65 % longer
@@ -2508,7 +2509,7 @@ blocks 5.6e-17, dense complex 1.4e-20; with phases 5.6e-17.
 (the files of this job are not those of the table in section 12, hence the
 other last digits; the three columns here are one set of files.)  The same
 numbers from: (Q) and (Q)_Lambda in blocks with 2 x 12, 4 x 6, 6 x 4 and 12
-x 2 ranks x threads, mapped; (Q) with `XZ_QMAP=0`, serial and 4 x 6;
+x 2 ranks x threads, mapped; (Q) with `qmap 0`, serial and 4 x 6;
 `ccsdt(q)_l` in one run on 3 x 8; dense (Q) and (Q)_Lambda on 4 x 6.  Wall
 times of (Q) there (24 cores): blocks 78.8 s on one rank, 41.2, 41.0, 41.8,
 43.4 s on 2, 4, 6, 12 ranks; dense 458 s on one rank, 310 s on 4 x 6;
@@ -2527,7 +2528,7 @@ the packed block) and are not quoted.
 - Ranks on several nodes; a run directory on a network file system.
 - The DIIS stage in the file with fewer passes; cycles with all eight
   vectors in the file were not timed.
-- The estimate of `XZ_QSAMPLE` is an upper estimate (1 to 36 % high here).
+- The estimate of `qsample` is an upper estimate (1 to 36 % high here).
 
 ## 15. The CCSDT iterations and the Lambda iterations over MPI ranks
 
@@ -2624,7 +2625,7 @@ This is stage two of the design, and the default with more than one rank.
 **Stage one** - rank 0 broadcasts T3, the residual is summed onto rank 0
 (`MPI_Reduce` in place), rank 0 alone does the hh ladder, the Jacobi step
 and DIIS and holds all vectors - was built first and validated, is still
-there (`XZ_SLICES=0`) and is slower everywhere (15.6, 15.7): the reduction
+there (`slices 0`) and is slower everywhere (15.6, 15.7): the reduction
 of a T3 onto rank 0 ran at 0.4 to 1.9 GB/s, the exchange between owners at
 4 to 12 GB/s.
 
@@ -2645,7 +2646,7 @@ node - 1) copies of T3 and the transfer of the slices within a node
 ### 15.2 The chunked transfers (`xzmpi.c`)
 
 An array of n double words goes in messages of at most `xz_chunk` words
-(2^23 = 64 MB; `XZ_MPICHUNK`, capped at 2^27 so that no count in bytes
+(2^23 = 64 MB; `mpichunk`, capped at 2^27 so that no count in bytes
 passes 2^31 - 1 either): `xzmpi_bcast_w` (from rank 0), `xzmpi_send_w` /
 `xzmpi_recv_w`, `xzmpi_sum0_w` (the sum onto rank 0, in place),
 `xzmpi_allsum_w` (the sum on every rank, in place), `xzmpi_slices_add` and
@@ -2658,7 +2659,7 @@ is shorter).  Calls: `MPI_Bcast`, `MPI_Send`, `MPI_Recv`, `MPI_Sendrecv`,
 regions of the work array and 8-byte integers; it never sees an MPI handle
 or an MPI integer.
 
-`XZ_MPITEST=n` runs every routine on arrays of n words with patterns that
+`mpitest n` runs every routine on arrays of n words with patterns that
 depend on rank and index (slices of unequal lengths, one of them empty) and
 counts wrong words.  Run (login node): n = 1 000 003 with chunks of 4097
 words on 1, 2, 3, 4, 6 ranks and of 1 word on 3 ranks; n = 300 000 000 (2.4
@@ -2673,14 +2674,14 @@ closes JOBARC as if the rank had opened it and writes an empty index
 the chain is run again (found here; it held for the ranks of (Q) as well).
 All errors of the program go through `xzerrex` now: `ERREX` on rank 0,
 `MPI_Abort` on the others (their message is in `xzccsdt.rNNNN`).
-`XZ_WFAIL` tests it; the directory runs again afterwards.
+`wfail` tests it; the directory runs again afterwards.
 
 ### 15.3 The batches and their ranks
 
 The batches are those of the loops: `nbp` occupied pairs (pass 1, pass 2),
 `nbt` occupied triples (ladder), never across the groups of the labels.
 With more than one rank the plan keeps at least 8 batches of each kind per
-rank (`XZ_BPR`; 26 + 120 dense on 8 ranks: 109 batches of 3 pairs, 65 of 40
+rank (`bpr`; 26 + 120 dense on 8 ranks: 109 batches of 3 pairs, 65 of 40
 triples).  `xzdeal` deals them, the most expensive first, **each to the
 rank that is done with it first**; every rank makes the same list.
 
@@ -2690,7 +2691,7 @@ n_j)`; pass 2: sum over the groups Q of `n_delta n_Q (n_delta + 64)` (96 in
 the Lambda equations); ladder: sum over the classes of the free index of
 `n_c n_Q (n_Q + 16)`; Lambda pass 1 adds the densities `n_delta^2 n_Q`.
 With one class every pair (triple) costs the same.  Measured with
-`XZ_BCOST` (seconds of every batch; `fitb.py`), seconds over model cost,
+`bcost` (seconds of every batch; `fitb.py`), seconds over model cost,
 normalized, for the batches that hold 90 % of the time: 26 + 78 in blocks,
 8 threads: pass 1 0.94 to 1.07, pass 2 0.97 to 1.01, ladder 0.96 to 1.12;
 26 + 160 in blocks, one rank of 12 threads: 0.92 to 1.18, 0.95 to 1.02, 0.97
@@ -2707,7 +2708,7 @@ equally fast (section 12: up to 40 %) - and the other ranks waited 2.0 to
 2.7 s of a 17 s cycle (real) and 11 s of 54 s (complex).  So after every
 step the ranks send rank 0 their seconds in their batches of each loop and
 up to the two meetings (`xzrebal`); if the last rank came more than 3 %
-(`XZ_REBAL`) after the mean, rank 0 sends back, per rank, the model cost per
+(`rebal`) after the mean, rank 0 sends back, per rank, the model cost per
 second in each loop and the seconds of everything else before each
 meeting, and the batches are dealt again with those numbers (pass 2 of a
 rank starts when its ladder is done).  That also takes care of whatever a
@@ -2715,7 +2716,7 @@ rank does besides its batches.  Measured on the login node with two ranks
 of 2 and 6 threads (26 + 78 in blocks): 4.02 s per cycle without, 2.37 s
 after one deal.  On four nodes of nearly equal speed it changed a
 cycle by 0 to 6 % (15.7); on nodes of unequal speed it was not timed.  Energies do not depend on the deal: the regression
-set with a deal after every step (`XZ_REBAL=0.0001`, 15 to 18 deals per
+set with a deal after every step (`rebal 0.0001`, 15 to 18 deals per
 case) is identical to 12 decimals.
 
 ### 15.4 Memory per rank
@@ -2723,7 +2724,7 @@ case) is identical to 12 decimals.
 Planned by the dry run (section 4), printed by rank 0, checked node by node
 against `MemAvailable`.  Work arrays as planned = as used (the table of the
 ranks prints both the work array and the peak resident set of every rank),
-MB, `MEMORY_SIZE` 150 GB, 4 DIIS vectors (`XZ_DIIS=m4`; the default of 8
+MB, `MEMORY_SIZE` 150 GB, 4 DIIS vectors (`diis m4`; the default of 8
 adds 8 more T3 / n per rank with slices, 8 T3 on rank 0 without):
 
 | case (T3) | step | serial | stage one: rank 0, others | slices: every rank of 2 | of 4 | of 8 |
@@ -2743,8 +2744,8 @@ other than 0 has no floor of its own - it takes rank 0's plan and stops
 with both numbers if its array does not hold it (ranks with different
 numbers of threads are planned for the largest).  Tested (login node, 3
 ranks): rank 0 at the floor of its plan (the DIIS vectors then in the files
-`XZDIIS`, `XZDIIS.0001`, ...), below it (the error, exit 255), `XZ_DIIS=f8`,
-`XZ_DIIS=m0`, ranks of 1 and 3 threads.
+`XZDIIS`, `XZDIIS.0001`, ...), below it (the error, exit 255), `diis f8`,
+`diis m0`, ranks of 1 and 3 threads.
 
 ### 15.5 Validation
 
@@ -2758,11 +2759,11 @@ four modes, with phases in blocks and dense, shuffled; `ccsdt(q)` of two;
 E(CCSDT(Q)_L), the pseudo-energy, E(CCSDT[Q]), E(CCSDT(Q))) -
 `natmpi/regr.sh`, login node: identical with the serial build, and with
 the MPI build on 1, 2, 3, 4 and 6 ranks, in the order of the work: nothing
-distributed (`XZ_DIST=0`), the pp ladder alone (`3`), the T3 equation
-(`123`), everything; stage one (`XZ_SLICES=0`) and slices; chunks of 1000
+distributed (`dist 0`), the pp ladder alone (`3`), the T3 equation
+(`123`), everything; stage one (`slices 0`) and slices; chunks of 1000
 to 7000 words; batches of 2 pairs and 3 triples; the DIIS vectors in the
 files; a deal after every step.  The final commit: serial, 1 (`m1`), 2, 3,
-4 ranks with slices, 2 and 3 ranks with `XZ_SLICES=0`.
+4 ranks with slices, 2 and 3 ranks with `slices 0`.
 (2) `ccsdt_density` on 2 to 4 ranks against the serial files of `xx2czvec`
 (`tden.sh`: H2O, with frozen and dropped spinors, HBr with 28 frozen, the
 labelled case in blocks and dense complex): largest difference 7e-17.
@@ -2779,7 +2780,7 @@ labelled case in blocks and dense complex): largest difference 7e-17.
 | pseudo-energy | -0.29411064336175 | | | | |
 | cycles CCSDT / Lambda | 20 / 18 | | | | |
 | wall time of the chain / s | 146.1 | 149.4 | 90.2 | 87.2 | 83.9, 84.0 |
-| dense (`XZ_LABELS=0`): the five numbers | the same as in blocks | the same | the same | the same | the same (4 x 12) |
+| dense (`labels 0`): the five numbers | the same as in blocks | the same | the same | the same | the same (4 x 12) |
 | wall time of the chain / s | 1155.6 | 1175.7 | 795.0 | 811.5 | 757.5 (4 x 12) |
 
 ("the same": every digit printed.  Section 14 has -2605.269299541779 for
@@ -2788,7 +2789,7 @@ columns here are one set of files.)
 (5) **Four nodes** (job 31814618, c292, c314, c395, c495; the run directory
 in the shared scratch, a network file system - (Q) then maps `XZAMPS`
 there, with its warning): `ccsdt(q)_l` of the labelled case and of HBr /
-cc-pVDZ-DK dense on 4 x 1 ranks (chunks of 5000 words, `XZ_MPITEST`) and 4
+cc-pVDZ-DK dense on 4 x 1 ranks (chunks of 5000 words, `mpitest`) and 4
 x 2 ranks, `ccsdt_density` on 2 x 2: all numbers those of the serial
 program on the same files.
 
@@ -2796,8 +2797,8 @@ program on the same files.
 
 Job 31814617, node c393 (2 x 24 cores Xeon Gold 6248R, 189 GB), snapshot
 3eb4282 (before slices became the default and before the measured speeds:
-"slices" below is `XZ_SLICES=1` of that binary), run directories in the
-node-local `/tmp`, `XZ_NCYC=4`, 4 DIIS vectors in memory, Intel MPI on the
+"slices" below is `slices 1` of that binary), run directories in the
+node-local `/tmp`, `ncyc 4`, 4 DIIS vectors in memory, Intel MPI on the
 node (`I_MPI_HYDRA_BOOTSTRAP=fork`, `I_MPI_PIN_DOMAIN=omp`,
 `OMP_PROC_BIND=close`).  Seconds per cycle, mean of cycles 2 to 4; the
 serial program of before first.
@@ -2865,7 +2866,7 @@ pins the `-ppn` ranks itself: `cores allowed: 0-47` for one rank per node,
 `0-23` and `24-47` for two, printed by the job), Intel MPI 2021 started by
 `mpirun -np N -ppn P -hosts ...` through Slurm (`srun` in the PATH),
 **fabric: libfabric provider `mlx`** (`I_MPI_DEBUG=5`), snapshot 3eb4282,
-`XZ_NCYC=4`, 4 DIIS vectors.  **Run directories: the node-local `/tmp` of
+`ncyc 4`, 4 DIIS vectors.  **Run directories: the node-local `/tmp` of
 every node** - made on the first node (157 s), carried as one tar file
 (5.7 GB) through `/scratch16/lcheng24/xwang405` and unpacked on all four
 (10 s for both), the scratch emptied again.  The serial program of before
@@ -2941,7 +2942,7 @@ energies of the serial program on 4 x 1 and 4 x 2 ranks.
 | serial before, 48 threads | 52.32 | 79.41 | 11.09 | 15.41 |
 | 2 x 1 x 48 | 28.59 (1.83) | 43.30 (1.83) | 7.63 (1.45) | 9.82 (1.57) |
 | 4 x 1 x 48 | 16.83 (3.11) | 24.78 (3.20) | 6.18 (1.79) | 6.92 (2.23) |
-| 4 x 1 x 48, `XZ_REBAL=0` | 16.90 | 25.05 | 6.09 | 7.37 |
+| 4 x 1 x 48, `rebal 0` | 16.90 | 25.05 | 6.09 | 7.37 |
 | 4 x 2 x 24 | 14.55 (3.60) | 19.95 (3.98) | 5.83 (1.90) | 6.87 (2.24) |
 
 These four nodes were nearly equally fast (measured speeds of the ranks
@@ -2956,7 +2957,7 @@ open.  The speedups are those of the earlier binary on other nodes within
 
 *One node* - job 31827786, node c668; first HBr 26 + 78 in blocks,
 converged, `ccsdt(q)_l`: the serial program of before, 1 x 48, 2 x 24, 4 x
-12 and 4 x 12 with `XZ_SLICES=0` give E(CCSDT) -2605.269299541781,
+12 and 4 x 12 with `slices 0` give E(CCSDT) -2605.269299541781,
 E(CCSDT[Q]_L) -2605.268884407871, E(CCSDT(Q)_L) -2605.269268719836, the
 pseudo-energy -0.29411064336159 and 20 / 18 cycles, all five alike (the
 files of this job; wall times 146.1, 151.4, 84.7, 83.4, 87.3 s).
@@ -3096,7 +3097,7 @@ states of +D with the same energies (measured: 2e-12): give one of the two
 unless both are wanted; the program computes what the section lists.  A
 shift that is not a difference of sums of the labels, or that no single
 excitation has, is left out with a warning.  **Without blocks** (no labels,
-`XZ_LABELS=0`) the states of all shifts are roots of one problem and the
+`labels 0`) the states of all shifts are roots of one problem and the
 program computes the sum of the roots asked for.
 
 Output, per shift: the size of a vector, where the subspace is, CFOUR's
@@ -3320,7 +3321,7 @@ of one sigma vector gives what must stay free:
    the run directory is asked first: the subspace is lowered to what the
    disk holds, and below 2 roots + 2 vectors the program stops with the
    numbers.  A write error stops it with the name of the file and the size
-   of a vector.  `XZ_EOMVEC=f` forces the files.
+   of a vector.  `eomvec f` forces the files.
 
 The file `XZEOMR` of the vectors of the roots is written only if the disk
 holds it (a warning otherwise; `%xzeomvec 0`: never).
@@ -3338,7 +3339,7 @@ the subspace in the work array; `work array used` at the end has it.
 ### 16.5 Validation
 
 **The sigma vector against the derivative of the amplitude step**
-(`XZ_EOMTEST=seed`, with `ccsdt_eom`): for a random totally symmetric vector
+(`eomtest seed`, with `ccsdt_eom`): for a random totally symmetric vector
 R the five-point formula `[8 (Res(T + R) - Res(T - R)) - (Res(T + 2R) -
 Res(T - 2R))] / 12` of the residual of the native CCSDT step - which is
 exact for these polynomials (docs/eom.md 1) and is the reference of the
@@ -3349,19 +3350,19 @@ Python sigma vector too - against `xzesig`:
 | H2O / 6-31G (10 + 16) | dense, complex | 9e-16, 9e-15, 7e-14 |
 | | the same with batches of 2 pairs, 3 triples, slabs of 7 rows | 1e-15, 8e-15, 7e-14 |
 | HBr / cc-pVDZ-DK, `%dglin` (8 + 28) | 6 classes, real | 4e-16, 5e-15, 4e-15 |
-| | dense, real (`XZ_LABELS=0`) | 1e-16, 2e-15, 1e-14 |
-| | 6 classes, complex (`XZ_REAL=0`) | 5e-16, 7e-15, 6e-15 |
+| | dense, real (`labels 0`) | 1e-16, 2e-15, 1e-14 |
+| | 6 classes, complex (`real 0`) | 5e-16, 7e-15, 6e-15 |
 | | 6 classes, real, small batches | 4e-16, 5e-15, 4e-15 |
 
 This is the check of the dense sigma vector and of the block passes at
 shift 0 after their generalization, in real arithmetic too.
 
 **The sigma vector against the Python sigma vector, element by element**
-(`XZ_EOMSIG=file`: the vector of the file, in the layout of 16.4, and its
-sigma vector written to `file.out`; `XZ_EOMSD=1` with it: the
+(`eomsig file`: the vector of the file, in the layout of 16.4, and its
+sigma vector written to `file.out`; `eomsd 1` with it: the
 singles-doubles block).  `eom_opt.sigma` of the Python program for a random
 vector of the shift (complex: the Python program takes integrals read from
-files as complex, so the native program ran with `XZ_REAL=0` on the real
+files as complex, so the native program ran with `real 0` on the real
 files), each program on its own converged amplitudes; where the spinors are
 in the order of their labels in the files the two programs have the same
 layouts of r1, r2 and of R3 in the blocks of a shift:
@@ -3369,7 +3370,7 @@ layouts of r1, r2 and of R3 in the blocks of a shift:
 | case | mode, shift in labels | largest difference in sigma_1, sigma_2, sigma_3 (largest elements 2 to 42, 11 to 156, 25 to 188) |
 |---|---|---|
 | H2O / 6-31G, CFOUR's spinors (10 + 16) | dense, complex | 1e-10, 4e-10, 6e-10 (the amplitudes of the two programs: CC_CONV=9) |
-| HBr / cc-pVDZ-DK, labelled real spinors (8 + 28) | dense (`XZ_LABELS=0`) | 1e-15, 3e-14, 5e-14 |
+| HBr / cc-pVDZ-DK, labelled real spinors (8 + 28) | dense (`labels 0`) | 1e-15, 3e-14, 5e-14 |
 | | 6 classes, shift 0 | 1e-15, 2e-14, 4e-14 |
 | | 6 classes, shift 2 | 1e-15, 2e-14, 4e-14 |
 | | 6 classes, shift -4 | 1e-15, 2e-14, 4e-14 |
@@ -3391,10 +3392,10 @@ norms of 3e-9 to 1e-8; CC_CONV=9 or 10).  Reference directories:
 | H2O / 6-31G, X2C-1e, CFOUR's spinors (10 + 16) | dense, complex | 7 (a triplet 0.2843786409 / ..8923 / ..9590, 0.3111891002, a triplet at 0.36607) | 4e-11 |
 | H2O / 6-31G, nonrelativistic RHF of PySCF as spin orbitals (the integrals of the MRCC reference, written by `zccsdt.cfour.write`) | dense, real | 16 | 1.8e-10 |
 | HBr / cc-pVDZ-DK, `%dglin`, CFOUR's SCF, 28 frozen (8 + 28) | 6 classes, real; shifts 0, 2, 4 (three roots each) | 9: shift 0 0.243530585077, 0.243983671405, 0.336571921431; shift 2 0.237036344568, 0.260822952202, 0.336663368901; shift 4 0.233028661244, 0.544410080817, 0.634588206498 | 7e-11 |
-| | 6 classes, complex (`XZ_REAL=0`) | the same 9 | equal to the real run to all digits printed |
-| | dense, real and complex (`XZ_LABELS=0`): the 9 lowest of all shifts | 0.233028661246 (twice), 0.237036344589 (twice), 0.243530585084, 0.243983671519, 0.260822952225 (twice), 0.336571921481 | 1.1e-10 to the roots of the shifts |
+| | 6 classes, complex (`real 0`) | the same 9 | equal to the real run to all digits printed |
+| | dense, real and complex (`labels 0`): the 9 lowest of all shifts | 0.233028661246 (twice), 0.237036344589 (twice), 0.243530585084, 0.243983671519, 0.260822952225 (twice), 0.336571921481 | 1.1e-10 to the roots of the shifts |
 | | shifts 0, -2, -4 from unit vectors (`%xzeomguess 0`) | 9 | 1e-10 to the roots of +2, +4 |
-| | the subspace in files (`XZ_EOMVEC=f`), the work array at its floor | 9 | equal to all digits printed |
+| | the subspace in files (`eomvec f`), the work array at its floor | 9 | equal to all digits printed |
 | the same with `%vircut` 1.5 (8 + 22, 6 dropped) | 6 classes, real; shifts 0, 2, 4 | 9 (0.247567085051, ..) | 1.2e-10 |
 | HBr+ doublet, `%dglin` 12 12 / 5 4 / 1 1, 28 frozen (7 + 29): an open-shell reference with unequal occupations of +-m_j | 6 classes, real; shifts 0, 2, -2, 4, -4 | 13 (shift -2: 0.012125852499, 0.157178984394, ..; shift -4: 0.011838429525, ..; shift 0: 0.273088295771, ..) | 1.1e-10 |
 | HBr / cc-pVDZ-DK, m_j-adapted spinors of a PySCF SCF in the order of their labels (`bench/cfour/labelled_run.py`; the Python program in its blocks) | 6 classes, real; shifts 0, 2, -2, 4, 6 | 14 | 7e-11; +2 against -2: 2e-12 |
@@ -3473,7 +3474,7 @@ singles-doubles stages in it), W'_vvvo 55 s, the rows of W'_pp 12 s, the
 operators on occupied triples 15 s.
 
 **The subspace in files** (the same job, afterwards: `xzccsdt eom`, shift 0,
-`XZ_EOMVEC=f`; 33.7 GB of files on the node-local NVMe): the same roots and
+`eomvec f`; 33.7 GB of files on the node-local NVMe): the same roots and
 the same 45 sigma vectors of 7.78 s, but 22.8 s per sigma vector in the
 vector operations of the solver instead of 1.2 - 2983 GB read and written
 in 961 s (3.1 GB/s; 98 readings of a vector per new vector, about seven
@@ -3510,8 +3511,8 @@ rank in the plan.  Not started.
 
 ### 16.8 Test hooks
 
-`XZ_EOMTEST=seed` (16.5), `XZ_EOMSIG=file` [`XZ_EOMSD=1`],
-`XZ_EOMVEC=f` (the subspace in files), `XZ_EOMCYC=n` (iterations at most:
+`eomtest seed` (16.5), `eomsig file` [`eomsd 1`],
+`eomvec f` (the subspace in files), `eomcyc n` (iterations at most:
 `ESTATE_MAXCYC` is in JOBARC and needs xjoda to change).
 
 ### 16.9 Not done
@@ -3532,8 +3533,8 @@ rank in the plan.  Not started.
 ## 17. CC3
 
     CALC=CC3                    CC3 without stored triples
-    CALC=CC3, EXCITE=EOMEE      CC3, then the folded excited states (label shift 0)
-    XZ_CC3=stored               (environment, a check route) CC3 with T3 stored; with
+    CALC=CC3, EXCITE=EOMEE      CC3, then the folded excited states (the label shifts of %xzeom)
+    cc3 stored               (a line of %xzccsdt; a check route) CC3 with T3 stored; with
                                 EXCITE=EOMEE its excited states in every label shift
     mpirun -np 4 xzccsdt        the iterations over ranks (both routes)
 
@@ -3571,7 +3572,7 @@ elements off the diagonal - nothing is cut and nothing rotated:
 
 (HBr / cc-pVDZ-DK with `%dglin`; H2O / 6-31G: 1.3e-13, 1.1e-13, 4.3e-13,
 3.8e-15.)  Above 1e-6 off the diagonal of F_oo or F_vv the run stops with a
-message (`XZ_FOCKTOL` raises it); without the two records, or when the
+message (`focktol` raises it); without the two records, or when the
 diagonal of that matrix is not `scf2ceig` (integral files written by
 another program, e.g. `bench/cfour/labelled_run.py`), the line says that the
 reader has the orbital energies only and canonical spinors are assumed.
@@ -3628,7 +3629,7 @@ s, as many per call as the work of a batch holds - a parameter of the plan
 (section 4): at least one occupied triple of the largest group
 (`zc_cc3_work`), raised up to 2 GB or all the triples of a pair, after the
 slab of the dressed `<ab||cd>` (the batches of pass 1, pass 2 and the pp
-ladder are not used); `XZ_CC3W=n` gives it (elements, at least one triple).
+ladder are not used); `cc3w n` gives it (elements, at least one triple).
 The plan prints it:
 
     CC3: the work of a batch of occupied triples:          41958 elements (       0.3 MB; one triple:         6993)
@@ -3674,8 +3675,8 @@ The outer loop (`xzeom3`, the algorithm of `ccn.folded_roots`):
    threshold that follows `|lambda(omega) - omega|` down to `ESTATE_CONV`;
    omega replaced by lambda(omega), or by the secant step of the last two;
    converged when `|lambda - omega|` is below `ESTATE_CONV / 100`
-   (`XZ_OMEGATOL`) and the residual below `ESTATE_CONV`.  Roots of stage 1
-   closer than 5e-4 Eh to a neighbour (`XZ_FOLDWIN`) form a cluster, solved
+   (`omegatol`) and the residual below `ESTATE_CONV`.  Roots of stage 1
+   closer than 5e-4 Eh to a neighbour (`foldwin`) form a cluster, solved
    together at every frequency and taken by their place in it: following
    one vector alone ran the second component of the nearly degenerate
    lowest triplet of H2O (split by 2.8e-7 Eh) into the first (the Python
@@ -3685,9 +3686,50 @@ The outer loop (`xzeom3`, the algorithm of `ccn.folded_roots`):
 Per frequency step a line: root, step, omega, lambda(omega), their
 difference, the largest element of the residual, sigma vectors, seconds;
 per root its omega, the frequencies and sigma vectors it took.  In blocks of
-the labels the totally symmetric states (shift 0); other shifts of `%xzeom`
-are left out with a warning (they are the states of `cc3_stored_eom`).
-Without labels the states of all shifts.  No file `XZEOMR`.
+the labels one problem per label shift of `%xzeom` (below); without labels
+the states of all shifts are roots of one problem.  No file `XZEOMR`.
+
+**Label shifts** (`csrc/cc3_shift.c`, added: `zc_cc3_batchs`, the batch
+kernel with four shifts in classes; all zero it is `zc_cc3_batch`, and the
+native program calls it everywhere).  For a vector of shift s the triples
+of a batch of occupied triples of group g are the virtual triples of group
+g + s:
+
+| argument | meaning | triples of the vector | ground-state triples with H' |
+|---|---|---|---|
+| `st` | of the triples: virtual group g + st (layout of the work, tables, `ev3`) | s | 0 |
+| `sa[z]` | of the amplitudes of drive set z: `At[P][c][e]` with class(c) + class(e) = class(P) + sa, `Bo[m][i][Q]` with group(Q) = class(m) + class(i) + sa | 0 (t2), s (r2) | 0 |
+| `sw[z]` | of its operators: `Ao[P][c][m]` with class(c) + class(m) = class(P) + sw, `Bv[e][i][Q]` with group(Q) = class(e) + class(i) + sw; sa + sw = st | s (H'), 0 | 0 |
+| `sc` | of the contraction operands: Gv with class(y) + class(m) = group(Q) + sc, Gsq with class(x) + class(d) = class(P) - sc, gsq with group(Q) = class(P) - sc, fov with class(d) = class(m) - sc; the four sums have the shift st + sc | 0 | s |
+
+In the kernel that is: the summed index e of a drive product has the class
+class(P) + sa - class(c), m the class class(P) + sw - class(c), per set (one
+class for both in the unshifted kernel); H and the amplitudes are those of
+group g + st; the four contractions take the classes above.  The Fortran
+side passes s = the shift of the vector (`xzefold`), the work per triple is
+that of group g + s, and sigma_1, sigma_2 are masked to the shift as in
+section 16.2.  **What the Python batch route would need** (not changed
+here): `cc3fly.Fly.run` with these four shifts - the kernel is in the
+library's directory already, only not in its build list -, `per_i` and the
+batches with g + st, `eom_opt.sigma` passing (s, {0, s}, {s, 0}, 0) and
+(0, 0, 0, s) for a `shift` in the fly branch (the masks m1, m2 of the shift
+are there), and `ccn.eom_folded` taking the singles of the shift as the
+guess (`eom.symmetric_singles(eris, shift)`).
+
+**More than one rank.**  The folded EOM runs over the ranks (the stored
+route and EOM-CCSDT do not, 16.7): rank 0 runs the solver; it sends the
+converged T1, T2 once, every rank makes the intermediates of the ground
+state, and for every folded sigma vector rank 0 broadcasts the vector, the
+frequency and the shift (`xzefsend`), every rank computes the same sigma
+vector with its share of the batches (`xzfly`: the four sums are summed on
+all ranks) and the other ranks drop theirs.
+
+**A limit of the folded route**: it follows the lowest roots of the
+singles-doubles stage.  A state that is dominated by doubles there lies
+high in that stage and is not found unless enough roots are asked for:
+HBr, shift 4 - the third root with R3 stored, 0.652304807 (weights of R1,
+R2, R3: 0.025, 0.946, 0.028), is missing from three folded roots, which
+give the stored fourth, 0.671637923, as their third.
 
 ### 17.5 Validation
 
@@ -3712,22 +3754,32 @@ of section 16.5; H2O with `%eomthrs 1e-9` and four roots of shift 0.
 
 Largest differences: energies 3.5e-12 (H2O, CC_CONV=9: the convergence),
 2e-13 (HBr); roots with T3 stored 9e-11, folded against Python's stored
-roots 3e-11 (H2O), 1.3e-11 (HBr).  The XZ_EOMTEST hook (16.5) on
+roots 3e-11 (H2O), 1.3e-11 (HBr).  The eomtest hook (16.5) on
 `cc3_stored_eom`: the sigma vector against the five-point derivative of
 the CC3 step, 4e-16, 5e-15, 2e-15 (6 classes, real) and 4e-16, 2e-15, 7e-15
 (dense, complex) in sigma_1, sigma_2, sigma_3.
 
+Label shifts in the folded route (HBr, `%xzeom` 2, 4, 6, 0, three roots
+each, 1e-9), against the roots with T3 stored of the table above: shift 2
+0.237157681878, 0.260912563587, 0.336749228828 (2e-11); shift 4
+0.233152111948, 0.544409202278 (9e-11; the third: 17.4); shift 6
+0.738624111778, 0.773900482120, 0.786520835593 (9e-11); shift 0 as
+before.  The same digits in real blocks, complex blocks (`real 0`), with
+one triple per batch on one thread, and with 2 and 3 MPI ranks; complex
+dense on 2 ranks: the 12 roots of the dense table; H2O, 4 roots, 1 and 2
+ranks: 0.284178235134, ..515478, ..9182079, 0.311028170177.
+
 Modes (all the same to the digits printed): HBr in real blocks (6
-classes), complex blocks (`XZ_REAL=0`), real dense (`XZ_LABELS=0`), complex
+classes), complex blocks (`real 0`), real dense (`labels 0`), complex
 dense; the labelled PySCF spinors and the same with phases (`hbr_lab`,
 `hbr_ph`: -0.142645856190 / ..191 with and without T3); one triple per batch
-(`XZ_CC3W=1`); 1 and 8 threads; the MPI build with 2, 3 and 4 ranks on one
-node (T3 stored also with `XZ_SLICES=0`): E(CC3) -2604.989088528366 / ..367
+(`cc3w 1`); 1 and 8 threads; the MPI build with 2, 3 and 4 ranks on one
+node (T3 stored also with `slices 0`): E(CC3) -2604.989088528366 / ..367
 and -76.169163882631 / ..625 in every run.  The folded roots in real and
 complex blocks, with one triple per batch and on one thread: equal to all
 12 decimals of `XZEOM`; without labels, real and complex (12 roots of all
 shifts), against the stored dense roots: 5e-11.  The memory floor:
-`XZ_MAXCOR` below the least that CC3 takes stops with the words needed;
+`maxcor` below the least that CC3 takes stops with the words needed;
 just above it the batches get smaller (11 928 elements instead of 41 958)
 and the energy is the same.  `regress.sh` (serial with `--eom`, and 2
 ranks) against the binary before this work: REGRESSION OK after each of the
@@ -3742,7 +3794,7 @@ cc-pVQZ-DK, X2C-1e, `%dglin`, `DROPMO=1>5`, `%vircut 4.124587`: 26 + 120,
 real, 10 classes (the case of 16.6; the chain took 23 s).  CC_CONV=8,
 `%eomthrs 1e-6`, three roots of shift 0, MEMORY_SIZE 60 GB.  Measured once.
 
-| | CC3, no T3 (`cc3_eom`) | CC3, T3 stored (`cc3_stored_eom`) | CCSDT (`ccsdt`, `XZ_NCYC=6`) |
+| | CC3, no T3 (`cc3_eom`) | CC3, T3 stored (`cc3_stored_eom`) | CCSDT (`ccsdt`, `ncyc 6`) |
 |---|---|---|---|
 | s per iteration | 1.54 (15 cycles) | 2.13 (17 cycles) | 4.10 |
 | relative to CCSDT | 0.38 | 0.52 | 1 |
@@ -3766,20 +3818,148 @@ without T3 and 3.63 s with T3 stored, a sigma vector 4.2 and 5.4 s.
 
 ### 17.7 ThF+
 
-(job and numbers: below)
+Job 31905442, bigmem12, 24 cores (`thf_cc3.sbatch` of the work directory;
+commit a1ca399, the program still with the method as argument).  ThF+ at
+3.743547 bohr, X2CAMF, Th DYVTZ-SO + F ADYVTZ-SO, 70 spinors frozen: 28 +
+330 active spinors, closed shell, `%dglin` 29 29 / 14 14 / 5 5 / 1 1: real,
+12 classes (the case of the EOM-CCSDT job 31861231; `labtol 1e-5`,
+`imagtol 1e-6` as there).  CC_CONV=7, ESTATE_CONV=5, MEMORY_SIZE 400 GB.
+The chain took 10.5 min (`xx2cvtran` 389 GB resident - the largest of the
+job).  The Fock check: largest |F_oo| off the diagonal 1.3e-11, |F_vv|
+4.4e-9, |F_ov| 1.8e-10, |F_pp - e_p| 3.6e-11.
+
+| | CC3, no T3 | CC3, T3 stored (3 cycles, `ncyc`) | CCSDT (job 31861231) |
+|---|---|---|---|
+| s per iteration | 37.75 (38 cycles, 23.3 cores busy) | 128.2 | 258.5 (59 cycles) |
+| work array: plan | 67.3 GB with the EOM (the least: 65.9 GB) | 302.8 GB | 302.8 GB |
+| peak resident set | 60.0 GB | 110.9 GB in 3 cycles (the DIIS vectors not all touched) | 298.1 GB |
+| total energy / Eh | -26538.335568361723 | | -26538.328976480821 |
+
+E(CC3) - E(CCSDT) = -6.59 mEh.  The work of a batch: 175 805 422 elements
+(1.4 GB; one occupied triple 6 761 747).
+
+EOM-CC3 folded, three roots of shift 0 (the totally symmetric states; the
+largest element of a residual 1e-5, |lambda - omega| below 1e-7): the
+singles-doubles stage 54 sigma vectors in 414 s (roots 0.02295, 0.02467,
+0.04217 Eh); a folded sigma vector 77.8 s (81 of them in 6300 s; it takes
+19.6 GB of the work array) = 2.1 CC3 iterations; EOM in all 6742 s.
+
+| root | omega / Eh | cm-1 | frequencies, sigma vectors | max \|r\| |
+|---|---|---|---|---|
+| 1 | 0.019859519401 | 4358.66 | 4, 20 | 8.6e-6 |
+| 2 | 0.020829587614 | 4571.57 | 5, 27 | 7.6e-6 |
+| 3 | 0.039378072332 | 8642.49 | 4, 34 | 4.8e-6 |
+
+(No EOM-CCSDT roots of shift 0 are at hand to compare; the states of
+Omega = 1, 2, 3 are those of shifts 2, 4, 6.)
 
 ### 17.8 Not done
 
-- EOM-CC3 without stored triples in a label shift: the kernel takes the
-  triples of a batch in the group of its occupied triple; a shift needs the
-  virtual triples of group g + s and the operands of a shift (an added
-  kernel or a shift argument).  The states of a shift: `cc3_stored_eom`
-  (T3 and R3 stored, the memory of EOM-CCSDT).
-- EOM over MPI ranks (section 16.7), for both routes: CC3 with
-  EXCITE=EOMEE runs with one rank, and CC3 amplitudes are not reused (no
-  `XZKEY` for them), so the iterations cannot be done over ranks first and
-  the EOM afterwards; a model tag in `XZKEY` would allow it.
+- The folded EOM: states dominated by doubles (17.4: they are not among
+  the lowest roots of the singles-doubles stage); the vectors of the roots
+  (no `XZEOMR`).  The Python batch route has no label shifts (17.4 says
+  what it needs).
+- EOM with T3 stored over MPI ranks (section 16.7); CC3 amplitudes are not
+  reused (no `XZKEY` for them).
 - Spinors that are not canonical: the program stops (17.1); the
   semicanonical rotation of docs/ccn.md, section 1, belongs before the
   integral transformation (CFOUR's spinors are canonical).
 - IP / EA, left-hand vectors, properties of CC3; CC2 and CC4.
+
+## 18. Options: the section %xzccsdt of the ZMAT
+
+The program is controlled by the ZMAT alone, as CFOUR's programs are: the
+job by `CALC`, `EXCITE`, `PROPS` (section 1), the thresholds by `CC_CONV`,
+`CC_MAXCYC`, `ESTATE_CONV`, `ESTATE_MAXCYC`, the memory by `MEMORY_SIZE`,
+the excited states by `%eomnroot`, `%eomthrs`, `%eomndav0`, `%xzeom`,
+`%xzeomguess`, `%xzeomvec` (16.1) - and everything else by one section of
+its own (`xzopt.F90`):
+
+    %xzccsdt
+    cc3 stored
+    labtol 1e-6
+
+one option per line, the name first (either case), its value the rest of
+the line (a name alone: 1); the section ends at an empty line, at the next
+line that starts with `%` or at the end of the file.  A name that is not
+an option stops the program with the list of the options.  **No
+environment variable is read** (`OMP_NUM_THREADS` and those of the MPI
+library are not ours); the variables `XZ_*` of earlier versions, which the
+sections above still describe by the name of their option, are gone.  In an
+MPI run every rank reads the ZMAT of its run directory.  An ordinary run
+needs no option.
+
+**User options.**
+
+| option | default | what |
+|---|---|---|
+| `labtol x` | 1e-5 | the largest integral that the symmetry labels forbid and that is taken as zero; above it the labels are not used (section 6) |
+| `imagtol x` | 1e-7 | the largest imaginary part of an integral that is taken as zero (real arithmetic); above it complex arithmetic |
+| `labels 0` | 1 | the labels of `dgcosym` / `xzlabels` are not used: one block |
+| `real 0` | 1 | complex arithmetic whatever the integrals |
+| `cc3 stored` | batch | CC3 with T3 stored (17.2; with EXCITE=EOMEE the sigma vector with R3): a check route with the memory of CCSDT |
+| `focktol x` | 1e-6 | CC3: the largest element of F_oo, F_vv of the SCF off the diagonal that is accepted (17.1) |
+| `omegatol x` | ESTATE_CONV / 100 | EOM-CC3 folded: `\|lambda(omega) - omega\|` at convergence (17.4) |
+| `foldwin x` | 5e-4 | EOM-CC3 folded: roots of the singles-doubles stage closer than this (Eh) are solved together |
+| `start ccsd` | second order | the iterations from T1, T2 of CFOUR's `xx2cccsd` (`t1guess`, `t2guess`) |
+| `hh pair` | op | the hh ladder of dense T3 through occupied pairs (section 12) |
+| `qmap 0` | 1 | (Q): T3 in the work array of every rank instead of the mapped `XZAMPS` (section 5) |
+| `eomvec f` | work array | EOM: the vectors of the subspace in files (16.4) |
+| `slices 0` | 1 | iterations over ranks without slices of T3 (section 15) |
+| `bpr n` | 8 | batches per rank at least |
+| `rebal x` | 0.03 | the batches are dealt again when the last rank is this fraction behind the mean (0: never) |
+| `dist digits` | 123456 | the kinds of batches that are dealt to the ranks |
+| `mpichunk n` | 2^23 | words of an MPI message |
+| `qtasks n`, `qranks n` | from the ranks | tasks of (Q), ranks it is planned for (section 5) |
+| `diis m8` / `f8` / `m0` | planned | with `plan`: the DIIS vectors in memory / in the file, their number |
+| `plan 8 numbers` | planned | the batch sizes nqs nbt nbp nba qxv qc22 qc13 qrows (0: as planned) |
+| `cc3w n` | planned | CC3: elements of the work of a batch of occupied triples (at least one triple) |
+
+**The defaults of `labtol` and `imagtol`** (changed with this section from
+1e-8 and 1e-10, so that ordinary runs need no option): measured in the
+integrals of CFOUR's chain with `%dglin`, the forbidden elements are 4.4e-7
+to 6.1e-7 and the imaginary parts 1e-9 to 2e-9 for ThF+ (a basis with very
+large exponents; with the old defaults the run dropped its labels or went
+complex) and 1e-12 or less for light molecules; labels that are not
+symmetry labels of the spinors leave elements of 0.1 and more (section 6:
+0.118, 1.41), spinors that are not real imaginary parts of the size of the
+integrals.  1e-5 and 1e-7 are a factor of 16 and 50 above the largest noise
+seen and three or more orders below a violation.  What is below a
+tolerance is dropped (set to zero), so the tolerances also bound what is
+neglected; the program prints the largest values it found next to the
+tolerance in every run:
+
+    the largest imaginary part of the integrals:   1.50E-12 (below the tolerance  1.00E-07: taken as zero)
+
+The two numbers are in `xzlayout` of `xzdrv.F90`.
+
+**CFOUR keywords in the place of earlier variables**: `eomcyc` is gone -
+`ESTATE_MAXCYC` of the ZMAT (the program takes its job from the ZMAT and
+xjoda is run again when it changes); the amplitudes of CFOUR's CCSD as
+the whole problem (`eomccsd`, `ccsd_eom`) went with the argument.
+
+**Developer and test options** (the same section; not in the README of the
+package):
+
+| option | what |
+|---|---|
+| `ncyc n` | a timing run: n cycles of every iteration, converged or not (section 12) |
+| `maxcor n` | only n words of the work array are used (rank 0; the floor and the plan, section 4) |
+| `debug file` | one amplitude step on the amplitudes of the file, the result written to `file.out` (section 7) |
+| `ldebug file`, `ddebug file` | the same for a Lambda iteration; dumps of the density stage |
+| `qdebug` | (Q): its four parts printed |
+| `den_active` | the density files of the active spinors alone |
+| `wfail` | an error on a rank other than 0 (the exit through `MPI_Abort`, 15.2) |
+| `eomtest seed` | the sigma vector against the derivative of the amplitude step (16.5) |
+| `eomsig file`, `eomsd` | the sigma vector of the vector of a file; its singles-doubles block (16.5) |
+| `mpitest n` | the chunked transfers on arrays of n words (15.2) |
+| `qsample x`, `qstop n` | (Q): a sample of the quadruples; stop after n tasks (restart test, section 5) |
+| `qcost file`, `bcost file` | the seconds of the tasks of (Q) / of the batches of the iterations |
+| `r0load a b` | a load of rank 0 by hand in the deal of the batches |
+
+Checked (HBr / cc-pVDZ-DK with `%dglin`, `CALC=CC3`): no section - real, 6
+classes, E(CC3) -2604.989088528367; `cc3 stored` - ..366; `imagtol 1e-12`
+and `Labels 0` - complex (1.5e-12 found), one block, the same energy; a
+line `foo 3` - the program stops with the two lists; the variables
+`XZ_CC3=stored XZ_REAL=0` in the environment - no effect; `cc3w 1`, `real
+0` on 2 ranks with EXCITE=EOMEE - the roots of 17.5.

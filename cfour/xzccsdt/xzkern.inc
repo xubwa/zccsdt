@@ -343,6 +343,20 @@
       real(c_double) :: stats(4)
     end subroutine
 
+    ! the same with label shifts of the triples, the operands and the contraction operands (csrc/cc3_shift.c)
+    subroutine N(zc_cc3_batchs)(no, nv, nq, na, ncls, orng, vrng, qoff, aoff, vtri, vsgn, vfree, vpair, &
+                                eo, ev3, omega, i0, i1, j, k, nset, sa, sw, st, sg, at1, ao1, bv1, bo1, &
+                                at2, ao2, bv2, bo2, gv, gsq, gsqp, fov, ysq, xo, r1, rasq, work, stats) bind(C)
+      import
+      integer(c_int64_t), value :: no, nv, nq, na, ncls, i0, i1, j, k, nset, st, sg
+      integer(c_int64_t) :: sa(2), sw(2)
+      real(c_double), value :: omega
+      type(*), dimension(*) :: orng, vrng, qoff, aoff, vtri, vsgn, vfree, vpair, eo, ev3
+      type(*), dimension(*) :: at1, ao1, bv1, bo1, at2, ao2, bv2, bo2, gv, gsq, gsqp, fov
+      type(*), dimension(*) :: ysq, xo, r1, rasq, work
+      real(c_double) :: stats(4)
+    end subroutine
+
     ! one batch of occupied triples of CC3 without stored triples (csrc/cc3_fly.c)
     subroutine N(zc_cc3_batch)(no, nv, nq, na, ncls, orng, vrng, qoff, aoff, vtri, vsgn, vfree, vpair, &
                                eo, ev3, omega, i0, i1, j, k, nset, at1, ao1, bv1, bo1, at2, ao2, bv2, bo2, &
