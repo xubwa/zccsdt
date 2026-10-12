@@ -18,18 +18,6 @@
 ! of the program), active virtual, frozen occupied, dropped virtual; cf(p) is
 ! CFOUR's number (from 1) of the spinor p of this order.
 !
-module xzfrzd
-  implicit none
-  integer(8) :: nheld = 0           ! frozen occupied + dropped virtual spinors
-  integer(8) :: nall = 0            ! all spinors
-  integer(8) :: nao = 0             ! AO functions (nall / 2)
-  integer(8) :: jfao = 0            ! the list of AO integrals
-  integer(8) :: jfc = 0, jfca = 0, jfcb = 0   ! spinors [2 nao][nall]; their upper and lower halves
-  integer(8) :: jfcf = 0            ! cf(0:nall-1)
-  integer(8) :: jfe = 0             ! spinor energies in the full order
-  integer(8) :: jfwa = 0, jfwb = 0, jft0 = 0, jft1 = 0, jfc1 = 0   ! work of the transformation
-end module xzfrzd
-
 ! ---------------------------------------------------------------------------
 ! The regions that live for the stage, and (not in a dry run) their contents.
 subroutine xzfrzinit(w)
