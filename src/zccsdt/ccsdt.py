@@ -1843,10 +1843,15 @@ class GCCSDT(UCCSDT):
 
     q_progress = 300.0      # seconds between the progress lines of (Q)
 
-    def ccsdt_q(self, t2=None, t3=None, fraction=None):
+    def ccsdt_q(self, t2=None, t3=None, fraction=None, workers=None):
         '''(Q) correction of the converged CCSDT amplitudes on spin orbitals
         or spinors (zccsdt.cc.quadruples; canonical orbitals); returns E(Q)
         and stores e_q, e_q5 (its fifth-order part, [Q]) and e_tot_q.
+
+        ``workers`` > 1 (in the sectors of the symmetry labels): the
+        occupied quadruples shared out among that many processes at most,
+        each with one thread (zccsdt.cc.quadruples_sym.kernel_processes);
+        the default is one process with the threads of its kernels.
 
         The correction is a sum over the occupied quadruples; a line with
         the part done and the time left is printed every ``q_progress``
@@ -1902,7 +1907,8 @@ class GCCSDT(UCCSDT):
                     'all occupied indices' if spl.dense.xv >= xfull else
                     '%d of %d occupied indices at a time' % (spl.dense.xv, xfull)), indent=3)
                 with _PeakMemory() as peak, timing.timer(ROOT_Q):
-                    part = quadruples_sym.kernel(eris, t2, t3, plan_=spl, stride=stride, progress=progress)
+                    part = quadruples_sym.kernel(eris, t2, t3, self.max_memory, plan_=spl, stride=stride,
+                                                 progress=progress, workers=workers)
             else:
                 pl = quadruples.plan(no, nv, np.dtype(dtype).itemsize, budget)
                 pr.kv('memory', '%s besides T3 and the integrals' % _size(pl.need), indent=3)

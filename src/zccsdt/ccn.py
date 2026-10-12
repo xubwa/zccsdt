@@ -15,6 +15,8 @@ of GCCSDT (CC3: T3 stored, in the blocks of the labels where the reference
 has them), with the Jacobian of the model in the eigenproblem.
 '''
 
+from math import comb
+
 import numpy as np
 
 from zccsdt.ccsdt import GCCSDT, _count, _size
@@ -242,29 +244,97 @@ class GCC4(_Model):
     store_t4 : bool
         False (default): no T4 - the quadruples of every occupied quadruple
         are made from the current amplitudes, contracted into the doubles
-        and triples equations and discarded (zccsdt.cc.cc4fly); memory of
-        CCSDT.  True: T4 stored, from the T4 engine of CCSDTQ (the
-        reference route, everything in memory).
-    The packed layout of T3 (the blocks of the symmetry labels are not used
-    by CC4).  eom_ee(): the folded eigenproblem in the space of singles,
-    doubles and triples, R4 folded in at the frequency of every root.
+        and triples equations and discarded (zccsdt.cc.cc4fly).  The
+        iterations are those of GCCSDT (T3 in the blocks of the symmetry
+        labels, the memory plan with its scratch files, DIIS) with the pass
+        over the quadruples in each: its memory is planned with that of the
+        step from ``max_memory`` (zccsdt.cc.cc4fly.plans; ``plan_quadruples``
+        after kernel()).  True: T4 stored, from the T4 engine of CCSDTQ (the
+        reference route, everything in memory, packed layout).
+    workers : int or None
+        Processes over the occupied quadruples, at most (default: the cores
+        of the process; fewer if the memory does not hold their work
+        arrays).  Each has one thread.
+    eom_ee(): the folded eigenproblem in the space of singles, doubles and
+    triples, R4 folded in at the frequency of every root.
 
 ''' + GCCSDT.__doc__
     _title = 'GCC4'
     _subtitle = 'CC4 on spin orbitals or spinors (GHF, X2C), real or complex'
     _method = 'CC4'
+    _stages = dict(GCCSDT._stages, **{
+        'cc4.dress': ('dressing (Q)', 'T1 dressing of the integrals of the quadruples'),
+        'cc4.pack': ('T3 packed', 'T3 on the packed block'),
+        'cc4.setup': ('setup', 'quadruples: operands'),
+        'cc4.pass': ('quadruples', 'quadruples: the pass over the occupied quadruples'),
+        'cc4.fork': ('processes', 'quadruples: starting the processes'),
+        'cc4.xo': ('Xo', 'quadruples: T2 intermediate Xo'),
+        'cc4.xv': ('Xv', 'quadruples: T2 <vv||vv> intermediate'),
+        'cc4.rhs': ('T4 rows', 'quadruples: the rows of T4'),
+        'cc4.back': ('T4 sums', 'quadruples: T4 in the T2 and T3 equations'),
+        'cc4.update': ('update (Q)', 'quadruples: Jacobi step'),
+    })
     model = 'cc4'
     store_t4 = False
-    _block_iterations = False
-    _keys = GCCSDT._keys | {'store_t4', 't4'}
+    workers = None
+    _keys = GCCSDT._keys | {'store_t4', 't4', 'workers', 'plan_quadruples', 'quadruples_stats'}
+
+    @property
+    def _block_iterations(self):
+        # (T4 stored: the reference route on the packed layout)
+        return not self.store_t4
+
+    def _options(self, plan, callback):
+        opts = GCCSDT._options(self, plan, callback)
+        opts.workers = self.workers
+        opts.quadruples = getattr(self, '_qplan', None)
+        return opts
+
+    def _make_plan(self, eris):
+        from zccsdt.cc import cc4fly
+        self._qplan = None
+        if self.store_t4:
+            return GCCSDT._make_plan(self, eris)
+        plan, self._qplan = cc4fly.plans(eris, np.result_type(eris.fock, eris.oovv), self._options(None, None))
+        return plan
+
+    def _print_plan(self, pr, plan, eris):
+        GCCSDT._print_plan(self, pr, plan, eris)
+        q = getattr(self, '_qplan', None)
+        if q is None:
+            return
+        o, v = eris.nocc, eris.nmo - eris.nocc
+        pr.kv('quadruples', 'not stored: %d occupied x %s virtual, %s; %s for the pass' % (
+            comb(o, 4), _count(comb(v, 4)), 'in the sectors of the symmetry labels' if q.sectors else 'packed layout',
+            _size(q.need)), indent=3)
+        if q.workers > 1:
+            how = '%d processes with one thread each' % q.workers
+        elif q.sectors:
+            how = 'one process'
+        else:
+            how = 'one process, the threads of the BLAS'
+        pr.kv('', '%s; T2 <vv||vv> intermediate for %s' % (
+            how, 'all occupied indices' if q.xv >= max(3, o - 1) else '%d of %d occupied indices at a time'
+            % (q.xv, max(3, o - 1))), indent=3)
 
     def _solve(self, eris, plan, t1, t2, t3, callback):
         from zccsdt.cc import ccn as K
-        res = K.cc4_kernel(eris, self.conv_tol, self._conv_tol_normt(), self.max_cycle, self.diis_space,
-                           t1=t1, t2=t2, t3=t3, store_t4=self.store_t4)
+        if not self.store_t4:
+            res = GCCSDT._solve(self, eris, plan, t1, t2, t3, callback)
+            self.plan_quadruples, self.quadruples_stats = res.quadruples, res.stats
+        else:
+            res = K.cc4_kernel(eris, self.conv_tol, self._conv_tol_normt(), self.max_cycle, self.diis_space,
+                               t1=t1, t2=t2, t3=t3, store_t4=True)
         self._eris = res.eris
-        self.t4 = res.t4
+        self.t4 = getattr(res, 't4', None)
         return res
+
+    def _first_iteration_note(self):
+        st = getattr(self, 'quadruples_stats', None)
+        if not st or st.get('workers', 1) < 2:
+            return ''
+        return ('; the last pass over the quadruples: %d processes with %s of private memory and %s of shared '
+                'arrays besides' % (st['workers'], _size(st['private']), _size(st['shared'])))
 
     def eom_ee(self, nroots=3, conv_tol=1e-6, shift=None, **kwargs):
         '''The ``nroots`` lowest excitation energies of CC4 (Hartree) and the
@@ -275,6 +345,8 @@ class GCC4(_Model):
             raise RuntimeError('GCC4.eom_ee(): no amplitudes (kernel() first)')
         if shift not in (None, 0):
             raise NotImplementedError('CC4: the states of all labels together (no label shifts)')
+        kwargs.setdefault('max_memory', self.max_memory)
+        kwargs.setdefault('workers', self.workers)
         e, sol = cc4fly.eom(self._eris, self.t1, self.t2, self.t3, nroots, conv_tol, **kwargs)
         self.eom, self.e_ee = sol, e
         return e, sol

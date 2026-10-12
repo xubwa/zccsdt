@@ -245,7 +245,7 @@ def cc4_rhs(t2, T3, ints, batch_bytes=None):
 
 
 def cc4_kernel(eris, conv_tol=1e-10, conv_tol_normt=1e-8, max_cycle=200, diis_space=8, verbose=False,
-               t1=None, t2=None, t3=None, model='cc4', store_t4=True):
+               t1=None, t2=None, t3=None, model='cc4', store_t4=True, opts=None):
     '''CC4 with T4 stored (docs/ccn.md, section 11): the singles, doubles
     and triples equations of CCSDTQ (the CCSDT step and the T4 terms of the
     T4 engine), the quadruples equation [F, T4] = -([V~, T3] + 1/2 [[V~, T2],
@@ -255,8 +255,20 @@ def cc4_kernel(eris, conv_tol=1e-10, conv_tol_normt=1e-8, max_cycle=200, diis_sp
     zccsdt.cc.ccsdtq does that in production).  ``store_t4`` False: no T4
     - the quadruples of every occupied quadruple are made from the current
     amplitudes, contracted into the doubles and triples equations and
-    discarded (zccsdt.cc.cc4fly).  Returns a solver.Result with t4 (packed;
+    discarded (zccsdt.cc.cc4fly) - the production route: solver.kernel with
+    method 'cc4', the CCSDT step in the layout of the integrals (the blocks
+    of their labels), memory by plan; ``opts``: its solver.Options (default:
+    the tolerances given here).  Returns a solver.Result with t4 (packed;
     None without T4) and the semicanonical integrals.'''
+    if not store_t4:
+        from zccsdt.cc import solver
+        if model != 'cc4':
+            raise ValueError('without stored T4: CC4')
+        opts = opts or solver.Options(conv_tol=conv_tol, conv_tol_normt=conv_tol_normt, max_cycle=max_cycle,
+                                      diis_space=diis_space, verbose=verbose)
+        res = solver.kernel(eris, 'cc4', opts, t1=t1, t2=t2, t3=t3)
+        res.t4 = None
+        return res
     import time
     from math import comb
     from zccsdt.cc import ccsd, ccsdt_opt, solver, t4engine, t4pack as P
@@ -270,7 +282,7 @@ def cc4_kernel(eris, conv_tol=1e-10, conv_tol_normt=1e-8, max_cycle=200, diis_sp
     t1, t2 = t1.astype(dtype), t2.astype(dtype)
     nI3, nA3, nI, nA = comb(no, 3), comb(nv, 3), comb(no, 4), comb(nv, 4)
     T3 = np.zeros(nI3 * nA3, dtype=dtype) if t3 is None else np.array(t3, dtype=dtype).ravel()
-    T4 = np.zeros((nI, nA), dtype=dtype) if store_t4 else None
+    T4 = np.zeros((nI, nA), dtype=dtype)
     e = np.asarray(eris.fock).diagonal().real
     eo, ev = e[:no], e[no:]
     d2 = eo[P.tuples(no, 2)].sum(axis=1)[:, None] - ev[P.tuples(nv, 2)].sum(axis=1)[None, :]
@@ -285,25 +297,6 @@ def cc4_kernel(eris, conv_tol=1e-10, conv_tol_normt=1e-8, max_cycle=200, diis_sp
         t0 = time.perf_counter()
         t1n, t2n, t3n = ccsdt_opt.update_amps(step, t1, t2, T3, eris, plan=plan)
         ints = t4engine.Dressed.from_eris(eris, t1)
-        if not store_t4:
-            from zccsdt.cc import cc4fly
-            r2, r3 = cc4fly.run_for(eris, ints, e, t2, T3)
-            del ints
-            t2n = t2n + P.unpack(r2 / d2, no, nv, 2)
-            t3n = t3n + r3.ravel() / d3
-            normt = float(np.linalg.norm(t1n - t1) + np.linalg.norm(t2n - t2) + 6 * np.linalg.norm(t3n - T3))
-            t1, t2, T3 = solver._from_parts(adiis.update(solver._parts(t1n, t2n, t3n)), no, nv, True)
-            T3 = np.array(T3)
-            e_new = ccsd.energy(t1, t2, eris)
-            timings.append(time.perf_counter() - t0)
-            if verbose:
-                print('cycle %3d  E_corr = %.15f  dE = %.3e  |dt| = %.3e' % (cycle + 1, e_new.real, (e_new - e_old).real, normt))
-            done = abs(e_new - e_old) < conv_tol and normt < conv_tol_normt
-            e_old = e_new
-            if done:
-                conv = True
-                break
-            continue
         # the T4 terms of the doubles and triples equations (they do not depend on T2, T3)
         R4, r3, r2 = t4engine.residual(np.zeros_like(t2), np.zeros_like(T3), T4, ints)
         if model == 'cc4':

@@ -611,8 +611,9 @@ the four sums against pass 1 over the stored T3 of the closed form
 
 `zccsdt.CC4(mf)` (`GCC4`; `store_t4 = False` by default), `ccn.cc4_kernel`
 (T4 stored, or `store_t4=False`), `zccsdt.cc.cc4fly` (the quadruples per
-occupied quadruple; the folded excitation energies `cc4fly.eom`),
-`tests/test_cc4.py`.
+occupied quadruple; the folded excitation energies `cc4fly.eom`; the
+memory plan `cc4fly.plan`, the processes `cc4fly.run_sectors`),
+`tests/test_cc4.py`, `tests/test_cc4_plan.py`.
 
 **T4 stored** (`ccn.cc4_kernel`, the reference route).  An iteration is
 the CCSDT step, the T4 terms of the doubles and triples equations from the
@@ -651,10 +652,149 @@ occupied quadruple I:
      the k outside P: one product (o x v x C(v,3)) and a scatter of its
      rows.
 
-Nothing of the size of T4 is stored; the memory is that of CCSDT (T3 and
-the operands of its step) plus that of (Q) (its Xv for the pairs (x, l) of
-one l at a time, as its plan holds them, and the products of one
-quadruple).
+Nothing of the size of T4 is stored, and no array [C(o,4), C(v,4)] is made
+at all.  (The first driver made the denominators of T4 as such an array
+whether T4 was stored or not: 58.3 GB of the 66 GB that its run of 26 + 60
+spinors took, 2.45 GB at 26 + 28.)
+
+**The iteration** (`solver.kernel(eris, 'cc4')`; `cc4fly.add_quadruples`).
+The Jacobi step of CCSDT as CCSDT takes it - T3 in the blocks of the
+symmetry labels, the memory plan with its scratch files, DIIS - and, added
+to its new T2 and T3 before DIIS, the sums of T4 over the denominators.
+Around the pass: the dressed blocks (`t4engine.Dressed`); T3 on the packed
+block [C(o,3), C(v,3)], which the (Q) code reads - its blocks put in their
+places one after the other; R3 on the packed block, read back block by
+block over its denominators (what is outside the blocks vanishes by
+symmetry).
+
+**Memory** (`cc4fly.plan`, `cc4fly.plans`).  A pass allocates
+
+- R2 and R3 on the packed blocks;
+- per drive (one for the ground state, three for a folded sigma vector)
+  the container of the conjugated dressed blocks (o v^3) and the (Q)
+  object: T2 in three layouts, `<ab||ei>`, `<ma||ij>`, the intermediate Xo
+  (C(o,3) o C(v,2) elements - with R3 and T3 the large arrays of a pass),
+  the blocks of `<bc||ef>`;
+- the operators of the four sums;
+- Xv for the occupied indices x held at a time: the blocks of one pair
+  (x, l), v C(v,3) elements at most; for all x < l, or for three at least
+  (the (Q) schedule: the quadruples of one l in groups);
+- per process the blocks of the products of one occupied quadruple - two
+  sets on two pairs, two on an index and a triple (the products and the
+  row of T4 in their places), a row [v, C(v,2)] and one [C(v,3)] - and,
+  for a forked process, WORKER_HEAP = 80 MB for what is its own besides
+  (the buffers of its BLAS, the pages of the parent that it writes: 50 to
+  70 MB measured);
+- while Xo is formed, its operands per process (o C(o,2) C(v,2)
+  elements).
+
+`plan(no, nv, itemsize, budget, labels, modulus, workers, ndrives)` counts
+these.  Its floor is one process with Xv for three occupied indices: below
+it `MemoryError` with the numbers.  From there first Xv for more occupied
+indices, up to all, then more processes, up to `workers` (default: the
+cores of the process; one where T4 has fewer than 2e7 elements), each part
+to its top before the next starts, so that nothing shrinks when the
+budget grows; Xo is formed by as many of the processes as hold its
+operands.  On the packed layout (no labels) the plan is that of the (Q)
+objects (batches of columns, `quadruples.plan`) plus the expanded row
+(C(v,2)^2 and v C(v,3)): one process.
+
+`plans(eris, dtype, opts)` makes the plan of the CCSDT step
+(`ccsdt_opt.plan_for`) and that of the pass from `max_memory`: with the
+memory for it the step in memory and the pass with all its processes; else
+the step planned beside the floor of the pass, the dressed blocks and T3
+packed (its scratch files), and the pass with what the step leaves - or
+the error before the first iteration.  This sums the two as if they were
+at their peaks together, which they are not: the pass runs when the step
+has given its work arrays back.  So that plan is the least a pass gets,
+and `add_quadruples` plans every pass again from `max_memory` less what
+is resident when it starts (and less the DIIS vectors that are still to
+come into memory) and takes the second plan where it has more processes
+(`GCC4.plan_quadruples`: the plan of the last pass).
+
+Measured (HBr / cc-pVTZ-DK, X2C, 10 frozen, the lowest 60 virtual spinors:
+26 + 60, real, labels 2 m_j; the sum of the proportional set sizes of the
+process and its children - every page once, the shared arrays included -
+sampled every second; job 31909245 (a step of it, 2026-10-12)):
+
+| `max_memory` | processes (quadruples; Xo) | plan of the pass | measured peak, all processes | of which the calculation itself; private pages of the processes | s / iteration |
+|---|---|---|---|---|---|
+| none (80 % of what the job has) | 24; 24 | 10.1 GB | 5.3 GB | 2.4 GB; 1.1 GB | 43.9 |
+| 12000 MB | 24; 22 | 9.4 GB | 5.3 GB | 2.5 GB; 1.2 GB | 43.8 |
+| 8000 MB | 24; 10 | 5.4 GB | 5.0 GB | 2.5 GB; 0.9 GB | 44.2 |
+
+The first driver: 66.3 GB (and (Q) once: 1.1 GB resident).  With
+`max_memory` 6000 MB the run ends before the first iteration:
+`MemoryError: CC4: the pass over the quadruples takes at least 2198 MB, the dressed integrals and T3 on the packed block 1219 MB of the budget of 5147 MB; beside them: CCSDT with 26 occupied and 60 virtual spin orbitals needs about 2.0 GB of memory for its o v^3 arrays and work buffers; 1.7 GB are available (..)`.  That floor is the sum described above - the least of the
+CCSDT step, of the pass, and what is resident after the integrals - and
+is above what a run with few processes would take (about 4.5 GB measured
+with 16 processes): the error is on the safe side of the double count,
+which the second plan removes for the processes but not for the floor.
+
+`tests/test_cc4_plan.py`: the rules of the plan (floor, monotone, within
+the budget; 8 + 28 and, as arithmetic, 26 + 60); the peak of a pass by
+tracemalloc against the plan - in sectors and on the packed layout, with
+everything in memory and at the floor; the front end with `max_memory`
+below the floor.
+
+**Processes** (`cc4fly.run_sectors`, `cc4fly._Workers`).  In the sectors of
+the labels the products of one occupied quadruple are many and small: at
+26 + 60 a quadruple is 39 matrix products on gathered rows and columns
+of the blocks, 42 scatters and 7600 Python-level calls (a profile of the
+processes).  The threads of the BLAS and of the OpenMP kernels have
+nothing to take there: one iteration at 26 + 28 took 103 s with 24 threads
+and takes 94 s on one core.  ((Q) is the same code and the same: one
+process by design, the native program shares its occupied quadruples out
+among MPI ranks.)  So the occupied quadruples are shared out among
+processes, forked from the calculation for every pass, each with one
+thread:
+
+- they read the operands - T3, the integrals, the tables - through the
+  pages they share with the parent; nothing is copied or sent;
+- R2, R3, Xo and Xv are shared mappings.  Xo is formed first, by the same
+  processes (`Quadruples.form_xo`, one m each); Xv of the pairs (x, l) of a
+  group by the parent, with the threads of the BLAS, while the processes
+  wait;
+- the quadruples of a group are handed out one at a time (a shared
+  counter), so that the processes end a group together;
+- a row of R3 is added to under the lock of the class of its virtual
+  triples (a quadruple adds to the rows of one class per block): the
+  matrix products are outside the locks, the scatter (`zc_rows_cols_add`)
+  inside;
+- the row of T4 in the places of the blocks by `zc_cc4_sector_row`
+  (csrc/tnpack.c): the two products of a kind summed in one array, the
+  quadruples of the sector walked once, two arrays written - instead of
+  the kernel of the (Q) gradient with its third product zero (five arrays
+  read, five written, the two-pair blocks conjugated back), which remains
+  the fallback for a library built before;
+- a process that fails or is killed is an error of the pass, with its
+  traceback; the others are stopped.
+
+Measured (job 31909245 (a step of it, 2026-10-12): node c118, the 24 cores of one socket of a Xeon
+Gold 6248R, MKL; HBr X2C in label blocks, real; seconds per iteration
+after the first, (Q) once):
+
+| case | CCSDT it | (Q), one process | (Q), 24 processes | CC4 it, before | CC4 it | CCSDTQ it | CC4 memory, before | CC4 memory |
+|---|---|---|---|---|---|---|---|---|
+| 26 + 28 | 0.28 s | 50.4 s | 3.6 s | 103 s | 6.3 s | 18.5 s | 4.9 GB | 2.8 GB |
+| 26 + 60 | 1.03 s | 129.9 s | 27.1 s | 334 s | 43.9 s | - | 66.3 GB | 5.3 GB |
+
+One CC4 iteration with 1 / 8 / 24 cores (as many processes): 93.6 / 13.4 / 6.3
+s at 26 + 28, 481 / 91 / 44 s at 26 + 60.  Of an iteration at 26 + 60 with
+24: the rows of T4 21.02 s, the four sums 15.71 s, Xo 1.79 s, Xv 1.36 s, starting the processes 0.18 s, dressing 0.14 s, T3 to the packed block 0.24 s, the operands 0.15 s, R3 back from the packed block 0.30 s, the CCSDT step with DIIS 1.05 s.  The CPU time of the pass summed over its processes is
+793 s with 24 of them, 647 s with 8 and 461 s on one core:
+the processes share the memory channels and the cache of the socket.
+
+What is left in one process: Xv (the parent, with the threads of the
+BLAS; the processes wait), the dressing and T3 to and from the packed
+block, the CCSDT step itself (its own threads), the start of the
+processes.  The pass on the packed layout (no labels, complex spinors) is
+one process: its products are large and the threads of the BLAS do them.
+
+`quadruples_sym.kernel(workers=n)`, `GCCSDT.ccsdt_q(workers=n)`: (Q) with
+the same processes - an addition, the default is one process as before
+and its numbers are unchanged (`kernel_processes`; the energies agree to
+rounding, 1e-13 relative in the test).
 
 **Work per iteration** (multiply-adds; o, v active occupied and virtual):
 the CCSDT step, the (Q) products o^4 v^4 (v + o) / 12 with o^2 v^5 / 4 for
@@ -707,7 +847,8 @@ the (Q) gradient - here with the third product zero and omega added to
 eo; its two-pair blocks come out conjugated and are conjugated back); the
 four sums block by block (products of the blocks with the integral blocks
 of the labels, `zc_rows_cols_add`, `tn_reduce`).  The CCSDT step inside
-CC4 runs on the packed layout (`GCC4` has no T3 blocks).  The excitation
+CC4 runs in the blocks of the labels (the spinors in the order of their
+labels, as for CCSDT; `cc4fly.eom` puts T3 on the packed block).  The excitation
 energies in sectors are those of the totally symmetric states (label
 shift 0): the quadruples of a sector follow the label of the occupied
 quadruple, so every vector is projected on shift 0 (`eom.Sector`).
@@ -715,8 +856,12 @@ Against the packed route (`tests/test_cc4.py::test_symmetry_sectors`):
 HBr / cc-pVDZ-DK, 28 frozen (8 + 28, six classes): energy 3e-17; the two
 lowest totally symmetric roots 1e-11; LiH / 6-31G: 1.5e-10.
 
-**Not done.**  Label shifts, IP and EA for CC4; the CCSDT step of CC4 in
-label blocks.
+**Not done.**  Label shifts, IP and EA for CC4.  T3 and R3 of a pass are
+on the packed block [C(o,3), C(v,3)] (eight times the blocks of the labels
+for HBr at 26 + 60), in memory: the floor of the plan has them, a scratch
+file does not.  Xv is formed by the parent alone.  The folded sigma
+vector plans each of its passes from what is resident, with the same
+processes, but its dressed derivative blocks are not planned.
 
 **Porting to the native program.**  No new kernel: the forward of a
 quadruple is the (Q) quantity r that the native program computes already

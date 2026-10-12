@@ -970,3 +970,85 @@ void zc_xv_sector_adj_##SFX(int n, const int *kv, int modulus,                 \
 
 DEFINE_QGSEC(double, d)
 DEFINE_QGSEC(double complex, z)
+
+/*
+ * CC4 without stored T4 in symmetry sectors (zccsdt/cc/cc4fly.py).
+ *
+ * zc_cc4_sector_row:  the T4 row of one occupied quadruple in the places of
+ * the blocks - zc_qg_sector_vectors for one right-hand side and nothing
+ * else.  For every virtual quadruple of the sector
+ *
+ *     t = (the splits of b22 + the splits of c13) / (eo - ev),
+ *
+ * with the signs of the splits as in zc_q_sector_energy, written with these
+ * signs to the places that the splits were read from: e22 on two pairs, e13
+ * on an index and a triple (the other places - groups that share an index -
+ * are not touched: the caller sets the blocks to zero).
+ */
+#define DEFINE_CC4SEC(T, SFX)                                                  \
+void zc_cc4_sector_row_##SFX(int n, const int *kv, int modulus, int M,         \
+        const double *ev, double eo, int kmin, int nk, const int *lid_of,      \
+        const int *lstart, const int *lmem, int qmin, int nq,                  \
+        const int64_t *off22, const int64_t *nc22, const int64_t *off13,       \
+        const int64_t *nc13, const int32_t *posV, const int32_t *posQ,         \
+        const int32_t *pos3, const T *b22, const T *c13, T *e22, T *e13)       \
+{                                                                              \
+    const int64_t nQ = (int64_t)n * (n - 1) / 2;                               \
+    const int64_t nA3 = nQ * (n - 2) / 3;                                      \
+    _Pragma("omp parallel for schedule(dynamic, 1)")                           \
+    for (int a = 0; a < n - 3; a++)                                            \
+    for (int b = a + 1; b < n - 2; b++)                                        \
+    for (int c = b + 1; c < n - 1; c++) {                                      \
+        int kd = M - kv[a] - kv[b] - kv[c];                                    \
+        if (modulus) kd = ((kd % modulus) + modulus) % modulus;                \
+        if (kd < kmin || kd >= kmin + nk || lid_of[kd - kmin] < 0) continue;   \
+        const int l = lid_of[kd - kmin];                                       \
+        int lo = lstart[l], hi = lstart[l + 1];                                \
+        while (lo < hi) {               /* the first member above c */         \
+            int mid = (lo + hi) / 2;                                           \
+            if (lmem[mid] > c) hi = mid; else lo = mid + 1;                    \
+        }                                                                      \
+        for (int t = lo; t < lstart[l + 1]; t++) {                             \
+            const int v[4] = {a, b, c, lmem[t]};                               \
+            static const int g22[6][4] = {{0,1,2,3}, {0,2,1,3}, {0,3,1,2},     \
+                                          {1,2,0,3}, {1,3,0,2}, {2,3,0,1}};    \
+            static const double s22[6] = {1, -1, 1, 1, -1, 1};                 \
+            int64_t x22[6], x13[4];                                            \
+            T r = 0;                                                           \
+            for (int s = 0; s < 6; s++) {                                      \
+                const int p = v[g22[s][0]], q = v[g22[s][1]];                  \
+                const int w = v[g22[s][2]], u = v[g22[s][3]];                  \
+                int kq = kv[p] + kv[q];                                        \
+                x22[s] = -1;                                                   \
+                if (modulus) kq = ((kq % modulus) + modulus) % modulus;        \
+                if (kq < qmin || kq >= qmin + nq || off22[kq - qmin] < 0)      \
+                    continue;                                                  \
+                const int64_t rk1 = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q); \
+                const int64_t rk2 = nQ - 1 - (int64_t)(n - 1 - w) * (n - 2 - w) / 2 - (n - 1 - u); \
+                const int64_t x = off22[kq - qmin] + posQ[rk1] * nc22[kq - qmin] + posQ[rk2];      \
+                x22[s] = x;                                                    \
+                r += s22[s] * b22[x];                                          \
+            }                                                                  \
+            for (int s = 0; s < 4; s++) {                                      \
+                const int p = v[s];                                            \
+                const int q = v[s == 0], w = v[s <= 1 ? 2 : 1], u = v[s == 3 ? 2 : 3];             \
+                const int lp = lid_of[kv[p] - kmin];                           \
+                x13[s] = -1;                                                   \
+                if (off13[lp] < 0) continue;                                   \
+                const int64_t y1 = n - 1 - q, y2 = n - 1 - w;                  \
+                const int64_t rk = nA3 - 1 - y1 * (y1 - 1) * (y1 - 2) / 6 - y2 * (y2 - 1) / 2 - (n - 1 - u); \
+                const int64_t x = off13[lp] + posV[p] * nc13[lp] + pos3[rk];   \
+                x13[s] = x;                                                    \
+                r += ((s & 1) ? -1.0 : 1.0) * c13[x];                          \
+            }                                                                  \
+            const T y = r / (eo - ev[v[0]] - ev[v[1]] - ev[v[2]] - ev[v[3]]);  \
+            for (int s = 0; s < 6; s++)                                        \
+                if (x22[s] >= 0) e22[x22[s]] = s22[s] * y;                     \
+            for (int s = 0; s < 4; s++)                                        \
+                if (x13[s] >= 0) e13[x13[s]] = ((s & 1) ? -1.0 : 1.0) * y;     \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_CC4SEC(double, d)
+DEFINE_CC4SEC(double complex, z)

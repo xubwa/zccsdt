@@ -25,7 +25,7 @@ from zccsdt.cc import ccsd, ccsdt, ccsdt_opt, t3pack
 from zccsdt import scratch
 from zccsdt.cc.diis import DIIS
 from zccsdt.scratch import Scratch
-from zccsdt.timing import timer
+from zccsdt.timing import cpu as timing_cpu, timer
 
 
 @dataclass
@@ -51,6 +51,8 @@ class Options:
                                 # ZCCSDT_MAX_DISK, else the free space of the scratch
                                 # directory less a reserve)
     plan: object = None         # ccsdt_opt.MemoryPlan given explicitly
+    quadruples: object = None   # CC4: the cc4fly.Plan of the pass over the quadruples, given explicitly
+    workers: int = None         # CC4: processes over the occupied quadruples, at most (default: the cores)
     diis_plan: object = None    # zccsdt.disk.DiisPlan given explicitly
     callback: object = None     # callback(info) after every iteration (kernel)
 
@@ -69,6 +71,8 @@ class Result:
     diis_plan: object = None    # where its DIIS vectors were (zccsdt.disk.DiisPlan)
     eris: object = None         # CC2 / CC3: the integrals of the spinors the amplitudes refer to
     rotation: object = None     # (U_o, U_v) if those are the given ones made semicanonical
+    quadruples: object = None   # CC4: the cc4fly.Plan of the pass over the quadruples
+    stats: object = None        # CC4: what the last pass measured (cc4fly.run_sectors)
 
 
 def init_amps(eris):
@@ -145,7 +149,10 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     '''Solve CCSD or CCSDT.  Returns a Result; t3 is kept packed.
     method: 'ccsd', 'ccsdt' (packed-T3 implementation) or 'ccsdt_ref'
     (the ported reference implementation, for validation); 'cc2', 'cc3':
-    the approximate models (docs/ccn.md), CC3 with T3 stored as in CCSDT.
+    the approximate models (docs/ccn.md), CC3 with T3 stored as in CCSDT;
+    'cc4': the CCSDT step plus the quadruples of CC4, made per occupied
+    quadruple and not stored (zccsdt.cc.cc4fly; ``opts.workers`` processes
+    at most, Result.quadruples: the plan of that pass).
 
     For 'ccsdt', ``opts.max_memory`` (MB; default: 80% of what the node and
     the memory cgroups of the process leave) decides where the large arrays
@@ -167,10 +174,13 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     model = method
     if method == 'cc3':
         method = 'ccsdt' if opts.store_t3 else 'cc3_fly'
+    cc4 = method == 'cc4'
+    if cc4:
+        method = 'ccsdt'
     assert method in ('ccsd', 'cc2', 'cc3_fly', 'ccsdt', 'ccsdt_ref')
     with_t3 = method not in ('ccsd', 'cc2', 'cc3_fly')
     rotation = None
-    if model in ('cc2', 'cc3'):
+    if model in ('cc2', 'cc3', 'cc4'):
         # the models with the full Fock blocks are invariant under rotations among the occupied
         # and among the virtual spinors: they are solved for semicanonical ones (exactly diagonal
         # blocks), and the amplitudes refer to those (Result.eris, Result.rotation)
@@ -186,11 +196,16 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     dtype = np.result_type(t1, t2, eris.oovv, eris.fock)
     t1 = t1.astype(dtype)
     t2 = t2.astype(dtype)
-    plan = scr = dplan = None
+    plan = scr = dplan = qplan = None
+    qstats = {}
     tight = r3_file = False
     from zccsdt import disk
     if method == 'ccsdt':
-        plan = opts.plan or ccsdt_opt.plan_for(eris, dtype, opts)
+        if cc4:                 # the step beside the pass over the quadruples
+            from zccsdt.cc import cc4fly
+            plan, qplan = cc4fly.plans(eris, dtype, opts)
+        else:
+            plan = opts.plan or ccsdt_opt.plan_for(eris, dtype, opts)
         # (before anything is allocated: the disk holds the plan or the run stops here)
         with disk.limit(opts.max_disk):
             dplan = opts.diis_plan or diis_plan_for(eris, dtype, opts, plan)
@@ -243,7 +258,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                          incore=opts.incore_complete or dplan.n_file == 0,
                          in_memory=dplan.n_memory)
         for icycle in range(opts.max_cycle):
-            t0, c0 = time.perf_counter(), time.process_time()
+            t0, c0 = time.perf_counter(), timing_cpu()
             if with_t3:
                 if method == 'ccsdt':
                     if not diis_t3:
@@ -252,7 +267,13 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                         rbuf = adiis.buffers(_parts(t1, t2, t3))[0][2] if r3_file else None
                     t1n, t2n, t3n = ccsdt_opt.update_amps(opts, t1, t2, t3, eris,
                                                           mem_mb=opts.mem_mb, out=rbuf,
-                                                          plan=plan, model=model)
+                                                          plan=plan, model='ccsdt' if cc4 else model)
+                    if cc4:
+                        # (the pass may take more processes than its plan: what is resident now decides)
+                        grow = None if opts.incore_complete else (
+                            opts.max_memory, dplan.memory if dplan is not None else 0, opts.workers)
+                        t2n = cc4fly.add_quadruples(eris, t1, t2, t3, t2n, t3n, qplan, opts.level_shift, qstats,
+                                                    grow)
                 else:
                     t1n, t2n, t3n = ccsdt.update_amps(opts, t1, t2, t3, eris)
             elif method == 'cc2':
@@ -303,7 +324,7 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                 opts.callback(dict(cycle=icycle + 1, e_corr=float(np.real(e_new)),
                                    de=float(np.real(de)), norms=tuple(norms), normt=normt,
                                    diis=len(adiis.xs), wall=timings[-1],
-                                   cpu=time.process_time() - c0))
+                                   cpu=timing_cpu() - c0))
             if abs(de) < opts.conv_tol and normt < opts.conv_tol_normt:
                 conv = True
                 break
@@ -317,4 +338,5 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     e_corr = e_old
     return Result(e_corr=e_corr, e_tot=eris.e_hf + e_corr.real, converged=conv,
                   ncycle=icycle + 1, t1=t1, t2=t2, t3=t3, timings=timings, plan=plan,
-                  diis_plan=dplan, eris=eris if model in ('cc2', 'cc3') else None, rotation=rotation)
+                  diis_plan=dplan, eris=eris if model in ('cc2', 'cc3', 'cc4') else None, rotation=rotation,
+                  quadruples=qstats.get('plan', qplan), stats=qstats or None)
