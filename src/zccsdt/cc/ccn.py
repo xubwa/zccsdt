@@ -287,7 +287,7 @@ def cc4_kernel(eris, conv_tol=1e-10, conv_tol_normt=1e-8, max_cycle=200, diis_sp
         ints = t4engine.Dressed.from_eris(eris, t1)
         if not store_t4:
             from zccsdt.cc import cc4fly
-            r2, r3 = cc4fly.run(ints, e, t2, T3)
+            r2, r3 = cc4fly.run_for(eris, ints, e, t2, T3)
             del ints
             t2n = t2n + P.unpack(r2 / d2, no, nv, 2)
             t3n = t3n + r3.ravel() / d3

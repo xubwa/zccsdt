@@ -114,3 +114,31 @@ def test_front_end():
     assert cc.converged and abs(cc.e_corr - ref.e_corr) < 1e-10 and cc.model == 'cc4'
     e, res = cc.eom_ee(nroots=2, conv_tol=1e-7)
     assert len(e) == 2 and res.converged.all()
+
+
+def test_symmetry_sectors():
+    '''CC4 without stored T4 in the sectors of the labels 2 m_j (the (Q)
+    sector code) against the packed route: HBr / cc-pVDZ-DK, 28 spinors
+    frozen (8 + 28, six classes): energy; LiH / 6-31G (4 + 18): the totally
+    symmetric roots of the folded problem are roots of the packed one.'''
+    import copy
+    from pyscf import x2c
+    for atom, basis, frozen, roots in (('Br 0 0 0; H 0 0 1.4145', 'cc-pvdz-dk', 28, False),
+                                       ('Li 0 0 0; H 0 0 1.5957', '6-31g', 0, True)):
+        mf = x2c.UHF(gto.M(atom=atom, basis=basis, verbose=0))
+        mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-8
+        mf.kernel()
+        cc = zccsdt.CC4(mf, frozen=frozen)
+        cc.verbose = 0
+        cc.conv_tol, cc.conv_tol_normt = 1e-12, 1e-9
+        cc.kernel()
+        eris = cc._eris
+        assert eris.labels is not None
+        dense = copy.copy(eris)
+        dense.no_sectors = True
+        b = ccn.cc4_kernel(dense, 1e-12, 1e-9, store_t4=False)
+        assert abs(b.e_corr - cc.e_corr) < 1e-11
+        if roots:
+            e1, s1 = cc4fly.eom(eris, cc.t1, cc.t2, cc.t3, nroots=2, conv_tol=1e-8)
+            e2, s2 = cc4fly.eom(dense, cc.t1, cc.t2, cc.t3, nroots=8, conv_tol=1e-8)
+            assert s1.converged.all() and max(abs(e2 - x).min() for x in e1) < 1e-9
