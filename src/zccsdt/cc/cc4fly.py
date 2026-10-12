@@ -473,6 +473,8 @@ class Plan:
     slab: int = 0           # elements of the blocks of Xv of one pair (x, l), at most
     n22: int = 0            # elements of the largest set of blocks X[(ab), (cd)]
     n13: int = 0            # and X[a, (bcd)]
+    auto: bool = False      # made by plans() beside the plan of the CCSDT step: add_quadruples may
+                            # take more processes where the memory that is resident then leaves room
 
 
 def _lean():
@@ -602,7 +604,13 @@ def plans(eris, dtype, opts):
     the memory for it the step has everything in memory and the pass all
     its processes; else the step is planned beside the floor of the pass
     (ccsdt_opt.plan_for: scratch files), and the pass gets what the step
-    leaves.  MemoryError, with the numbers, if the floors do not fit.'''
+    leaves.  MemoryError, with the numbers, if the floors do not fit.
+
+    The two plans are summed as if the step and the pass were at their
+    peaks together, which they are not: the pass runs when the step has
+    given its work arrays back.  So the plan of the pass made here is the
+    least that a pass gets (and the error before the first iteration);
+    add_quadruples plans every pass again from what is resident then.'''
     from zccsdt import memory
     from zccsdt.cc import ccsdt_opt
     no = eris.nocc
@@ -615,6 +623,7 @@ def plans(eris, dtype, opts):
     if given is not None:
         return opts.plan or ccsdt_opt.plan_for(eris, dtype, opts, reserve=given.need + extra), given
     full = plan(no, nv, isz, None, lab, mod, workers)
+    full.auto = True
     budget = None if opts.incore_complete else memory.budget(opts.max_memory)
     if budget is None:
         return opts.plan or ccsdt_opt.plan_for(eris, dtype, opts), full
@@ -633,7 +642,9 @@ def plans(eris, dtype, opts):
                               'and T3 on the packed block %.0f MB of the budget of %.0f MB; beside them: %s'
                               % (full.floor / 1e6, extra / 1e6, budget / 1e6, err)) from None
     cached = ccsdt_opt.cached_bytes(eris)
-    return step, plan(no, nv, isz, budget + cached - step.need - extra, lab, mod, workers)
+    least = plan(no, nv, isz, budget + cached - step.need - extra, lab, mod, workers)
+    least.auto = True
+    return step, least
 
 
 # ------------------------------------------------------------ processes over the quadruples
@@ -1067,12 +1078,19 @@ def _blocks(eris, dtype):
     return L, [(g, lo[om.tri_off[g]:om.tri_off[g + 1]], lv[vm.tri_off[g]:vm.tri_off[g + 1]]) for g in L.stored]
 
 
-def add_quadruples(eris, t1, t2, t3, t2n, t3n, plan_=None, level_shift=0.0, stats=None):
+def add_quadruples(eris, t1, t2, t3, t2n, t3n, plan_=None, level_shift=0.0, stats=None, grow=None):
     '''The quadruples of CC4 in a Jacobi step of CCSDT: the new T2
     ``t2n`` and T3 ``t3n`` (the layout of ``t3``: the blocks of the labels
     of ``eris`` or the packed block; changed in place) of
     ccsdt_opt.update_amps at (t1, t2, t3) plus the sums of T4 over the
-    denominators.  Returns the new T2.  ``plan_``: the Plan of the pass.'''
+    denominators.  Returns the new T2.  ``plan_``: the Plan of the pass.
+    ``grow``: (max_memory, bytes that the run still allocates outside the
+    pass - DIIS vectors in memory -, workers) for a plan of plans(): the
+    pass is planned again from what is resident now (the dressed blocks
+    and T3 on the packed block are there, the work arrays of the CCSDT
+    step are not), and that plan is taken where it has more processes;
+    stats['plan']: the plan used.'''
+    from zccsdt import memory
     from zccsdt.cc import ccsdt_opt, t4engine
     no = eris.nocc
     nv = np.asarray(eris.fock).shape[0] - no
@@ -1090,6 +1108,18 @@ def add_quadruples(eris, t1, t2, t3, t2n, t3n, plan_=None, level_shift=0.0, stat
             for g, I, A in blocks[1]:
                 if len(I) and len(A):
                     T3p[I[:, None], A[None, :]] = blocks[0].block(t3, g)
+    if grow is not None and plan_ is not None and plan_.auto:
+        budget = memory.budget(grow[0])
+        if budget is not None:
+            lab, mod = _sector_labels(eris)
+            try:
+                again = plan(no, nv, np.dtype(dtype).itemsize, budget - grow[1], lab, mod, grow[2])
+            except MemoryError:     # (less than the plan of plans() counted on: that one stands)
+                again = None
+            if again is not None and (again.workers, again.xo_workers) > (plan_.workers, plan_.xo_workers):
+                plan_ = again
+    if stats is not None:
+        stats['plan'] = plan_
     r2, r3 = run_for(eris, ints, e, t2, T3p, plan_=plan_, stats=stats)
     del ints, T3p
     with timer('cc4.update'):

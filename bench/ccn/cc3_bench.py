@@ -11,7 +11,8 @@ against CCSD(T) on the same spinors (docs/ccn.md, section 9):
   --nvir keep the lowest N virtual spinors; --symmetry 0: the packed layout
   (no label blocks); --real 0: the spinors as the SCF left them (complex).
          cc4 | q | ccsdtq : NITER iterations of zccsdt.CC4 (no stored T4; --workers N: processes
-         over the occupied quadruples, default the cores), of CCSDT and then (Q), of CCSDTQ
+         over the occupied quadruples, default the cores), of CCSDT and then (Q) (--workers N:
+         in N processes; default: one process), of CCSDTQ
 One measurement per process; the line RESULT has the numbers.  X2C-1e
 spinors of PySCF (x2c.UHF).  ZC_MAXMEM (MB): max_memory.  For cc4 the memory is sampled
 by phase (mem_gb: the largest sum of the proportional set sizes of the process and of its
@@ -149,8 +150,10 @@ elif a.what in ('cc4', 'q', 'ccsdtq'):
         cc.kernel()
     if a.what == 'cc4':
         q = cc.plan_quadruples
+        q0 = cc._qplan      # (made before the iterations; q: that of the last pass)
         rec.update(mem.record(), workers=q.workers, xo_workers=q.xo_workers, plan_q_gb=q.need / 1e9,
-                   plan_step_gb=cc.plan_used.need / 1e9, stats=cc.quadruples_stats, maxmem=maxmem)
+                   workers_least=q0.workers, plan_least_gb=q0.need / 1e9, plan_step_gb=cc.plan_used.need / 1e9,
+                   stats={k: v for k, v in (cc.quadruples_stats or {}).items() if k != 'plan'}, maxmem=maxmem)
     rec.update(total=time.perf_counter() - t0, iterations=[round(float(x), 3) for x in cc.timings],
                e_corr=float(np.real(cc.e_corr)), nocc=int(cc.t1.shape[0]), nvir_active=int(cc.t1.shape[1]),
                dtype=str(cc.t2.dtype), peak_gb=(getattr(cc, 'peak_memory', 0) or 0) / 1e9,
@@ -158,7 +161,8 @@ elif a.what in ('cc4', 'q', 'ccsdtq'):
     if a.what == 'q':
         snap = timing.snapshot()
         t0 = time.perf_counter()
-        eq = cc.ccsdt_q()
+        eq = cc.ccsdt_q(workers=a.workers or None)
+        rec.update(q_workers=a.workers)
         rec.update(q=time.perf_counter() - t0, e_q=float(eq), q_stages=stages(snap, 2), rss_q_gb=memory.resident() / 1e9)
 else:
     cls = zccsdt.CCSDT if a.what == 'ccsdt' else zccsdt.CC3

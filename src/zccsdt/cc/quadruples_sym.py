@@ -254,14 +254,18 @@ def _stack(parts, ncol, dtype):
     return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
 
-def kernel(eris, t2, t3, max_memory=None, plan_=None, stride=1, progress=None):
+def kernel(eris, t2, t3, max_memory=None, plan_=None, stride=1, progress=None, workers=None):
     '''(E[Q], E(Q)) as zccsdt.cc.quadruples.kernel, in the symmetry sectors
-    of ``eris.labels`` (``stride``, ``progress``: as there).'''
+    of ``eris.labels`` (``stride``, ``progress``: as there).  ``workers``
+    > 1: the occupied quadruples shared out among that many processes at
+    most (kernel_processes; the default is this process alone).'''
     from zccsdt import memory
     no = eris.nocc
     nv = np.asarray(eris.fock).shape[0] - no
     if no < 4 or nv < 4:
         return 0.0, 0.0
+    if workers is not None and int(workers) > 1:
+        return kernel_processes(eris, t2, t3, int(workers), max_memory, plan_, stride, progress)
     dtype = np.result_type(t2, t3, eris.oovv)
     isz = np.dtype(dtype).itemsize
     if plan_ is None:
@@ -364,3 +368,182 @@ def kernel(eris, t2, t3, max_memory=None, plan_=None, stride=1, progress=None):
                    _INT(sec.qmin), _INT(sec.nq), p_(off22), p_(nc22), p_(off13), p_(nc13),
                    p_(sec.posV), p_(sec.posQ), p_(sec.pos3), p_(B1), p_(B2), p_(B3), p_(C1), p_(C2), p_(e))
     return float(e[0]), float(e[0] + e[1])
+
+
+# ------------------------------------------------------------ several processes
+
+def _quadruple(sec, q, I, M, XV, kpair, xl, B1, B2, B3, C1, C2):
+    """The blocks of the five products of the occupied quadruple I (total
+    label M), as kernel() forms them: B1, B2, B3 on two pairs, C1, C2 on an
+    index and a triple."""
+    dtype, ko, T3, so12 = q.dtype, sec.ko, q.T3, q.so12
+    b22, _, b13, _, off22, nc22, off13, nc13 = sec.layout(M)
+    x13, J13, s13 = q.so13.idx1[I], q.so13.idx2[I], q.so13.sgn[I]
+    p22, q22, s22 = q.so22.idx1[I], q.so22.idx2[I], q.so22.sgn[I]
+    rg = getattr(P._lib, 'zc_rows_gemm_' + P._SFX[np.dtype(dtype)])
+    p_ = P._p
+    for qq, off, nr, nc in b22:
+        rq, cq = sec.Q2[qq], sec.Q2[int(sec.red(M - qq))]
+        LA, RA, LB, RB, LZ, RZ = [], [], [], [], [], []
+        for k in range(4):
+            x, J, s = int(x13[k]), int(J13[k]), float(s13[k])
+            ke = int(sec.red(qq - ko[x]))
+            if ke in sec.V:             # <ab||e x> t(J; e, cd)
+                col, sg = sec.t3_rows(ke, int(sec.red(M - qq)))
+                LA.append(-s * q.vvvo_t[x][np.ix_(sec.V[ke], rq)])
+                RA.append(T3[J][col] * sg)
+            if ke in sec.O:             # t(x m, ab) Xo(m; J; cd)
+                ms = sec.O[ke]
+                LB.append(s * q.t2_xp[x][np.ix_(ms, rq)])
+                RB.append(q.Xo[J][np.ix_(ms, cq)])
+        for k in range(6):              # t(ij, ab) <cd||kl>
+            if kpair[p22[k]] == qq:
+                LZ.append(float(s22[k]) * q.t2_pp[p22[k]][rq][None, :])
+                RZ.append(q.vvoo_t[q22[k]][cq][None, :])
+        for Ls, Rs, B in ((LA, RA, B1), (LB, RB, B2), (LZ, RZ, B3)):
+            X = B[off:off + nr * nc].reshape(nr, nc)
+            if Ls:
+                gemm(np.ascontiguousarray(_stack(Ls, nr, dtype).T), _stack(Rs, nc, dtype), X)
+            else:
+                X[...] = 0
+    for pp, off, nr, nc in b13:
+        va, a3 = sec.V[pp], sec.A3[int(sec.red(M - pp))]
+        LC, rows, sgs = [], [], []
+        for k in range(6):              # <m a||ij> t(m kl; bcd)
+            km = int(sec.red(kpair[p22[k]] - pp))
+            if km in sec.O:
+                ms = sec.O[km]
+                sg = so12.psg[ms, q22[k]]
+                ms = ms[sg != 0]
+                if len(ms):
+                    LC.append(float(s22[k]) * q.ovoo_t[p22[k]][np.ix_(ms, va)])
+                    rows.append(so12.pos[ms, q22[k]])
+                    sgs.append(sg[sg != 0])
+        X = C1[off:off + nr * nc].reshape(nr, nc)
+        if LC:
+            L = np.ascontiguousarray(_stack(LC, nr, dtype))
+            rows = np.ascontiguousarray(np.concatenate(rows), dtype=np.int64)
+            sgs = np.ascontiguousarray(np.concatenate(sgs), dtype=np.float64)
+            cols = np.ascontiguousarray(a3, dtype=np.int64)
+            rg(p_(T3), _I64(T3.shape[1]), p_(rows), p_(sgs), _I64(len(rows)), p_(cols), _I64(nc),
+               p_(L), _I64(nr), p_(X))
+        else:
+            X[...] = 0
+        X = C2[off:off + nr * nc].reshape(nr, nc)
+        first = True
+        for k in (0, 1, 3):             # 2 t(ij, a e) Xv(e; kl; bcd), l in the second pair
+            ke = int(sec.red(kpair[p22[k]] - pp))
+            if ke in sec.V:
+                L = np.ascontiguousarray(q.t2_px[p22[k]][np.ix_(sec.V[ke], va)].T)
+                gemm(L, XV[int(xl[q22[k], 0])][ke], X, alpha=2.0 * float(s22[k]), beta=0.0 if first else 1.0)
+                first = False
+        if first:
+            X[...] = 0
+
+
+def kernel_processes(eris, t2, t3, workers, max_memory=None, plan_=None, stride=1, progress=None):
+    """kernel() with the occupied quadruples shared out among forked
+    processes with one thread each (zccsdt.cc.cc4fly._Workers), ``workers``
+    at most and as many as the memory beside the plan holds (each: its
+    blocks and cc4fly.WORKER_HEAP).  The processes read the operands of
+    this one; Xo, which they form first, and Xv are shared arrays.  The
+    same terms summed in another order: the energies of kernel() to
+    rounding.  ``progress`` is called after every group of quadruples."""
+    import time
+    from zccsdt import memory
+    from zccsdt.cc import cc4fly
+    no = eris.nocc
+    nv = np.asarray(eris.fock).shape[0] - no
+    dtype = np.dtype(np.result_type(t2, t3, eris.oovv))
+    isz = dtype.itemsize
+    budget = memory.budget(max_memory)
+    if plan_ is None:
+        plan_ = plan(eris, isz, budget)
+    sec, n22, n13 = plan_.sectors, plan_.n22, plan_.n13
+    per = (3 * n22 + 2 * n13) * isz + cc4fly.WORKER_HEAP
+    xo = Q._fixed(no, nv, isz)[2] + cc4fly.WORKER_HEAP
+    nxo = workers
+    if budget is not None:
+        room = max(0, budget - plan_.need)
+        workers, nxo = int(min(workers, max(1, room // per))), int(max(1, room // xo))
+    if workers < 2:
+        return kernel(eris, t2, t3, max_memory, plan_, stride, progress)
+    quads = P.tuples(no, 4)
+    nI3, nQ = comb(no, 3), comb(nv, 2)
+    q = Q.Quadruples(eris, t2, t3, plan_.dense, xo=cc4fly._shared((nI3, no, nQ), dtype))
+    kpair = sec.red(sec.ko[P.tuples(no, 2)].sum(axis=1))
+    xl = P.tuples(no, 2)
+    Mq = sec.red(sec.ko[quads].sum(axis=1))
+    ev = np.ascontiguousarray(np.asarray(eris.mo_energy)[no:], dtype=np.float64)
+    fn = getattr(P._lib, 'zc_q_sector_energy_' + P._SFX[dtype])
+    kv32 = np.ascontiguousarray(sec.kv, dtype=np.int32)
+    groups = [(l, xs, Is[::stride]) for l, xs, Is in q.schedule()]
+    groups = [g for g in groups if len(g[2])]
+    total = sum(len(g[2]) for g in groups)
+    nslot = max([3, min(plan_.dense.xv, no - 1)] + [len(xs) for _, xs, _ in groups])
+    slab = max(1, sec.xv_size()[0])
+    arena = cc4fly._shared((nslot * slab,), dtype)
+    state = {}
+
+    def serve(kind, payload, grab):
+        if kind == 'xo':
+            for m0, m1 in grab(no, 1):
+                q.form_xo(eris, range(m0, m1))
+            return 0.0, 0.0
+        Is, meta = payload
+        if 'b' not in state:
+            state['b'] = [np.empty(n22, dtype=dtype) for _ in range(3)] + [np.empty(n13, dtype=dtype) for _ in range(2)]
+        B1, B2, B3, C1, C2 = state['b']
+        XV = {x: {ke: arena[o:o + nr * nc].reshape(nr, nc) for ke, (o, nr, nc) in blocks.items()}
+              for x, blocks in meta.items()}
+        e = np.zeros(2)
+        p_ = P._p
+        for i0, i1 in grab(len(Is), 1):
+            for I in Is[i0:i1]:
+                I, M = int(I), int(Mq[I])
+                _, _, _, _, off22, nc22, off13, nc13 = sec.layout(M)
+                _quadruple(sec, q, I, M, XV, kpair, xl, B1, B2, B3, C1, C2)
+                fn(_INT(nv), p_(kv32), _INT(sec.modulus), _INT(M), p_(ev), _DBL(float(q.eo4[I])),
+                   _INT(sec.kmin), _INT(sec.nk), p_(sec.lid_of), p_(sec.lstart), p_(sec.lmem),
+                   _INT(sec.qmin), _INT(sec.nq), p_(off22), p_(nc22), p_(off13), p_(nc13),
+                   p_(sec.posV), p_(sec.posQ), p_(sec.pos3), p_(B1), p_(B2), p_(B3), p_(C1), p_(C2), p_(e))
+        return float(e[0]), float(e[1])
+
+    e5 = e6 = 0.0
+    done, inside = 0, 0.0
+    with timer('qs.processes'):
+        pool = cc4fly._Workers(workers, serve)
+        ok = False
+        try:
+            with timer('qs.xo'):
+                pool.map('xo', None, max(1, min(nxo, workers, no)))
+            where, meta, last = {}, {}, None
+            for l, xs, Is in groups:
+                with timer('qs.xv'):
+                    if last != l:
+                        where, meta, last = {}, {}, l
+                    need = [int(x) for x in xs]
+                    for x in [x for x in where if x not in need]:
+                        del where[x], meta[x]
+                    free = [n for n in range(nslot) if n not in where.values()]
+                    for x in need:
+                        if x in where:
+                            continue
+                        where[x] = free.pop()
+                        o, meta[x] = where[x] * slab, {}
+                        for ke, blk in xv_blocks(sec, q, x, l).items():
+                            arena[o:o + blk.size] = blk.ravel()
+                            meta[x][ke] = (o, blk.shape[0], blk.shape[1])
+                            o += blk.size
+                t0 = time.perf_counter()
+                with timer('qs.quadruples'):
+                    res = pool.map('quads', (np.asarray(Is), meta), max(1, min(workers, len(Is))))
+                e5, e6 = e5 + sum(r[0] for r in res), e6 + sum(r[1] for r in res)
+                inside += time.perf_counter() - t0
+                done += len(Is)
+                if progress is not None:
+                    progress(done, total, inside)
+            ok = True
+        finally:
+            pool.close(kill=not ok)
+    return float(e5), float(e5 + e6)

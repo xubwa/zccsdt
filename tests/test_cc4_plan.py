@@ -147,6 +147,20 @@ def test_a_failing_process_is_an_error(hbr, monkeypatch):
         cc4fly.run_sectors(ints, e, np.asarray(eris.labels), 0, cc.t2, T3, workers=2)
 
 
+def test_q_in_processes(hbr):
+    '''(Q) in sectors with the occupied quadruples shared out among
+    processes (quadruples_sym.kernel_processes) against one process.'''
+    from zccsdt.cc import quadruples_sym
+    mf, cc, eris, ints, e, T3 = hbr
+    ref = quadruples_sym.kernel(eris, cc.t2, T3)
+    out = quadruples_sym.kernel(eris, cc.t2, T3, workers=3)
+    assert abs(ref[1]) > 1e-6 and max(abs(a - b) for a, b in zip(ref, out)) < 1e-13 * abs(ref[1])
+    part = quadruples_sym.kernel(eris, cc.t2, T3, stride=3)
+    seen = []
+    out = quadruples_sym.kernel(eris, cc.t2, T3, stride=3, workers=2, progress=lambda *a: seen.append(a))
+    assert max(abs(a - b) for a, b in zip(part, out)) < 1e-13 * abs(ref[1]) and seen[-1][0] == seen[-1][1]
+
+
 def test_front_end(hbr):
     mf, cc, eris, ints, e, T3 = hbr
     assert cc.plan_quadruples.workers == 1 and cc.t4 is None

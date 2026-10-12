@@ -269,7 +269,11 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
                                                           mem_mb=opts.mem_mb, out=rbuf,
                                                           plan=plan, model='ccsdt' if cc4 else model)
                     if cc4:
-                        t2n = cc4fly.add_quadruples(eris, t1, t2, t3, t2n, t3n, qplan, opts.level_shift, qstats)
+                        # (the pass may take more processes than its plan: what is resident now decides)
+                        grow = None if opts.incore_complete else (
+                            opts.max_memory, dplan.memory if dplan is not None else 0, opts.workers)
+                        t2n = cc4fly.add_quadruples(eris, t1, t2, t3, t2n, t3n, qplan, opts.level_shift, qstats,
+                                                    grow)
                 else:
                     t1n, t2n, t3n = ccsdt.update_amps(opts, t1, t2, t3, eris)
             elif method == 'cc2':
@@ -335,4 +339,4 @@ def kernel(eris, method='ccsdt', opts=None, t1=None, t2=None, t3=None):
     return Result(e_corr=e_corr, e_tot=eris.e_hf + e_corr.real, converged=conv,
                   ncycle=icycle + 1, t1=t1, t2=t2, t3=t3, timings=timings, plan=plan,
                   diis_plan=dplan, eris=eris if model in ('cc2', 'cc3', 'cc4') else None, rotation=rotation,
-                  quadruples=qplan, stats=qstats or None)
+                  quadruples=qstats.get('plan', qplan), stats=qstats or None)
