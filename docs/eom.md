@@ -1527,6 +1527,37 @@ states with a shift, job 31939788 - the same two roots of shift 2 took
 1.02 s per product (2.4 times the sigma vector of the shifted blocks),
 39.6 s in all and 1.32 GB, with the same eigenvalues to all ten digits
 printed.
+**26 + 120 spinors, 24 threads: the left product is slower than the sigma
+vector.**  HBr / cc-pVQZ-DK, 10 frozen, the lowest 120 virtual spinors,
+label blocks (T3: 8.2e7 elements), two roots, thresholds 1e-6,
+`max_memory` 80 GB (jobs 31946736: shift 2, and 31947000: shift 0):
+
+| | shift 0 (`BlockL3`) | shift 2 (`ShiftL3`) |
+|---|---|---|
+| CCSDT iteration | 6.13 s | 6.08 s |
+| sigma vector | 10.74 s = 1.75 iterations | 10.15 s = 1.67 |
+| **left product** | **13.19 s = 2.15 iterations** | **13.07 s = 2.15** |
+| left product / sigma vector | 1.23 | 1.29 |
+| sigma vectors / left products | 30 / 36 | 31 / 37 |
+| right solve / left solve in all | 401.6 s / 484.4 s = 1.21 | 393.7 s / 493.4 s = 1.25 |
+| omega(left) - omega(right) | -4.5e-8, -3.6e-8 | -3.7e-8, 1.9e-8 |
+| resident memory above the start, peak; plan less T3 | 20.20 GB; 25.45 GB | 19.71 GB; 24.95 GB |
+| of a left product: pass 1 | 5.1 s (stacked products 2.6 s on 4.1 cores, gathers 1.3 s, density 1.1 s) | 5.1 s (2.6 s on 3.9 cores, 1.3 s, 1.0 s) |
+| pass 2 | 3.7 s (drive 1.5 s on 3.7 cores) | 3.7 s (1.5 s on 3.7 cores) |
+| ladder | 1.5 s (`Xq`, `X2` 0.7 s on 3.5 cores) | 1.5 s (0.7 s on 3.4 cores) |
+| residuals of rank one and two | 1.6 s | 1.6 s |
+
+The shifted passes cost what the passes without a shift cost; the plan
+holds at this size.  But a left product is 2.15 CCSDT iterations here,
+where it is 1.15 with 8 occupied spinors and 8 threads: the Lambda passes
+in blocks do their products per class of the indices with the threads of
+the BLAS (`gemm` on blocks that are small with six classes of 26 occupied
+spinors), where the T3 engine hands lists of small products to threads
+(`gemm_tasks`) - 6.4 s of the 13 s run on four to seven of 24 cores.  This is the
+engine of the ground-state Lambda equations as it is (measured before
+with 8 occupied spinors only: docs/lambda.md 9.7), not something of the
+left vectors; what it costs them is in 12.5.
+
 **Under a budget** (job 31942452, H2O / cc-pVTZ, thresholds 1e-6;
 `EB_LEFTMEM`: `max_memory` = the resident memory at the start of the left
 solve + 3600 MB, where the unlimited run takes 5.87 GB more): the plan
@@ -1548,10 +1579,18 @@ table has the peak above the start.)
   of a Lagrangian that is implemented), IP / EA / DEA.
 - The right-hand operands are not released for the left solve.
 - U / R-form integrals.
-- Not measured: the shifted passes beyond 8 + 78 spinors (HBr / cc-pVQZ-DK,
-  26 + 120, where the sigma vector was timed), and complex spinors with
-  labels at a production size (tested on LiH with phases).  The densities
-  of a state with a shift still go through the packed block (13.2).
+- **The threads of the Lambda passes in blocks** (12.4): with 26 occupied
+  spinors and 24 threads the stacked products of pass 1, the drive
+  products of pass 2, the products with `Xq` and `X2` and the dense
+  residuals keep four to seven cores busy - a left product takes 13 s;
+  with these parts on all cores it would be about 8 s (an estimate from
+  their share, not measured).  The remedy is the task lists of the
+  T3 engine (`t3kern.gemm_tasks`, as `ShiftT3.pass1` and `_pass2` use
+  them) in `BlockL3` and `ShiftL3`; it would speed up the ground-state
+  Lambda equations of such molecules by the same amount.
+- Not measured: complex spinors with labels at a production size (tested
+  on LiH with phases).  The densities of a state with a shift still go
+  through the packed block (13.2).
 
 ## 13. Densities of excited states and transition moments (`zccsdt.cc.eom_density`)
 

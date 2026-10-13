@@ -10,7 +10,8 @@
 # Left-hand vectors of EOM-EE-CCSDT against the right-hand ones, one node.
 #   usage: sbatch -o bench/logs/%x-%j.out bench/slurm_eom_left.sh
 #   ZC_ROOT: snapshot of the repository (with src/zccsdt/lib/*.so)
-#   EL_PARTS: which parts run (default "h2o hbr hbr2 hbr_dense")
+#   EL_PARTS: which parts run (default "h2o hbr hbr2 hbr_dense"; qz2, qz0: 26 + 120 spinors -
+#   sbatch -c 24 --mem=90G, EB_MAXMEM=80000)
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export MKL_NUM_THREADS=$OMP_NUM_THREADS OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
 cd ${ZC_ROOT:-/home/xwang405/apps/zccsdt}
@@ -29,6 +30,8 @@ h2o)       echo "=== H2O / cc-pVTZ, packed block  $(date)"; python -u bench/eom_
 hbr)       echo "=== HBr / cc-pVTZ-DK, label blocks, shift 0  $(date)"; python -u bench/eom_left_bench.py hbr 2 0 2>&1 | filter ;;
 hbr2)      echo "=== HBr / cc-pVTZ-DK, label blocks, shift 2  $(date)"; python -u bench/eom_left_bench.py hbr 2 2 2>&1 | filter ;;
 hbr_dense) echo "=== HBr / cc-pVTZ-DK, packed block  $(date)"; python -u bench/eom_left_bench.py hbr_dense 3 2>&1 | filter ;;
+qz2)       echo "=== HBr / cc-pVQZ-DK (26 + 120), label blocks, shift 2  $(date)"; python -u bench/eom_left_bench.py hbr_qz 2 2 2>&1 | filter ;;
+qz0)       echo "=== HBr / cc-pVQZ-DK (26 + 120), label blocks, shift 0  $(date)"; python -u bench/eom_left_bench.py hbr_qz 2 0 2>&1 | filter ;;
 esac
 done
 find "$S" -delete

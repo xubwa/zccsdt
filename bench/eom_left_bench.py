@@ -5,6 +5,8 @@ right-hand ones of the same run (docs/eom.md, section 12):
     python -u bench/eom_left_bench.py hbr [NROOTS] [SHIFT] HBr / cc-pVTZ-DK, X2C, 28 frozen (8 + 78), label blocks;
                                                            SHIFT: the label shift (default 0)
     python -u bench/eom_left_bench.py hbr_dense [NROOTS]   the same on the packed block
+    python -u bench/eom_left_bench.py hbr_qz [NROOTS] [SHIFT]   HBr / cc-pVQZ-DK, 10 frozen, the lowest 120 virtual
+                                                           spinors (26 + 120), label blocks
 
 Environment: EB_MAXMEM (MB, default 26000), EB_CONV (default 1e-6), EB_BASIS
 (default cc-pvtz / cc-pvtz-dk), EB_DENSITY=1: the excited-state densities,
@@ -41,13 +43,18 @@ if case == 'h2o':
     print('E(RHF) = %.12f' % rhf.e_tot)
     cc = zccsdt.CCSDT(scf.addons.convert_to_ghf(rhf))
 else:
-    mol = gto.M(atom='Br 0 0 0; H 0 0 1.4145', basis=os.environ.get('EB_BASIS', 'cc-pvtz-dk'), verbose=0)
+    mol = gto.M(atom='Br 0 0 0; H 0 0 1.4145', verbose=0,
+                basis=os.environ.get('EB_BASIS', 'cc-pvqz-dk' if case == 'hbr_qz' else 'cc-pvtz-dk'))
     mf = x2c.UHF(mol)
     mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-8
     mf.kernel()
     print('E(X2C SCF) = %.12f' % mf.e_tot)
-    cc = zccsdt.CCSDT(mf, frozen=28)
-    cc.symmetry = case == 'hbr'
+    frozen = 28
+    if case == 'hbr_qz':    # the lowest occupied and the highest virtual spinors left out
+        order, nocc = np.argsort(mf.mo_energy), int((np.asarray(mf.mo_occ) > 0).sum())
+        frozen = [int(i) for i in order[:10]] + [int(i) for i in order[nocc + 120:]]
+    cc = zccsdt.CCSDT(mf, frozen=frozen)
+    cc.symmetry = case != 'hbr_dense'
 cc.verbose = 4
 cc.max_memory = float(os.environ.get('EB_MAXMEM', 26000))
 cc.conv_tol, cc.conv_tol_normt = 1e-10, 1e-8
