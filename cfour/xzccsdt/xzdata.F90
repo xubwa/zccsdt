@@ -125,6 +125,13 @@ module xzdata
   integer(8) :: nt4old = 0          ! evaluations of the earlier runs (of nt4)
   integer(8) :: nt4run = 0          ! evaluations of this run, the sigma vectors of EOM-CC4 with them
   integer(8) :: nt4stop = 0         ! option cc4stop n (a test hook): the run stops after n of them
+  ! the extrapolation over the macro iterations (N(xz4acc)): on - the plan found room for its three
+  ! sets of amplitudes in the work array of rank 0, and option cc4acc is not 0; their places (the
+  ! amplitudes of the last evaluation, g and f of the macro iteration before), the macro iterations
+  ! in its history, the largest factor between the first steps of two evaluations
+  logical :: acc4 = .false.
+  integer(8) :: a4x = 0, a4g = 0, a4f = 0, a4n = 0
+  real(8) :: a4kmax = 0d0
   real(8) :: e4ccsdt = 0d0          ! the CCSDT correlation energy of the start (0: none)
   real(8) :: t4sec = 0d0            ! seconds of the evaluations
   ! the T1-dressed <ab||cd> that the Xv of CC4 is made from, [Q][Q'] in the blocks of jvvvv: made once per

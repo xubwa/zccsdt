@@ -25,9 +25,9 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   logical, intent(out) :: converged
   integer(8), intent(out) :: ncyc
   integer(8) :: kt1n, kt2n, kr3, icyc, m0, n, kb1, kb2, nsince
-  logical :: fromccsd, t4now, fresh, conv, phase4, resumed
-  real(8) :: fmicro, dmac, demac, t4s, dprev, kap, dsaved
-  integer(8) :: kc4
+  logical :: fromccsd, t4now, fresh, conv, phase4, resumed, accel, havex, accx
+  real(8) :: fmicro, dmac, demac, t4s, dprev, kap, dsaved, theta
+  integer(8) :: kc4, nall
   character(len=24) :: mark
   integer(8), external :: N(xzdiis_target)
   real(8) :: norms(3), eold, enew, de, normt, t0, t1w, ctl(2), tsg
@@ -41,10 +41,14 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   m0 = xzmark()
   kt1n = xzget(NW * no * nv, 'new T1')
   kt2n = xzget(NW * no * no * nv * nv, 'new T2')
+  accel = .false.
+  nall = no * nv + no * no * nv * nv + n3
   if (cc4) then
     ! CC4: the T4 terms of the doubles and triples equations (xzcc4.inc)
     jd42 = xzget(NW * npo * nvp, 'CC4: T4 term of R2')
     jd43 = xzget(NW * n3, 'CC4: T4 terms of R3')
+    ! (the extrapolation over the macro iterations: the plan says whether its arrays fit)
+    accel = acc4 .and. (cc4mode == 0 .or. cc4mode == 3)
   end if
   if (xzworker()) then
     ! a rank other than 0: no DIIS vectors, one region for its part of the
@@ -63,6 +67,13 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       return
     end if
   else
+    ! CC4, macro / micro: the extrapolation over the macro iterations (N(xz4acc)) keeps three
+    ! sets of amplitudes on rank 0
+    if (accel) then
+      a4x = xzget(NW * nall, 'CC4: the amplitudes of the last evaluation')
+      a4g = xzget(NW * nall, 'CC4: the amplitudes of the macro iteration before')
+      a4f = xzget(NW * nall, 'CC4: their change in that macro iteration')
+    end if
     call N(xzdiis_alloc)(nslot, usefile, nch)
   end if
   ! option start ccsd: T1 and T2 of CFOUR's xx2cccsd as the start (its files
@@ -89,6 +100,8 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     call zc_vzero_d(NW * n3, w(jd43))
   end if
   dsaved = 0d0
+  a4n = 0
+  a4kmax = 0d0
   if (cc4rst > 0) then
     ! CC4 from the file XZCC4 of an earlier run: its amplitudes (cc4rst 1: and the T4 terms of its last evaluation)
     call N(xz4ckpt)(w, 'r', kc4, eold, dsaved)
@@ -176,6 +189,17 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     fresh = .true.
     dprev = dsaved
   end if
+  havex = .false.
+  accx = .false.
+  if (accel .and. resumed) then
+    ! (the amplitudes of the file are those of its evaluation; g and f of the
+    ! macro iteration before came with them)
+    call N(xz4accget)(w, a4x)
+    havex = .true.
+  else
+    a4n = 0
+    a4kmax = 0d0
+  end if
   fmicro = 1d-2
   call xzoptget('cc4micro', dbg, ldbg)
   if (ldbg > 0) read(dbg(1:ldbg), *) fmicro
@@ -214,6 +238,9 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       ctl = [1d0, merge(0d0, 1d0, icyc == 1)]
       if (t4now) ctl(1) = merge(2d0, 3d0, cc4mode == 0 .or. cc4mode == 3 .or. nt4 == 0)
       if (icyc == 1 .and. (cc4start .or. cc4rst > 0)) ctl(2) = 2d0
+      ! (the amplitudes of rank 0 were extrapolated: all of T3 to the ranks)
+      if (accx) ctl(2) = 2d0
+      accx = .false.
       ! (4: the T4 term of the doubles equation of an earlier run follows)
       if (icyc == 1 .and. resumed) ctl(1) = 4d0
       call xzmpi_bcast(ctl, 16_8)
@@ -227,6 +254,10 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     mark = ' '
     if (icyc == 1 .and. resumed) write(mark, '(a,i3,a)') '   T4', nt4, ' (XZCC4)'
     if (t4now) then
+      if (accel .and. .not. havex) then
+        call N(xz4accget)(w, a4x)
+        havex = .true.
+      end if
       t4s = omp_get_wtime()
       call xztic()
       call N(xzt4)(w, jt1, jt2, jt3, jd42, jd43, 0d0)
@@ -311,6 +342,10 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
           write(6, '(a,i3,a,f18.12,a,es9.2,a,es9.2,a,f7.4)') '     with the T4 terms of evaluation ', nt4, &
             ': correlation energy ', enew, ';  its first step changed the amplitudes by ', dmac, ', the energy by ', &
             demac, ';  factor ', kap
+          ! (with the extrapolation the factors fall from one evaluation to the next:
+          ! the estimate takes the largest that was seen)
+          a4kmax = max(a4kmax, kap)
+          if (accel) kap = a4kmax
           if (cc4mode == 0 .and. dprev > 0d0 .and. kap < 0.5d0 .and. 2d0 * kap * dmac < conv_t &
               .and. 2d0 * kap * demac < conv_e) then
             write(6, '(a,es9.2,a)') '     new T4 terms would change the amplitudes by about ', kap * dmac, &
@@ -320,6 +355,17 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
             exit
           end if
           dprev = dmac
+          ! the amplitudes of the next evaluation: extrapolated from the last two macro iterations
+          if (accel) then
+            call N(xz4acc)(w, a4x, a4g, a4f, a4n, theta)
+            if (theta /= 0d0) then
+              call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
+              eold = dble(e)
+              accx = .true.
+              write(6, '(a,f9.5,a,f18.12)') '     the amplitudes of the next evaluation: extrapolated over the last two macro ' // &
+                'iterations, theta ', theta, ';  correlation energy ', eold
+            end if
+          end if
         end if
       end if
       fresh = .false.

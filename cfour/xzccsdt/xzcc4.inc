@@ -471,22 +471,121 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
 end subroutine
 
 ! ---------------------------------------------------------------------------
+! The extrapolation over the macro iterations of CC4 (Anderson, one step of
+! history).  A macro iteration is the map G: amplitudes x at which the T4
+! terms are evaluated -> the amplitudes g that solve the equations of CCSDT
+! with these terms held.  With f = g - x of this and of the macro iteration
+! before, the next evaluation is made at
+!   x' = g - theta (g - g_before),   theta = <f, f - f_before> / |f - f_before|^2,
+! the combination of the two g for which that of the two f is shortest.
+! kx: x (N(xz4accget) took it when the T4 terms were evaluated), kg, kf: g
+! and f of the macro iteration before (nacc > 0), each [T1 | T2 | T3].  On
+! return the amplitudes are x', and kx, kg, kf are ready for the next call;
+! theta = 0: no step (the first call, or a theta beyond 1/2 in size).
+subroutine N(xz4acc)(w, kx, kg, kf, nacc, theta)
+  use xzdata
+  use xzkern
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx, kg, kf
+  integer(8), intent(inout) :: nacc
+  real(8), intent(out) :: theta
+  integer(8) :: n(3), kt(3), o(3), p
+  ZT :: s
+  real(8) :: dff, dfp, dpp, den
+  n = [no * nv, no * no * nv * nv, n3]
+  kt = [jt1, jt2, jt3]
+  o = [0_8, n(1), n(1) + n(2)]
+  theta = 0d0
+  ! f = g - x, in the place of x
+  do p = 1, 3
+    call N(xz4accf)(n(p), w(kt(p)), w(kx + NW * o(p)))
+  end do
+  if (nacc > 0) then
+    dff = 0d0
+    dfp = 0d0
+    dpp = 0d0
+    do p = 1, 3
+      call N(zc_vdot)(n(p), w(kx + NW * o(p)), w(kx + NW * o(p)), s)
+      dff = dff + dble(s)
+      call N(zc_vdot)(n(p), w(kx + NW * o(p)), w(kf + NW * o(p)), s)
+      dfp = dfp + dble(s)
+      call N(zc_vdot)(n(p), w(kf + NW * o(p)), w(kf + NW * o(p)), s)
+      dpp = dpp + dble(s)
+    end do
+    den = dff - 2d0 * dfp + dpp
+    if (den > 0d0) theta = (dff - dfp) / den
+    if (abs(theta) > 0.5d0) theta = 0d0
+  end if
+  ! the amplitudes: g - theta (g - g_before); g and f kept
+  do p = 1, 3
+    call N(xz4accs)(n(p), theta, w(kt(p)), w(kg + NW * o(p)))
+    call N(xzecopy)(n(p), w(kx + NW * o(p)), w(kf + NW * o(p)))
+    call N(xzecopy)(n(p), w(kt(p)), w(kx + NW * o(p)))
+  end do
+  nacc = nacc + 1
+end subroutine
+
+! the amplitudes [T1 | T2 | T3] to kx
+subroutine N(xz4accget)(w, kx)
+  use xzdata
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx
+  call N(xzecopy)(no * nv, w(jt1), w(kx))
+  call N(xzecopy)(no * no * nv * nv, w(jt2), w(kx + NW * no * nv))
+  call N(xzecopy)(n3, w(jt3), w(kx + NW * (no * nv + no * no * nv * nv)))
+end subroutine
+
+! x <- g - x
+subroutine N(xz4accf)(n, g, x)
+  implicit none
+  integer(8), intent(in) :: n
+  ZT, intent(in) :: g(n)
+  ZT, intent(inout) :: x(n)
+  integer(8) :: i
+  !$omp parallel do
+  do i = 1, n
+    x(i) = g(i) - x(i)
+  end do
+end subroutine
+
+! t <- t - theta (t - g), g <- the t of before
+subroutine N(xz4accs)(n, theta, t, g)
+  implicit none
+  integer(8), intent(in) :: n
+  real(8), intent(in) :: theta
+  ZT, intent(inout) :: t(n), g(n)
+  integer(8) :: i
+  ZT :: tk
+  !$omp parallel do private(tk)
+  do i = 1, n
+    tk = t(i)
+    t(i) = tk - theta * (tk - g(i))
+    g(i) = tk
+  end do
+end subroutine
+
+! ---------------------------------------------------------------------------
 ! The file XZCC4 of the run directory: the CC4 iterations for a later run
 ! (docs/native.md, section 19.9).  Rank 0 writes it after every completed
 ! evaluation of the T4 terms (macro / micro) and when CC4 has converged; an
 ! unformatted stream:
-!   character(8)  'XZCC4_01'
+!   character(8)  'XZCC4_02'
 !   integer(8)    active occupied, active virtual, spinors, frozen occupied
 !                 spinors; words per element, classes of the labels, elements
 !                 of T3 as stored; T4 evaluations so far; CC_CONV of converged
 !                 amplitudes, or -1: the amplitudes at which the last
-!                 evaluation was made, followed by its terms
+!                 evaluation was made, followed by its terms; the macro
+!                 iterations in the history of the extrapolation (0 or 1)
 !   real(8)       the three numbers of XZKEY (xzkeyval); the CCSDT correlation
 !                 energy of the start, the correlation energy of the
 !                 amplitudes, the change of the amplitudes in the first step
-!                 after the evaluation before, the seconds of the evaluations
+!                 after the evaluation before, the seconds of the evaluations,
+!                 the largest factor between the first steps of two evaluations
 !   T1 [i][a], T2 [i][j][a][b], T3 as stored
-!   if not converged: the T4 terms of R2 [P][Q] and of R3 (as T3)
+!   if not converged: the T4 terms of R2 [P][Q] and of R3 (as T3); with a
+!   history, g and f of the macro iteration before (N(xz4acc); [T1 | T2 | T3] each)
 ! rw = 'w': written from jt1, jt2, jt3, jd42, jd43 - to XZCC4.new, which then
 ! takes the name (an interrupted write leaves the file of before); a failure
 ! is a warning.  'r': into these places; cconv, ecorr, dprev of the file,
@@ -501,22 +600,27 @@ subroutine N(xz4ckpt)(w, rw, cconv, ecorr, dprev)
   integer(8), intent(inout) :: cconv
   real(8), intent(inout) :: ecorr, dprev
   character(len=8) :: tag
-  integer(8) :: hd(9), n1, n2
-  real(8) :: key(3), st(4), t0
+  integer(8) :: hd(10), n1, n2, nh, nall
+  real(8) :: key(3), st(5), t0
   integer(8) :: ios
   n1 = NW * no * nv
   n2 = NW * no * no * nv * nv
+  nall = n1 + n2 + NW * n3
   t0 = omp_get_wtime()
   if (rw == 'w') then
     call xzkeyval(key)
+    nh = 0
+    if (cconv < 0 .and. acc4) nh = min(a4n, 1_8)
     open(unit=77, file='XZCC4.new', form='unformatted', access='stream', status='replace', iostat=ios)
-    if (ios == 0) write(77, iostat=ios) 'XZCC4_01', no, nv, ntot, nfrozen, int(NW, 8), ncls, n3, nt4, cconv, key, &
-                                        e4ccsdt, ecorr, dprev, t4sec
+    if (ios == 0) write(77, iostat=ios) 'XZCC4_02', no, nv, ntot, nfrozen, int(NW, 8), ncls, n3, nt4, cconv, nh, key, &
+                                        e4ccsdt, ecorr, dprev, t4sec, a4kmax
     if (ios == 0) write(77, iostat=ios) w(jt1:jt1 + n1 - 1)
     if (ios == 0) write(77, iostat=ios) w(jt2:jt2 + n2 - 1)
     if (ios == 0) write(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
     if (ios == 0 .and. cconv < 0) write(77, iostat=ios) w(jd42:jd42 + NW * npo * nvp - 1)
     if (ios == 0 .and. cconv < 0) write(77, iostat=ios) w(jd43:jd43 + NW * n3 - 1)
+    if (ios == 0 .and. nh > 0) write(77, iostat=ios) w(a4g:a4g + nall - 1)
+    if (ios == 0 .and. nh > 0) write(77, iostat=ios) w(a4f:a4f + nall - 1)
     if (ios == 0) close(77, iostat=ios)
     if (ios == 0) ios = xz_rename('XZCC4.new' // c_null_char, 'XZCC4' // c_null_char)
     if (ios /= 0) then
@@ -525,7 +629,8 @@ subroutine N(xz4ckpt)(w, rw, cconv, ecorr, dprev)
       close(77, status='delete', iostat=ios)
     else if (cconv < 0) then
       write(6, '(a,i3,a,f10.1,a,f8.2,a)') '     checkpoint: the amplitudes and the T4 terms of evaluation ', nt4, &
-        ' written to the file XZCC4 (', 8d-6 * (n1 + n2 + 2 * NW * n3 + NW * npo * nvp), ' MB, ', omp_get_wtime() - t0, &
+        ' written to the file XZCC4 (', 8d-6 * (n1 + n2 + 2 * NW * n3 + NW * npo * nvp + 2 * nh * nall), ' MB, ', &
+        omp_get_wtime() - t0, &
         ' s): a run of this ZMAT in this directory continues after it'
     else
       write(6, '(a,f10.1,a,f8.2,a)') '  the converged CC4 amplitudes written to the file XZCC4 (', &
@@ -536,7 +641,7 @@ subroutine N(xz4ckpt)(w, rw, cconv, ecorr, dprev)
   end if
   open(unit=77, file='XZCC4', form='unformatted', access='stream', status='old', action='read', iostat=ios)
   if (ios == 0) read(77, iostat=ios) tag, hd, key, st
-  if (ios /= 0 .or. tag /= 'XZCC4_01') then
+  if (ios /= 0 .or. tag /= 'XZCC4_02') then
     write(6, '(/,a)') ' @XZCCSDT-F, the file XZCC4 cannot be read.'
     call xzerrex
   end if
@@ -560,6 +665,14 @@ subroutine N(xz4ckpt)(w, rw, cconv, ecorr, dprev)
   if (ios == 0) read(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
   if (ios == 0 .and. cconv < 0) read(77, iostat=ios) w(jd42:jd42 + NW * npo * nvp - 1)
   if (ios == 0 .and. cconv < 0) read(77, iostat=ios) w(jd43:jd43 + NW * n3 - 1)
+  ! (the history of the extrapolation, if this run extrapolates)
+  a4n = 0
+  a4kmax = st(5)
+  if (ios == 0 .and. cconv < 0 .and. hd(10) > 0 .and. acc4) then
+    read(77, iostat=ios) w(a4g:a4g + nall - 1)
+    if (ios == 0) read(77, iostat=ios) w(a4f:a4f + nall - 1)
+    a4n = hd(10)
+  end if
   close(77)
   if (ios /= 0) then
     write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZCC4 failed, iostat ', ios

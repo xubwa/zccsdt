@@ -833,7 +833,7 @@ subroutine xz4chk(conv, state, nev)
   integer(8), intent(in) :: conv
   integer(8), intent(out) :: state, nev
   character(len=8) :: tag
-  integer(8) :: hd(9)
+  integer(8) :: hd(10)
   real(8) :: e(3), ek(3)
   integer :: ios
   logical :: there
@@ -844,7 +844,7 @@ subroutine xz4chk(conv, state, nev)
   open(unit=77, file='XZCC4', form='unformatted', access='stream', status='old', action='read', iostat=ios)
   if (ios == 0) read(77, iostat=ios) tag, hd, ek
   close(77)
-  if (ios /= 0 .or. tag /= 'XZCC4_01') return
+  if (ios /= 0 .or. tag /= 'XZCC4_02') return
   call xzkeyval(e)
   if (hd(1) /= no .or. hd(2) /= nv .or. hd(3) /= ntot .or. hd(4) /= nfrozen) return
   if (abs(e(1) - ek(1)) > 1d-9 * max(1d0, abs(e(1)))) return
