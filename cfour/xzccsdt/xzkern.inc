@@ -381,6 +381,13 @@
       type(*), dimension(*) :: r, tri, kv, off, nq, posv, posq, y
     end subroutine
 
+    subroutine N(zc_cc4_rows_gemm)(m, ld, rows, sg, nr, nc, l, na, alpha, x) bind(C)
+      import
+      integer(c_int64_t), value :: ld, nr, nc, na
+      real(c_double), value :: alpha
+      type(*), dimension(*) :: m, rows, sg, l, x
+    end subroutine
+
     subroutine N(zc_cc4_addrows)(r, ld, tgt, nr, nc, x) bind(C)
       import
       integer(c_int64_t), value :: ld, nr, nc

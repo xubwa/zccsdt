@@ -389,6 +389,13 @@ what the ZMAT asks for (as joda stored it in JOBARC):
     CALC=CC3,EXCITE=EOMEE               CC3, then EOM-EE-CC3 from the folded problem in
                                         singles and doubles, each root self-consistent
                                         in omega, for the label shifts of %xzeom
+    CALC=CC4                            CC4, the quadruples never stored: from the CCSDT
+                                        amplitudes (XZAMPS, or CCSDT solved first), the
+                                        T4 terms evaluated a few times and held while
+                                        the equations of CCSDT with them are iterated
+    CALC=CC4,EXCITE=EOMEE               CC4, then EOM-EE-CC4 (singles, doubles, triples;
+                                        the quadruples folded in at the frequency of
+                                        every root), label shifts of %xzeom; one MPI rank
 
 CC_CONV (the amplitudes to 10^-CC_CONV, the energy to 10^-(CC_CONV+2)),
 CC_MAXCYC, MEMORY_SIZE (all working memory is CFOUR's work array), DROPMO /
@@ -402,7 +409,9 @@ are taken and the iterations skipped - e.g. CALC=CCSDT, then (xjoda again
 with) CALC=CCSDT(Q) or EXCITE=EOMEE in the same directory computes only the
 new part; the output says "taken" or "solved here".  Remove the files to
 force a new solution.  CC3 amplitudes are solved in every run (a CC3 run
-does not read XZKEY and removes it).
+does not read XZKEY and removes it).  CC4 takes the CCSDT amplitudes of
+XZAMPS as its start (or solves CCSDT first and writes them); its own
+amplitudes are not written, XZAMPS stays that of CCSDT.
 
 CC3: the triples equation takes the Fock operator as the diagonal of the
 spinor energies.  The program prints the largest elements of the Fock
@@ -432,7 +441,14 @@ ordinary run needs none of them:
                      diagonal that is accepted
     omegatol         EOM-CC3: |lambda(omega) - omega| at convergence (default
                      ESTATE_CONV / 100)
-    foldwin 5e-4     EOM-CC3: roots closer than this (Eh) are solved together
+    foldwin 5e-4     EOM-CC3, EOM-CC4: roots closer than this (Eh) are solved together
+    cc4 macro        confirm: converged only when new T4 terms leave the first
+                     step below the thresholds (one evaluation more); plain: the
+                     T4 terms in every iteration; scratch: the same from the
+                     second-order amplitudes (no CCSDT first)
+    cc4micro 1e-2    CC4: the equations with the T4 terms held are iterated to
+                     this fraction of the change of the first step
+    cc4eom macro     davidson: every sigma vector of EOM-CC4 with the T4 terms
     start ccsd       CCSDT from T1, T2 of xx2cccsd (files t1guess, t2guess)
     hh pair          the hh ladder of dense T3 through occupied pairs
     qmap 0           (Q): T3 in the work array of every rank, not mapped
@@ -456,8 +472,9 @@ Test
 HF / 6-31G (CFOUR's GENBAS entries), X2C-1e, %dglin (labels of dgcosym,
 real arithmetic), CALC=CCSDT: runs the chain in a new directory below the
 current one (or \$XZTEST_DIR), then $prog a second time (which must take
-XZAMPS), then with CALC=CC3 (xjoda again), and compares E(SCF), E(CCSDT)
-and E(CC3) with the reference numbers; PASS or FAIL.  A few seconds.  Do not run it with a source directory as the
+XZAMPS), then with CALC=CC3 and with CALC=CC4 (xjoda again; CC4 starts from
+XZAMPS), and compares E(SCF), E(CCSDT), E(CC3) and E(CC4) with the reference
+numbers; PASS or FAIL.  A few seconds.  Do not run it with a source directory as the
 current directory.
 
 Origin

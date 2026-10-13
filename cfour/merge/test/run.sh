@@ -13,14 +13,17 @@
 # current one (or $XZTEST_DIR): xjoda, xsox2catm, xsox2chf, xx2cvtran,
 # xzccsdt; then xzccsdt once more, which must take the amplitudes of the
 # first run (file XZAMPS) instead of iterating; then CALC=CC3 (xjoda again):
-# CC3 without stored triples.  Compared with the reference numbers below:
-# E(SCF), E(CCSDT) and E(CC3) to 1e-8 Eh.  Prints PASS or FAIL;
+# CC3 without stored triples; then CALC=CC4, which must start from the CCSDT
+# amplitudes of XZAMPS (written again by the program before it: the CC3 run
+# has removed XZKEY).  Compared with the reference numbers below: E(SCF),
+# E(CCSDT), E(CC3) and E(CC4) to 1e-8 Eh.  Prints PASS or FAIL;
 # exit status 0 on PASS.  A few seconds (OMP_NUM_THREADS threads).
 #
 set -u
 ref_scf=-100.064473416710
 ref_cc=-100.196412399000
 ref_cc3=-100.196407469096
+ref_cc4=-100.196781330907
 tol=1e-8
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -47,6 +50,13 @@ sed -i 's/CALC=CCSDT,/CALC=CC3,/' ZMAT
 "$bin/xjoda" > xjoda.cc3.out 2>&1 || { echo "FAIL: xjoda (CALC=CC3) stopped (exit $?), see $d/xjoda.cc3.out"; exit 1; }
 "$xz" > xzccsdt.cc3.out 2>&1 || { echo "FAIL: xzccsdt (CALC=CC3) stopped (exit $?), see $d/xzccsdt.cc3.out"; exit 1; }
 
+# CC4: from the CCSDT amplitudes (CALC=CCSDT once more writes XZAMPS and XZKEY), the quadruples never stored
+sed -i 's/CALC=CC3,/CALC=CCSDT,/' ZMAT
+"$bin/xjoda" > xjoda.3.out 2>&1 && "$xz" > xzccsdt.3.out 2>&1 || { echo "FAIL: CALC=CCSDT (third run) stopped, see $d/xzccsdt.3.out"; exit 1; }
+sed -i 's/CALC=CCSDT,/CALC=CC4,/' ZMAT
+"$bin/xjoda" > xjoda.cc4.out 2>&1 || { echo "FAIL: xjoda (CALC=CC4) stopped (exit $?), see $d/xjoda.cc4.out"; exit 1; }
+"$xz" > xzccsdt.cc4.out 2>&1 || { echo "FAIL: xzccsdt (CALC=CC4) stopped (exit $?), see $d/xzccsdt.cc4.out"; exit 1; }
+
 val() { awk -v k="$2" '$1 == k { v = $NF } END { print v }' "$1"; }
 bad=0
 check() {   # what value reference
@@ -66,5 +76,7 @@ grep -q 'taken, the CCSDT iterations are skipped' xzccsdt.2.out || { echo "  the
 grep -q 'CCSDT converged in' xzccsdt.2.out && { echo "  the second run iterated"; bad=1; }
 check 'E(CC3)' "$(val xzccsdt.cc3.out 'E(CC3)')" $ref_cc3
 grep -q 'CC3 converged in' xzccsdt.cc3.out || { echo "  the CC3 run did not iterate (CCSDT amplitudes taken?)"; bad=1; }
+check 'E(CC4)' "$(val xzccsdt.cc4.out 'E(CC4)')" $ref_cc4
+grep -q 'they are the start of the CC4 iterations' xzccsdt.cc4.out || { echo "  the CC4 run did not start from XZAMPS"; bad=1; }
 if [ $bad = 0 ]; then echo "PASS"; else echo "FAIL (outputs in $d)"; fi
 exit $bad

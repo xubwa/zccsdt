@@ -131,6 +131,30 @@ void zc_cc4_red12_##SFX(T *R, const int32_t *tri, int64_t nt, int n,           \
     }                                                                          \
 }                                                                              \
                                                                                \
+/* X[a, c] += alpha sum_r L[r, a] sg[r] M[rows[r] * ld + c]: zc_rows_gemm of     \
+ * csrc/tnpack.c on all columns of the rows, added to X (L: [nr, na],          \
+ * X: [na, nc]) */                                                             \
+void zc_cc4_rows_gemm_##SFX(const T *M, int64_t ld, const int64_t *rows,       \
+        const double *sg, int64_t nr, int64_t nc, const T *L, int64_t na,      \
+        double alpha, T *X)                                                    \
+{                                                                              \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *tmp = malloc(sizeof(T) * (size_t)(nr > 0 ? nr : 1));                \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t c = 0; c < nc; c++) {                                     \
+            for (int64_t r = 0; r < nr; r++)                                   \
+                tmp[r] = (alpha * sg[r]) * M[rows[r] * ld + c];                \
+            for (int64_t a = 0; a < na; a++) {                                 \
+                T x = 0;                                                       \
+                for (int64_t r = 0; r < nr; r++) x += L[r * na + a] * tmp[r];  \
+                X[a * nc + c] += x;                                            \
+            }                                                                  \
+        }                                                                      \
+        free(tmp);                                                             \
+    }                                                                          \
+}                                                                              \
+                                                                               \
 /* R[tgt[r] * ld + c] += X[r * nc + c], c < nc (rows may repeat: the threads   \
  * take blocks of columns) */                                                  \
 void zc_cc4_addrows_##SFX(T *R, int64_t ld, const int64_t *tgt, int64_t nr,    \

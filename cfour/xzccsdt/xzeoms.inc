@@ -481,6 +481,42 @@ subroutine N(xzeorth)(w, n, kx, rel)
 end subroutine
 
 ! ---------------------------------------------------------------------------
+! The sigma vector of the solver: N(xzesig), or - EOM-CC4, macro / micro
+! (xzcc4.inc; e4nq of xzeomd > 0) - of the matrix with the T4 terms held on
+! the span of the e4nq orthonormal vectors q_c at e4kq, whose sigma vectors
+! with the T4 terms F_c are at e4kf:
+!   B x = A_PP (x - sum_c q_c (q_c|x)) + sum_c F_c (q_c|x).
+subroutine N(xzesigm)(w, kv, ks, sd)
+  use xzdata
+  use xzmem
+  use xzkern
+  use xzeomd
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kv, ks
+  logical, intent(in) :: sd
+  integer(8) :: m, kt, nlen, c
+  ZT :: a(64)
+  if (e4nq == 0 .or. sd .or. efold) then
+    call N(xzesig)(w, kv, ks, sd)
+    return
+  end if
+  nlen = no * nv + npo * nvp + n3s
+  m = xzmark()
+  kt = xzget(NW * nlen, 'EOM-CC4: the vector without its part on q')
+  call N(xzecopy)(nlen, w(kv), w(kt))
+  do c = 1, e4nq
+    call N(zc_vdot)(nlen, w(e4kq + NW * nlen * (c - 1)), w(kv), a(c))
+    call N(xzeaxpyc)(nlen, -a(c), w(e4kq + NW * nlen * (c - 1)), w(kt))
+  end do
+  call N(xzesig)(w, kt, ks, sd)
+  do c = 1, e4nq
+    call N(xzeaxpyc)(nlen, a(c), w(e4kf + NW * nlen * (c - 1)), w(ks))
+  end do
+  call xzrel(m)
+end subroutine
+
+! ---------------------------------------------------------------------------
 ! The solver of one problem (one label shift; the singles-doubles block of
 ! it if sd).
 !   nroot      roots wanted: the lowest
@@ -517,6 +553,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   ZT, intent(out) :: vlead(nlead, nroot)
   integer, intent(in) :: iures
   integer(8) :: nsd, nlen, n, n0, nconv, it, k, j, g, c, ntarget, nun, mkeep, nadded, icv, mv, jbest, nkeep, i
+  integer(8) :: nin, nout
   ZT, allocatable :: gm(:, :), ym(:, :), cr(:, :), coef(:), dots(:), qm(:, :), qr(:), gq(:, :)
   complex(8), allocatable :: ev(:)
   logical, allocatable :: flag(:)
@@ -530,6 +567,12 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   nsd = no * nv + npo * nvp
   nlen = nsd
   if (.not. sd) nlen = nsd + n3s
+  ! (the vectors to start from and those returned at kout: singles and
+  ! doubles, or - EOM-CC4, evfin / evfout - whole vectors)
+  nin = nsd
+  nout = nsd
+  if (evfin) nin = nlen
+  if (evfout) nout = nlen
   nfound = 0
   nsig = 0
   nit = 0
@@ -555,7 +598,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     if (n >= msub) exit
     call zc_vzero_d(NW * nlen, w(kxa))
     if (kstart > 0) then
-      call N(xzecopy)(nsd, w(kstart + NW * nsd * (g - 1)), w(kxa))
+      call N(xzecopy)(nin, w(kstart + NW * nin * (g - 1)), w(kxa))
     else
       call N(xzeone)(w(kxa + NW * singles(g)))
     end if
@@ -583,6 +626,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     nit = it
     call N(xzesmall)(n, gm, msub, ev, ym)
     if (nfollow > 0) call follow()
+    if (it == 1) eritz0(1:min(n, 64_8)) = dble(ev(1:min(n, 64_8)))
     needdiag = .false.
     ! the converged roots among the eigenvectors, by their overlap
     call mark_converged()
@@ -687,7 +731,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
       wts(3, k) = dble(s)
     end if
     call N(xzelead)(no * nv, w(kxa), nlead, lead(1, k), vlead(1, k))
-    if (kout > 0) call N(xzecopy)(nsd, w(kxa), w(kout + NW * nsd * (k - 1)))
+    if (kout > 0) call N(xzecopy)(nout, w(kxa), w(kout + NW * nout * (k - 1)))
     if (iures > 0) then
       if (k == 1) then
         write(iures, pos=wpos, iostat=ios) eshift, k, nlen, dble(ev(k)), aimag(ev(k)), w(kxa:kxa + NW * nlen - 1)
@@ -768,7 +812,7 @@ contains
     call N(xzevput)(w, 1, n + 1, kxa)
     ts = omp_get_wtime()
     if (efold) call N(xzefsend)(w, kxa)
-    call N(xzesig)(w, kxa, kxb, sd)
+    call N(xzesigm)(w, kxa, kxb, sd)
     if (sd .and. .not. efold) then
       teomsd = teomsd + omp_get_wtime() - ts
       neomsd = neomsd + 1
@@ -948,7 +992,7 @@ subroutine N(xzeom)(w, ecorr)
   real(8) :: w(*)
   real(8), intent(in) :: ecorr
   integer(8) :: m0, ms, ish, s, nsd, nlen, kxa, kxb, kst, nroot, nkeep, nsing, msd, msub, k, peak, sigw, avail
-  integer(8) :: nfound, nsig, nit, nsgd, nitd, nst, i, a, r, nprob
+  integer(8) :: nfound, nsig, nit, nsgd, nitd, nst, i, a, r, nprob, kxf
   integer(8), allocatable :: singles(:), lead(:, :), cyc(:)
   complex(8), allocatable :: ee(:)
   real(8), allocatable :: rmax(:), rnorm(:), wts(:, :)
@@ -977,6 +1021,7 @@ subroutine N(xzeom)(w, ecorr)
 
   if (xzdry) then
     call N(xzeomim)(w)
+    if (cc4) call N(xz4eomim)(w)
     do ish = 1, nprob
       call problem(ish, s, nroot, ok)
       if (.not. ok) cycle
@@ -987,11 +1032,15 @@ subroutine N(xzeom)(w, ecorr)
       msub = subspace(nroot)
       ms = xzmark()
       kst = xzget(NW * nkeep * nsd, 'EOM: vectors to start from')
+      ! (EOM-CC4: the vectors of the roots; of a root, and its sigma vector, with the T4 terms held; one more)
+      if (cc4) kxf = xzget(NW * (3 * nroot + 1) * nlen, 'EOM: the vectors of the roots')
       kxa = xzget(NW * nlen, 'EOM: a vector')
       kxb = xzget(NW * nlen, 'EOM: its sigma vector')
       ! (the least: the singles-doubles stage in the work array, or the buffer of the files)
       k = xzget(max(2 * msd * (NW * nsd + xzalign), msub * NW * min(nlen, 1024_8) + 64), 'EOM: the subspace')
+      efold = cc4
       call N(xzesig)(w, kxa, kxb, .false.)
+      efold = .false.
       call xzrel(ms)
     end do
     call xzrel(m0)
@@ -1010,8 +1059,15 @@ subroutine N(xzeom)(w, ecorr)
 
   t0 = omp_get_wtime()
   call N(xzeomim)(w)
+  if (cc4) call N(xz4eomim)(w)
   teomim = omp_get_wtime() - t0
+  if (cc4) then
+    write(6, '(/,a)') '  EOM-EE-CC4: excitation energies and right-hand vectors, the quadruples folded in'
+    write(6, '(a)') '  (first the roots of the matrix without the T4 terms - that of EOM-CCSDT at the CC4 amplitudes -,'
+    write(6, '(a)') '  then every root with the quadruples at its own frequency)'
+  else
   write(6, '(/,a)') '  EOM-EE-CCSDT: excitation energies and right-hand vectors'
+  end if
   write(6, '(a)') '  ' // repeat('-', 98)
   write(6, '(a,f10.2,a)') '   intermediates of the ground state (the pp operator in the place of <ab||cd>): ', teomim, ' s'
   write(6, '(a,es9.2,a,i4,a)') '   convergence: the largest element of a residual below ', ethr, &
@@ -1053,7 +1109,7 @@ subroutine N(xzeom)(w, ecorr)
 
   ! ---- the file of the vectors of the roots, if the disk of the run directory holds them
   iures = 0
-  if (ewvec /= 0) then
+  if (ewvec /= 0 .and. .not. cc4) then
     need = 0d0
     do ish = 1, nprob
       call problem(ish, s, nroot, ok)
@@ -1104,6 +1160,8 @@ subroutine N(xzeom)(w, ecorr)
     nroot = min(nroot, nsing)
     ms = xzmark()
     kst = xzget(NW * nkeep * nsd, 'EOM: vectors to start from')
+    kxf = 0
+    if (cc4) kxf = xzget(NW * nroot * nlen, 'EOM: the vectors of the roots')
     kxa = xzget(NW * nlen, 'EOM: a vector')
     kxb = xzget(NW * nlen, 'EOM: its sigma vector')
     allocate(ee(nkeep), rmax(nkeep), rnorm(nkeep), wts(3, nkeep), cyc(nkeep), lead(nlead, nkeep), vlead(nlead, nkeep))
@@ -1138,13 +1196,15 @@ subroutine N(xzeom)(w, ecorr)
     write(6, '(a,f10.1,a,f10.1,a)') '   a sigma vector takes ', 8d-6 * sigw, ' MB of the work array; free besides it: ', &
       8d-6 * avail, ' MB'
     flush(6)
+    evfout = cc4
     if (eguess == 1) then
       call N(xzesolve)(w, .false., nroot, ethr, emaxcyc, msub, nst, kst, singles, kxa, kxb, avail, &
-                       ee, rmax, rnorm, wts, cyc, nfound, nsig, nit, 0_8, iures, lead, vlead, .false.)
+                       ee, rmax, rnorm, wts, cyc, nfound, nsig, nit, kxf, iures, lead, vlead, .false.)
     else
       call N(xzesolve)(w, .false., nroot, ethr, emaxcyc, msub, nst, 0_8, singles, kxa, kxb, avail, &
-                       ee, rmax, rnorm, wts, cyc, nfound, nsig, nit, 0_8, iures, lead, vlead, .false.)
+                       ee, rmax, rnorm, wts, cyc, nfound, nsig, nit, kxf, iures, lead, vlead, .false.)
     end if
+    evfout = .false.
     t1 = omp_get_wtime() - t1
     tsg = teomsig - tsg
     ! ---- the roots
@@ -1162,7 +1222,7 @@ subroutine N(xzeom)(w, ecorr)
         rmax(k), rnorm(k), cyc(k), wts(:, k), escf + ecorr + dble(ee(k))
       if (abs(aimag(ee(k))) > 1d-10) write(6, '(a,es12.4)') '          imaginary part of omega: ', aimag(ee(k))
       if (rmax(k) > ethr) write(6, '(a)') '          NOT converged'
-      if (nres < maxres) then
+      if (nres < maxres .and. .not. cc4) then
         nres = nres + 1
         rshift(nres) = eshl(ish)
         if (dense) rshift(nres) = 0
@@ -1198,6 +1258,9 @@ subroutine N(xzeom)(w, ecorr)
           dble(vlead(r, k)), N(xzeimag)(vlead(r, k))
       end do
     end do
+    ! ---- EOM-CC4: the quadruples folded in, root by root (xzcc4.inc)
+    if (cc4 .and. nfound > 0) call N(xzeom4f)(w, merge(0_8, eshl(ish), dense), nroot, nfound, ee, kxf, kxa, kxb, &
+                                              singles, nlen, ecorr)
     write(6, '(a,f10.2,a)') '   time of this problem: ', omp_get_wtime() - tsh, ' s'
     flush(6)
     deallocate(singles, ee, rmax, rnorm, wts, cyc, lead, vlead)

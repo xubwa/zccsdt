@@ -507,6 +507,8 @@ subroutine xzdrv(w, maxcor)
     write(6, '(/,a,a,a)') '   EOM-EE-', trim(mname), ': the states'
     write(6, '(a)') '  ' // repeat('-', 98)
     write(6, '(a)') '   shift  root        omega / Eh            eV            cm-1          total energy / Eh    max |r|'
+    if (cc4) write(6, '(a)') '                      (below each: omega without the T4 terms, the Rayleigh quotient of that vector' // &
+      ' with them, after the first evaluation / Eh)'
     open(unit=79, file='XZEOM', form='formatted', status='replace')
     write(79, '(a)') '# EOM-EE-' // trim(mname) // ' of xzccsdt: label shift, root, omega / Eh, ' // &
                      'total energy / Eh, largest element and norm of the residual, weights of R1, R2, R3, converged'
@@ -516,6 +518,7 @@ subroutine xzdrv(w, maxcor)
       write(6, '(i8,i6,f20.12,f14.8,f16.4,f27.12,es11.2,a)') rshift(kres), rroot(kres), rom(kres), &
         rom(kres) * 27.211386245988d0, rom(kres) * 219474.6313632d0, escf + ecorr + rom(kres), rmx(kres), &
         merge('                ', '  NOT converged ', rconv(kres))
+      if (cc4) write(6, '(14x,3f20.12)') rpp(kres), rshot(kres), rfirst(kres)
       write(79, '(2i6,2f25.14,2es12.4,3f10.6,l3,2i7,f10.6)') rshift(kres), rroot(kres), rom(kres), &
         escf + ecorr + rom(kres), rmx(kres), rnm(kres), rwt(:, kres), rconv(kres), rli(kres), rla(kres), rlv(kres)
       if (rconv(kres)) elow = min(elow, rom(kres))
@@ -638,17 +641,18 @@ subroutine xzjob()
     if (larg > 0 .and. (arg(1:1) == 'p' .or. arg(1:1) == 'P')) cc4mode = 1
     if (larg > 0 .and. (arg(1:1) == 's' .or. arg(1:1) == 'S')) cc4mode = 2
     if (larg > 0 .and. (arg(1:1) == 'c' .or. arg(1:1) == 'C')) cc4mode = 3
-    if (den .or. eom) then
-      write(6, '(/,a)') ' @XZCCSDT-F, CALC=CC4: the energy only (no EXCITE, PROPS, DERIV_LEV) in this version.'
+    if (den) then
+      write(6, '(/,a)') ' @XZCCSDT-F, CALC=CC4: no density (PROPS, DERIV_LEV) in this program.'
       call xzerrex
     end if
+    if (eom) method = 'CC4_EOM'
   end if
   if (method == ' ') then
     write(6, '(/,a,i4,a,i3,a)') ' @XZCCSDT-F, CALC of the ZMAT (level ', level, ', EXCITATION ', nexc, &
       ') is not one of CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2.'
     call xzerrex
   end if
-  if ((eom .or. den) .and. cc3mode == 0) then
+  if ((eom .or. den) .and. cc3mode == 0 .and. .not. cc4) then
     if (method /= 'CCSDT') then
       write(6, '(/,a,a,a)') ' @XZCCSDT-F, ', trim(merge('EXCITE=EOMEE          ', 'PROPS or DERIV_LEV > 0', eom)), &
         ' goes with CALC=CCSDT only (here CALC=' // trim(method) // ').'

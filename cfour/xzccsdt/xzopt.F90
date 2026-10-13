@@ -25,12 +25,12 @@ module xzopt
   implicit none
   private
   public :: xzoptget
-  integer, parameter :: nuser = 24, ndev = 17, nopt = nuser + ndev
+  integer, parameter :: nuser = 25, ndev = 17, nopt = nuser + ndev
   ! the user options first, then the developer and test options
   character(len=10), parameter :: oname(nopt) = [character(len=10) :: &
     'labtol', 'imagtol', 'focktol', 'omegatol', 'foldwin', 'real', 'labels', 'cc3', 'start', 'hh', &
     'qmap', 'slices', 'bpr', 'rebal', 'dist', 'diis', 'plan', 'cc3w', 'eomvec', 'mpichunk', &
-    'qtasks', 'qranks', 'cc4', 'cc4micro', &
+    'qtasks', 'qranks', 'cc4', 'cc4micro', 'cc4eom', &
     'ncyc', 'maxcor', 'debug', 'ddebug', 'ldebug', 'qdebug', 'den_active', 'wfail', 'eomtest', 'eomsig', &
     'eomsd', 'mpitest', 'qsample', 'qstop', 'qcost', 'bcost', 'r0load']
   character(len=256) :: oval(nopt) = ' '

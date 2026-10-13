@@ -73,6 +73,8 @@ subroutine N(xzeomkeep)()
     e3bv = xzget(NW * nv * no * nvp, 'CC3: Bv')
     e3gv = xzget(NW * no * nvp * nv, 'CC3: Gv')
   end if
+  ! (EOM-CC4: the operands of the T4 terms of the ground state, the bare <ab||cd>)
+  if (cc4) call N(xz4eomkeep)()
 end subroutine
 
 ! ---------------------------------------------------------------------------
@@ -192,6 +194,8 @@ subroutine N(xzeomim)(w)
     kpib = xzget(nv * nv, 'pairs of a group')
   end if
   if (.not. xzdry) then
+    ! (EOM-CC4 makes Xv from the bare <ab||cd>: a copy)
+    if (cc4) call N(xzecopy)(nvv, w(jvvvv), w(e4vv))
     do h = 0, npg - 1
       lo = vpoff(h)
       nqh = vpoff(h + 1) - lo
@@ -680,6 +684,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
   call xzshctx(0_8, 0_8, 0_8)
   ! ---- CC3, folded: the triples at the frequency eomega, made per batch
   if (fold) call N(xzefold)(w, kr1, kr2, kr2p, kdwv, kdovoo, kdooov, kdfov, ks1, ks2)
+  ! ---- CC4, folded: the T4 terms at the frequency eomega (xzcc4.inc)
+  if (efold .and. cc4 .and. with3) call N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo, ks2, ks3)
 
   ! ---- with labels: sigma_1 and sigma_2 on the elements of the shift
   if (.not. dense .and. .not. xzdry) then
