@@ -241,7 +241,7 @@ class Problem:
                 s = np.zeros(pos.shape, dtype=np.int8)
                 for j in range(m):
                     s ^= pb[:, tt[:, j]]
-                sgn = np.where(ok, 1.0 - 2.0 * s, 0.0)
+                sgn = np.where(ok, 1 - 2 * s, 0).astype(np.int8)
                 self._sub[key] = (pos, sgn)
         return self._sub[key]
 

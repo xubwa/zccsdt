@@ -169,6 +169,24 @@ class Problem:
             X4[:comb(no, 2)] += np.asarray(x[2]).reshape(self.shapes[2])
         return X2, X3, X4
 
+    # (for the 5p3h row of zccsdt.cc.dea5: the padded amplitudes on packed arrays, the places of
+    #  the ghosts and of the spinors of eris, sigma parts given on [i, (abc)] and [(ij), (abcd)])
+    @property
+    def ghosts(self):
+        return (0, 1)
+
+    @property
+    def places(self):
+        return 2 + np.arange(self.no)
+
+    def padded(self, x):
+        return self._embed(x)
+
+    def add_dense(self, y, S3, S4):
+        y[1] += S3.ravel()
+        y[2] += S4.ravel()
+        return y
+
     def sigma(self, x, y):
         '''y <- the DEA matrix on x (lists of flat parts).'''
         t0 = time.perf_counter()
@@ -327,7 +345,7 @@ class ProblemSym(Problem):
         g1, g2 = sorted(int(x) for x in where[:2])
         rp = where[2:]                          # the places of the occupied spinors of eris
         assert np.all(np.diff(rp) > 0)
-        self.g = (g1, g2)
+        self.g, self.rp = (g1, g2), rp
 
         def pad(x, key):
             x = np.asarray(x)
@@ -406,13 +424,15 @@ class ProblemSym(Problem):
             m2 &= (par[no:][v2].sum(axis=1) - target_parity) % 2 == 0
         self.pair_row = _rank_table(no + 2, 2)[(g1, g2)]
         self.sizes, self.den, self.masks = [len(v2)], [evv[v2].sum(axis=1)], [m2]
-        self.idx, self.sgn = [None], [None]
+        self.idx, self.sgn, self.dpos = [None], [None], [None]
         v3 = P.tuples(nv, 3)
-        parts = [(lay.O3cls, lay.o3, lambda k: v3[lay.A3cls[k]], lay.t3off, lay.nK, range(lay.n3))]
+        parts = [(lay.O3cls, lay.o3, lambda k: v3[lay.A3cls[k]], lay.t3off, lay.nK, range(lay.n3),
+                  lambda k: np.asarray(lay.A3cls[k]), comb(nv, 3))]
         if rank == 4:
-            parts.append((lay.O4cls, lay.o4, lambda M: lay.quads[M].astype(np.int64), lay.boff, lay.nA, lay.sectors))
-        for ocls, otup, vtup, off, ncol, which in parts:
-            idx, sgn, den, mask = [], [], [], []
+            parts.append((lay.O4cls, lay.o4, lambda M: lay.quads[M].astype(np.int64), lay.boff, lay.nA, lay.sectors,
+                          lambda M: lay.lex(M), comb(nv, 4)))
+        for ocls, otup, vtup, off, ncol, which, vlex, nlex in parts:
+            idx, sgn, den, mask, dpos = [], [], [], [], []
             for k in which:
                 if not len(ocls[k]) or not ncol[k]:
                     continue
@@ -423,6 +443,10 @@ class ProblemSym(Problem):
                 idx.append((off[k] + rows[:, None] * ncol[k] + np.arange(ncol[k])[None, :]).ravel())
                 sgn.append(np.repeat(sg, ncol[k]))
                 den.append((evv[vt].sum(axis=1)[None, :] - eo[rest].sum(axis=1)[:, None]).ravel())
+                # the same element on the dense array [i, (abc)] / [(i<j), (abcd)] in lexicographic order
+                row = rest[:, 0] if rest.shape[1] == 1 else (rest[:, 0] * (2 * no - rest[:, 0] - 1) // 2
+                                                             + rest[:, 1] - rest[:, 0] - 1)
+                dpos.append((row[:, None] * nlex + np.asarray(vlex(k), dtype=np.int64)[None, :]).ravel())
                 if par is not None:
                     mask.append((((par[no:][vt].sum(axis=1)[None, :] - par[:no][rest].sum(axis=1)[:, None])
                                   - target_parity) % 2 == 0).ravel())
@@ -430,14 +454,22 @@ class ProblemSym(Problem):
             self.sgn.append(np.concatenate(sgn) if sgn else np.zeros(0))
             self.den.append(np.concatenate(den) if den else np.zeros(0))
             self.masks.append(np.concatenate(mask) if mask else np.ones(len(self.idx[-1]), bool))
+            self.dpos.append(np.concatenate(dpos) if dpos else np.zeros(0, dtype=np.int64))
             self.sizes.append(len(self.idx[-1]))
         self.shapes = [(s,) for s in self.sizes]
         self.jac = [2 * eg - self.den[0], 2 * eg - self.den[1]]
         self.nsigma, self.seconds = 0, 0.0
         self.block_sizes = (n3, lay.size if rank == 4 else 0)
 
-    def sigma(self, x, y):
-        t0 = time.perf_counter()
+    @property
+    def ghosts(self):
+        return self.g
+
+    @property
+    def places(self):
+        return self.rp
+
+    def _x23(self, x):
         nv, (g1, g2) = self.nv, self.g
         a2, b2 = P.tuples(nv, 2).T
         X2 = self.t2.copy()
@@ -448,6 +480,24 @@ class ProblemSym(Problem):
         X2[g2, g1] -= r2
         X3 = self.t3.copy()
         X3[self.idx[1]] += self.sgn[1] * x[1]
+        return X2, X3
+
+    def padded(self, x):
+        X2, X3 = self._x23(x)
+        X4 = self.t4.copy()
+        X4[self.idx[2]] += self.sgn[2] * x[2]
+        return X2, self.lay.t3_to_packed(X3), self.lay.to_packed(X4)
+
+    def add_dense(self, y, S3, S4):
+        y[1] += S3.ravel()[self.dpos[1]]
+        y[2] += S4.ravel()[self.dpos[2]]
+        return y
+
+    def sigma(self, x, y):
+        t0 = time.perf_counter()
+        nv, (g1, g2) = self.nv, self.g
+        a2, b2 = P.tuples(nv, 2).T
+        X2, X3 = self._x23(x)
         _, t2n, t3n = ccsdt_opt.update_amps(self.step, self.t1, X2, X3, self.eris, mem_mb=self.mem_mb, plan=self.plan)
         s2 = (t2n[g1, g2] - X2[g1, g2])[a2, b2] * self.jac[0]
         s3 = (np.asarray(t3n)[self.idx[1]] - X3[self.idx[1]]) * self.sgn[1] * self.jac[1]
