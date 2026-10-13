@@ -43,7 +43,7 @@ are.  The directory is generated; the sources stay here.
 
        <cfour>/zccsdt/test/run.sh <cfour>/bin
        cfour/merge/regress.sh --ref build/xzccsdt/xzccsdt     --new <cfour>/bin/xzccsdt --eom
-       cfour/merge/regress.sh --ref build/xzccsdt_mpi/xzccsdt --new <cfour>/bin/xzccsdt_mpi --np 2
+       cfour/merge/regress.sh --ref build/xzccsdt_mpi/xzccsdt --new <cfour>/bin/xzccsdt_mpi --np 2 --eom
 
    The binaries take no argument: `regress.sh` sets `CALC` (`PROPS`,
    `EXCITE`) of the ZMAT of each case and runs `xjoda` again before each
