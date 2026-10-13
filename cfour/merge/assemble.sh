@@ -397,10 +397,15 @@ what the ZMAT asks for (as joda stored it in JOBARC):
                                         the quadruples folded in at the frequency of
                                         every root), label shifts of %xzeom
 
-CC_CONV (the amplitudes to 10^-CC_CONV, the energy to 10^-(CC_CONV+2)),
-CC_MAXCYC, MEMORY_SIZE (all working memory is CFOUR's work array), DROPMO /
-%vircut (the active spinors are those of the integral files).  The final
-energy goes to JOBARC as TOTENERG; the lowest EOM state as TOTENER2.
+CC_CONV=N means what it means in xx2cccsd: the iterations (amplitudes,
+lambda) stop when the largest element, in absolute value, of the change of
+the amplitudes in a cycle - residual over denominator, over T1, T2 and T3 -
+is below 10^-N; there is no test of the energy.  The table of the
+iterations prints this number (max|dT|) beside the norms of the three
+changes.  CC_MAXCYC, MEMORY_SIZE (all working memory is CFOUR's work
+array), DROPMO / %vircut (the active spinors are those of the integral
+files).  The final energy goes to JOBARC as TOTENERG; the lowest EOM state
+as TOTENER2.
 
 Earlier runs: the amplitudes are written to XZAMPS, lambda to XZLAMB, and
 the file XZKEY records what they belong to (active spinors, E(SCF), two
@@ -408,10 +413,23 @@ sums of the spinor energies, CC_CONV).  If they fit the present run they
 are taken and the iterations skipped - e.g. CALC=CCSDT, then (xjoda again
 with) CALC=CCSDT(Q) or EXCITE=EOMEE in the same directory computes only the
 new part; the output says "taken" or "solved here".  Remove the files to
-force a new solution.  CC3 amplitudes are solved in every run (a CC3 run
-does not read XZKEY and removes it).  CC4 takes the CCSDT amplitudes of
-XZAMPS as its start (or solves CCSDT first and writes them); XZAMPS stays
-that of CCSDT.
+force a new solution.  CC3 amplitudes are solved in every run (a finished
+CC3 run leaves no XZKEY).  CC4 takes the CCSDT amplitudes of XZAMPS as its
+start (or solves CCSDT first and writes them); XZAMPS stays that of CCSDT.
+
+Iterations are not lost.  While the amplitudes (lambda) are iterated they
+are written to XZAMPS (XZLAMB) every K cycles - K is printed; it is chosen
+from the first write so that the writes take about 1 % of the time - and
+once more when CC_MAXCYC cycles are over without convergence; XZKEY then
+says how far they are (the model, the cycles, the largest element of the
+last step).  The program still stops with CFOUR's error, and says that the
+amplitudes are saved.  Run it again with the same ZMAT in the same
+directory - after a stop at CC_MAXCYC, a time limit or a crash: it says
+"the iterations CONTINUE from them" and goes on from the saved amplitudes
+(the DIIS vectors start anew: one or two cycles more in all than a run
+without the stop).  CCSDT continues CCSDT, CC3 continues CC3, never one the
+other.  A write needs the space of the file a second time for a moment
+(XZAMPS.new, which then takes the name).
 
 CC4 is restartable.  A T4 evaluation is the expensive step (hours for a
 large case), so after every completed one the program writes what a later
