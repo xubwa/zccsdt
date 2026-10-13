@@ -34,6 +34,14 @@
 ! and sigma_2 are masked to it (the integrals are symmetric to the rounding
 ! of the SCF only).
 !
+! More than one rank (edist of xzeomd.F90; docs/native.md, section 16.7): as
+! an amplitude step over ranks (xzstep.inc).  Every rank has the whole
+! vector and T3, makes the small terms itself and does its batches of the
+! six loops over T3-sized arrays (xzdist: the kinds 7 to 12); the results of
+! the two passes 1 are summed on every rank, the two operators on occupied
+! triples are applied by every rank on its rows, and at the end the rows of
+! sigma_3 go to their owners.  sigma_1 and sigma_2 are the same on all ranks.
+!
 
 ! ---------------------------------------------------------------------------
 ! The places of the kept arrays (taken from the stack by the caller of
@@ -229,6 +237,9 @@ subroutine N(xzesig)(w, kv, ks, sd)
   use xzdata
   use xzmem
   use xzkern
+  use xzeomd, only: edist, eswoff, esmax
+  use xzdist, only: xzmine, xzbtic, xzbtoc, dkind, dsec, tmeet, nrank, xzmpi_barrier, xzmpi_allsum_w, &
+                    xzmpi_slices_add, xzmpi_chunk
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -239,9 +250,9 @@ subroutine N(xzesig)(w, kv, ks, sd)
   integer(8) :: kdweff, ka2, kb2, kx2, kdwkl, kxp, kc1, kr1v, kzz, kyy
   integer(8) :: kdwv, kdwo, kxacc, kyall, kr1c, kra, kgpd, kgmq, kzpp, kbuf, kg2, kyb, ku, kxb, ktmp, ktmp2
   integer(8) :: kzero3, kwring, kadrv, kdo6, kslab, kgq, kgh, kpib, ktv, kxpp, kbd, ktb, kz, nbdw
-  integer(8) :: h, hr, lo, lo2, nqh, nqr, q0, nq, i0, nb, p0, x0
-  logical :: dense, with3, fold
-  real(8) :: stats(4)
+  integer(8) :: h, hr, lo, lo2, nqh, nqr, q0, nq, i0, nb, p0, x0, kex
+  logical :: dense, with3, fold, dist
+  real(8) :: stats(4), tst, tsg
   ZT :: one, zero, half, mone
   one = 1
   zero = 0
@@ -252,6 +263,9 @@ subroutine N(xzesig)(w, kv, ks, sd)
   nsd = ov + npo * nvp
   dense = ncls == 1
   with3 = .not. sd
+  ! (over the ranks: this rank does its batches and its rows)
+  dist = with3 .and. edist .and. nrank > 1
+  tst = omp_get_wtime()
   ! the folded sigma vector of CC3 without stored triples (efold, at the
   ! frequency eomega): the singles-doubles block and the triples folded in
   ! (N(xzefold)); the vectors are singles and doubles
@@ -344,6 +358,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
     kwring = xzget(NW * ov2, 'pass-2 operand W')
     kadrv = xzget(NW * npo * nv * ny, 'pass-2 operand A')
     kdo6 = xzget(merge(0_8, NW * nto * nto, cc3mode /= 0), 'occupied operator, derivative')
+    kex = 0
+    if (dist) kex = xzget(min(xzmpi_chunk(), NW * max(esmax, 1_8)), 'chunk of the exchange')
     m3 = xzmark()
     ! ---- pass 1 over R3 with the integrals of the ground state, over T3 with H'
     call xzshctx(s, 0_8, 0_8)
@@ -355,22 +371,50 @@ subroutine N(xzesig)(w, kv, ks, sd)
     kra = xzget(NW * npo * nvp, 'T3 part of sigma_2')
     m2 = xzmark()
     if (.not. xzdry) call zc_vzero_d(NW * n3s, w(ks3))
+    tsg = omp_get_wtime()
+    if (dist) dkind = 7
     if (dense) then
       kbuf = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
       if (.not. xzdry) then
         call zc_vzero_d(NW * ny * no * nvp, w(kxacc))
         call zc_vzero_d(NW * ov, w(kr1c))
+        if (dist) then
+          ! (the rows of the pairs of other ranks)
+          call zc_vzero_d(NW * npo * nv * ny, w(kyall))
+          call zc_vzero_d(NW * npo * nvp, w(kra))
+        end if
         stats = 0
-        call N(zc_t3_pass1w)(w(kr3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), w(jvsgn), &
-                             nbp, w(egpd), w(egmq), ny, w(jgpp), w(eft), w(kxacc), w(kyall), w(kr1c), &
-                             w(kra), c_null_ptr, stats, w(kbuf))
+        do p0 = 0, npo - 1, nbp
+          if (.not. xzmine(p0)) cycle
+          call xzbtic()
+          call N(zc_t3_pass1r)(w(kr3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), w(jvsgn), &
+                               nbp, p0, min(p0 + nbp, npo), w(egpd), w(egmq), ny, w(jgpp), w(eft), w(kxacc), &
+                               w(kyall), w(kr1c), w(kra), c_null_ptr, stats, w(kbuf))
+          call xzbtoc(p0)
+        end do
       end if
     else
       call N(xzbpass1)(w, kr3, w(egpd), w(egmq), w(jgpp), w(efov), w(kxacc), w(kyall), w(kr1c), w(kra))
     end if
+    dkind = 0
     call xzrel(m2)
     if (.not. xzdry) then
       call xztoc(5, 'pass 1 over R3')
+      if (dist) then
+        ! what the batches of all ranks made, on every rank
+        dsec(1, 3) = dsec(1, 3) + omp_get_wtime() - tsg
+        tsg = omp_get_wtime()
+        tmeet(1) = tmeet(1) + tsg - tst
+        call xzmpi_barrier()
+        dsec(9, 3) = dsec(9, 3) + omp_get_wtime() - tsg
+        tsg = omp_get_wtime()
+        call xzmpi_allsum_w(w(kxacc), NW * ny * no * nvp)
+        call xzmpi_allsum_w(w(kyall), NW * npo * nv * ny)
+        call xzmpi_allsum_w(w(kr1c), NW * ov)
+        call xzmpi_allsum_w(w(kra), NW * npo * nvp)
+        call xztoc(5, 'MPI: waiting, sums of pass 1')
+        dsec(4, 3) = dsec(4, 3) + omp_get_wtime() - tsg
+      end if
       call N(xzeadd1)(no, nv, w(kr1c), w(ks1))
       call N(xzr2t3)(no, nv, npo, nvp, w(jopa), w(jopb), w(jvpa), w(jvpb), w(kyall), w(kxacc), w(kra))
       call N(xzeaxpy)(npo * nvp, w(kra), w(ks2))
@@ -392,23 +436,48 @@ subroutine N(xzesig)(w, kv, ks, sd)
       call zc_vzero_d(NW * npo * nvp, w(kzpp))
       call xztoc(5, 'small terms')
     end if
+    tsg = omp_get_wtime()
+    if (dist) dkind = 10
     if (dense) then
       kbuf = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
       if (.not. xzdry) then
         call zc_vzero_d(NW * ny * no * nvp, w(kxacc))
         call zc_vzero_d(NW * ov, w(kr1c))
+        if (dist) then
+          call zc_vzero_d(NW * npo * nv * ny, w(kyall))
+          call zc_vzero_d(NW * npo * nvp, w(kra))
+        end if
         stats = 0
-        call N(zc_t3_pass1w)(w(jt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), w(jvsgn), &
-                             nbp, w(kgpd), w(kgmq), ny, w(kzpp), w(kdft), w(kxacc), w(kyall), w(kr1c), &
-                             w(kra), c_null_ptr, stats, w(kbuf))
+        do p0 = 0, npo - 1, nbp
+          if (.not. xzmine(p0)) cycle
+          call xzbtic()
+          call N(zc_t3_pass1r)(w(jt3), nto, nvt, no, nv, npo, nvp, w(jotri), w(josgn), w(jvtri), w(jvsgn), &
+                               nbp, p0, min(p0 + nbp, npo), w(kgpd), w(kgmq), ny, w(kzpp), w(kdft), w(kxacc), &
+                               w(kyall), w(kr1c), w(kra), c_null_ptr, stats, w(kbuf))
+          call xzbtoc(p0)
+        end do
       end if
     else
       p1_noe = .true.
       call N(xzbpass1)(w, jt3, w(kgpd), w(kgmq), w(kzpp), w(kdfov), w(kxacc), w(kyall), w(kr1c), w(kra))
       p1_noe = .false.
     end if
+    dkind = 0
     if (.not. xzdry) then
       call xztoc(5, 'pass 1 over T3 with H''')
+      if (dist) then
+        dsec(1, 3) = dsec(1, 3) + omp_get_wtime() - tsg
+        tsg = omp_get_wtime()
+        tmeet(2) = tmeet(2) + tsg - tst
+        call xzmpi_barrier()
+        dsec(9, 3) = dsec(9, 3) + omp_get_wtime() - tsg
+        tsg = omp_get_wtime()
+        call xzmpi_allsum_w(w(kxacc), NW * ny * no * nvp)
+        call xzmpi_allsum_w(w(kyall), NW * npo * nv * ny)
+        call xzmpi_allsum_w(w(kra), NW * npo * nvp)
+        call xztoc(5, 'MPI: waiting, sums of pass 1')
+        dsec(4, 3) = dsec(4, 3) + omp_get_wtime() - tsg
+      end if
       call N(xzr2t3)(no, nv, npo, nvp, w(jopa), w(jopb), w(jvpa), w(jvpb), w(kyall), w(kxacc), w(kra))
       call N(xzeaxpy)(npo * nvp, w(kra), w(ks2))
     end if
@@ -471,6 +540,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
     kxpp = xzget(NW * nqs * nbt * nv, 'pp-ladder product')
   end if
   call xzshctx(s, 0_8, 0_8)
+  tsg = omp_get_wtime()
+  if (dist) dkind = 9
   do h = 0, npg - 1
     lo = vpoff(h)
     nqh = vpoff(h + 1) - lo
@@ -499,11 +570,14 @@ subroutine N(xzesig)(w, kv, ks, sd)
         if (xzdry) cycle
         do i0 = 0, nto - 1, nbt
           nb = min(nbt, nto - i0)
+          if (.not. xzmine(i0)) cycle
+          call xzbtic()
           call N(zc_gather_vir_half)(w(kr3), nvt, w(jrows + i0), nb, w(jvtri), w(jvsgn), nv, nvp, w(ktv))
           call N(zc_gemm)(0_4, 0_4, nq, nb * nv, nvp, one, w(jvvvv + NW * q0 * nvp), nvp, w(ktv), nb * nv, zero, &
                           w(kxpp), nb * nv)
           call N(zc_reduce_pair_first_rows)(w(ks3), nvt, w(kxpp), w(jrows + i0), nb, nv, q0, q0 + nq, &
                                             w(jvfree), w(jvpair))
+          call xzbtoc(i0)
         end do
         call xztoc(5, 'R3: pp ladder')
       else
@@ -511,6 +585,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
       end if
     end do
   end do
+  dkind = 0
+  if (dist .and. .not. xzdry) dsec(2, 3) = dsec(2, 3) + omp_get_wtime() - tsg
   call xzrel(m1)
 
   if (with3) then
@@ -527,12 +603,16 @@ subroutine N(xzesig)(w, kv, ks, sd)
     end if
     ! (W'_vvvo is in the operand: its place is free for the batches)
     call xzrel(m3)
+    tsg = omp_get_wtime()
+    if (dist) dkind = 8
     if (dense) then
       ktb = xzget(NW * nbp * ov * nvp, 'pass-2 batch of T3')
       kz = xzget(NW * nbp * ov * nvp, 'pass-2 product')
       if (.not. xzdry) then
         stats = 0
         do p0 = 0, npo - 1, nbp
+          if (.not. xzmine(p0)) cycle
+          call xzbtic()
           if (cc3mode /= 0) then
             call N(zc_t3_driver)(nto, nvt, no, nv, npo, nvp, w(jofree), w(jopair), w(jvfree), w(jvpair), &
                                  nbp, p0, min(p0 + nbp, npo), w(kadrv), w(kbd), w(ks3), stats, w(kz))
@@ -541,6 +621,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
                                  w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), &
                                  w(kwring), w(kadrv), w(kbd), w(ks3), c_null_ptr, stats, w(ktb), w(kz))
           end if
+          call xzbtoc(p0)
         end do
       end if
     else
@@ -548,11 +629,18 @@ subroutine N(xzesig)(w, kv, ks, sd)
       call N(xzbpass2)(w, kr3, ks3, w(kwring), w(kadrv), w(kbd), 1_8, 0_8, w(kbd), w(kbd))
       noring = .false.
     end if
+    dkind = 0
     if (.not. xzdry) then
       call xztoc(5, 'R3: pass 2')
+      if (dist) dsec(3, 3) = dsec(3, 3) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
       if (cc3mode /= 0) then
         ! CC3: [F, R3] with the diagonal of F
         call N(xzfdiag)(w, kr3, ks3, s, bof_in, .false.)
+      else if (dist) then
+        ! (the rows of this rank)
+        call N(xzeslocc)(w, kr3, ks3, w(eo6))
+        dsec(8, 3) = dsec(8, 3) + omp_get_wtime() - tsg
       else if (dense) then
         call N(zc_t3_occop)(w(eo6), w(kr3), nto, nvt, ncb, c_null_ptr, w(ks3))
       else
@@ -581,6 +669,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
     ktv = xzget(NW * nvp * nbt * nv, 'pp-ladder batch of T3')
     kxpp = xzget(NW * nqs * nbt * nv, 'pp-ladder product')
   end if
+  tsg = omp_get_wtime()
+  if (dist) dkind = 12
   do h = 0, npg - 1
     lo = vpoff(h)
     nqh = vpoff(h + 1) - lo
@@ -616,11 +706,14 @@ subroutine N(xzesig)(w, kv, ks, sd)
         if (xzdry) cycle
         do i0 = 0, nto - 1, nbt
           nb = min(nbt, nto - i0)
+          if (.not. xzmine(i0)) cycle
+          call xzbtic()
           call N(zc_gather_vir_half)(w(jt3), nvt, w(jrows + i0), nb, w(jvtri), w(jvsgn), nv, nvp, w(ktv))
           call N(zc_gemm)(0_4, 0_4, nq, nb * nv, nvp, one, w(kslab), nvp, w(ktv), nb * nv, zero, &
                           w(kxpp), nb * nv)
           call N(zc_reduce_pair_first_rows)(w(ks3), nvt, w(kxpp), w(jrows + i0), nb, nv, q0, q0 + nq, &
                                             w(jvfree), w(jvpair))
+          call xzbtoc(i0)
         end do
         call xztoc(5, 'T3: pp ladder')
       else
@@ -628,6 +721,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
       end if
     end do
   end do
+  dkind = 0
+  if (dist .and. .not. xzdry) dsec(2, 3) = dsec(2, 3) + omp_get_wtime() - tsg
   call xzrel(m2)
 
   if (with3) then
@@ -643,12 +738,16 @@ subroutine N(xzesig)(w, kv, ks, sd)
       if (cc3mode == 0) call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(kdwkl), w(kdfeoo), w(kdo6))
       call xztoc(5, 'small terms')
     end if
+    tsg = omp_get_wtime()
+    if (dist) dkind = 11
     if (dense) then
       ktb = xzget(NW * nbp * ov * nvp, 'pass-2 batch of T3')
       kz = xzget(NW * nbp * ov * nvp, 'pass-2 product')
       if (.not. xzdry) then
         stats = 0
         do p0 = 0, npo - 1, nbp
+          if (.not. xzmine(p0)) cycle
+          call xzbtic()
           if (cc3mode /= 0) then
             call N(zc_t3_driver)(nto, nvt, no, nv, npo, nvp, w(jofree), w(jopair), w(jvfree), w(jvpair), &
                                  nbp, p0, min(p0 + nbp, npo), w(kadrv), w(kbd), w(ks3), stats, w(kz))
@@ -657,6 +756,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
                                  w(jvtri), w(jvsgn), w(jvfree), w(jvpair), nbp, p0, min(p0 + nbp, npo), &
                                  w(kwring), w(kadrv), w(kbd), w(ks3), c_null_ptr, stats, w(ktb), w(kz))
           end if
+          call xzbtoc(p0)
         end do
       end if
     else
@@ -664,16 +764,33 @@ subroutine N(xzesig)(w, kv, ks, sd)
       call N(xzbpass2)(w, jt3, ks3, w(kwring), w(kadrv), w(kbd), 1_8, 0_8, w(kbd), w(kbd))
       noring = .false.
     end if
+    dkind = 0
     if (.not. xzdry) then
       call xztoc(5, 'T3: pass 2')
+      if (dist) dsec(3, 3) = dsec(3, 3) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
       if (cc3mode /= 0) then
         ! (CC3: the bare F has no derivative)
+      else if (dist) then
+        call N(xzeslocc)(w, jt3, ks3, w(kdo6))
+        dsec(8, 3) = dsec(8, 3) + omp_get_wtime() - tsg
       else if (dense) then
         call N(zc_t3_occop)(w(kdo6), w(jt3), nto, nvt, ncb, c_null_ptr, w(ks3))
       else
         call N(xzbocc)(w, jt3, ks3, w(kdo6))
       end if
       call xztoc(5, 'T3: hh ladder, F_oo')
+      if (dist) then
+        ! the rows of sigma_3 to their owners
+        tsg = omp_get_wtime()
+        tmeet(3) = tmeet(3) + tsg - tst
+        call xzmpi_barrier()
+        dsec(10, 3) = dsec(10, 3) + omp_get_wtime() - tsg
+        tsg = omp_get_wtime()
+        call xzmpi_slices_add(w(ks3), eswoff, w(kex))
+        call xztoc(5, 'MPI: sigma_3 to its rows')
+        dsec(5, 3) = dsec(5, 3) + omp_get_wtime() - tsg
+      end if
     end if
   end if
   call xzrel(m1)
@@ -686,7 +803,38 @@ subroutine N(xzesig)(w, kv, ks, sd)
     call N(xzemask)(no, nv, npo, nvp, s, ocls, vcls, w(jopgrp), w(jvpgrp), w(ks1), w(ks2))
     call xztoc(5, 'small terms')
   end if
+  if (dist .and. .not. xzdry) dsec(7, 3) = dsec(7, 3) + omp_get_wtime() - tst
   call xzrel(m0)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! More than one rank: the operator on the occupied triples for the rows of
+! this rank, r[I][A] += sum_J o6[I][J] t3[J][A], with the label shifts of
+! the pass (as N(xzbocc); the result in the layout of the vectors, whose
+! slices are those of xzeomd).
+subroutine N(xzeslocc)(w, kt3, kr3, o6)
+  use xzdata
+  use xzkern
+  use xzeomd, only: xzeslrows
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kt3, kr3
+  ZT, intent(in) :: o6(0:nto-1, 0:nto-1)                       ! [I][J]
+  integer(8) :: g, h, ni, nj, na, a, b
+  ZT :: one
+  one = 1
+  do g = 0, ntg - 1
+    h = g + sh_w
+    if (h < 0 .or. h >= ntg) cycle
+    ni = otoff(g + 1) - otoff(g)
+    nj = otoff(h + 1) - otoff(h)
+    na = xzna(sh_o, g)
+    if (ni == 0 .or. nj == 0 .or. na == 0) cycle
+    call xzeslrows(g, a, b)
+    if (b <= a) cycle
+    call N(zc_gemm)(0_4, 0_4, b - a, na, nj, one, o6(otoff(h), otoff(g) + a), nto, w(kt3 + NW * bof_in(h)), na, &
+                    one, w(kr3 + NW * (bof_out(g) + a * na)), na)
+  end do
 end subroutine
 
 ! ---------------------------------------------------------------------------

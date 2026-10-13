@@ -89,11 +89,11 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a)') ' @XZCCSDT-F, fewer than three occupied or virtual spinors: no triples.'
     call xzerrex
   end if
-  ! (the folded EOM-CC3 runs over the ranks: its batches of occupied triples are dealt out)
-  if (with_eom .and. nrank > 1 .and. cc3mode /= 2) then
-    write(6, '(a)') ' @XZCCSDT-F, the excited states (EOM) run with one rank: the sigma vectors are not distributed.'
-    write(6, '(a)') '             Run CALC=CCSDT (without EXCITE) over the ranks, then EXCITE=EOMEE with one rank:'
-    write(6, '(a)') '             the second run takes the amplitudes of the file XZAMPS of the first.'
+  ! (EOM-EE-CCSDT and the folded EOM-CC3 run over the ranks; the check route of CC3 with R3 stored does not)
+  if (with_eom .and. nrank > 1 .and. cc3mode == 1) then
+    write(6, '(a)') ' @XZCCSDT-F, the excited states of CC3 with T3 stored (option cc3 stored, a check route) run with one'
+    write(6, '(a)') '             rank: their sigma vectors are not distributed.  EOM-EE-CCSDT and EOM-CC3 without stored'
+    write(6, '(a)') '             triples run over the ranks.'
     call xzerrex
   end if
 
@@ -218,14 +218,15 @@ subroutine xzdrv(w, maxcor)
   call xzplan(w, nslot, usefile, nch, .false.)
   ! (the other ranks allocate what their part takes with this plan and use
   ! its batch sizes: xzrankmem, xzplan)
-  if (myrank == 0 .and. nrank > 1 .and. (with_q .or. with_cc .or. with_lam)) then
+  if (myrank == 0 .and. nrank > 1 .and. (with_q .or. with_cc .or. with_lam .or. with_eom)) then
     rplan = 0d0
     rplan(1) = dble(pneedw)
     rplan(2:9) = dble([nqs, nbt, nbp, nba, qxv, qc22, qc13, qrows])
     rplan(10:12) = dble([nslot, merge(1_8, 0_8, usefile), nch])
     rplan(13:15) = dble([ncls, nwe, n3])
     rplan(16) = dble(nc3w)
-    call xzmpi_bcast(rplan, 128_8)
+    rplan(17) = dble(epw)
+    call xzmpi_bcast(rplan, 8_8 * size(rplan))
   end if
   ! (a test hook: option wfail, an error on a rank other than 0)
   call xzoptget('wfail', length=larg)
@@ -291,8 +292,8 @@ subroutine xzdrv(w, maxcor)
       call xzrel(jt3 - xzbase)
       call xzmapt3(w, 'XZAMPS', nwe * (no * nv + no * no * nv * nv), nwe * n3, jt3)
     end if
-  else if (.not. docc .and. myrank > 0 .and. with_lam) then
-    ! (a rank other than 0 before the Lambda equations: rank 0 sends the amplitudes)
+  else if (.not. docc .and. myrank > 0 .and. (with_lam .or. with_eom)) then
+    ! (a rank other than 0 before the Lambda equations or the excited states: rank 0 sends the amplitudes)
     jt1 = xzget(nwe * no * nv, 'T1')
     jt2 = xzget(nwe * no * no * nv * nv, 'T2')
     jt3 = xzget(nwe * n3, 'T3')
@@ -1301,12 +1302,12 @@ subroutine xzrankmem(maxcor)
   call xzsizes()
   sizes_set = .true.
   call xzreuse()
-  if (.not. (with_q .or. with_cc .or. with_lam)) then
+  if (.not. (with_q .or. with_cc .or. with_lam .or. with_eom)) then
     maxcor = 4096
     return
   end if
   rplan = 0d0
-  call xzmpi_bcast(rplan, 128_8)
+  call xzmpi_bcast(rplan, 8_8 * size(rplan))
   maxcor = min(maxcor, int(rplan(1), 8) + 4096)
 end subroutine xzrankmem
 

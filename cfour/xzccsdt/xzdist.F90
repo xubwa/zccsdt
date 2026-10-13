@@ -23,6 +23,11 @@
 !
 !   kinds of batches   1 pass 1   2 pass 2   3 pp ladder    (T3 equation)
 !                      4 pass 1   5 pass 2   6 ladder       (Lambda equations)
+!                      7 pass 1   8 pass 2   9 pp ladder    (EOM sigma vector: the residual with R3)
+!                     10 pass 1  11 pass 2  12 pp ladder    (EOM sigma vector: the residual with T3
+!                                                            and the derivatives of the operators)
+!   The kinds of a sigma vector are dealt per label shift (xzdeal_eom): the
+!   passes run with the shift of the vector in their operands.
 !
 ! Without MPI, and with one rank, every batch is this rank's and nothing is
 ! sent: the serial program.
@@ -32,9 +37,11 @@ module xzdist
                    xzmpi_sum0_w, xzmpi_allsum_w, xzmpi_gather, xzmpi_max, xzmpi_sum, xzmpi_chunk, &
                    xzmpi_slices_add, xzmpi_slices_put
   implicit none
-  integer, parameter :: ndk = 6
+  integer, parameter :: ndk = 12
   character(len=10), parameter :: dkname(ndk) = [character(len=10) :: 'pass 1', 'pass 2', 'pp ladder', &
-    'L pass 1', 'L pass 2', 'L ladder']
+    'L pass 1', 'L pass 2', 'L ladder', 'R3 pass 1', 'R3 pass 2', 'R3 ladder', 'T3 pass 1', 'T3 pass 2', 'T3 ladder']
+  integer, parameter :: ndset = ndk / 3        ! 1 T3 equation, 2 Lambda, 3 and 4 the two residuals of an EOM sigma vector
+  integer(8) :: dshift = 0                    ! the label shift (classes) of the vector of the kinds 7 to 12
   integer(8), allocatable :: bown(:, :)       ! (first pair or triple of the batch, kind): its rank (-1: no batch starts there)
   integer(8), allocatable :: bnum(:, :)       ! pairs or triples of the batch
   real(8), allocatable :: bcost(:, :)         ! its cost by the model
@@ -42,7 +49,8 @@ module xzdist
   integer :: dkind = 0                        ! the kind of the loop that runs; 0: every batch is done
   logical :: asworker = .false.               ! a dry run for the memory of a rank other than 0
   logical :: distk(ndk) = .true.              ! option dist: which kinds are dealt out (else all to rank 0)
-  real(8) :: rplan(16) = 0d0                  ! the plan of rank 0: words of a worker, the 8 batch sizes
+  real(8) :: rplan(20) = 0d0                  ! the plan of rank 0: words of a worker, the 8 batch sizes, ..;
+                                              ! 17: EOM, the words of the subspace of a rank other than 0
   integer(8) :: maxthr = 0                    ! the largest number of threads of a rank
   ! ---- slices (more than one rank; option slices 0: off): every rank owns a range of
   !      rows of T3 - the elements soff(r) <= e < soff(r + 1) of the stored
@@ -66,8 +74,11 @@ module xzdist
   ! 9, 10 waiting for the other ranks before the sums of pass 1 and before
   ! the sum of the residual
   integer, parameter :: nds = 10
-  real(8) :: dsec(nds, 2) = 0d0
-  real(8) :: dwords(2) = 0d0                  ! words of amplitudes sent to the ranks (per receiving rank)
+  ! (set 3: the sigma vectors of EOM - both passes 1, both sweeps, both passes
+  ! 2; 6 the slices of the vector to the ranks; 8 the two operators on
+  ! occupied triples on its rows; 9 the waiting before the two sums of pass 1)
+  real(8) :: dsec(nds, ndset) = 0d0
+  real(8) :: dwords(ndset) = 0d0               ! words of amplitudes sent to the ranks (per receiving rank)
   real(8), private :: tb0 = 0d0
   ! ---- the speeds of the ranks, measured (xzrebal).  The nodes of a
   !      partition are not equally fast, the two sockets of a node need not
@@ -84,7 +95,8 @@ module xzdist
   real(8) :: tint(2) = 0d0                    ! seconds of this rank up to the two meetings, since the last xzrebal
   real(8) :: tsync = 0d0                      ! (the end of the first meeting)
   real(8) :: rebtol = 0.03d0                  ! deal again when the last rank arrives this far after the mean
-  integer(8) :: nrebal(2) = 0                 ! how often the batches were dealt again
+  integer(8) :: nrebal(ndset) = 0              ! how often the batches were dealt again
+  real(8) :: tmeet(3) = 0d0                   ! EOM: seconds of this rank up to the three meetings of a sigma vector
   ! constants of the cost model: the part of a batch that does not grow with the summed index
   ! (gathers, reductions), in units of one more summed index of its products
   real(8) :: cg1 = 8d0, cg2 = 64d0, cg3 = 16d0, cg4 = 16d0, cg5 = 96d0, cg6 = 16d0
@@ -126,9 +138,14 @@ contains
     use xzdata
     integer, intent(in) :: kind
     integer(8), intent(in) :: g
-    integer(8) :: sd, sm, sy, gq, sc, h
+    integer(8) :: sd, sm, sy, gq, sc, h, st, sw
     real(8) :: nd, nm, nq, ney, dl, nc, nqh, c, np, nj
     c = 0d0
+    ! (the sigma vector of EOM: the shift of the rank-3 operand and of the operators)
+    st = 0
+    sw = 0
+    if (kind >= 7 .and. kind <= 9) st = dshift
+    if (kind >= 10) sw = dshift
     select case (kind)
     case (1)
       do sd = 0, ncls - 1
@@ -185,6 +202,34 @@ contains
           c = c + nd * nm * nq * ney
         end do
       end do
+    case (7, 10)
+      do sd = 0, ncls - 1
+        do sm = 0, ncls - 1
+          gq = g + sm - sd + st
+          if (gq < 0 .or. gq >= npg) cycle
+          nd = vcoff(sd + 1) - vcoff(sd)
+          nm = ocoff(sm + 1) - ocoff(sm)
+          nq = vpoff(gq + 1) - vpoff(gq)
+          ney = 0.5d0 * (xznvc(g - sd - sw) + xznoc(g - sd - sw) + xznvc(g - sd + st + sw) + xznoc(g - sd + st + sw))
+          c = c + nd * nm * nq * (cg1 + ney)
+        end do
+      end do
+    case (8, 11)
+      do gq = 0, npg - 1
+        if (abs(g - gq + st + sw) >= ncls) cycle
+        dl = ndel(g - gq + st + sw)
+        nq = vpoff(gq + 1) - vpoff(gq)
+        c = c + dl * nq * (xzndel(g - gq + st) + cg2)
+      end do
+    case (9, 12)
+      do sc = 0, ncls - 1
+        h = g + st - sc
+        if (h < 0 .or. h >= npg .or. h + sw < 0 .or. h + sw >= npg) cycle
+        if (xzna(st, g) == 0 .or. xzna(st + sw, g) == 0) cycle
+        nc = vcoff(sc + 1) - vcoff(sc)
+        nqh = vpoff(h + 1) - vpoff(h)
+        c = c + nc * nqh * (vpoff(h + sw + 1) - vpoff(h + sw) + cg3)
+      end do
     end select
     xzbcost1 = c
   end function
@@ -198,7 +243,7 @@ contains
     integer(8) :: n, g, s, nb, step, r, k, best, nbat, rk
     integer(8), allocatable :: lst(:)
     real(8), allocatable :: load(:)
-    real(8) :: c, tot, worst
+    real(8) :: c, tot, worst, r0x
     character(len=32) :: arg
     integer :: larg
     logical :: triples
@@ -236,7 +281,7 @@ contains
     if (larg > 0) read(arg(1:larg), *, end=11, err=11) rebtol
 11  continue
     end if
-    if (myrank == 0 .and. nrank > 1 .and. .not. present(only)) then
+    if (myrank == 0 .and. nrank > 1 .and. .not. present(only) .and. (with_cc .or. with_lam)) then
       write(6, '(/,a,i4,a)') '   The iterations over ', nrank, ' ranks: batches of pairs and triples by the cost model'
       write(6, '(a)') '     loop        batches   slowest rank above the mean   share of rank 0'
     end if
@@ -248,14 +293,19 @@ contains
       if (mod(kk, 3) == 0) kind = kk - 1
       if (present(only)) then
         if ((kind - 1) / 3 + 1 /= only) cycle
+      else if (kind > 6) then
+        ! (the kinds of a sigma vector: per label shift, xzdeal_eom)
+        cycle
       end if
-      triples = kind == 3 .or. kind == 6
+      triples = mod(kind, 3) == 0
+      r0x = 0d0
+      if (kind <= 6) r0x = r0extra(merge(1, 2, kind <= 3))
       step = merge(nbt, nbp, triples)
       nbat = 0
       tot = 0d0
       do g = 0, merge(ntg, npg, triples) - 1
         if (triples) then
-          if (vtoff(g + 1) == vtoff(g)) cycle
+          if (kind <= 6 .and. vtoff(g + 1) == vtoff(g)) cycle
           c = xzbcost1(kind, g)
           do s = otoff(g), otoff(g + 1) - 1, step
             nb = min(step, otoff(g + 1) - s)
@@ -290,7 +340,7 @@ contains
       end do
       load = 0d0
       ! (option r0load: a load of rank 0 by hand, a fraction of the loop)
-      if (nrank > 1) load(0) = r0extra(merge(1, 2, kind <= 3)) * tot
+      if (nrank > 1) load(0) = r0x * tot
       ! each batch to the rank that is done with it first: the seconds before
       ! its batches (pass 2: with those of its ladder), then its batches at
       ! its speed
@@ -306,16 +356,71 @@ contains
         load(best) = load(best) + bcost(lst(k), kind)
       end do
       rload(:, kind) = load
-      if (nrank > 1) rload(0, kind) = load(0) - r0extra(merge(1, 2, kind <= 3)) * tot
+      if (nrank > 1) rload(0, kind) = load(0) - r0x * tot
       ! (pass 2 of a rank starts when its ladder is done)
       if (triples) roff(:, kind - 1) = roff(:, kind) + rload(:, kind) / rspeed(:, kind)
-      if (myrank == 0 .and. nrank > 1 .and. .not. present(only)) then
+      if (myrank == 0 .and. nrank > 1 .and. .not. present(only) .and. (with_cc .or. with_lam)) then
         worst = maxval(load) / max(sum(load) / nrank, 1d-300) - 1d0
         write(6, '(5x,a10,i9,f18.2,a,f18.2,a)') dkname(kind), nbat, 100d0 * worst, ' %', &
-          100d0 * (load(0) - r0extra(merge(1, 2, kind <= 3)) * tot) / max(tot, 1d-300), ' %'
+          100d0 * (load(0) - r0x * tot) / max(tot, 1d-300), ' %'
       end if
     end do
     deallocate(lst, load)
+  end subroutine
+
+  ! The batches of the two residuals of an EOM sigma vector of the label
+  ! shift s (classes), dealt with the speeds that were measured last (called
+  ! by every rank when the problem of a shift starts, and from xzrebal_eom).
+  ! Between the last two meetings of a sigma vector a rank does the ladder
+  ! and pass 2 with R3, then those with T3.
+  subroutine xzdeal_eom(s)
+    integer(8), intent(in) :: s
+    if (.not. allocated(bown)) call xzdeal()
+    dshift = s
+    roff(:, 7:12) = 0d0
+    call xzdeal(3)
+    roff(:, 12) = roff(:, 8) + rload(:, 8) / rspeed(:, 8)
+    call xzdeal(4)
+  end subroutine
+
+  ! After a sigma vector (called by every rank): as xzrebal, for the six
+  ! kinds of batches of a sigma vector and its three meetings (the sums of
+  ! the two passes 1, sigma_3 to the owners of its rows).
+  subroutine xzrebal_eom()
+    real(8) :: mine(9), all(9, 0:nrank - 1), msg(1 + 6 * nrank), worst
+    integer :: k
+    integer(8) :: r
+    if (nrank == 1) return
+    mine(1:6) = ksec(7:12)
+    mine(7:9) = tmeet
+    ksec(7:12) = 0d0
+    tmeet = 0d0
+    all = 0d0
+    call xzmpi_gather(mine, all, 9_8)
+    msg = 0d0
+    if (myrank == 0 .and. rebtol > 0d0) then
+      worst = 0d0
+      do k = 7, 9
+        if (sum(all(k, :)) > 0d0) worst = max(worst, maxval(all(k, :)) * nrank / sum(all(k, :)) - 1d0)
+      end do
+      if (worst > rebtol .and. minval(all(1:6, :)) > 0d0 .and. minval(rload(:, 7:12)) > 0d0) then
+        msg(1) = 1d0
+        do r = 0, nrank - 1
+          do k = 1, 6
+            msg(1 + 6 * r + k) = rload(r, 6 + k) / all(k, r)
+          end do
+        end do
+      end if
+    end if
+    call xzmpi_bcast(msg, 8_8 * (1 + 6 * nrank))
+    if (msg(1) /= 1d0) return
+    do r = 0, nrank - 1
+      do k = 1, 6
+        rspeed(r, 6 + k) = msg(1 + 6 * r + k)
+      end do
+    end do
+    call xzdeal_eom(dshift)
+    nrebal(3) = nrebal(3) + 1
   end subroutine
 
   ! The slices of the stored T3 for the mode that xzsetmode has set: equal
@@ -538,10 +643,14 @@ contains
     call xzmpi_gather(mine, all, int(nds + 4, 8))
     if (myrank > 0) return
     nrw = dble(nwe * n3)
-    write(6, '(/,a,a,a,i4,a)') '   The ranks in the ', merge('CCSDT ', 'Lambda', set == 1), ' iterations (seconds of ', &
-      ncyc, ' cycles)'
+    if (set <= 2) then
+      write(6, '(/,a,a,a,i4,a)') '   The ranks in the ', merge('CCSDT ', 'Lambda', set == 1), ' iterations (seconds of ', &
+        ncyc, ' cycles)'
+    else
+      write(6, '(/,a,i6,a)') '   The ranks in the sigma vectors of EOM (seconds of ', ncyc, ' sigma vectors)'
+    end if
     write(6, '(a)') '     rank    pass 1  sweep+ladder    pass 2   waiting  sums of pass 1   waiting  sum of residual' // &
-      '  amplitudes  ' // merge('on its rows ', 'rank 0 alone', slices) // '     step   work array/MB   peak resident/MB'
+      '  amplitudes  ' // merge('on its rows ', 'rank 0 alone', slices .or. set > 2) // '     step   work array/MB   peak resident/MB'
     do r = 0, nrank - 1
       write(6, '(i9,f10.2,f14.2,f10.2,f10.2,f16.2,f10.2,f17.2,f12.2,f14.2,f9.2,f16.1,f19.1)') r, all(1, r), &
         all(2, r), all(3, r), all(9, r), all(4, r), all(10, r), all(5, r), all(6, r), all(8, r), all(7, r), &
@@ -553,6 +662,20 @@ contains
       100d0 * (maxval(all(3, :)) / max(sum(all(3, :)) / nrank, 1d-30) - 1d0), ' %'
     rate = 0d0
     if (maxval(all(6, 1:)) > 0d0) rate = 8d-9 * all(nds + 1, 1) / maxval(all(6, 1:))
+    if (set > 2) then
+      ! (the sigma vectors: the vector to a rank, sigma_3 from a rank, in all)
+      if (nrebal(3) > 0) then
+        write(6, '(a,i4,a)') '     the batches were dealt again ', nrebal(3), ' times (by the measured speeds); at the end, rank by rank'
+        write(6, '(a,*(f7.3))') '       speed in pass 1 with R3 (mean 1): ', rspeed(:, 7) * nrank / sum(rspeed(:, 7))
+        write(6, '(a,*(f7.3))') '       speed in pass 2 with R3:          ', rspeed(:, 8) * nrank / sum(rspeed(:, 8))
+        write(6, '(a,*(f7.3))') '       speed in pass 2 with T3:          ', rspeed(:, 11) * nrank / sum(rspeed(:, 11))
+      end if
+      write(6, '(a,f10.2,a,f8.3,a)') '     the vectors: ', 8d-9 * all(nds + 1, 1), ' GB into a rank in all, ', rate, &
+        ' GB/s into the slowest receiver (all ranks send and receive at once)'
+      if (maxval(all(5, :)) > 0d0) write(6, '(a,f8.3,a)') '     sigma_3 to the owners of its rows: ', &
+        8d-9 * all(nds + 1, 1) / maxval(all(5, :)), ' GB/s'
+      return
+    end if
     if (nrebal(set) > 0) then
       write(6, '(a,i4,a)') '     the batches were dealt again ', nrebal(set), &
         ' times (by the measured speeds); at the end, rank by rank'

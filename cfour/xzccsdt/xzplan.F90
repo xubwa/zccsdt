@@ -58,8 +58,8 @@ integer(8) function xzpeak_cc(w)
       call xzlam_d(w, pslot, pfile, pchunk, c, n)
     end if
   end if
-  ! the excited states (rank 0): after the amplitudes
-  if (with_eom .and. (.not. xzworker() .or. cc3mode == 2)) then
+  ! the excited states (all ranks: the sigma vectors run over them): after the amplitudes
+  if (with_eom) then
     if (nwe == 2) then
       call xzeom_z(w, e)
     else
@@ -122,6 +122,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   use xzkern
   use xzpland
   use xzdist
+  use xzeomd, only: ep0, epw
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -233,6 +234,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     call setpar(9, max(1_8, int(rplan(16), 8)))
     pslot = 0
     pfile = .false.
+    ! (EOM: its rows of the vectors of the subspace, as rank 0 planned them)
+    epw = int(rplan(17), 8)
     if (slices) then
       ! (its slices of the DIIS vectors, where rank 0 has its own)
       pslot = int(rplan(10), 8)
@@ -358,7 +361,13 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       'its part of the residual, the batches; no DIIS vectors)'
     if (.not. planq .and. slices) write(6, '(a,f10.1,a)') '       (its own work array: the integrals, the amplitudes, ' // &
       'the residual, the batches, its slice of every DIIS vector: at most ', 8d-6 * nwe * smax, ' MB of T3)'
-    call xznodemem(max(need_cc, need_q), pneedw + 4096)
+    if (with_eom .and. cc3mode == 0) then
+      write(6, '(a,f10.1,a,f10.1,a)') '       (EOM: the vectors of the subspace by rows of R3 - rank 0 holds up to ', 8d-6 * ep0, &
+        ' MB of them besides the plan above, every other rank ', 8d-6 * epw, ' MB, which is in its number)'
+      call xznodemem(max(need_cc, need_q) + ep0, pneedw + 4096)
+    else
+      call xznodemem(max(need_cc, need_q), pneedw + 4096)
+    end if
   end if
   if (with_q .and. t3shared) then
     if (q_left) then

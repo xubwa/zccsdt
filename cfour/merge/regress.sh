@@ -22,8 +22,11 @@
 #                  /scratch16/lcheng24/xwang405/zccsdt_ref; each has a README
 #                  that says how it was made)
 #   --eom          also "eom" from XZAMPS (the excited states that the ZMAT of
-#                  the case asks for; one rank only, so not with --np): the
-#                  file XZEOM - shift, root, omega to 8 decimals, converged
+#                  the case asks for): the file XZEOM - shift, root, omega to
+#                  8 decimals, converged.  With --np the reference binary
+#                  runs this step with one rank and the binary under test
+#                  with N: the roots over N ranks against those of one rank
+#                  (a reference of before EOM over ranks stops with more)
 #   --scratch DIR  where the copies are run (default /tmp/$USER.xzregress);
 #                  never a source directory
 #
@@ -57,7 +60,7 @@ while [ $# -gt 0 ]; do
     --eom) eom=1; shift ;;
     --ref-args) refargs=1; shift ;;
     --cfourbin) cfourbin=$2; shift 2 ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
     *) echo "regress.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -86,7 +89,7 @@ zkw() {
   esac
 }
 runset() {
-  local who=$1 bin=$2 useargs=$3 c m f n d o st
+  local who=$1 bin=$2 useargs=$3 c m f n d o st n1
   local txt=$scratch/$who.txt
   mkdir -p "$scratch/$who.den" "$scratch/$who.out"
   : > "$txt"
@@ -103,7 +106,7 @@ runset() {
       esac
     done
     methods='ccsdt(q)_l (q) density'
-    [ $eom = 1 ] && [ "$np" -eq 0 ] && methods="$methods eom"
+    [ $eom = 1 ] && methods="$methods eom"
     for m in $methods; do
       o=$scratch/$who.out/$c.$(echo "$m" | tr -d '()').out
       args=$m
@@ -114,7 +117,9 @@ runset() {
         (cd "$d" && "$cfourbin/xjoda" > "$o.xjoda" 2>&1)
       fi
       if [ "$np" -gt 0 ]; then
-        (cd "$d" && mpirun -np "$np" "$bin" $args > "$o" 2>&1)
+        n1=$np
+        [ "$m" = eom ] && [ "$who" = ref ] && n1=1
+        (cd "$d" && mpirun -np "$n1" "$bin" $args > "$o" 2>&1)
       else
         (cd "$d" && "$bin" $args > "$o" 2>&1)
       fi

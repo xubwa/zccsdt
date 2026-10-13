@@ -51,6 +51,34 @@ module xzeomd
   real(8) :: evio = 0d0                     ! seconds in reading and writing them
   real(8) :: evbytes = 0d0                  ! bytes read and written
 
+  ! ---- more than one rank (docs/native.md, section 16.7).  Rank 0 runs the
+  !      solver; R3 and sigma_3 of a vector are cut into one slice of rows per
+  !      rank (as T3 in the iterations, xzdist.F90, here in the layout of the
+  !      label shift), and every rank holds of every vector of the subspace
+  !      its own rows only - rank 0 with the singles and doubles in front.
+  !      A vector operation of the solver is a command of rank 0 that every
+  !      rank carries out on its part: the elements evoff .. evoff + evlen - 1
+  !      of a vector of the work array.
+  logical :: edist = .false.                ! the sigma vectors with R3 run over the ranks
+  logical :: ecmd = .false.                 ! the vector operations of the solver do (not in the singles-doubles stage)
+  integer(8), allocatable :: esoff(:)       ! (0:nrank) the slices of R3 of the shift, elements
+  integer(8), allocatable :: eswoff(:)      ! the same in words
+  integer(8) :: esmax = 0                   ! elements of the longest slice
+  integer(8) :: evoff = 0                   ! the first element of a vector that this rank holds
+  integer(8) :: ekx(2) = 0                  ! the two vectors of the work array that the commands name
+  ! the commands
+  integer, parameter :: op_end = 0, op_shift = 1, op_endshift = 2, op_open = 3, op_close = 4, op_zero = 5, &
+    op_dot = 6, op_scal = 7, op_mdot = 8, op_comb = 9, op_put = 10, op_sigma = 11, op_max = 12, op_prec = 13, &
+    op_trans = 14, op_axpy = 15, op_collect = 16, op_spread = 17
+  ! the plan of the subspace (made by the dry run of rank 0, followed by the
+  ! run: the other ranks have the memory of the plan): per problem the
+  ! vectors and whether they are in files; the words that the subspace takes
+  ! on rank 0 and on another rank (the most of all problems)
+  integer(8) :: eplan = 0                   ! the problem that runs (0: no plan to follow - one rank)
+  integer(8) :: epm(maxsh) = 0
+  logical :: epf(maxsh) = .false.
+  integer(8) :: ep0 = 0, epw = 0
+
   ! ---- the results, for the table at the end and the file XZEOM
   integer(8) :: nres = 0
   integer(8) :: rshift(maxres) = 0, rroot(maxres) = 0, rnsig(maxres) = 0, rcyc(maxres) = 0
@@ -65,10 +93,17 @@ contains
 
   ! the name of the file of vector j: EOMCnnnn (kind 1), EOMHnnnn (kind 2),
   ! the names of CFOUR's xx2ceomcc (libx2ccc/davhcfname)
-  character(len=8) function xzevname(kind, j)
+  ! (a rank other than 0 holds its rows of the vector: EOMCnnnn.rrrr)
+  character(len=13) function xzevname(kind, j)
+    use xzpar, only: myrank
     integer, intent(in) :: kind
     integer(8), intent(in) :: j
-    write(xzevname, '(a4,i4.4)') merge('EOMC', 'EOMH', kind == 1), j
+    xzevname = ' '
+    if (myrank == 0) then
+      write(xzevname, '(a4,i4.4)') merge('EOMC', 'EOMH', kind == 1), j
+    else
+      write(xzevname, '(a4,i4.4,a1,i4.4)') merge('EOMC', 'EOMH', kind == 1), j, '.', myrank
+    end if
   end function xzevname
 
   integer function xzevunit(kind, j)
@@ -159,6 +194,8 @@ contains
     if (ncls == 1) then
       eshift = 0
       n3s = nto * nvt
+      boff_s(0) = 0
+      boff_s(1) = n3s
       return
     end if
     n3s = 0
@@ -169,6 +206,102 @@ contains
     boff_s(ntg) = n3s
     if (.not. xzdry) call xzeomfill(nto, s, w(jobase_s))
   end subroutine xzeomlay
+
+  ! A command of rank 0 to the other ranks (which wait for it in N(xzeserve)):
+  ! the operation and up to five numbers.
+  subroutine xzecmd(op, a1, a2, a3, a4, a5)
+    use xzpar, only: xzmpi_bcast
+    integer, intent(in) :: op
+    real(8), intent(in), optional :: a1, a2, a3, a4, a5
+    real(8) :: ctl(6)
+    ctl = 0d0
+    ctl(1) = dble(op)
+    if (present(a1)) ctl(2) = a1
+    if (present(a2)) ctl(3) = a2
+    if (present(a3)) ctl(4) = a3
+    if (present(a4)) ctl(5) = a4
+    if (present(a5)) ctl(6) = a5
+    call xzmpi_bcast(ctl, 48_8)
+  end subroutine xzecmd
+
+  ! which of the two vectors of the commands the address kx is
+  real(8) function xzewhich(kx)
+    integer(8), intent(in) :: kx
+    xzewhich = merge(1d0, 2d0, kx == ekx(1))
+  end function xzewhich
+
+  ! The slices of a rank-3 array of the layout that xzeomlay has set: equal
+  ! numbers of elements as far as whole rows allow (xzdist: xzslices, for the
+  ! layout of a label shift).
+  subroutine xzeslices()
+    use xzdata
+    use xzpar, only: nrank
+    integer(8) :: r, g, na, ni, t, a
+    if (allocated(esoff)) deallocate(esoff, eswoff)
+    allocate(esoff(0:nrank), eswoff(0:nrank))
+    esoff(0) = 0
+    do r = 1, nrank - 1
+      t = (r * n3s) / nrank
+      esoff(r) = n3s
+      do g = 0, ntg - 1
+        ni = otoff(g + 1) - otoff(g)
+        na = xzna(eshift, g)
+        if (ni == 0 .or. na == 0) cycle
+        if (t < boff_s(g) + ni * na) then
+          a = max(0_8, (t - boff_s(g) + na - 1) / na)
+          esoff(r) = boff_s(g) + a * na
+          exit
+        end if
+      end do
+      esoff(r) = max(esoff(r), esoff(r - 1))
+    end do
+    esoff(nrank) = n3s
+    esmax = 0
+    do r = 0, nrank - 1
+      esmax = max(esmax, esoff(r + 1) - esoff(r))
+    end do
+    eswoff = nwe * esoff
+  end subroutine xzeslices
+
+  ! the rows a <= row < b of the block of the group g (layout of the shift)
+  ! that this rank holds: all of them unless the problem runs over the ranks
+  subroutine xzeslrows(g, a, b)
+    use xzdata
+    use xzpar, only: myrank, nrank
+    integer(8), intent(in) :: g
+    integer(8), intent(out) :: a, b
+    integer(8) :: na, ni
+    ni = otoff(g + 1) - otoff(g)
+    na = xzna(eshift, g)
+    a = 0
+    b = ni
+    if (nrank == 1 .or. .not. edist .or. na == 0) return
+    a = min(ni, max(0_8, (esoff(myrank) - boff_s(g) + na - 1) / na))
+    b = min(ni, max(0_8, (esoff(myrank + 1) - boff_s(g)) / na))
+    if (esoff(myrank + 1) <= boff_s(g)) b = 0
+    if (b < a) b = a
+  end subroutine xzeslrows
+
+  ! The place of a subspace of msub vectors of nloc elements when avail words
+  ! are free for it (the rule of N(xzevopen); docs/native.md, section 16.4):
+  ! all of them in the work array; else, if at least nmem fit there, that
+  ! many in the work array; else files (infile).
+  subroutine xzevplace(nw, nloc, nmem, avail, mayfile, msub, infile)
+    use xzmem, only: xzalign
+    integer(8), intent(in) :: nw, nloc, nmem, avail
+    logical, intent(in) :: mayfile
+    integer(8), intent(inout) :: msub
+    logical, intent(out) :: infile
+    integer(8) :: nfit
+    infile = 2 * msub * (nw * nloc + xzalign) > avail
+    if (infile .and. mayfile) then
+      nfit = avail / (2 * (nw * nloc + xzalign))
+      if (nfit >= nmem) then
+        msub = nfit
+        infile = .false.
+      end if
+    end if
+  end subroutine xzevplace
 
   ! The step of the labels of the active spinors (xzclasses), for the shifts
   ! of the input: a shift D in labels is D / step classes.

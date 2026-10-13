@@ -379,7 +379,7 @@ what the ZMAT asks for (as joda stored it in JOBARC):
                                         EXCITATION=4 as CCSDT(Q) / CCSDT(Q)_L
     CALC=CCSDT,EXCITE=EOMEE             CCSDT, then EOM-EE-CCSDT (roots, label shifts,
                                         thresholds: %eomnroot, %xzeom, ESTATE_CONV,
-                                        ESTATE_MAXCYC; one MPI rank)
+                                        ESTATE_MAXCYC)
     CALC=CCSDT,PROPS=FIRST_ORDER        CCSDT, Lambda, the files xfull, dpoo, dpvv,
       (or DERIV_LEV=1)                  dii0, daa0, dpopo, dpvpv for xx2czvec
                                         (then xx2czvec, xsox2cprop)
@@ -443,8 +443,8 @@ ordinary run needs none of them:
                      the memory plan by hand (docs/native.md, section 4)
 
 (docs/native.md, section 18, has these and the developer options.)  MPI
-(iterations, (Q), the folded EOM-CC3 over ranks; the run directory with
-the integral files under the same path on every node):
+(iterations, (Q), EOM-EE-CCSDT and the folded EOM-CC3 over ranks; the run
+directory with the integral files under the same path on every node):
 
     OMP_NUM_THREADS=24 I_MPI_PIN_DOMAIN=omp mpirun -np 2 ${prog}_mpi
 

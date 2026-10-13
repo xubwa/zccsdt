@@ -196,8 +196,12 @@ decided alike ...`).
   `I_MPI_WAIT_MODE=1`).
 - The density stage (`density`, the last step of `ccsdt_density`) is rank
   0's.
-- The excited states (`eom`, `ccsdt_eom`) run with one rank only; with more
-  the program stops with a message (section 16.7).
+- **The excited states** (EOM-EE-CCSDT) run on all ranks (section 16.7):
+  rank 0 runs the solver and sends the converged amplitudes once; every
+  rank does its batches of a sigma vector and holds its rows of R3 of every
+  vector of the subspace.  A node-local directory on every node is enough.
+  (EOM-CC3 folded: section 17.4.  The check route `cc3 stored` with
+  `EXCITE=EOMEE` runs with one rank.)
 
 The steps can be separate invocations in one directory: `CALC=CCSDT`
 (serial or one rank), then `CALC=CCSDT(Q)` with `mpirun ...`: the second
@@ -241,7 +245,7 @@ Written:
 | `xzccsdt.rNNNN` | output of the ranks other than 0 (MPI) |
 | `XZEOM`; `JOBARC`: `TOTENER2` | `eom`, `ccsdt_eom`: a text line per excited state (shift, root, omega, total energy, residual, weights); the total energy of the lowest state (section 16.1) |
 | `XZEOMR` | the vectors of the roots (section 16.1; not with `%xzeomvec 0`, not if the disk is short) |
-| `EOMCnnnn`, `EOMHnnnn` | only if the subspace of the EOM solver does not fit in the work array: its vectors and their sigma vectors (CFOUR's names), deleted at the end (section 16.4) |
+| `EOMCnnnn`, `EOMHnnnn` | only if the subspace of the EOM solver does not fit in the work array: its vectors and their sigma vectors (CFOUR's names), deleted at the end (section 16.4); over ranks `EOMCnnnn.<rank>`, `EOMHnnnn.<rank>`: the rows of a rank other than 0 (16.7) |
 
 A run that reads `XZAMPS` or `XZLAMB` must run in the mode of the run that wrote it
 (labels used or not, real or complex: both follow from the same integral
@@ -292,7 +296,7 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzdata.F90` | sizes, the job, offsets of the arrays that live for the run |
 | `xzdiis.F90` | DIIS: slots, the file, the small linear problem (ZHEEV) |
 | `xzpar.F90` | ranks and the task list of (Q) (groups, pieces, the distribution by the cost model), checkpoint files |
-| `xzdist.F90` | the iterations over ranks: the batches of pairs and triples and their ranks (cost model), the slices of T3, the times of the ranks |
+| `xzdist.F90` | the iterations and the sigma vectors of EOM over ranks: the batches of pairs and triples and their ranks (cost model), the slices of T3, the times of the ranks |
 | `xzkern.F90`, `xzkern.inc` | explicit `bind(C)` interfaces of the kernels, one include for `_d` and `_z` |
 | `xzmpi.c`, `xzutil.c` | C: all MPI calls of the program behind a few functions (stubs without MPI) - broadcasts and sums of a few numbers, and arrays of the size of T3 in chunks: broadcast, send / receive, sum onto rank 0, sum on all ranks, the two exchanges of slices; free disk space, resident set (anonymous and mapped), BLAS integer size, a file mapped read-only (`xz_map_file`: T3 of (Q)), whether a directory is on a network file system |
 | `xztype.h` | the element type of a compilation of the type-generic sources |
@@ -304,7 +308,7 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzden.inc` | the density stage: the passes over l3 and T3, the blocks of the two-particle density, the orbital gradient, the files of `xx2czvec`; its pass C in blocks |
 | `xzdfrz.inc`, `xzfrz.F90` | frozen and dropped spinors in the density stage: the contractions with integrals of one such index, the rotations, the rows and columns of `xfull`; the integrals through CFOUR's `int_mintv2e` and `vtranpsog` |
 | `xzq.inc`, `xzqs.inc` | (Q) and (Q)_Lambda: the task loop and the dense quadruple; the quadruple in sectors of the labels |
-| `xzeom.inc`, `xzeoms.inc`, `xzeomd.F90` | EOM-EE-CCSDT: the intermediates of the ground state and the sigma vector; the solver, the driver and the test hooks; the input (flags, ZMAT sections), the label shifts and their layout, the results (section 16) |
+| `xzeom.inc`, `xzeoms.inc`, `xzeomd.F90` | EOM-EE-CCSDT: the intermediates of the ground state and the sigma vector; the solver, the driver, the test hooks and the vector operations over ranks; the input (flags, ZMAT sections), the label shifts and their layout, the slices and commands of the ranks, the results (section 16) |
 | `xzcc3.inc` | CC3 (section 17): the step without stored triples, the batches of occupied triples and their fold, the diagonal Fock operator of T3, the folded EOM sigma vector and its driver |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
@@ -469,7 +473,10 @@ plan` to the word).
   allocations of every label shift of the input with the smallest subspace
   that can run; the subspace of the solver then takes what is left, per
   shift - all of it in the work array, a smaller one in the work array, or
-  files (section 16.4).
+  files (section 16.4).  With more than one rank the same dry run fixes the
+  subspace of every shift (vectors, work array or files) and the words that
+  a rank other than 0 needs for its rows of it; the run follows that plan
+  (section 16.7).
 - **The work array of a rank other than 0 is not `MEMORY_SIZE`.**  Rank 0
   makes the plan - the batch sizes, the place of the DIIS vectors - in its
   `MEMORY_SIZE`, then runs the scheduler dry once more *as a rank other
@@ -3043,6 +3050,12 @@ the transfer rates above are Intel MPI's, in particular the slow
   start when rank 0 has planned: 3 to 7 s here, on its own clock).
 - Open MPI; more than four nodes; more than 8 ranks.
 
+### 15.11 The sigma vectors of EOM
+
+The excited states use this machinery for a second kind of step: the kinds
+of batches 7 to 12 of `xzdist.F90`, dealt per label shift (`xzdeal_eom`,
+`xzrebal_eom`), the sums of pass 1, rows with owners.  Section 16.7.
+
 ## 16. EOM-EE-CCSDT: excited states
 
     CALC=CCSDT,EXCITE=EOMEE         # CCSDT, then the excited states (or the
@@ -3061,8 +3074,8 @@ case and runs through the same code.  The Python program
 reference of the sigma vector and of every root below; the solver is not
 its block Davidson but CFOUR's (16.3).
 
-Not here: IP / EA, left-hand vectors, properties, CFOUR's CIS guess; more
-than one MPI rank (16.7).
+Not here: IP / EA, left-hand vectors, properties, CFOUR's CIS guess.  Over
+MPI ranks: 16.7.
 
 ### 16.1 Input and output
 
@@ -3490,24 +3503,266 @@ Not measured: complex arithmetic and the dense layout at production size;
 the Python program on this node and these spinors (its numbers are of
 another job and another SCF).
 
-### 16.7 MPI
+### 16.7 Over MPI ranks
 
-EOM runs with one rank.  With more the program stops at the start:
+    mpirun -np 8 -ppn 2 xzccsdt_mpi          # CALC=CCSDT,EXCITE=EOMEE; 4 nodes, one rank per socket
 
-    @XZCCSDT-F, the excited states (EOM) run with one rank: the sigma vectors are not distributed.
-                Run CALC=CCSDT (without EXCITE) over the ranks, then EXCITE=EOMEE with one rank:
-                the second run takes the amplitudes of the file XZAMPS of the first.
+EOM-EE-CCSDT runs over the ranks as the iterations do (section 15), in
+every mode: real and complex, the blocks of every label shift and dense.
+Rank 0 runs the solver.  No new option; `slices`, `bpr`, `rebal`,
+`mpichunk` act as in the iterations.
 
-(CCSDT over ranks and EOM with one rank of the MPI build or the serial
-build: run, with the arguments of the time.)  The passes of a sigma vector are the ones
-that the iterations deal to the ranks, and they ask `xzmine` for every
-batch; what is missing is the rest of the machinery of section 15 for a
-second kind of step: the kept intermediates made on every rank
-(`xzeomim` after the amplitudes of rank 0), the vector sent to the ranks per
-sigma vector (or its slices, with the solver's vector operations on
-slices), the cost model and the deal of the batches for the layouts of a
-shift, the sums of the two passes 1 and of sigma_3, and the memory of a
-rank in the plan.  Not started.
+**The sigma vector** (`xzesig` with `edist`; `xzepsig`).  Every rank has
+the amplitudes (rank 0 broadcasts T1, T2, T3 once, before the
+intermediates), the pp operator in the place of `<ab||cd>` and the kept
+intermediates of 16.2, **made by every rank itself** (`xzeomim`, one
+amplitude step without its residual; 1 to 4 s at the sizes below).  Per
+vector:
+
+| step | who | what goes between the ranks |
+|---|---|---|
+| r1, r2 of rank 0; the rows of R3 of every rank | all | a broadcast of the singles and doubles; the slices of R3 to every rank (`xzmpi_slices_put`): every rank then has the whole vector |
+| H', the terms of sigma_1, sigma_2 without T3-sized arrays, W'_vvvo, W'_vooo, the rows of W'_pp | every rank, the same numbers | - |
+| **pass 1 over R3**; **pass 1 over T3 with H'** | every rank: its batches of pairs | after each: the four (three) results summed on every rank (`MPI_Allreduce`, as meeting 1 of an iteration) |
+| sweep over W_pp with the **pp ladder of R3**; **pass 2 with R3** | every rank: its batches of triples / pairs | - |
+| operator on occupied triples with R3 | every rank: its rows (`xzeslocc`) | - |
+| sweep over the rows of W'_pp with the **pp ladder of T3**; **pass 2 with T3** | every rank: its batches | - |
+| operator of (W'_oooo, F'_oo) with T3 | every rank: its rows | - |
+| sigma_3 | all | **the rows to their owners** (`xzmpi_slices_add`) |
+
+sigma_1 and sigma_2 come out the same on every rank (after the sums of the
+passes 1); rank 0's are used.  The six loops are six more kinds of batches
+of `xzdist.F90` (7 to 12; the batches themselves are those of the plan,
+`nbp` pairs and `nbt` triples), dealt **per label shift** by a cost model
+that has the shifts of the operands (`xzbcost1`: the classes of the summed
+indices with `sh_t`, `sh_w` as the passes of `xzblk.inc` have them), and
+dealt again by the measured speeds of the ranks after a sigma vector whose
+last rank came more than `rebal` after the mean at one of the three
+meetings (`xzdeal_eom`, `xzrebal_eom`; the ladder and pass 2 of T3 start on
+a rank when those of R3 are done).  The slices are those of the layout of
+the shift (`xzeslices`: equal numbers of elements of R3, cut at rows of its
+blocks), not those of T3.
+
+**The solver and where the subspace is** (the scalable form of the two that
+the design named).  Rank 0 runs `xzesolve` as before: the projected
+matrix, its eigenpairs, the convergence test, compaction.  **No rank holds
+more of a vector of the subspace than its rows**: rank r has, of every
+basis vector and of every sigma vector, the elements of its slice of R3 -
+rank 0 with the singles and doubles in front - in its own work array, or
+in its own files (below).  Every operation of the solver on vectors is a
+command of rank 0 (`xzecmd`: an operation and up to five numbers,
+broadcast) that all ranks carry out on their part (`xzeserve` on the other
+ranks; the routines are the serial ones on the range `evoff .. evoff +
+evlen - 1` of a vector): store, the dot products with the subspace
+(`MPI_Reduce` of n numbers onto rank 0), linear combinations and the
+compaction (the coefficients broadcast), scale, the preconditioner by
+rows, the largest element of a residual (`MPI_Reduce` with max; CFOUR's
+`eomconv` gets that element and prints its line), the sigma vector.  The
+two vectors of the work array (the new vector, its sigma vector) are whole
+on every rank - the passes read all of R3 and add to rows of all owners.
+For the file `XZEOMR` the rows of a root go to all ranks once more and
+rank 0 writes the vector.  The singles-doubles stage (the start) is rank
+0's alone: it has nothing of the size of T3.
+
+**The subspace in files** works per rank: with `eomvec f`, or when the
+plan of rank 0 says files, every rank keeps its rows in its own files
+`EOMCnnnn.<rank>`, `EOMHnnnn.<rank>` of its run directory (rank 0:
+`EOMCnnnn`, `EOMHnnnn`), read through its own buffer.  Work array or files
+is decided once, by rank 0, for all - as for the DIIS vectors.
+
+**Memory per rank, planned before anything is allocated.**  The dry run
+of rank 0 (section 4) goes through the EOM stage twice, as itself and as a
+rank other than 0.  As itself it fixes, per label shift, what the run will
+do with this `MEMORY_SIZE` by the rule of 16.4 applied to *its own part* of
+a vector (singles, doubles, its slice): all vectors of the subspace in the
+work array, fewer, or files (`xzevplace`; `epm`, `epf`).  The run follows
+that plan (it never takes more vectors than planned), and the words that
+another rank needs for its rows of that subspace are part of what rank 0
+sends it (`rplan(17)`), so a rank other than 0 allocates
+
+    tables, integrals (the pp operator), T1, T2, T3, the kept intermediates
+    + 2 whole vectors + the arrays of a sigma vector (as rank 0, with the
+      chunk of the exchange)
+    + 2 x (vectors of the subspace) x (its slice of R3)        [or the file buffer]
+
+and stops with both numbers if its array does not hold the plan.  Rank 0
+holds the same with its own slice and the singles and doubles.  The plan
+prints both and the sum per node against `MemAvailable`:
+
+      a rank other than 0 takes:            1715130792  =    13721.0 MB
+        (EOM: the vectors of the subspace by rows of R3 - rank 0 holds up to     9127.3 MB of them besides the plan above, every other rank     8197.9 MB, which is in its number)
+        node of rank     0:    1 ranks, work arrays      15784.4   memory available at the start     171932.8
+
+Measured (jobs below; MB; "used" is the table of the ranks at the end, the
+work array and the peak resident set):
+
+| case, subspace of 25 | serial: work array, resident | 2 ranks: rank 0 / another, plan = used; resident | 4 ranks | 8 ranks |
+|---|---|---|---|---|
+| HBr 26 + 120, real blocks (a vector 674 MB) | 39 742, 39 109 | 23 144 / 22 121; 23 425 / 22 418 | 14 743 / 13 721 (used 13 700 to 13 714); 15 489 / 14 386 to 14 437 | 10 533 / 9 516 (used 9 498 to 9 516); 11 234 / 10 118 to 10 288 |
+| HBr 18 + 78, complex dense (a vector 1001 MB) | 55 647, 51 014 | 30 656 / 30 250; 28 972 / 28 522 | 17 581 / 17 175; 16 913 / 16 417 to 16 466 | 11 238 / 10 833; 11 494 / 11 030 to 11 127 |
+
+(The resident sets of the ranks of an MPI run are up to 8 % above their
+work arrays: buffers of the MPI library.)  The subspace is what shrinks: 33.7 GB (50.0 GB) on one rank, 2 x 25 x
+(slice) on each of n.  What does not shrink with n: T3, the two whole
+vectors and the arrays of a sigma vector on every rank.
+
+**Not distributed**, and what it costs: the small dense terms of a sigma
+vector, W'_vvvo and the rows of W'_pp are made by every rank with its own
+threads (HBr 26 + 120 in blocks: about 0.6 s of a serial sigma vector of 4.9 s
+on 48 threads; they are what bounds the gain in blocks, as the
+intermediates do in an iteration, 15.6); the singles-doubles stage runs on
+rank 0 (22 to 27 s per shift there, at any number of ranks: 10 % of a shift
+on one node, 18 % on four); the intermediates of the ground state are made
+by every rank.
+
+**Validation** (holding job 31913218, node c611; the binaries of the
+commit before this work as the reference; scripts and outputs
+`.claude/jobs/7ba4fcf7/tmp/eomm`).
+
+*Roots, serial against ranks* (`XZEOM`, 14 decimals):
+
+| case | runs | largest difference of a root / Eh |
+|---|---|---|
+| HBr / cc-pVDZ-DK, `%dglin`, real blocks, shifts 2, 4, 6, 0, three roots each, 1e-9 | serial on 8 and 1 thread; MPI build on 1, 2, 3, 4 ranks (8, 4 and 1 thread per rank); `slices 0`; small batches with `mpichunk 3001` and a deal after every vector (`plan 7 3 2 2 ..`, `rebal 0.0001`); `eomvec f` on 2 and 3 ranks | 1.0e-14 |
+| the same, complex blocks (`real 0`) | serial, 2, 3, 4 ranks | 0 (all 14 decimals) |
+| H2O / 6-31G, complex dense, 4 roots, 1e-5 | serial, 2, 3, 4 ranks, 4 ranks of 1 thread | 0 |
+| HBr dense real (`labels 0`), 3 roots | serial, 2, 4 ranks | 0 |
+| HBr, the start from unit vectors and a subspace of 13 (21 compactions) | serial, 3 ranks | 0 |
+| HBr, EOM alone from `XZAMPS` of a run on 2 ranks | 3 ranks, serial | 1.0e-14 |
+| HBr, rank 0 near the least memory (`maxcor`; 2 and 3 ranks: subspaces of 13 to 24 vectors by the plan, the work array used 99.7 to 100.0 % of it) | | 1.8e-10 (another subspace; threshold 1e-9) |
+
+*The sigma vector of a fixed vector* (`eomsig`: a random vector on the
+pattern of the roots of the shift; the largest difference of an element
+of sigma to the binary of before this work, serial; largest elements 3.8
+to 24.6):
+
+| case | new serial, 8 threads | 1 thread | 1 rank | 2, 3, 4 ranks; 2 ranks of 1 thread; 3 ranks with small batches and `mpichunk 3001` |
+|---|---|---|---|---|
+| HBr real blocks, shift 0 | 0 | 1.3e-15 | 0 | 1.8e-15 to 2.2e-15 |
+| shift 2 | 0 | 1.6e-15 | 0 | 1.8e-15 to 2.2e-15 |
+| shift 4 | 0 | 1.3e-15 | 0 | 2.2e-15 to 3.6e-15 |
+| HBr complex blocks, shift 2 | 0 | 1.8e-15 | 0 | 1.8e-15 to 3.6e-15 |
+| shift 6 | 0 | 1.3e-15 | 0 | 2.2e-15 to 3.1e-15 |
+| H2O complex dense | 0 | 7.1e-15 | 0 | 1.1e-14 |
+| HBr real dense | 0 | 1.8e-15 | 0 | 1.8e-15 to 2.7e-15 |
+
+(the serial program and one rank of the MPI build give the bits of the
+binary of before; ranks differ from it as one thread does.)
+
+*Regression*: `regress.sh --eom` serial, and `--np 2 --eom` - the EOM step
+of the reference with one rank, of the new binary with two - on the seven
+cases: REGRESSION OK both (all printed lines identical, 38 lines of roots
+each; density files to 5.6e-17).  `eomtest` serial: the numbers of before
+(3.6e-16, 5.1e-15, 4.2e-15); with more than one rank it stops with a
+message, as `cc3 stored` with EOM does.  The folded EOM-CC3 on 2 ranks:
+its roots as before.
+
+**Not tested**: files chosen by the plan over ranks (in the cases tried
+the smaller subspace in the work array always won; files over ranks ran
+with `eomvec f`); a rank whose work array is too short for the plan; Open
+MPI.
+
+**Timings.**  Two jobs, snapshot of commit 9664495 built on the node, run
+directories in the node-local `/tmp` of every node, Intel MPI 2021
+(`I_MPI_PIN_DOMAIN=omp`, `OMP_PROC_BIND=close`; one node:
+`I_MPI_HYDRA_BOOTSTRAP=fork`, rank 0 on the cores 0-23 and rank 1 on 24-47;
+several nodes: through Slurm, provider `mlx`), Xeon Gold 6248R (2 x 24
+cores, 189 GB).  The serial program first, on the first node; 24 threads:
+the cores and the memory of socket 0.  EOM from `XZAMPS` of the first run
+in all runs but the first.  **Seconds per sigma vector with R3** (the
+solver not included; measured once):
+
+*A. HBr / cc-pVQZ-DK, `%dglin`, 26 + 120, real, 10 classes* (the case of
+16.6; T3 655 MB; three roots of each of the shifts 0 and 2 to 1e-6: 36 + 36
+sigma vectors in every run; the mean of the two shifts):
+
+| | job 31913519, node c694 | job 31913521, nodes c045, c075, c138, c143 | vector operations of the solver per sigma vector |
+|---|---|---|---|
+| serial, 24 threads | 7.55 | 6.67 | 1.05 to 1.36 |
+| serial, 48 threads | 6.39 | 4.91 | 0.62 to 1.04 |
+| 1 node x 2 ranks x 24 | 5.79 | 4.60 | 0.55 to 0.83 |
+| 1 node x 4 x 12 | 6.29 | | 0.80 |
+| 2 nodes x 1 x 48 | | 3.59 | 0.42 to 0.49 |
+| 4 nodes x 1 x 48 | | 2.62 | 0.24 to 0.28 |
+| 4 nodes x 2 x 24 | | 2.67 | 0.22 to 0.25 |
+
+Speedups (same node for the serial run): on one node 2 x 24 against the
+serial program on 24 threads 1.30 and 1.45, against 48 threads 1.10 and
+1.07; two nodes 1.37 (1.86 against 24 threads); **four nodes 1.87 (2.55)**,
+with two ranks each 1.84.  CCSDT itself: 4.68 and 4.07 s per cycle on 24
+threads.
+
+*B. HBr / cc-pVTZ-DK, `DROPMO=1>9`, `labels 0`, `real 0`: 18 + 78, complex,
+dense* (62.1 million triples, T3 993 MB; three roots to 1e-5, 29 sigma
+vectors in every run; CCSDT 13.45 and 12.86 s per cycle on 24 threads):
+
+| | job 31913519, c694 | job 31913521, c045 .. | vector operations per sigma vector |
+|---|---|---|---|
+| serial, 24 threads | 25.60 | 24.71 | 1.52 to 1.99 |
+| serial, 48 threads | 19.93 | 17.02 | 0.87 to 1.16 |
+| 1 node x 2 ranks x 24 | 14.95 | 13.77 | 0.81 to 1.12 |
+| 1 node x 4 x 12 | 13.93 | | 1.13 |
+| 2 nodes x 1 x 48 | | 10.00 | 0.62 |
+| 4 nodes x 1 x 48 | | 5.74 | 0.36 |
+| 4 nodes x 2 x 24 | | 4.64 | 0.32 |
+
+Speedups: on one node 2 x 24 against 24 threads 1.71 and 1.79, against 48
+threads 1.33 and 1.24 (4 x 12: 1.43); two nodes 1.70 (2.47 against 24
+threads); **four nodes 2.97 (4.30), with two ranks each 3.67 (5.33)**.
+
+The roots of all runs of a case agree to the 14 decimals of `XZEOM` (one
+run: 1.0e-14).
+
+Where a sigma vector goes (seconds per sigma vector and rank; "rest": what
+every rank makes itself; the table of the ranks of the output):
+
+| | pass 1 (both) | sweeps, ladders | pass 2 (both) | sums of pass 1 | vector to the ranks, sigma_3 to its rows | on its rows | waiting | rest |
+|---|---|---|---|---|---|---|---|---|
+| blocks, 1 node x 2 x 24 (c694) | 0.87 | 0.95 | 1.76 | 0.72 | 0.14, 0.14 | 0.06 | 0.13 | 0.87 |
+| blocks, 4 nodes x 1 x 48 | 0.41 | 0.37 | 0.59 | 0.22 | 0.05, 0.07 | 0.02 | 0.21 | 0.62 |
+| dense complex, 4 nodes x 1 x 48 | 1.00 | 0.99 | 2.50 | 0.09 | 0.09, 0.12 | 0.18 | 0.38 | 0.30 |
+| dense complex, 4 nodes x 2 x 24 | 0.51 | 0.90 | 1.83 | 0.15 | 0.20, 0.22 | 0.15 | 0.30 | 0.17 |
+
+The sums of the passes 1 (`MPI_Allreduce` of 0.53 GB per sigma vector in
+blocks: 0.7 GB/s on one node, 2.4 GB/s between four) are 8 to 13 % of a
+sigma vector in blocks; the exchanges of the vector and of sigma_3 ran at
+2.3 to 4.0 GB/s per rank on one node and 6 to 9.7 GB/s between nodes (8
+ranks on four nodes: 3.7 to 4.2).
+
+**An estimate for ThF+ 28 + 330** (real, 12 classes; **not a measurement**;
+no job was run).  Serial, 24 cores of a bigmem node (job 31861231): 449 s
+per sigma vector of shift 2 (a vector 15.4 GB) and 21.5 s of vector
+operations; of a CCSDT iteration there 85 % are the three loops that the
+ranks share (pass 1 15.8, ladder 22.9, pass 2 46.4 %) and 15 % what every
+rank would make itself (the t2 `<ov||vv>` term of W_vvvo alone 7 %).
+With the measured ratios of case A - the passes of a rank of 48 threads
+1.3 times those of 24, three quarters of the ideal gain over four ranks,
+the rest 1.4 times faster on 48 threads - and the sums of pass 1 (9.4 GB
+per sigma vector) and the exchanges at the rates above:
+
+| | passes | made by every rank | sums, exchanges, waiting | a sigma vector | against 449 s |
+|---|---|---|---|---|---|
+| 2 nodes x 1 x 48 | 170 s | 50 s | 15 s | about 235 s | 1.9 |
+| 4 nodes x 1 x 48 | 95 s | 50 s | 15 s | about 160 s | 2.8 |
+
+(of the 2.8, 1.36 is 48 threads against 24.)  **Memory** is what decides
+where it can run: without the subspace 107 GB per rank (the serial plan:
+integrals, T3 15.7 GB, the kept intermediates, two vectors, a sigma vector
+21 GB), which every rank has; the subspace of 25 vectors, 770 GB on one
+rank, is 2 x 25 x 15.4 / n GB per rank - 193 GB on four: 300 GB per rank,
+i.e. four nodes of the bigmem kind, where the serial run took 680 GB and
+held 18 vectors.  On the 189 GB nodes of `parallel` a rank has room for 9
+vectors of four ranks' slices: enough for one root per run (3 roots + 4 =
+7), not for three (13) - then the plan puts the subspace into the files of
+every rank (193 GB on its node-local disk), which costs seven readings of
+them per new vector (16.6).
+
+**Not done**: the small dense terms, W'_vvvo and the rows of W'_pp split
+over the ranks; the singles-doubles stage over ranks; the intermediates
+of the ground state made once and sent, or their pass 1 dealt out; the
+sums of pass 1 by an exchange in the place of `MPI_Allreduce`; whole
+vectors (R3, sigma_3) held by rows only, which the passes do not allow;
+EOM of CC3 with T3 stored over ranks; more than four nodes.
 
 ### 16.8 Test hooks
 
@@ -3520,7 +3775,8 @@ rank in the plan.  Not started.
 - Left-hand vectors, r0, transition moments, densities and properties of
   the excited states; IP and EA (the Python program has them by a ghost
   spinor with short vectors, docs/eom.md 5).
-- MPI (16.7).  T3 or the vectors in a mapped file.
+- T3 or the vectors in a mapped file.  Over ranks (16.7): the small dense
+  terms of a sigma vector split over the ranks; `cc3 stored` with EOM.
 - Root following (`EOMFOLLOW=OVERLAP`), given start vectors (`%eomroot`),
   restart from the files of the subspace (`%irestart`), the core-valence
   separation, CFOUR's CIS guess.  A state without a single excitation in its
@@ -3716,8 +3972,9 @@ batches with g + st, `eom_opt.sigma` passing (s, {0, s}, {s, 0}, 0) and
 are there), and `ccn.eom_folded` taking the singles of the shift as the
 guess (`eom.symmetric_singles(eris, shift)`).
 
-**More than one rank.**  The folded EOM runs over the ranks (the stored
-route and EOM-CCSDT do not, 16.7): rank 0 runs the solver; it sends the
+**More than one rank.**  The folded EOM runs over the ranks (EOM-CCSDT
+does too, in another way: 16.7; the stored route of CC3 does not): rank 0
+runs the solver; it sends the
 converged T1, T2 once, every rank makes the intermediates of the ground
 state, and for every folded sigma vector rank 0 broadcasts the vector, the
 frequency and the shift (`xzefsend`), every rank computes the same sigma
@@ -3859,8 +4116,8 @@ Omega = 1, 2, 3 are those of shifts 2, 4, 6.)
   the lowest roots of the singles-doubles stage); the vectors of the roots
   (no `XZEOMR`).  The Python batch route has no label shifts (17.4 says
   what it needs).
-- EOM with T3 stored over MPI ranks (section 16.7); CC3 amplitudes are not
-  reused (no `XZKEY` for them).
+- EOM of CC3 with T3 stored (`cc3 stored`) over MPI ranks - the program
+  stops; CC3 amplitudes are not reused (no `XZKEY` for them).
 - Spinors that are not canonical: the program stops (17.1); the
   semicanonical rotation of docs/ccn.md, section 1, belongs before the
   integral transformation (CFOUR's spinors are canonical).
@@ -3950,8 +4207,8 @@ package):
 | `qdebug` | (Q): its four parts printed |
 | `den_active` | the density files of the active spinors alone |
 | `wfail` | an error on a rank other than 0 (the exit through `MPI_Abort`, 15.2) |
-| `eomtest seed` | the sigma vector against the derivative of the amplitude step (16.5) |
-| `eomsig file`, `eomsd` | the sigma vector of the vector of a file; its singles-doubles block (16.5) |
+| `eomtest seed` | the sigma vector against the derivative of the amplitude step (16.5); one rank |
+| `eomsig file`, `eomsd` | the sigma vector of the vector of a file; its singles-doubles block (16.5); over ranks too (16.7) |
 | `mpitest n` | the chunked transfers on arrays of n words (15.2) |
 | `qsample x`, `qstop n` | (Q): a sample of the quadruples; stop after n tasks (restart test, section 5) |
 | `qcost file`, `bcost file` | the seconds of the tasks of (Q) / of the batches of the iterations |
