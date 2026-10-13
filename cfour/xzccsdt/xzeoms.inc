@@ -63,8 +63,8 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
   evnh = 0
   ! (more than one rank: as the dry run of rank 0 planned it - the other
   ! ranks have the memory of that plan)
-  if (ecmd .and. eplan > 0) msub = min(msub, epm(eplan))
   masked = msub
+  if (ecmd .and. eplan > 0) msub = min(msub, epm(eplan))
   call xzevplace(int(NW, 8), nlen, nmem, avail, mayfile, msub, evfile)
   if (msub /= masked) write(6, '(a,i4,a,i4,a)') '   the work array holds ', msub, &
     ' vectors of the subspace with their sigma vectors (', masked, &
