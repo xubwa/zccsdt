@@ -280,3 +280,190 @@ def kernel(eris, t1, t2, t3=None, t4=None, rank=3, row3='full', row4='full', lab
               file=out, flush=True)
     return Result(e=res.e.real[order], converged=res.converged[order], residuals=res.residuals[order], vectors=vec,
                   weights=wts, nsigma=res.nsigma, niter=res.niter, sizes=counts, timings=times)
+
+
+# ------------------------------------------------- in the blocks of the symmetry labels
+
+def _rank_table(n, k):
+    return {tuple(int(x) for x in t): r for r, t in enumerate(P.tuples(n, k))}
+
+
+class ProblemSym(Problem):
+    '''The same sigma vector in the blocks of the symmetry labels of a
+    linear molecule (2 m_j; the spinors of ``eris`` in the order of their
+    labels, the labels in use: the layout of the ground state).
+
+    The two ghosts get labels inside the range of the others, 1 and
+    target - 1, so that the operators R of the target - l_a + l_b + .. -
+    l_i - .. = target - are totally symmetric on the padded spinors: T + R
+    has the block structure of T, and the residual code of the ground state
+    in label blocks (the CCSDT step, zccsdt.cc.t4engine_sym) is called as it
+    is.  Its blocks hold the amplitudes without ghosts and those with one
+    or two ghosts that are totally symmetric; a short vector is the
+    elements with both, by index arrays into the flat arrays of the blocks.
+    ``t3``: flat in the blocks of the engine of ``eris`` (or None), ``t4``:
+    flat in the blocks of zccsdt.cc.t4engine_sym (or None).  The 3p1h and
+    4p2h rows are the full ones.'''
+
+    def __init__(self, eris, t1, t2, t3=None, t4=None, rank=3, target=0, parity=None, target_parity=0, mem_mb=2000.0,
+                 batch_bytes=None):
+        from zccsdt.cc import t3pack, t4engine_sym as S
+        from zccsdt.eris import ERIs
+        if t3pack.classes_of(eris) is None:
+            raise ValueError('EOM-DEA in label blocks: labels without a modulus in use, the spinors in their order')
+        self.rank, self.row3, self.row4 = rank, 'full', 'full'
+        no, n = eris.nocc, np.asarray(eris.fock).shape[0]
+        nv = n - no
+        self.no, self.nv = no, nv
+        self.dtype = dtype = np.dtype(np.result_type(t1, t2, eris.oovv, eris.fock))
+        lab = np.asarray(eris.labels, dtype=np.int64)
+        lo, lv = lab[:no], lab[no:]
+        # the padded spinors, in the order of the labels: the ghosts before the others of their label
+        glab = sorted((1, int(target) - 1))
+        plo = np.concatenate((glab, lo))
+        order = np.argsort(plo, kind='stable')
+        where = np.empty(no + 2, dtype=np.int64)
+        where[order] = np.arange(no + 2)
+        g1, g2 = sorted(int(x) for x in where[:2])
+        rp = where[2:]                          # the places of the occupied spinors of eris
+        assert np.all(np.diff(rp) > 0)
+        self.g = (g1, g2)
+
+        def pad(x, key):
+            x = np.asarray(x)
+            if 'o' not in key:
+                return x
+            out = np.zeros(tuple(no + 2 if c == 'o' else d for d, c in zip(x.shape, key)), dtype=x.dtype)
+            out[np.ix_(*[rp if c == 'o' else np.arange(d) for d, c in zip(x.shape, key)])] = x
+            return out
+        ev = np.asarray(eris.mo_energy).real
+        self.eg = eg = -(4.0 * float(abs(ev).max()) + 10.0)
+        fock = np.zeros((n + 2, n + 2), dtype=np.asarray(eris.fock).dtype)
+        keep = np.concatenate((rp, no + 2 + np.arange(nv)))
+        fock[np.ix_(keep, keep)] = eris.fock
+        e = np.full(n + 2, eg)
+        e[keep] = ev
+        blocks = {k: (None if getattr(eris, k) is None else pad(getattr(eris, k), k))
+                  for k in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv')}
+        e2 = ERIs(nocc=no + 2, fock=fock, mo_energy=e, e_hf=eris.e_hf, e_nuc=eris.e_nuc,
+                  source=(eris.source or '') + ' + 2 ghosts', **blocks)
+        if getattr(eris, '_vvvv_pp', None) is not None:
+            e2._vvvv_pp = eris._vvvv_pp
+        e2.labels = np.concatenate((plo[order], lv))
+        e2.modulus, e2.use_labels = 0, True
+        self.eris = e2
+        self.lay = lay = S.layout_for(e2)
+        if lay is None:
+            raise ValueError('EOM-DEA in label blocks: no layout for these labels')
+        self.S = S
+        self.t1 = np.ascontiguousarray(pad(t1, 'ov'), dtype=dtype)
+        self.t2 = np.ascontiguousarray(pad(t2, 'oovv'), dtype=dtype)
+        n3 = int(lay.t3off[-1])
+        assert ccsdt_opt.engine_for(e2, dtype).size == n3
+        self.t3 = np.zeros(n3, dtype=dtype)
+        if t3 is not None:
+            # the blocks of eris -> the packed block -> the rows of the padded occupied triples -> its blocks
+            rk = _rank_table(no + 2, 3)
+            rows = np.array([rk[tuple(int(x) for x in rp[t])] for t in P.tuples(no, 3)])
+            big = np.zeros((comb(no + 2, 3), comb(nv, 3)), dtype=dtype)
+            big[rows] = ccsdt_opt.packed_t3(eris, t3)
+            self.t3 = np.ascontiguousarray(lay.t3_from_packed(big), dtype=dtype)
+            del big
+        self.t4 = None
+        if rank == 4:
+            self.t4 = lay.zeros(dtype)
+            if t4 is not None:
+                lay0 = S.layout_for(eris)
+                rk = _rank_table(no + 2, 4)
+                rows = np.array([rk[tuple(int(x) for x in rp[t])] for t in P.tuples(no, 4)])
+                big = np.zeros((comb(no + 2, 4), comb(nv, 4)), dtype=dtype)
+                big[rows] = lay0.to_packed(np.asarray(t4).ravel())
+                self.t4 = np.ascontiguousarray(lay.from_packed(big), dtype=dtype)
+                del big
+            self.ints = t4engine.Dressed.from_eris(e2, self.t1)
+        self.mem_mb, self.batch_bytes = mem_mb, batch_bytes
+        self.step = solver.Options(mem_mb=mem_mb)
+        self.plan = ccsdt_opt.plan_for(e2, dtype, solver.Options(mem_mb=mem_mb, incore_complete=True))
+        # ---- the elements with both ghosts: places in the flat arrays, signs (ghosts to the front),
+        #      denominators e_a + .. - e_i - .., parity masks
+        eo, evv = ev[:no], ev[no:]
+        par = None if parity is None else np.asarray(parity, dtype=np.int64)
+        back = np.full(no + 2, -1, dtype=np.int64)
+        back[rp] = np.arange(no)
+
+        def sector(tuples_):
+            '''(rows with both ghosts, their signs, the spinors of eris that are left [n, k - 2]).'''
+            has = (tuples_ == g1).any(axis=1) & (tuples_ == g2).any(axis=1)
+            rows = np.flatnonzero(has)
+            t = tuples_[rows]
+            p1, p2 = np.argmax(t == g1, axis=1), np.argmax(t == g2, axis=1)
+            sgn = np.where((p1 + p2 - 1) % 2, -1.0, 1.0)
+            rest = np.array([[back[x] for x in row if x not in (g1, g2)] for row in t], dtype=np.int64).reshape(len(t), tuples_.shape[1] - 2)
+            return rows, sgn, rest
+        v2 = P.tuples(nv, 2)
+        m2 = lv[v2].sum(axis=1) == target
+        if par is not None:
+            m2 &= (par[no:][v2].sum(axis=1) - target_parity) % 2 == 0
+        self.pair_row = _rank_table(no + 2, 2)[(g1, g2)]
+        self.sizes, self.den, self.masks = [len(v2)], [evv[v2].sum(axis=1)], [m2]
+        self.idx, self.sgn = [None], [None]
+        v3 = P.tuples(nv, 3)
+        parts = [(lay.O3cls, lay.o3, lambda k: v3[lay.A3cls[k]], lay.t3off, lay.nK, range(lay.n3))]
+        if rank == 4:
+            parts.append((lay.O4cls, lay.o4, lambda M: lay.quads[M].astype(np.int64), lay.boff, lay.nA, lay.sectors))
+        for ocls, otup, vtup, off, ncol, which in parts:
+            idx, sgn, den, mask = [], [], [], []
+            for k in which:
+                if not len(ocls[k]) or not ncol[k]:
+                    continue
+                rows, sg, rest = sector(otup[ocls[k]])
+                if not len(rows):
+                    continue
+                vt = vtup(k)
+                idx.append((off[k] + rows[:, None] * ncol[k] + np.arange(ncol[k])[None, :]).ravel())
+                sgn.append(np.repeat(sg, ncol[k]))
+                den.append((evv[vt].sum(axis=1)[None, :] - eo[rest].sum(axis=1)[:, None]).ravel())
+                if par is not None:
+                    mask.append((((par[no:][vt].sum(axis=1)[None, :] - par[:no][rest].sum(axis=1)[:, None])
+                                  - target_parity) % 2 == 0).ravel())
+            self.idx.append(np.concatenate(idx) if idx else np.zeros(0, dtype=np.int64))
+            self.sgn.append(np.concatenate(sgn) if sgn else np.zeros(0))
+            self.den.append(np.concatenate(den) if den else np.zeros(0))
+            self.masks.append(np.concatenate(mask) if mask else np.ones(len(self.idx[-1]), bool))
+            self.sizes.append(len(self.idx[-1]))
+        self.shapes = [(s,) for s in self.sizes]
+        self.jac = [2 * eg - self.den[0], 2 * eg - self.den[1]]
+        self.nsigma, self.seconds = 0, 0.0
+        self.block_sizes = (n3, lay.size if rank == 4 else 0)
+
+    def sigma(self, x, y):
+        t0 = time.perf_counter()
+        nv, (g1, g2) = self.nv, self.g
+        a2, b2 = P.tuples(nv, 2).T
+        X2 = self.t2.copy()
+        r2 = np.zeros((nv, nv), dtype=self.dtype)
+        r2[a2, b2] = x[0]
+        r2 -= r2.T
+        X2[g1, g2] += r2
+        X2[g2, g1] -= r2
+        X3 = self.t3.copy()
+        X3[self.idx[1]] += self.sgn[1] * x[1]
+        _, t2n, t3n = ccsdt_opt.update_amps(self.step, self.t1, X2, X3, self.eris, mem_mb=self.mem_mb, plan=self.plan)
+        s2 = (t2n[g1, g2] - X2[g1, g2])[a2, b2] * self.jac[0]
+        s3 = (np.asarray(t3n)[self.idx[1]] - X3[self.idx[1]]) * self.sgn[1] * self.jac[1]
+        del t2n, t3n
+        if self.rank == 4:
+            X4 = self.t4.copy()
+            X4[self.idx[2]] += self.sgn[2] * x[2]
+            R4, r3, r2_ = self.S.residual(self.lay, X2, X3, X4, self.ints, self.batch_bytes)
+            del X4
+            y[2][:] = R4[self.idx[2]] * self.sgn[2]
+            s3 += np.asarray(r3).ravel()[self.idx[1]] * self.sgn[1]
+            s2 = s2 + r2_[self.pair_row]
+            del R4, r3, r2_
+        y[0][:] = s2
+        y[1][:] = s3
+        self.project(y)
+        self.nsigma += 1
+        self.seconds += time.perf_counter() - t0
+        return y
