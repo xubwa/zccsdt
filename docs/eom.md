@@ -1175,7 +1175,7 @@ Thresholds: ground state |dT| < 1e-11; EOM residual norm < 1e-9 (folded:
 | 3p1h | CCSDT | 3.1088 | 3.2207 | 3.2462 | 2.6530 | 3.1421 |
 | 4p2h | CCSDT | 3.4605 | 3.4396 | 3.4540 | 3.1699 | 3.6026 |
 | 4p2h | CCSDTQ | 3.4415 | 3.4219 | 3.4362 | 3.1442 |  |
-| 5p3h at lowest order, folded | CCSDT | 3.5439 | 3.5261 | 3.5455 |  |  |
+| 5p3h at lowest order, folded | CCSDT | 3.5439 | 3.5261 | 3.5455 | 3.4354 |  |
 | 5p3h | CCSDT | 3.5410 | 3.5180 | 3.5357 |  |  |
 | 5p3h | CCSDTQ | 3.5239 | 3.5006 | 3.5180 |  |  |
 | 6p4h | CCSDT | 3.5376 |  |  |  |  |
@@ -1208,6 +1208,11 @@ Total energies of the 116-spinor space (Eh):
   +0.0109, +0.0117, +0.0104 cm-1 (spin-orbit only, n = 26, 30, 32),
   +0.0029, +0.0081, +0.0098 (X2Ccorr): it carries the 5p3h step to about
   0.01 cm-1, always from above.
+- In the complete double-zeta basis the 5p3h step (folded) is larger than
+  in the truncated spaces: -0.126 (spin-orbit only: 1.9537 -> 1.8273),
+  +0.266 (X2Ccorr: 3.1699 -> 3.4354); the complete 5p3h row had not
+  finished there when this was written (section 11.7), so the error of
+  the folded row is calibrated on the truncated spaces only.
 - T4 of the ground state at fixed R: +0.015 .. +0.02 cm-1 (spin-orbit
   only), -0.02 (X2Ccorr).
 - **Against the exact full CI.**  On the Hamiltonian files of another
@@ -1216,17 +1221,19 @@ Total energies of the 116-spinor space (Eh):
   determinant of those spinors as the reference (f_ov is not zero there;
   the complete rows take it as it is), T of CCSDTQ, determinant route:
 
-  | n | 3p1h | 4p2h | 5p3h | 6p4h | full CI |
-  |---|---|---|---|---|---|
-  | 26 | 4.5256 | 3.2397 | 3.2683 | 3.2684 | 3.2683 |
-  | 28 | 4.0050 | 2.9130 | 2.9044 | | 2.8864 |
-  | 30 | 3.9157 | 2.8833 | | | 2.8492 |
-  | 32 | 3.8848 | 2.8763 | | | 2.8355 |
+  | n | 3p1h | 4p2h | 5p3h | 6p4h | 7p5h | full CI |
+  |---|---|---|---|---|---|---|
+  | 26 | 4.5256 | 3.2397 | 3.2683 | 3.2684 | 3.2684 | 3.2683 |
+  | 28 | 4.0050 | 2.9130 | 2.9044 | | | 2.8864 |
+  | 30 | 3.9157 | 2.8833 | 2.8710 | | | 2.8492 |
+  | 32 | 3.8848 | 2.8763 | | | | 2.8355 |
 
   n = 26, E(2 Omega = 0): -149.81654719716 (4p2h), -149.81654231670
-  (5p3h), -149.81655060092 (6p4h); full CI -149.8165502235.  The top of
-  the sequence is the full CI (4e-7 Eh, 1e-4 cm-1 at 6p4h); at 5p3h the
-  splitting can still be 0.02 cm-1 off (n = 28).
+  (5p3h), -149.81655060092 (6p4h), -149.81655022231 (7p5h); full CI
+  -149.8165502235 (given to ten decimals): the errors are +3.0e-6,
+  +7.9e-6, -3.8e-7 and +1e-9 Eh, the same for the two components to
+  1e-9 from 5p3h on.  The top of the sequence is the full CI; at 5p3h the
+  splitting can still be 0.02 cm-1 off (n = 28, 30).
 
 ### 11.7 Sizes and cost
 
@@ -1250,8 +1257,8 @@ with other steps of this work):
 | the same on the packed layout | 0.07 s | | 39 s |
 | 4p2h sigma vector, label blocks | 0.6 s (packed: 2.7 s) | 8.7 s | 98 - 104 s (12 threads); 43 s (24 cores) |
 | sigma vectors per root, 4p2h | 30 - 42 | 30 - 37 | 38 - 62 |
-| folded 5p3h sigma vector | 7 - 9 s | 117 s (8 threads) | |
-| folded 5p3h: sigma vectors after the 4p2h root | 28 - 36 | 36 | |
+| folded 5p3h sigma vector | 7 - 9 s | 66 - 117 s (8 threads) | 1167 s, 1591 s (the first of two runs, 48 cores: right-hand side 402 - 536 s, rows below 472 - 735 s, intermediates of (P) 248 - 270 s, rows to 4p2h 44 - 48 s); 64 GB |
+| folded 5p3h: sigma vectors after the 4p2h root | 28 - 36 | 32 - 36 | |
 | determinant route, 5p3h sigma vector | 4 s | more than 45 min (not finished) | not possible |
 | determinant route, 6p4h | 27 - 32 s | | |
 
