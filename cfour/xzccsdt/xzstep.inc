@@ -178,6 +178,8 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     ! sum_{k,Q} ~<ak||Q> t2[i][k][Q], at the columns no + a
     call N(zc_gemm)(0_4, 0_4, no, ny, no * nvp, one, w(kt2p), no * nvp, w(kgmq), ny, zero, w(kr1v), ny)
     call N(xzr2t3)(no, nv, npo, nvp, w(jopa), w(jopb), w(jvpa), w(jvpb), w(kyall), w(kxacc), w(kra))
+    ! CC4: the T4 term of the doubles equation (xzcc4.inc; the same on every rank)
+    if (cc4) call N(xzaxpy)(npo * nvp, one, w(jd42), w(kra))
     call xztoc(1, 'R1, R2 from pass 1')
   end if
   call xzrel(m1)
@@ -248,6 +250,8 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     call xztic()
     call zc_vzero_d(NW * n3, w(kr3))
     call zc_vzero_d(NW * npo * nvp, w(klad))
+    ! CC4: the T4 terms of the triples equation (rank 0 has their sum over the ranks)
+    if (cc4 .and. myrank == 0) call N(xzaxpy)(n3, one, w(jd43), w(kr3))
     call xztoc(1, 'zero of the residual')
   end if
   tsg = omp_get_wtime()

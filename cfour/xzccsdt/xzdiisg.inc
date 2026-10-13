@@ -78,6 +78,14 @@ integer(8) function N(xzdiis_target)()
   end if
 end function
 
+! the sequence starts again: the next vector is its first (CC4: new T4 terms)
+subroutine N(xzdiis_restart)()
+  use xzdiisd
+  implicit none
+  ncnt = 0
+  ncall = 0
+end subroutine
+
 subroutine N(xzdiis_close)()
   use xzdiisd
   implicit none

@@ -96,6 +96,11 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a)') '             triples run over the ranks.'
     call xzerrex
   end if
+  if (with_eom .and. nrank > 1 .and. cc4) then
+    write(6, '(a)') ' @XZCCSDT-F, the excited states of CC4 (EOM-CC4) run with one rank: their sigma vectors are not distributed.'
+    write(6, '(a)') '             Run CALC=CC4,EXCITE=EOMEE with one rank.'
+    call xzerrex
+  end if
 
   ! ---- the symmetry labels
   allocate(lab(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
@@ -197,7 +202,7 @@ subroutine xzdrv(w, maxcor)
   ! ---- CC3: its triples equation takes the Fock operator from the spinor
   !      energies (canonical spinors); the Fock matrix of the SCF says how far
   !      that holds (rank 0, which has JOBARC)
-  if (cc3mode /= 0 .and. myrank == 0) call xzfockchk(w)
+  if ((cc3mode /= 0 .or. cc4) .and. myrank == 0) call xzfockchk(w)
 
   ! ---- MP2: the second-order energy of the integrals as they were read (a
   !      check of the files, e.g. against the number that xx2cvtran prints)
@@ -271,6 +276,11 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a,a,a,i4,a)') '   ', trim(mname), ' converged in ', ncyc, ' cycles.'
     call xztable(1, 'the ' // trim(mname) // ' iterations', tcc, ncyc)
     if (cc3mode == 2) write(6, '(a,4f10.2)') '     (of it in the CC3 kernel: products, amplitudes, gather, contractions /s)', tfly
+    if (cc4) then
+      ! (CC4 amplitudes are not written: XZAMPS keeps those of CCSDT, their start)
+      write(6, '(a,i4,a,f10.2,a)') '   The T4 terms of the doubles and triples equations were evaluated ', nt4, &
+        ' times (', t4sec, ' s).'
+    else
     ! the amplitudes for the steps that follow, here or in a later run
     t0 = omp_get_wtime()
     if (nwe == 2) then
@@ -287,6 +297,7 @@ subroutine xzdrv(w, maxcor)
     end if
     write(6, '(/,a,f10.1,a,f8.2,a)') '   amplitudes written to the file XZAMPS (', &
       8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s; XZKEY)'
+    end if
     ! (Q) follows at once: T3 leaves the work array, the file is mapped as on the other ranks
     if (t3shared .and. .not. with_lam) then
       call xzrel(jt3 - xzbase)
@@ -467,6 +478,13 @@ subroutine xzdrv(w, maxcor)
   if (cc3mode /= 0) then
     write(6, '(a,f25.12)') '   CC3 correlation energy        ', ecorr
     write(6, '(a,f25.12)') '   E(CC3)                        ', escf + ecorr
+  else if (cc4) then
+    if (e4ccsdt /= 0d0) then
+      write(6, '(a,f25.12)') '   CCSDT correlation energy      ', e4ccsdt
+      write(6, '(a,f25.12)') '   E(CCSDT)                      ', escf + e4ccsdt
+    end if
+    write(6, '(a,f25.12)') '   CC4 correlation energy        ', ecorr
+    write(6, '(a,f25.12)') '   E(CC4)                        ', escf + ecorr
   else
     write(6, '(a,f25.12)') '   CCSDT correlation energy      ', ecorr
     write(6, '(a,f25.12)') '   E(CCSDT)                      ', escf + ecorr
@@ -495,6 +513,8 @@ subroutine xzdrv(w, maxcor)
     write(6, '(/,a,a,a)') '   EOM-EE-', trim(mname), ': the states'
     write(6, '(a)') '  ' // repeat('-', 98)
     write(6, '(a)') '   shift  root        omega / Eh            eV            cm-1          total energy / Eh    max |r|'
+    if (cc4) write(6, '(a)') '                      (below each: omega without the T4 terms, the Rayleigh quotient of that vector' // &
+      ' with them, after the first evaluation / Eh)'
     open(unit=79, file='XZEOM', form='formatted', status='replace')
     write(79, '(a)') '# EOM-EE-' // trim(mname) // ' of xzccsdt: label shift, root, omega / Eh, ' // &
                      'total energy / Eh, largest element and norm of the residual, weights of R1, R2, R3, converged'
@@ -504,6 +524,7 @@ subroutine xzdrv(w, maxcor)
       write(6, '(i8,i6,f20.12,f14.8,f16.4,f27.12,es11.2,a)') rshift(kres), rroot(kres), rom(kres), &
         rom(kres) * 27.211386245988d0, rom(kres) * 219474.6313632d0, escf + ecorr + rom(kres), rmx(kres), &
         merge('                ', '  NOT converged ', rconv(kres))
+      if (cc4) write(6, '(14x,3f20.12)') rpp(kres), rshot(kres), rfirst(kres)
       write(79, '(2i6,2f25.14,2es12.4,3f10.6,l3,2i7,f10.6)') rshift(kres), rroot(kres), rom(kres), &
         escf + ecorr + rom(kres), rmx(kres), rnm(kres), rwt(:, kres), rconv(kres), rli(kres), rla(kres), rlv(kres)
       if (rconv(kres)) elow = min(elow, rom(kres))
@@ -611,12 +632,33 @@ subroutine xzjob()
     if (eom) method = 'CC3_EOM'
   end if
   mname = merge('CC3  ', 'CCSDT', cc3mode /= 0)
+  if (level == 52) then
+    ! ---- CC4 (docs/native.md, section 19): T4 is never stored.  From the
+    !      CCSDT amplitudes (the file XZAMPS if it belongs to these integrals,
+    !      else CCSDT is solved first), macro / micro iterations (xzcc.inc);
+    !      option cc4 confirm: the same, converged only when new T4 terms
+    !      leave the first step below the thresholds; cc4 plain: the T4 terms
+    !      in every iteration; cc4 scratch: the same from the second-order start
+    method = 'CC4'
+    mname = 'CC4'
+    cc4 = .true.
+    cc4mode = 0
+    call xzoptget('cc4', arg, larg)
+    if (larg > 0 .and. (arg(1:1) == 'p' .or. arg(1:1) == 'P')) cc4mode = 1
+    if (larg > 0 .and. (arg(1:1) == 's' .or. arg(1:1) == 'S')) cc4mode = 2
+    if (larg > 0 .and. (arg(1:1) == 'c' .or. arg(1:1) == 'C')) cc4mode = 3
+    if (den) then
+      write(6, '(/,a)') ' @XZCCSDT-F, CALC=CC4: no density (PROPS, DERIV_LEV) in this program.'
+      call xzerrex
+    end if
+    if (eom) method = 'CC4_EOM'
+  end if
   if (method == ' ') then
     write(6, '(/,a,i4,a,i3,a)') ' @XZCCSDT-F, CALC of the ZMAT (level ', level, ', EXCITATION ', nexc, &
       ') is not one of CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2.'
     call xzerrex
   end if
-  if ((eom .or. den) .and. cc3mode == 0) then
+  if ((eom .or. den) .and. cc3mode == 0 .and. .not. cc4) then
     if (method /= 'CCSDT') then
       write(6, '(/,a,a,a)') ' @XZCCSDT-F, ', trim(merge('EXCITE=EOMEE          ', 'PROPS or DERIV_LEV > 0', eom)), &
         ' goes with CALC=CCSDT only (here CALC=' // trim(method) // ').'
@@ -685,6 +727,21 @@ subroutine xzreuse()
   tok = dec(1) == 1d0
   lok = dec(2) == 1d0
   if (.not. with_cc) return
+  if (cc4) then
+    ! CC4: the amplitudes of XZAMPS are those of CCSDT (a CC4 run writes no
+    ! others there) - the start of its iterations, never their result
+    cc4start = tok .and. cc4mode /= 2
+    if (cc4start) then
+      write(6, '(/,a)') '   amplitudes: the file XZAMPS of an earlier run has the CCSDT amplitudes of these integrals (XZKEY):'
+      write(6, '(a)') '               they are the start of the CC4 iterations'
+    else if (cc4mode == 2) then
+      write(6, '(/,a)') '   amplitudes: option cc4 scratch - CC4 from the second-order amplitudes, the T4 terms in every iteration'
+    else
+      write(6, '(/,a)') '   amplitudes: no file XZAMPS with the CCSDT amplitudes of these integrals (or not converged as'
+      write(6, '(a)') '               tightly): CCSDT is solved first (and written to XZAMPS), then CC4 from its amplitudes'
+    end if
+    return
+  end if
   if (tok) then
     with_cc = .false.
     write(6, '(/,a)') '   amplitudes: the file XZAMPS of an earlier run belongs to these integrals (XZKEY):'
@@ -1411,7 +1468,7 @@ subroutine xzfockchk(w)
   call getrec(0, 'JOBARC', 'scf2ccmo', lc, n2)
   n2 = nint(sqrt(dble(max(lf, 0_8)) / 2d0), 8)
   if (lf <= 0 .or. lc <= 0 .or. 2 * n2 * n2 /= lf .or. mod(lc, 2 * n2) /= 0 .or. lc / (2 * n2) /= ntot) then
-    write(6, '(a)') '   Fock matrix of CC3: the spinor energies of scf2ceig (JOBARC has no scf2cfck / scf2ccmo of this SCF:'
+    write(6, '(a)') '   Fock matrix of ' // trim(mname) // ': the spinor energies of scf2ceig (JOBARC has no scf2cfck / scf2ccmo of this SCF:'
     write(6, '(a)') '     the reader has the orbital energies only - canonical spinors assumed, not checked)'
     return
   end if
@@ -1448,7 +1505,7 @@ subroutine xzfockchk(w)
     end do
   end do
   deallocate(f, c, x, col)
-  write(6, '(a)') '   Fock matrix of CC3: the spinor energies of scf2ceig; the Fock matrix of the SCF (scf2cfck, scf2ccmo)'
+  write(6, '(a)') '   Fock matrix of ' // trim(mname) // ': the spinor energies of scf2ceig; the Fock matrix of the SCF (scf2cfck, scf2ccmo)'
   write(6, '(a,es10.2,a,es10.2,a,es10.2,a,es10.2)') '     on the active spinors: largest |F_oo| off the diagonal ', oo, &
     ',  |F_vv| ', vv, ',  |F_ov| ', ov, ';  |F_pp - e_p| ', dg
   tol = 1d-6
@@ -1465,7 +1522,7 @@ subroutine xzfockchk(w)
   end if
   if (max(oo, vv) > tol) then
     write(6, '(/,a,es10.2,a)') ' @XZCCSDT-F, the active spinors are not canonical (above ', tol, ' off the diagonal of F):'
-    write(6, '(a)') '             the triples of CC3 take F as diagonal.  Rotate the spinors (semicanonical) first,'
+    write(6, '(a)') '             the highest rank of ' // trim(mname) // ' takes F as diagonal.  Rotate the spinors (semicanonical) first,'
     write(6, '(a)') '             or raise option focktol to accept the error.'
     call xzerrex
   end if

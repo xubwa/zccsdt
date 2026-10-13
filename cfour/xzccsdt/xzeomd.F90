@@ -87,6 +87,16 @@ module xzeomd
   real(8) :: rom(maxres) = 0d0, rim(maxres) = 0d0, rmx(maxres) = 0d0, rnm(maxres) = 0d0, rwt(3, maxres) = 0d0
   logical :: rconv(maxres) = .false.
   real(8) :: teomim = 0d0, teomsig = 0d0, teomsd = 0d0, teomvec = 0d0
+  ! EOM-CC4 (xzcc4.inc): the vectors that the solver starts from (evfin) and
+  ! returns (evfout) have all three parts; the eigenvalues of its first
+  ! projected matrix; per state the root without the T4 terms, the energy
+  ! after one evaluation of them, the eigenvalue at the first frequency
+  logical :: evfin = .false., evfout = .false.
+  ! macro / micro: the T4 terms held on e4nq orthonormal vectors (at e4kq;
+  ! their sigma vectors with the T4 terms at e4kf): N(xzesigm)
+  integer(8) :: e4nq = 0, e4kq = 0, e4kf = 0
+  real(8) :: eritz0(64) = 0d0
+  real(8) :: rpp(maxres) = 0d0, rshot(maxres) = 0d0, rfirst(maxres) = 0d0
   integer(8) :: neomsig = 0, neomsd = 0
 
 contains

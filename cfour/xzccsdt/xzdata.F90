@@ -105,6 +105,36 @@ module xzdata
   ! singles and doubles with the triples folded in at a frequency)
   integer :: cc3mode = 0
   character(len=5) :: mname = 'CCSDT'   ! the model of the iterations, for the output
+  ! CC4 (xzcc4.inc; docs/native.md, section 19): the CCSDT step with the T4
+  ! terms of the doubles and triples equations as fixed parts of its
+  ! residuals; T4 is made per occupied quadruple and never stored
+  logical :: cc4 = .false.
+  ! 0: macro / micro iterations - the T4 terms are evaluated, the equations of
+  ! CCSDT with them are iterated to convergence, and so on; 1 (option cc4
+  ! plain): the T4 terms in every iteration; 2 (option cc4 scratch): the same
+  ! from the second-order start, without the CCSDT amplitudes; 3 (option cc4
+  ! confirm): macro / micro with the last evaluation that confirms convergence
+  integer :: cc4mode = 0
+  logical :: cc4start = .false.     ! the CCSDT amplitudes of the file XZAMPS are the start
+  integer(8) :: jd42 = 0, jd43 = 0  ! the T4 terms: of R2 [P][Q], of R3 (as T3 is stored)
+  integer(8) :: nt4 = 0             ! evaluations of the T4 terms
+  real(8) :: e4ccsdt = 0d0          ! the CCSDT correlation energy of the start (0: none)
+  real(8) :: t4sec = 0d0            ! seconds of the evaluations
+  integer(8) :: jv4 = 0             ! the bare <ab||cd> that the Xv of CC4 is made from (jvvvv; in the EOM e4vv)
+  ! the operands of the pass over the occupied quadruples (N(xz4run)), of the ground state:
+  ! dressed f[m][e], <mn||ie>, <mb||ef>; - <ab||ex> [x][e][Q], <ma||ij> [i][j][m][a]; tau1,
+  ! t2[i][m][Q], t2[P][e][a], Xo, - t1
+  integer(8) :: g4fov = 0, g4ooov = 0, g4d = 0, g4q1 = 0, g4q2 = 0, g4tau = 0, g4t2p = 0, g4t2px = 0, g4xo = 0, g4tm = 0
+  ! and of a sigma vector of the label shift x4s: of H' = [H~, R1] f', <mn||ie>', <mb||ef>',
+  ! - <ab||ex>', <ma||ij>'; Xo of (H', t2) plus Xo of (H~, r2); r1, - r1, r2[i][j][a][b],
+  ! r2[i][m][Q], r2[P][e][a], R3; the dressed <mb||ef> of the ground state
+  integer(8) :: x4s = 0
+  integer(8) :: x4fov = 0, x4ooov = 0, x4d = 0, x4q1 = 0, x4q2 = 0, x4xos = 0
+  integer(8) :: x4r1 = 0, x4tmr = 0, x4r2 = 0, x4r2p = 0, x4r2px = 0, x4r3 = 0, x4d0 = 0
+  ! kept for the sigma vectors of EOM-CC4 (N(xz4eomim)): the bare <ab||cd> (the pp operator
+  ! is in its place), and of the ground state - <ab||ex>, <ma||ij>, Xo, t2[P][e][a], tau1, - t1
+  integer(8) :: e4vv = 0, e4q1 = 0, e4q2 = 0, e4xo = 0, e4t2px = 0, e4tau = 0, e4tm = 0
+  real(8) :: t4eom(6) = 0d0         ! seconds of the T4 terms of the sigma vectors (as tq of N(xz4run))
   logical :: noring = .false.       ! pass 2 in blocks without its ring term (T3 is not read)
   integer(8) :: nc3w = 0            ! elements of the work of one CC3 batch (the plan)
   ! the folded EOM-CC3 sigma vector: on, at the frequency eomega.  nfollow > 0:

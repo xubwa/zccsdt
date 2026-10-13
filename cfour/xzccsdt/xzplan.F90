@@ -269,6 +269,13 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     if (cc3mode == 2 .and. (k == 2 .or. k == 3)) cycle
     call raise(k, .true.)
   end do
+  ! CC4: the evaluation of the T4 terms (xzcc4.inc) is a stage of the
+  ! iterations with the batches of (Q)
+  if (cc4) then
+    do k = 5, 8
+      call raise(k, .true.)
+    end do
+  end if
   if (cc3mode == 2) then
     call raise(9, .true.)
     ! a test hook: option cc3w n elements of the work of a batch (at least one triple)
@@ -405,6 +412,14 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     write(6, '(a,i8,a,i8)') '     (Q): columns (cd) of a product:              ', qc22, '  of ', nvp
     write(6, '(a,i8,a,i8)') '     (Q): columns (bcd) of a product:             ', qc13, '  of ', nvt
     write(6, '(a,i8,a,i8)') '     (Q): rows (bc) of a step of Xv:              ', qrows, '  of ', nvp
+  end if
+  if (cc4) then
+    write(6, '(a,i8,a,i8)') '     T4 terms: occupied indices with Xv at a time:', qxv, '  of ', max(3_8, no - 1)
+    if (ncls == 1) then
+      write(6, '(a,i8,a,i8)') '     T4 terms: columns (cd) of a product:         ', qc22, '  of ', nvp
+      write(6, '(a,i8,a,i8)') '     T4 terms: columns (bcd) of a product:        ', qc13, '  of ', nvt
+      write(6, '(a,i8,a,i8)') '     T4 terms: rows (bc) of a step of Xv:         ', qrows, '  of ', nvp
+    end if
   end if
   if (max(need_cc, need_q) > xzsize) then
     write(6, '(/,a)') ' @XZCCSDT-F, the plan does not fit the work array (option plan?).'
