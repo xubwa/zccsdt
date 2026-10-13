@@ -185,7 +185,7 @@ again until it finishes; cycles of all runs against one run without a stop;
 | HBr `hbr_fc` (complex, dense), `CALC=CCSDT(Q)`, CC_CONV=10 | 7 | 17 | 7 + 7 + 5 = 19 | E(CCSDT), E(CCSDT(Q)) 4e-12 |
 | H2O `h2o_631g`, `PROPS=FIRST_ORDER`, CC_CONV=9 | 5 | CCSDT 15, Lambda 13 | CCSDT 5 + 5 + 5 + 1 = 16, Lambda 5 + 5 + 4 = 14 | E(CCSDT) 9.5e-11 |
 | HBr `hbr_dglin_fc`, `CALC=CC3` | 6 | 15 | 6 + 6 + 5 = 17 | E(CC3) identical (12 decimals) |
-| HBr `hbr_dglin_fc`, `CALC=CC4` (the cut hits its CCSDT iterations) | 6 | CCSDT 17, CC4 40 | CCSDT 6 + 6 + 6 + 1 = 19, then CC4 24 in the last run | E(CC4) identical |
+| HBr `hbr_dglin_fc`, `CALC=CC4` (the cut hits its CCSDT iterations) | 6 | CCSDT 17, then 23 cycles of CC4 (`CC4 converged in 40 cycles`) | CCSDT 6 + 6 + 6 + 1 = 19, then 23 cycles of CC4 in the last run | E(CC4) identical |
 | HBr / cc-pVTZ-DK `hbr_tz_dglin` (8 + 78), `CALC=CCSDT`, killed (SIGKILL) in cycle 10 of 18; K = 3: saved after cycle 8 | - | 18 | 8 kept + 11 = 19 | E(CCSDT) 1e-12 |
 | the same on 2 ranks, killed in cycle 4; K = 2: saved after cycle 4 | - | 18 | 4 + 14 = 18 | 6e-12 |
 
