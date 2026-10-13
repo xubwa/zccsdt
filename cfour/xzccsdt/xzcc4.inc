@@ -568,7 +568,7 @@ end subroutine
 
 ! ---------------------------------------------------------------------------
 ! The file XZCC4 of the run directory: the CC4 iterations for a later run
-! (docs/native.md, section 19.9).  Rank 0 writes it after every completed
+! (docs/native.md, section 19.5).  Rank 0 writes it after every completed
 ! evaluation of the T4 terms (macro / micro) and when CC4 has converged; an
 ! unformatted stream:
 !   character(8)  'XZCC4_02'
@@ -1771,7 +1771,7 @@ end subroutine
 ! ---------------------------------------------------------------------------
 ! EOM-CC4, macro / micro: the files of a problem (number ip of the input: a
 ! label shift) for a later run of the same ZMAT in the run directory
-! (docs/native.md, section 19.9), written by rank 0, unformatted streams:
+! (docs/native.md, section 19.5), written by rank 0, unformatted streams:
 !
 !   XZE4R.nnn   the roots.  'XZE4R_01'; integer(8): active occupied, active
 !               virtual, spinors, frozen occupied spinors, words per element,
@@ -1995,7 +1995,7 @@ subroutine N(xz4eq)(w, rw, ip, nlen, ecorr, k, ca, nc, outer, omega, dwprev, nev
   integer(8) :: hd(14), hf(14), c, ios, fsize, kv, base
   integer :: kind
   real(8) :: key(3), kf3(3), st(3), t0
-  logical :: there
+  logical :: there, cmd0
   ok = .false.
   write(fn, '(a6,i3.3)') 'XZE4Q.', ip
   if (rw == 'd') then
@@ -2006,6 +2006,8 @@ subroutine N(xz4eq)(w, rw, ip, nlen, ecorr, k, ca, nc, outer, omega, dwprev, nev
   t0 = omp_get_wtime()
   call xzkeyval(key)
   hd = [no, nv, ntot, nfrozen, int(NW, 8), ncls, eshift, nlen, k, ca, nc, outer, nev, nsigr]
+  ! (the commands to the ranks as the caller has them when this returns)
+  cmd0 = ecmd
   if (edist) then
     ecmd = .true.
     evoff = 0
@@ -2039,7 +2041,7 @@ subroutine N(xz4eq)(w, rw, ip, nlen, ecorr, k, ca, nc, outer, omega, dwprev, nev
       write(6, '(a,a,a,f10.1,a,f8.2,a)') '          (checkpoint: q, F and the frequency of this evaluation written to the file ', fn, &
         ', ', 16d-6 * NW * nlen * nc, ' MB, ', omp_get_wtime() - t0, ' s)'
     end if
-    ecmd = .false.
+    ecmd = cmd0
     return
   end if
   inquire(file=fn, exist=there, size=fsize)
@@ -2052,7 +2054,7 @@ subroutine N(xz4eq)(w, rw, ip, nlen, ecorr, k, ca, nc, outer, omega, dwprev, nev
     if (.not. there) close(77, iostat=ios)
   end if
   if (.not. there) then
-    ecmd = .false.
+    ecmd = cmd0
     return
   end if
   do kind = 3, 4
@@ -2079,7 +2081,7 @@ subroutine N(xz4eq)(w, rw, ip, nlen, ecorr, k, ca, nc, outer, omega, dwprev, nev
   nsigr = hf(14)
   omega = st(2)
   dwprev = st(3)
-  ecmd = .false.
+  ecmd = cmd0
   ok = .true.
 end subroutine
 
