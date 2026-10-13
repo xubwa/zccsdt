@@ -161,3 +161,33 @@ def test_roots_and_masks():
         assert all(abs(w - x).min() < 1e-9 for x in r.e)
     assert abs(roots[2] - roots[-2]).max() < 1e-9
     assert abs(min(roots[0][0], roots[2][0]) - w[0]) < 1e-9
+
+
+def test_front_end_and_label_blocks():
+    '''BH / 6-31G from BH(2+) with X2C spinors (4 + 18; labels 2 m_j):
+    eom_dea() in the blocks of the labels (ProblemSym) and by masks on the
+    packed layout give the same ground state of BH (shift 0), R to 3p1h and
+    to 4p2h, and with the 5p3h operators folded in; the lowest states of the
+    shifts +-2 are degenerate.'''
+    import zccsdt
+    from pyscf import gto, x2c
+    mf = x2c.UHF(gto.M(atom='B 0 0 0; H 0 0 1.2324', basis='6-31g', charge=2, verbose=0)).run(conv_tol=1e-12)
+    cc = {}
+    for sym in (True, False):
+        c = zccsdt.CCSDT(mf)
+        c.symmetry, c.verbose = sym, 0
+        c.conv_tol, c.conv_tol_normt = 1e-12, 1e-10
+        c.kernel()
+        cc[sym] = c
+    e = {}
+    for rank in (3, 4):
+        for sym in (True, False):
+            e[sym, rank], res = cc[sym].eom_dea(nroots=1, shift=0, rank=rank, conv_tol=1e-9, nguess=6)
+            assert res.converged.all() and cc[sym].eom_dea_result is res
+        assert abs(e[True, rank] - e[False, rank]).max() < 1e-9
+    assert 1e-5 < e[True, 3][0] - e[True, 4][0] < 1e-1 and e[True, 4][0] < -0.5
+    up, _ = cc[True].eom_dea(nroots=1, shift=2, rank=3, conv_tol=1e-6, nguess=8)
+    dn, _ = cc[True].eom_dea(nroots=1, shift=-2, rank=3, conv_tol=1e-6, nguess=8)
+    assert abs(up[0] - dn[0]) < 1e-7 and up[0] > e[True, 3][0] + 1e-3
+    f = {sym: cc[sym].eom_dea(nroots=1, shift=0, rank=4, conv_tol=1e-9, nguess=6, fold5=True)[0] for sym in (True, False)}
+    assert abs(f[True] - f[False]).max() < 1e-8 and 1e-7 < abs(f[True][0] - e[True, 4][0])

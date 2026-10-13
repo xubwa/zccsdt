@@ -136,6 +136,14 @@ class Fold5:
         e = copy.copy(base.eris)
         e.use_labels = False
         e.__dict__.pop('_buffers', None)
+        # canonical spinors: the class of (P) checks the Fock matrix to 1e-7; what an SCF leaves
+        # off the diagonal (up to 1e-5 here) is not part of the model
+        f = np.asarray(e.fock)
+        off = abs(f - np.diag(f.diagonal())).max()
+        if off > 1e-5:
+            raise NotImplementedError('the 5p3h row at lowest order needs canonical spinors (largest off-diagonal '
+                                      'element of the Fock matrix: %.1e)' % off)
+        e.fock = np.diag(f.diagonal())
         self.eris = e
         t5 = P.tuples(no + 2, 5)
         has = (t5 == g1).any(axis=1) & (t5 == g2).any(axis=1)

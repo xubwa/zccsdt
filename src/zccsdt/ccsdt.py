@@ -1047,7 +1047,8 @@ class GCCSDT(UCCSDT):
     _keys = UCCSDT._keys | {'model', 'real_spinors', 'symmetry', 'l1', 'l2', 'l3', 'converged_lambda', 'lambda_blocks', 'rdm1_basis', 'q_estimate', 'q_progress', 'rdm1_blocks', 'blocks_min',
                               'e_ql', 'e_ql5', 'e_tot_ql', 'zeta1', 'zeta2', 'zeta3', 'l1_ql', 'l2_ql', 'l3_ql',
                               'converged_zeta', 'converged_lambda_ql', 'ql_gradient_sectors', 'q_gradient_sectors',
-                              'zeta_stencil', 'response_stencil', 'ql_info', 'eom', 'e_ee', 'eom_ip_result', 'eom_ea_result'}
+                              'zeta_stencil', 'response_stencil', 'ql_info', 'eom', 'e_ee', 'eom_ip_result', 'eom_ea_result',
+                              'eom_dea_result'}
 
     def _axial(self):
         '''The spinors of a linear molecule on the z axis adapted to m_j
@@ -1839,6 +1840,66 @@ class GCCSDT(UCCSDT):
                              name=kind.upper(), verbose=self.verbose >= logger.NOTE, stdout=self.stdout,
                              model=self.model, **kwargs)
         setattr(self, 'eom_' + kind + '_result', res)
+        return res.e, res
+
+    def eom_dea(self, nroots=1, shift=0, rank=None, conv_tol=1e-8, nguess=None, parity=None, target_parity=0,
+                fold5=False, max_cycle=100):
+        '''EOM-DEA: the ``nroots`` lowest E(N+2) - E(N) (Hartree) of the states
+        with two electrons more than the reference, and the zccsdt.cc.dea.Result
+        (docs/eom.md, section 11).  Vectors r[(a<b)], r[i, (a<b<c)] and, with
+        ``rank`` 4, r[(i<j), (a<b<c<d)], all rows complete: with the amplitudes
+        of CCSDT rank 3 is the 3p1h truncation with the T of CCSDT, rank 4
+        DEA-EOM-CCSDT; after CCSDTQ (GCCSDTQ) T4 is in the matrix of rank 4.
+
+        shift          the sum of the labels (2 m_j) of the two electrons; the states
+                       are computed in the blocks of the labels where the iterations ran
+                       in them, by masks on the packed layout otherwise (None there: no
+                       labels, all states)
+        rank           3 or 4 (default: 4 after CCSDTQ, 3 after CCSDT)
+        parity         0 / 1 per active spinor (occupied, then virtual, in the order of
+                       the integrals), with ``target_parity``: only the vectors of that
+                       parity of the two electrons
+        fold5          the 5p3h operators at lowest order, folded (zccsdt.cc.dea5), on
+                       rank 4: the roots that follow those of rank 4
+        nguess         unit vectors on the lowest pairs (a<b) to start from
+                       (default nroots + 2)
+        The result is kept as self.eom_dea_result.'''
+        from zccsdt.cc import dea, t3pack
+        if self.t1 is None:
+            raise RuntimeError('%s.eom_dea(): no amplitudes (kernel() first)' % self.__class__.__name__)
+        if self.model != 'ccsdt':
+            raise NotImplementedError('eom_dea: after CCSDT or CCSDTQ')
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        t4 = getattr(self, 't4', None)
+        rank = rank or (4 if t4 is not None else 3)
+        if rank == 3:
+            t4 = None
+        if t3pack.classes_of(eris) is not None:
+            if shift is None:
+                raise ValueError('eom_dea: in the blocks of the labels the states are asked for by shift')
+            pb = dea.ProblemSym(eris, self.t1, self.t2, self.t3, t4, rank=rank, target=int(shift), parity=parity,
+                                target_parity=target_parity)
+        else:
+            from zccsdt.cc import ccsdtq_sym
+            dense, t3 = self._dense_view()
+            if t4 is not None:
+                t4 = ccsdtq_sym.packed_t4(eris, t4)
+            lab = getattr(dense, 'labels', None) if shift is not None else None
+            pb = dea.Problem(dense, self.t1, self.t2, t3, t4, rank=rank, labels=lab, target=int(shift or 0), parity=parity,
+                             target_parity=target_parity)
+        note = self.verbose >= logger.NOTE
+        res = dea.kernel(None, None, None, problem=pb, nroots=nroots, nguess=nguess, conv_tol=conv_tol,
+                         max_cycle=max_cycle, verbose=note, stdout=self.stdout)
+        if fold5:
+            from zccsdt.cc import dea5
+            lab = getattr(eris, 'labels', None)
+            for k in range(len(res.e)):
+                omega, sol, _ = dea5.kernel(pb, (float(res.e[k]), res.vectors[k]), conv_tol=conv_tol, verbose=note,
+                                            stdout=self.stdout, labels=lab if shift is not None else None, parity=parity,
+                                            target=int(shift or 0), target_parity=target_parity)
+                res.e[k], res.vectors[k] = omega, sol.vectors[0]
+                res.converged[k], res.residuals[k] = bool(sol.converged[0]), float(sol.residuals[0])
+        self.eom_dea_result = res
         return res.e, res
 
     q_progress = 300.0      # seconds between the progress lines of (Q)
