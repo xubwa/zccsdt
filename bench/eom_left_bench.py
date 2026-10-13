@@ -9,7 +9,9 @@ right-hand ones of the same run (docs/eom.md, section 12):
 Environment: EB_MAXMEM (MB, default 26000), EB_CONV (default 1e-6), EB_BASIS
 (default cc-pvtz / cc-pvtz-dk), EB_DENSITY=1: the excited-state densities,
 dipole moments and transition moments as well (2: with the response of the
-amplitudes).
+amplitudes); EB_LEFTMEM: the left solve with max_memory set to the resident
+memory at its start plus so many MB (the plan under a budget: smaller
+buffers, a smaller subspace, the vectors in a scratch file).
 
 Prints seconds per sigma vector and per left product, the iterations of
 both sides, the eigenvalues of both sides, biorthogonality, and the peak of
@@ -60,6 +62,9 @@ from zccsdt import memory
 from zccsdt.cc import ccsdt_opt
 ccsdt_opt.release_cached(cc._eris)
 base = memory.resident()            # (T3, the right-hand vectors and the operands of their sigma vector)
+if os.environ.get('EB_LEFTMEM'):    # the left solve under a budget of so many MB above what is resident now
+    cc.max_memory = base / 1e6 + float(os.environ['EB_LEFTMEM'])
+    print('left solve: max_memory %.0f MB = resident %.0f MB + %s MB' % (cc.max_memory, base / 1e6, os.environ['EB_LEFTMEM']))
 t0 = time.perf_counter()
 with _PeakMemory() as peak:
     left = cc.eom_left(conv_tol=conv)
@@ -85,6 +90,7 @@ t3b = np.asarray(cc.t3).nbytes
 print('   left: resident memory %.2f GB before, peak %.2f GB: %.2f GB more; plan %.2f GB less T3 (%.2f GB, there before) = %.2f GB (%s)'
       % (base / 1e9, (peak.peak or 0) / 1e9, ((peak.peak or 0) - base) / 1e9, left.plan.need / 1e9, t3b / 1e9,
          (left.plan.need - t3b) / 1e9, left.plan.text()))
+print('   left: buffers of the passes %.0f MB; vectors mapped: %s' % (left.plan.lam.mem_mb, left.plan.mapped))
 print('   timers of the left solve (wall s, cpu s, calls):')
 for k in sorted(snap):
     v = snap[k]

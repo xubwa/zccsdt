@@ -1492,6 +1492,14 @@ against 1.8 to 2.0 for a sigma vector (two residuals of the T3 engine and
 two passes 1), and the left solve as a whole 0.6 to 0.75 of the right one,
 with as many products.  A state with a shift in the blocks costs the
 packed block: 2.4 times the sigma vector of the shifted blocks for HBr.
+**Under a budget** (job 31942452, H2O / cc-pVTZ, thresholds 1e-6;
+`EB_LEFTMEM`: `max_memory` = the resident memory at the start of the left
+solve + 3600 MB, where the unlimited run takes 5.87 GB more): the plan
+shrinks the buffers of the passes to 329 MB and the subspace to 7
+vectors, in memory; the peak is 3.52 GB above the start; a left product
+takes 6.47 s (6.32 s with the large buffers), the solve 40 products in 20
+iterations.
+
 (The first run of the benchmark compared the peak of the resident memory
 of the process with the plan - 7.7 GB against 6.7 GB for H2O - which
 counts the operands of the right-hand side that were there before; the
