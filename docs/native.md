@@ -123,7 +123,9 @@ another `CALC` than `CCSDT` stops the program.
 active occupied and virtual spinors, all spinors, the frozen spinors,
 E(SCF) of JOBARC, the sum of the spinor energies of `scf2ceig` and the sum
 of (p + 1) times the energy of spinor p (the order), `CC_CONV` of the
-amplitudes and of lambda.  At the start (`xzreuse`; rank 0 decides, the
+amplitudes and of lambda, and (the last line, `XZKEY02`) the model of the
+amplitudes (CCSDT or CC3), their cycles in all runs and the largest element
+of their last step, the same two numbers of lambda.  At the start (`xzreuse`; rank 0 decides, the
 other ranks are told) `XZAMPS` is taken in the place of the CCSDT iterations
 if `XZKEY` and `XZAMPS` are there, the header of `XZAMPS` has the active
 spaces, the sizes agree exactly and the three energies to 1e-9 (relative),
@@ -142,9 +144,97 @@ when it is read.  So the steps can be separate runs in one directory:
 of the SCF and of xx2cvtran stay valid).  Remove the files to force a new
 solution.
 
-Thresholds: `CC_CONV=N` - the amplitudes (|dT1| + |dT2| + |dT3| of the full
-tensors) below 10^-N and the energy below 10^-(N+2), as the Python front end
-reads it - and `CC_MAXCYC`; lambda: |dL1| + |dL2| + |dL3| below 10^-N.  Frozen and dropped spinors are what CFOUR left
+**Iterations that did not finish are continued.**  While the amplitudes
+are iterated, rank 0 writes them to `XZAMPS` every K cycles - the first time
+after cycle 2; K = 1 + 100 t(write) / t(cycle) from that write, so the
+writes take about 1 % of the time; the output states K - and once more when
+`CC_MAXCYC` cycles are over without convergence; the Lambda iterations do
+the same with `XZLAMB`.  `XZKEY` then has, in the place of `CC_CONV`, the
+digits d that were reached (the largest element of the last step below
+10^-d), so the reuse rule above needs no change: a run that asks for no
+more than d takes the file as it is, and a run that asks for more - the
+same ZMAT again - finds a file of its integrals and its model that is not
+converged as tightly and STARTS its iterations from it instead of from the
+second-order amplitudes (lambda: instead of from conj(t)):
+`amplitudes: the file XZAMPS of an earlier run has CCSDT amplitudes of these
+integrals that are not converged as tightly as asked (XZKEY: 12 cycles, the
+largest element of the last step 1.178E-07): the iterations CONTINUE from
+them`.  The DIIS vectors are not saved: the sequence starts anew, which
+costs one or two cycles in all (check below).  At `CC_MAXCYC` the program
+stops with CFOUR's error as before, and the message says that the
+amplitudes are saved and that a rerun continues.  A write goes to
+`XZAMPS.new` (`XZLAMB.new`), which then takes the name, and `XZKEY` is
+removed before and written after: a run that is killed while it writes
+leaves the file of before, or no key.  The model is part of the key: CCSDT
+continues CCSDT amplitudes, CC3 continues CC3 amplitudes (the only use of
+CC3 amplitudes of a file - a finished CC3 run leaves no `XZKEY`, section
+17), CC4 continues the CCSDT iterations of its start (its own iterations
+have the checkpoint `XZCC4`, 19.5).  A file of another mode (`labels`,
+`real`, `cc3 stored` changed) that is not converged is left aside with a
+line, and the iterations start as without it.  `XZKEY01` files of earlier
+versions (converged CCSDT amplitudes, by the tighter test of then) are read
+as before.
+
+Check (2026-10-13, node c260, 8 threads; `CC_MAXCYC` cut, the same ZMAT run
+again until it finishes; cycles of all runs against one run without a stop;
+1 rank and 2 ranks with slices of T3 gave the same counts and energies):
+
+| case | cut to | uninterrupted | continued | energies, continued against uninterrupted |
+|---|---|---|---|---|
+| HBr `hbr_dglin_fc` (8 + 28), `CALC=CCSDT(Q)_L`, CC_CONV=10 | 6 | CCSDT 17, Lambda 16 | CCSDT 6 + 6 + 6 + 1 = 19, Lambda 6 + 6 + 5 = 17 (6 runs) | E(CCSDT) 6e-12, E(CCSDT(Q)_L) 6e-12 |
+| HBr `hbr_fc` (complex, dense), `CALC=CCSDT(Q)`, CC_CONV=10 | 7 | 17 | 7 + 7 + 5 = 19 | E(CCSDT), E(CCSDT(Q)) 4e-12 |
+| H2O `h2o_631g`, `PROPS=FIRST_ORDER`, CC_CONV=9 | 5 | CCSDT 15, Lambda 13 | CCSDT 5 + 5 + 5 + 1 = 16, Lambda 5 + 5 + 4 = 14 | E(CCSDT) 9.5e-11 |
+| HBr `hbr_dglin_fc`, `CALC=CC3` | 6 | 15 | 6 + 6 + 5 = 17 | E(CC3) identical (12 decimals) |
+| HBr `hbr_dglin_fc`, `CALC=CC4` (the cut hits its CCSDT iterations) | 6 | CCSDT 17, then 23 cycles of CC4 (`CC4 converged in 40 cycles`) | CCSDT 6 + 6 + 6 + 1 = 19, then 23 cycles of CC4 in the last run | E(CC4) identical |
+| HBr / cc-pVTZ-DK `hbr_tz_dglin` (8 + 78), `CALC=CCSDT`, killed (SIGKILL) in cycle 10 of 18; K = 3: saved after cycle 8 | - | 18 | 8 kept + 11 = 19 | E(CCSDT) 1e-12 |
+| the same on 2 ranks, killed in cycle 4; K = 2: saved after cycle 4 | - | 18 | 4 + 14 = 18 | 6e-12 |
+
+**`CC_CONV=N`: the iterations of the amplitudes and of lambda stop when the
+largest element, in absolute value, of the change of the amplitudes in the
+cycle - new minus old before the DIIS extrapolation, which is the residual
+divided by the denominator of spinor energies - over T1, T2 and T3 (l1, l2,
+l3) is below 10^-N.**  This is the test of CFOUR's spinor CCSD: `xx2cccsd`
+(`x2c_ccsdsoao.f90`) leaves its loop on `rmax.lt.conv`, with `conv =
+10**(-abs(iflags(4)))` (`setsocc.f90`) and `rmax = max(r2max, r1max)` set at
+the end of `hbarso.f90` from `t1normso` / `t2normso` of r1, r2 *after*
+`r1updso` / `r2updso` have divided the residuals by the denominators - the
+largest modulus of an element of the update that `t12updso.f90` then adds
+to the amplitudes; its Lambda equations (`x2cccdenoc/lbdeq.f90`) use the
+same line.  CFOUR has no test of the energy, and neither has this program:
+the energy change is a column of the table only.  (One difference in the
+order: `xx2cccsd` tests the update before it is added and DIIS is applied,
+this program after - its amplitudes at convergence include the last step.)
+Until 2026-10-13 the test was |dT1| + |dT2| + |dT3| of the full tensors
+below 10^-N and the energy change below 10^-(N+2), the convention of the
+Python front end (`zccsdt.cfour`, unchanged: there `CC_CONV=N` still means
+the norms and the energy).  The norm of the full T3 counts every element 36
+times and sums over all of them, so that test was tighter by a factor that
+grows with the size of the tensors: 20 for HBr / cc-pVTZ-DK (8 + 78), and
+a run of a U- atom (15 + 315 active spinors, CC_CONV=7) had stopped at
+`CC_MAXCYC=100` with the three norms at 1.2e-8, 4.3e-8, 5.7e-8 and the
+energy changing by 2e-10.  The table of the iterations keeps the three
+norms and has the new measure as the column `max|dT|` (`max|dL|`):
+
+      cycle     correlation energy      energy change      |dT1|      |dT2|      |dT3|   max|dT|   DIIS    time/s
+         17      -0.19890660878678      -1.541792E-11  2.840E-10  1.215E-09  2.065E-09  1.49E-10      8      0.12
+         18      -0.19890660878767      -8.885115E-13  1.324E-10  3.981E-10  6.680E-10  5.82E-11      8      0.12
+
+CC3 uses the same loop and test; CC4 uses the same measure in its macro /
+micro logic (19.2), without the energy.  The excited states have their own
+threshold, `ESTATE_CONV` (16.1), which already was CFOUR's: `eomene2.f90`
+calls `eomconv` - the largest modulus of an element of the residual `H c -
+omega c` at most `eomthr = 10**(-abs(iflags(98)))` or the number of
+`%eomthrs` - and the complex solver here calls the same routine.
+`CC_MAXCYC` as before.  Old against new on the regression cases
+(`regress.sh --tol --eom`, 2026-10-13; serial and 2 ranks alike): CCSDT 17
+-> 15 cycles (H2O, CC_CONV=9), 19 -> 17 (the five neutral HBr cases,
+CC_CONV=10), 22 -> 20 (HBr+); Lambda 15 -> 13, 18 -> 16 (17 -> 15 with
+dropped virtuals), 20 -> 16; every energy within 3.4e-11 (H2O) and 5e-12
+(HBr), the elements of the density files within 9.3e-11 and 1.7e-11, the
+excitation energies identical to the 8 decimals of `XZEOM`, with the same
+number of EOM iterations.
+
+Frozen and dropped spinors are what CFOUR left
 (`DROPMO`, `%vircut`): the program takes the active spinors of the integral
 files.
 
@@ -1478,9 +1568,12 @@ integrals, nothing conjugated, l1 and l2 dense, l3 and its residual stored
 as T3 is (the packed block, or the blocks of the labels).  Start from
 conj(t), Jacobi steps with DIIS (`xzdiis.F90`, the code of the amplitudes: 8
 vectors in the work array or their l3 parts in `XZDIIS`), converged when
-|dL1| + |dL2| + |dL3| of the full tensors is below 10^-`CC_CONV`.  The output
-has, per cycle, `1/4 sum <ab||ij> l2[ij][ab]` (the pseudo-energy that the
-Python tests compare), the three norms and the time.
+the largest element of the step over l1, l2, l3 is below 10^-`CC_CONV`
+(section 1; until 2026-10-13: |dL1| + |dL2| + |dL3| of the full tensors).
+The output has, per cycle, `1/4 sum <ab||ij> l2[ij][ab]` (the pseudo-energy
+that the Python tests compare), the three norms, the largest element and
+the time.  Lambda that is not converged is saved and continued as the
+amplitudes are (section 1).
 
 **Once** (`xzlamim`): what an amplitude iteration makes, by its routines
 (`xzimd.inc`, pass 1 over T3) - the dressed integrals, W_vvvo with its T3
@@ -3805,9 +3898,12 @@ The job comes from the ZMAT as for every method (section 1); `CALC=CC3` is
 joda's level 32, and EXCITE=EOMEE is read in either of joda's forms.  The
 validation and timings below were run while the program still took the
 method as an argument (`cc3`, `cc3_eom`, `cc3_stored`, `cc3_stored_eom`:
-the four cases above).  CC3 amplitudes are never reused from `XZAMPS`: a
-CC3 run does not read `XZKEY` and removes it after writing its amplitudes,
-so no CCSDT run takes them and no CC3 run takes those of CCSDT.
+the four cases above).  CC3 amplitudes are never reused from `XZAMPS` as a
+result: a CC3 run removes `XZKEY` after writing its converged amplitudes,
+and the key of amplitudes that are not converged (section 1: saved every
+few cycles and at `CC_MAXCYC`) names their model, so no CCSDT run takes or
+continues them, no CC3 run those of CCSDT - a CC3 run continues only its
+own unfinished iterations.
 
 CC3 of docs/ccn.md: the singles and doubles equations of CCSDT, the triples
 equation to the lowest order, `<T| [V~, T2] + [F, T3] |0> = 0`, F the Fock
@@ -4133,8 +4229,11 @@ Omega = 1, 2, 3 are those of shifts 2, 4, 6.)
 ## 18. Options: the section %xzccsdt of the ZMAT
 
 The program is controlled by the ZMAT alone, as CFOUR's programs are: the
-job by `CALC`, `EXCITE`, `PROPS` (section 1), the thresholds by `CC_CONV`,
-`CC_MAXCYC`, `ESTATE_CONV`, `ESTATE_MAXCYC`, the memory by `MEMORY_SIZE`,
+job by `CALC`, `EXCITE`, `PROPS` (section 1), the thresholds by `CC_CONV`
+(the largest element of the step of the amplitudes below 10^-N, as in
+`xx2cccsd`; section 1), `CC_MAXCYC` (the amplitudes are saved when it is
+reached, and a rerun continues; section 1), `ESTATE_CONV`,
+`ESTATE_MAXCYC`, the memory by `MEMORY_SIZE`,
 the excited states by `%eomnroot`, `%eomthrs`, `%eomndav0`, `%xzeom`,
 `%xzeomguess`, `%xzeomvec` (16.1) - and everything else by one section of
 its own (`xzopt.F90`):
@@ -4346,10 +4445,12 @@ need few of them:
   of CCSDT with these terms are iterated - cycles of the cost of CCSDT -
   until the change of the amplitudes is below `cc4micro` (0.01) times that
   of the first step after the evaluation; then the terms are evaluated
-  again.  Converged when the first step after an evaluation is below the
-  thresholds of `CC_CONV` (the test of a plain iteration), or - saving that
+  again.  The change of the amplitudes is its largest element (section 1,
+  `CC_CONV`; until 2026-10-13 the sum of the three norms, together with the
+  energy change - the tables below are of then).  Converged when the first step after an evaluation is below the
+  threshold of `CC_CONV` (the test of a plain iteration), or - saving that
   last evaluation - when the first steps of the evaluations say that the
-  next would be: `2 kappa d` below the thresholds, d the last first step
+  next would be: `2 kappa d` below the threshold, d the last first step
   and kappa the largest factor between two of them that was seen (the
   output says so: `new T4 terms would change the amplitudes by about ..`).
   `cc4 confirm` asks for the confirming evaluation.

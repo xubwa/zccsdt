@@ -58,8 +58,8 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,i6,a,i6,a,i6)') '   frozen occupied ', nfrozen, '   dropped virtual ', ndropped, &
     '   of ', ntot
   write(6, '(a,i14,a,i14)') '   triples: occupied ', nto, '   virtual ', nvt
-  write(6, '(a,es9.1,a,es9.1,a,i5)') '   convergence: energy ', conv_e, '   amplitudes ', conv_t, &
-    '   cycles ', maxcyc
+  write(6, '(a,es9.1,a,i5)') '   convergence: the largest element of a step of the amplitudes (of lambda) below ', conv_t, &
+    ' (CC_CONV, as xx2cccsd);   cycles ', maxcyc
   write(6, '(a,f20.12)') '   E(SCF) of JOBARC: ', escf
   write(6, '(a,i14,a,f10.1,a)') '   work array (MAXCOR): ', maxcor, ' words = ', 8d-6 * maxcor, ' MB'
   write(6, '(a,i4,a,i2)') '   threads: ', nthr, '   BLAS integers: bytes ', 4 + 4 * ilp64
@@ -264,11 +264,23 @@ subroutine xzdrv(w, maxcor)
       call xzoptget('debug', length=larg)
       if (larg == 0) write(6, '(/,a,a,a,i5,a)') ' @XZCCSDT-F, ', trim(mname), ' did not converge in ', maxcyc, &
         ' cycles (CC_MAXCYC).'
+      if (larg == 0 .and. ampsaved .and. cc4) write(6, '(a)') '             (its CCSDT iterations, the start of CC4)'
+      if (larg == 0 .and. ampsaved) then
+        write(6, '(a,es10.3,a,es9.2,a)') '             The largest element of the last step is ', ktbig, ' (asked: below ', &
+          conv_t, ', CC_CONV).'
+        write(6, '(a,i5,a)') '             The amplitudes are saved as they are (files XZAMPS, XZKEY; ', ktcyc, &
+          ' cycles in all runs so far):'
+        write(6, '(a)') '             a rerun of this ZMAT in this directory CONTINUES the iterations from them.'
+      end if
       call xzmpi_bcast(sync, 16_8)
       if (larg > 0) return
       call xzerrex
     end if
     write(6, '(a,a,a,i4,a)') '   ', trim(mname), ' converged in ', ncyc, ' cycles.'
+    if (amprst .and. cc4) write(6, '(a,i5,a)') '   (its CCSDT iterations continued from the amplitudes of earlier runs: ', &
+      ktcyc, ' cycles in all runs)'
+    if (amprst .and. .not. cc4) write(6, '(a,i5,a)') '   (continued from the amplitudes of earlier runs: ', ktcyc, &
+      ' cycles in all runs)'
     call xztable(1, 'the ' // trim(mname) // ' iterations', tcc, ncyc)
     if (cc3mode == 2) write(6, '(a,4f10.2)') '     (of it in the CC3 kernel: products, amplitudes, gather, contractions /s)', tfly
     if (cc4) then
@@ -285,7 +297,7 @@ subroutine xzdrv(w, maxcor)
       call xzamps_d(w, 'w', ecorr)
     end if
     if (cc3mode == 0) then
-      call xzkeyw(-1_8)
+      call xzkeyw(nint(-log10(conv_t), 8), -1_8)
     else
       ! (CC3 amplitudes are never reused: an XZKEY of an earlier CCSDT run goes)
       open(unit=76, file='XZKEY', status='old', iostat=larg)
@@ -336,6 +348,7 @@ subroutine xzdrv(w, maxcor)
   ! ---- the Lambda equations (all ranks), or lambda of an earlier run
   if (with_lam) then
     t0 = omp_get_wtime()
+    ecckeep = ecorr
     if (nwe == 2) then
       call xzlam_z(w, nslot, usefile, nch, converged, ncyc)
     else
@@ -355,10 +368,18 @@ subroutine xzdrv(w, maxcor)
     if (.not. converged) then
       write(6, '(/,a,i5,a)') ' @XZCCSDT-F, the Lambda equations of CCSDT did not converge in ', maxcyc, &
         ' cycles (CC_MAXCYC).'
+      if (lamsaved) then
+        write(6, '(a,es10.3,a,es9.2,a)') '             The largest element of the last step is ', klbig, ' (asked: below ', &
+          conv_t, ', CC_CONV).'
+        write(6, '(a,i5,a)') '             Lambda is saved as it is (files XZLAMB, XZKEY; ', klcyc, &
+          ' cycles in all runs so far):'
+        write(6, '(a)') '             a rerun of this ZMAT in this directory CONTINUES the iterations from it.'
+      end if
       call xzmpi_bcast(sync, 16_8)
       call xzerrex
     end if
     write(6, '(a,i4,a)') '   The Lambda equations converged in ', ncyc, ' cycles.'
+    if (lamrst) write(6, '(a,i5,a)') '   (continued from lambda of earlier runs: ', klcyc, ' cycles in all runs)'
     call xztable(3, 'the intermediates of the Lambda equations', tlamim, 0_8)
     call xztable(2, 'the iterations of the Lambda equations', tlm - tlamim, ncyc)
     t0 = omp_get_wtime()
@@ -367,7 +388,7 @@ subroutine xzdrv(w, maxcor)
     else
       call xzlamb_d(w, 'w', ecorr)
     end if
-    call xzkeyw(nint(-log10(conv_t), 8))
+    call xzkeyw(nint(-log10(conv_t), 8), nint(-log10(conv_t), 8))
     write(6, '(/,a,f10.1,a,f8.2,a)') '   lambda written to the file XZLAMB (', &
       8d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB, ', omp_get_wtime() - t0, ' s)'
   end if
@@ -573,7 +594,9 @@ end subroutine xzdrv
 ! into PROPS=EXCITATION, EXCITE=NONE: both forms mean EOM here.  The
 ! iterations of an earlier run are not repeated when the files XZAMPS
 ! (XZLAMB) of the run directory belong to these integrals (xzreuse).
-! Thresholds: the amplitudes to 10**-CC_CONV, the energy to 10**-(CC_CONV + 2).
+! Threshold: CC_CONV=N - the largest element (absolute value) of the Jacobi
+! step of the amplitudes (of lambda), residual over denominator, below
+! 10**-N, as CFOUR's xx2cccsd (rmax < conv); no test of the energy.
 subroutine xzjob()
   use xzdata
   use xzeomd, only: xzeominp
@@ -670,7 +693,6 @@ subroutine xzjob()
   with_lam = q_left .or. with_den
   with_q = method == 'CCSDT[Q]' .or. method == 'CCSDT(Q)' .or. q_left
   conv_t = 10d0 ** (-abs(iflags(4)))
-  conv_e = 10d0 ** (-abs(iflags(4)) - 2)
   maxcyc = iflags(7)
   if (maxcyc <= 0) maxcyc = 50
   ! a timing run: option ncyc cycles of every iteration, converged or not
@@ -692,15 +714,24 @@ end subroutine xzjob
 !   E(SCF) of JOBARC (SCFENEG)
 !   the sum of the spinor energies (scf2ceig, all spinors), and the sum of
 !   (p + 1) times the energy of spinor p (the order)
-!   CC_CONV of the amplitudes, CC_CONV of lambda (-1: no lambda)
+!   CC_CONV of the amplitudes, CC_CONV of lambda (-1: no lambda) - of
+!   iterations that did not converge: the digits d with the largest element
+!   of the last step below 10**-d
+!   (XZKEY02) the model of the amplitudes (CCSDT, CC3), their cycles in all
+!   runs and the largest element of the last step, the same two of lambda
 ! XZAMPS is taken if XZKEY and XZAMPS are there, its header has these active
-! spaces, the numbers above agree (sizes exactly, energies to 1e-9 relative)
-! and it was converged at least as tightly (CC_CONV not smaller); XZLAMB if
-! XZAMPS is taken, XZLAMB is lambda of these amplitudes (its header, the
-! CCSDT energy) and its CC_CONV is not smaller.  The labels and the
-! arithmetic (real or complex) are decided again from the same files; a
-! file of another mode (option labels, option real changed) stops the run when it is
-! read.  Rank 0 decides, the other ranks are told.
+! spaces, the numbers above agree (sizes exactly, energies to 1e-9 relative),
+! the model is CCSDT and it was converged at least as tightly (CC_CONV not
+! smaller); XZLAMB if XZAMPS is taken, XZLAMB is lambda of these amplitudes
+! (its header, the CCSDT energy) and its CC_CONV is not smaller.  A file
+! that fits in all but its convergence is the START of the iterations
+! (amprst, lamrst): the run continues an earlier one that ran out of cycles
+! or was stopped.  CC3 amplitudes are never a result (a converged CC3 run
+! leaves no XZKEY); a CC3 run continues CC3 amplitudes, a CCSDT run those of
+! CCSDT.  The labels and the arithmetic (real or complex) are decided again
+! from the same files; a converged file of another mode (option labels,
+! option real changed) stops the run when it is read, one that is not
+! converged is left aside.  Rank 0 decides, the other ranks are told.
 subroutine xzreuse()
   use xzdata
   use xzpar
@@ -709,7 +740,7 @@ subroutine xzreuse()
   integer(8) :: iflags
   common /flags/ iflags(100)
   logical, save :: done = .false.
-  logical :: tok, lok
+  logical :: tok, lok, trst, lrst
   real(8) :: dec(4)
   integer(8) :: st4, nev4
   character(len=32) :: arg
@@ -720,9 +751,11 @@ subroutine xzreuse()
   lok = .false.
   st4 = 0
   nev4 = 0
-  ! (CC3: its amplitudes are solved in every run; XZKEY is not written for them, so
-  ! that no CCSDT run takes them and no CC3 run takes those of CCSDT)
-  if (myrank == 0 .and. with_cc .and. cc3mode == 0) call xzkeychk(int(abs(iflags(4)), 8), with_lam, tok, lok)
+  trst = .false.
+  lrst = .false.
+  ! (CC3: its amplitudes are solved in every run; XZKEY is written for them only while
+  ! they are not converged, with their model: no CCSDT run takes them, no CC3 run those of CCSDT)
+  if (myrank == 0 .and. with_cc) call xzkeychk(int(abs(iflags(4)), 8), with_lam, tok, lok, trst, lrst)
   ! (CC4: the file XZCC4 of an earlier run of these integrals - its converged
   ! amplitudes, or those of its last completed T4 evaluation with the terms,
   ! which only the macro / micro iterations continue; not with option cc4 scratch)
@@ -737,6 +770,10 @@ subroutine xzreuse()
   cc4rst = nint(dec(3))
   nev4 = nint(dec(4), 8)
   if (.not. with_cc) return
+  ! (the amplitudes of an earlier run that did not converge are the start; CC4:
+  ! of its CCSDT iterations, unless it has a file XZCC4 or starts from scratch)
+  amprst = trst .and. .not. (cc4 .and. (cc4mode == 2 .or. cc4rst > 0))
+  lamrst = lrst
   if (cc4) then
     ! (a test hook: option cc4stop n - the run stops after its n-th evaluation of the T4 terms)
     call xzoptget('cc4stop', arg, larg)
@@ -759,6 +796,9 @@ subroutine xzreuse()
       write(6, '(a)') '               they are the start of the CC4 iterations'
     else if (cc4mode == 2) then
       write(6, '(/,a)') '   amplitudes: option cc4 scratch - CC4 from the second-order amplitudes, the T4 terms in every iteration'
+    else if (amprst) then
+      write(6, '(/,a)') '   amplitudes: the file XZAMPS of an earlier run has CCSDT amplitudes of these integrals that are not'
+      write(6, '(a)') '               converged as tightly as asked (XZKEY): the CCSDT iterations CONTINUE from them, then CC4'
     else
       write(6, '(/,a)') '   amplitudes: no file XZAMPS with the CCSDT amplitudes of these integrals (or not converged as'
       write(6, '(a)') '               tightly): CCSDT is solved first (and written to XZAMPS), then CC4 from its amplitudes'
@@ -769,14 +809,24 @@ subroutine xzreuse()
     with_cc = .false.
     write(6, '(/,a)') '   amplitudes: the file XZAMPS of an earlier run belongs to these integrals (XZKEY):'
     write(6, '(a)') '               taken, the CCSDT iterations are skipped'
+  else if (amprst) then
+    write(6, '(/,a,a,a)') '   amplitudes: the file XZAMPS of an earlier run has ', trim(mname), &
+      ' amplitudes of these integrals that are not converged'
+    write(6, '(a,i5,a,es10.3,a)') '               as tightly as asked (XZKEY: ', ktcyc, ' cycles, the largest element of the last step ', &
+      ktbig, '):'
+    write(6, '(a)') '               the iterations CONTINUE from them'
   else
-    write(6, '(/,a)') '   amplitudes: solved here (no file XZAMPS of these integrals, or not converged as tightly)'
+    write(6, '(/,a)') '   amplitudes: solved here (no file XZAMPS of these integrals and this model)'
   end if
   if (with_lam) then
     if (lok) then
       with_lam = .false.
       write(6, '(a)') '   lambda:     the file XZLAMB of an earlier run is lambda of these amplitudes: taken,'
       write(6, '(a)') '               the Lambda iterations are skipped'
+    else if (lamrst) then
+      write(6, '(a,i5,a,es10.3,a)') '   lambda:     the file XZLAMB of an earlier run is lambda of these amplitudes, not converged as tightly as asked (', &
+        klcyc, ' cycles, the largest element of the last step ', klbig, '):'
+      write(6, '(a)') '               the Lambda iterations CONTINUE from it'
     else
       write(6, '(a)') '   lambda:     solved here'
     end if
@@ -802,25 +852,35 @@ subroutine xzkeyval(e)
   deallocate(buf)
 end subroutine xzkeyval
 
-! XZKEY for the amplitudes just written (lconv < 0) or for lambda (lconv: its CC_CONV)
-subroutine xzkeyw(lconv)
+! XZKEY for the amplitudes (tconv: their CC_CONV, or the digits they have
+! reached) and lambda (lconv: likewise; < 0: none) just written, with the
+! model, the cycles and the largest elements of the last steps (xzdata)
+subroutine xzkeyw(tconv, lconv)
   use xzdata
   implicit none
-  integer(8), intent(in) :: lconv
-  integer(8) :: iflags
-  common /flags/ iflags(100)
+  integer(8), intent(in) :: tconv, lconv
   real(8) :: e(3)
   integer :: ios
   call xzkeyval(e)
   open(unit=76, file='XZKEY', form='formatted', status='replace', iostat=ios)
   if (ios /= 0) return
-  write(76, '(a)') 'XZKEY01'
+  write(76, '(a)') 'XZKEY02'
   write(76, '(4i12)') no, nv, ntot, nfrozen
   write(76, '(es26.17)') e(1)
   write(76, '(2es26.17)') e(2), e(3)
-  write(76, '(2i6)') int(abs(iflags(4)), 8), lconv
+  write(76, '(2i6)') tconv, lconv
+  write(76, '(a,i8,es12.3,i8,es12.3)') merge('CC3  ', 'CCSDT', cc3mode /= 0), ktcyc, ktbig, &
+    merge(klcyc, 0_8, lconv >= 0), merge(klbig, 0d0, lconv >= 0)
   close(76)
 end subroutine xzkeyw
+
+! the digits d of a largest element x: the largest d >= 0 with x < 10**-d
+integer(8) function xzdigits(x)
+  implicit none
+  real(8), intent(in) :: x
+  xzdigits = 0
+  if (x > 0d0 .and. x < 1d0) xzdigits = ceiling(-log10(x), 8) - 1
+end function xzdigits
 
 ! The file XZCC4 of the run directory (N(xz4ckpt), xzcc4.inc; rank 0): state 0
 ! if it is not there or belongs to other integrals (the numbers of XZKEY), 1
@@ -855,20 +915,25 @@ subroutine xz4chk(conv, state, nev)
   if (hd(9) >= 0) state = merge(2, 3, hd(9) >= conv)
 end subroutine xz4chk
 
-! the check of XZKEY, XZAMPS and XZLAMB (rank 0)
-subroutine xzkeychk(conv, needl, tok, lok)
+! the check of XZKEY, XZAMPS and XZLAMB (rank 0): tok, lok - the amplitudes
+! (lambda) of the files are taken; trst, lrst - they are those of iterations
+! of this model that did not get as far as asked: the start of the iterations
+subroutine xzkeychk(conv, needl, tok, lok, trst, lrst)
   use xzdata
   implicit none
   integer(8), intent(in) :: conv
   logical, intent(in) :: needl
-  logical, intent(out) :: tok, lok
+  logical, intent(out) :: tok, lok, trst, lrst
   character(len=8) :: tag
-  integer(8) :: k(4), c(2), head(5), headl(5)
-  real(8) :: e(3), ek(3), ea, el
+  character(len=5) :: model
+  integer(8) :: k(4), c(2), head(5), headl(5), tc, lc
+  real(8) :: e(3), ek(3), ea, el, tb, lb
   integer :: ios
   logical :: there
   tok = .false.
   lok = .false.
+  trst = .false.
+  lrst = .false.
   inquire(file='XZKEY', exist=there)
   if (.not. there) return
   inquire(file='XZAMPS', exist=there)
@@ -880,27 +945,46 @@ subroutine xzkeychk(conv, needl, tok, lok)
   if (ios == 0) read(76, *, iostat=ios) ek(1)
   if (ios == 0) read(76, *, iostat=ios) ek(2), ek(3)
   if (ios == 0) read(76, *, iostat=ios) c
+  ! (XZKEY01, of before the iterations were saved: converged CCSDT amplitudes)
+  model = 'CCSDT'
+  tc = 0
+  lc = 0
+  tb = 0d0
+  lb = 0d0
+  if (ios == 0 .and. tag == 'XZKEY02') read(76, *, iostat=ios) model, tc, tb, lc, lb
   close(76)
-  if (ios /= 0 .or. tag /= 'XZKEY01') return
+  if (ios /= 0 .or. (tag /= 'XZKEY01' .and. tag /= 'XZKEY02')) return
+  if (model /= merge('CC3  ', 'CCSDT', cc3mode /= 0)) return
   call xzkeyval(e)
   if (k(1) /= no .or. k(2) /= nv .or. k(3) /= ntot .or. k(4) /= nfrozen) return
   if (abs(e(1) - ek(1)) > 1d-9 * max(1d0, abs(e(1)))) return
   if (abs(e(2) - ek(2)) > 1d-9 * max(1d0, abs(e(2)))) return
   if (abs(e(3) - ek(3)) > 1d-9 * max(1d0, abs(e(3)))) return
-  if (c(1) < conv) return
   open(unit=77, file='XZAMPS', form='unformatted', access='stream', status='old', action='read', iostat=ios)
   if (ios == 0) read(77, iostat=ios) tag, head, ea
   close(77)
   if (ios /= 0 .or. tag /= 'XZAMPS01' .or. head(1) /= no .or. head(2) /= nv) return
+  ktcyc = tc
+  ktbig = tb
+  if (cc3mode /= 0 .or. c(1) < conv) then
+    trst = .true.
+    return
+  end if
   tok = .true.
-  if (.not. needl .or. c(2) < conv) return
+  if (.not. needl .or. c(2) < 0) return
   inquire(file='XZLAMB', exist=there)
   if (.not. there) return
   open(unit=77, file='XZLAMB', form='unformatted', access='stream', status='old', action='read', iostat=ios)
   if (ios == 0) read(77, iostat=ios) tag, headl, el
   close(77)
   if (ios /= 0 .or. tag /= 'XZLAMB01' .or. any(headl /= head) .or. abs(el - ea) > 1d-9) return
-  lok = .true.
+  klcyc = lc
+  klbig = lb
+  if (c(2) >= conv) then
+    lok = .true.
+  else
+    lrst = .true.
+  end if
 end subroutine xzkeychk
 
 ! ---------------------------------------------------------------------------

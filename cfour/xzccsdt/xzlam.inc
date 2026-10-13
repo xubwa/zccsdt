@@ -29,6 +29,12 @@
 ! iteration; the other ranks do their batches of pass 1, pass 2 and the
 ! ladder.  The DIIS vectors and the residuals of rank 1 and 2 are rank 0's.
 !
+! Converged when the largest element (absolute value) of the Jacobi step over
+! l1, l2, l3 is below conv_t = 10**-CC_CONV (the test of CFOUR's lbdeq:
+! rmax < conv).  Lambda is written to XZLAMB (XZKEY: how far it is) every
+! few cycles and when the cycles run out; a run that finds such a file of
+! its amplitudes continues from it (lamrst of xzreuse).
+!
 subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   use xzdata
   use xzmem
@@ -45,6 +51,9 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   integer(8) :: kl1n, kl2n, kr3, icyc, m0, ov, kk
   integer(8), external :: N(xzdiis_target)
   real(8) :: norms(3), normt, t0, t1w, ctl(2), tsg
+  real(8) :: emax(3), big, tcsum, twr
+  integer(8) :: ksave, lastsave
+  logical, external :: N(xzfit)
   ZT :: pe
   character(len=256) :: dbg
   integer :: ldbg
@@ -113,15 +122,30 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     return
   end if
 
-  ! the start: conj(t)
-  call N(xzlconj)(ov, w(jt1), w(jl1))
-  call N(xzlconj)(ov * ov, w(jt2), w(jl2))
-  call N(xzlconj)(n3, w(jt3), w(jl3))
+  ! the start: conj(t), or lambda of an earlier run that did not converge
+  ! (of these amplitudes: xzreuse; here: of this mode)
+  if (lamrst) lamrst = N(xzfit)('XZLAMB', ecckeep, .true.)
+  if (lamrst) then
+    call N(xzlamb)(w, 'l', ecckeep)
+  else
+    klcyc = 0
+    call N(xzlconj)(ov, w(jt1), w(jl1))
+    call N(xzlconj)(ov * ov, w(jt2), w(jl2))
+    call N(xzlconj)(n3, w(jt3), w(jl3))
+  end if
 
   write(6, '(/,a)') '  Lambda equations of CCSDT'
-  write(6, '(a)') '  ' // repeat('-', 90)
-  write(6, '(a)') '   cycle    1/4 <ab||ij> l2[ij][ab]      |dL1|      |dL2|      |dL3|   DIIS    time/s'
-  write(6, '(a)') '  ' // repeat('-', 90)
+  if (lamrst) write(6, '(a,i5,a,es10.3)') '  The iterations CONTINUE those of earlier runs (lambda of XZLAMB, not converged):', &
+    klcyc, ' cycles so far, the largest element of their last step ', klbig
+  write(6, '(a,es9.2,a)') '  converged when max|dL|, the largest element of the step over l1, l2, l3, is below ', conv_t, &
+    ' (CC_CONV)'
+  write(6, '(a)') '  ' // repeat('-', 101)
+  write(6, '(a)') '   cycle    1/4 <ab||ij> l2[ij][ab]      |dL1|      |dL2|      |dL3|   max|dL|   DIIS    time/s'
+  write(6, '(a)') '  ' // repeat('-', 101)
+  lamsaved = .false.
+  ksave = 0
+  lastsave = 0
+  tcsum = 0d0
   ncyc = maxcyc
   do icyc = 1, maxcyc
     t0 = omp_get_wtime()
@@ -129,11 +153,13 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
       ! one more iteration: lambda to the ranks
       call xztic()
       tsg = omp_get_wtime()
+      ! (2: lambda of a file is the start - all of l3 to the ranks, with slices too)
       ctl = [1d0, 1d0]
+      if (icyc == 1 .and. lamrst) ctl(2) = 2d0
       call xzmpi_bcast(ctl, 16_8)
       call xzmpi_bcast_w(w(jl1), NW * ov)
       call xzmpi_bcast_w(w(jl2), NW * ov * ov)
-      if (.not. slices) call xzmpi_bcast_w(w(jl3), NW * n3)
+      if (.not. slices .or. ctl(2) == 2d0) call xzmpi_bcast_w(w(jl3), NW * n3)
       call xztoc(2, 'MPI: lambda to the ranks')
       dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
     end if
@@ -147,7 +173,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     end if
     call xztic()
     tsg = omp_get_wtime()
-    call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms)
+    call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms, emax)
     call xztoc(2, 'DIIS')
     dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
     if (slices) then
@@ -157,16 +183,34 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
       dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
     end if
     call N(xzlpseudo)(no, nv, w(jl2), w(joovv), pe)
-    normt = norms(1) + norms(2) + norms(3)
-    write(6, '(i8,f28.14,3es11.3,i7,f10.2)') icyc, dble(pe), norms, ncnt, omp_get_wtime() - t0
+    big = maxval(emax)
+    write(6, '(i8,f28.14,3es11.3,es10.2,i7,f10.2)') icyc, dble(pe), norms, big, ncnt, omp_get_wtime() - t0
     flush(6)
-    if (normt < conv_t) then
+    klcyc = klcyc + 1
+    klbig = big
+    if (big < conv_t) then
       converged = .true.
       ncyc = icyc
       exit
     end if
+    ! lambda to XZLAMB every ksave cycles (as the amplitudes: xzcc.inc)
+    tcsum = tcsum + omp_get_wtime() - t0
+    if (.not. timing_run .and. icyc >= 2 .and. icyc - lastsave >= max(ksave, 1_8)) then
+      call N(xzlsave)(w, twr)
+      lastsave = icyc
+      if (ksave == 0) then
+        ksave = max(1_8, int(100d0 * twr * dble(icyc) / tcsum, 8) + 1)
+        write(6, '(a,i4,a,f8.2,a,f9.2,a)') '     lambda is written to XZLAMB every ', ksave, &
+          ' cycles (a write ', twr, ' s, a cycle ', tcsum / dble(icyc), ' s): a run that is stopped continues from it'
+      end if
+    end if
   end do
-  write(6, '(a)') '  ' // repeat('-', 90)
+  write(6, '(a)') '  ' // repeat('-', 101)
+  ! the cycles ran out: lambda as it is to XZLAMB
+  if (.not. converged .and. .not. timing_run) then
+    if (lastsave /= maxcyc) call N(xzlsave)(w, twr)
+    lamsaved = .true.
+  end if
   if (nrank > 1) then
     ctl = 0d0
     call xzmpi_bcast(ctl, 16_8)
@@ -190,7 +234,7 @@ subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
   integer(8), intent(out) :: icyc
   integer(8), external :: N(xzdiis_target)
   integer(8) :: kr3, ov
-  real(8) :: ctl(2), tsg, t0, norms(3)
+  real(8) :: ctl(2), tsg, t0, norms(3), emax(3)
   ov = no * nv
   icyc = 0
   write(6, '(/,a)') '  Lambda equations of CCSDT: the batches of this rank'
@@ -204,7 +248,7 @@ subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
     call xztic()
     call xzmpi_bcast_w(w(jl1), NW * ov)
     call xzmpi_bcast_w(w(jl2), NW * ov * ov)
-    if (.not. slices) then
+    if (.not. slices .or. ctl(2) == 2d0) then
       call xzmpi_bcast_w(w(jl3), NW * n3)
       dwords(2) = dwords(2) + dble(NW * n3)
     end if
@@ -216,7 +260,7 @@ subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
     if (slices) then
       tsg = omp_get_wtime()
       call xztic()
-      call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms)
+      call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms, emax)
       call xztoc(2, 'DIIS')
       dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
       tsg = omp_get_wtime()
@@ -243,10 +287,12 @@ end subroutine
 !   one after the other), in the order of the spinors of the run that wrote it
 ! rw = 'w': written from the work array; 'r': the regions of l2 and l3 are
 ! taken from the stack and filled (a dry run: only taken); l1 only for the
-! density (with_den).
+! density (with_den); 'l': l1, l2, l3 read into the regions that are there
+! (the start of the iterations; N(xzfit) has said that the file fits).
 subroutine N(xzlamb)(w, rw, ecorr)
   use xzdata
   use xzmem
+  use xzkern
   implicit none
   real(8) :: w(*)
   character(len=1), intent(in) :: rw
@@ -259,14 +305,30 @@ subroutine N(xzlamb)(w, rw, ecorr)
   n1 = NW * no * nv
   n2 = NW * no * no * nv * nv
   if (rw == 'w') then
-    open(unit=77, file='XZLAMB', form='unformatted', access='stream', status='replace', iostat=ios)
+    ! (to XZLAMB.new, which then takes the name: a run that is stopped while
+    ! it writes leaves the file of before)
+    open(unit=77, file='XZLAMB.new', form='unformatted', access='stream', status='replace', iostat=ios)
     if (ios == 0) write(77, iostat=ios) 'XZLAMB01', no, nv, int(NW, 8), ncls, n3, ecorr
     if (ios == 0) write(77, iostat=ios) w(jl1:jl1 + n1 - 1)
     if (ios == 0) write(77, iostat=ios) w(jl2:jl2 + n2 - 1)
     if (ios == 0) write(77, iostat=ios) w(jl3:jl3 + NW * n3 - 1)
     if (ios == 0) close(77, iostat=ios)
+    if (ios == 0) ios = xz_rename('XZLAMB.new' // c_null_char, 'XZLAMB' // c_null_char)
     if (ios /= 0) then
       write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZLAMB failed (iostat ', ios, '): disk full?'
+      call xzerrex
+    end if
+    return
+  end if
+  if (rw == 'l') then
+    open(unit=77, file='XZLAMB', form='unformatted', access='stream', status='old', action='read', iostat=ios)
+    if (ios == 0) read(77, iostat=ios) tag, head, e
+    if (ios == 0) read(77, iostat=ios) w(jl1:jl1 + n1 - 1)
+    if (ios == 0) read(77, iostat=ios) w(jl2:jl2 + n2 - 1)
+    if (ios == 0) read(77, iostat=ios) w(jl3:jl3 + NW * n3 - 1)
+    close(77)
+    if (ios /= 0) then
+      write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZLAMB failed, iostat ', ios
       call xzerrex
     end if
     return
@@ -308,6 +370,22 @@ subroutine N(xzlamb)(w, rw, ecorr)
     call xzerrex
   end if
   if (t3shared) call xzmapt3(w, 'XZLAMB', n1 + n2, NW * n3, jl3)
+end subroutine
+
+! ---------------------------------------------------------------------------
+! Lambda as it is, not converged, to XZLAMB, and XZKEY with how far it is
+! (as N(xzsave) of the amplitudes).  twr: the seconds of the write.
+subroutine N(xzlsave)(w, twr)
+  use xzdata
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  real(8), intent(out) :: twr
+  integer(8), external :: xzdigits
+  twr = omp_get_wtime()
+  call N(xzlamb)(w, 'w', ecckeep)
+  call xzkeyw(nint(-log10(conv_t), 8), xzdigits(klbig))
+  twr = omp_get_wtime() - twr
 end subroutine
 
 ! ---------------------------------------------------------------------------

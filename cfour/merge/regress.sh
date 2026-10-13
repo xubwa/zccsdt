@@ -5,7 +5,7 @@
 #
 #   cfour/merge/regress.sh --ref BIN --new BIN [--ref-args] [--np N] [--cases "c1 c2 ..."]
 #                          [--refdir DIR] [--scratch DIR] [--threads T] [--eom]
-#                          [--cfourbin DIR]
+#                          [--cfourbin DIR] [--tol]
 #
 #   --ref BIN      the reference binary (build/xzccsdt/xzccsdt of the repository;
 #                  with --np: build/xzccsdt_mpi/xzccsdt)
@@ -29,6 +29,14 @@
 #                  (a reference of before EOM over ranks stops with more)
 #   --scratch DIR  where the copies are run (default /tmp/$USER.xzregress);
 #                  never a source directory
+#   --tol          the two binaries differ in the source (another test of
+#                  convergence, another order of sums): the numbers are compared
+#                  to a tolerance that follows CC_CONV=N of the ZMAT of the case -
+#                  energies and the elements of the density files to 10^-N,
+#                  the excitation energies to 1e-7 (they are printed to 8
+#                  decimals) - and the cycles are listed, old
+#                  and new, without being compared.  Everything else (status,
+#                  mode, warnings, sizes, converged roots) must be identical
 #
 # Per case and binary, in a copy of the run directory: "ccsdt(q)_l" (CCSDT,
 # the Lambda equations, (Q)_Lambda; ZMAT: CALC=CCSDT(Q)_L), "(q)" from XZAMPS
@@ -38,13 +46,14 @@
 # mode (labels, real or complex), the cycles, every energy as printed (12
 # decimals), and the density files (bytes; where they differ, the largest
 # difference of an element).  Exit status 0 if nothing printed differs and
-# no element of a density file differs by more than 1e-10.
+# no element of a density file differs by more than 1e-10 (without --tol:
+# two builds of one source).
 #
 # Run it in a job, not on a login node (8 threads; about 2 minutes per
 # binary for the default cases).
 #
 set -u
-ref=; new=; np=0; threads=8; eom=0; refargs=0; cfourbin=$HOME/apps/cfour-x2cso/bin
+ref=; new=; np=0; threads=8; eom=0; refargs=0; tol=0; cfourbin=$HOME/apps/cfour-x2cso/bin
 refdir=/scratch16/lcheng24/xwang405/zccsdt_ref
 scratch=/tmp/$USER.xzregress
 cases="h2o_631g hbr_fc hbr_lab hbr_ph hbr_dglin_fc hbr_dglin_fc_vc hbrp_dglin_fc"
@@ -59,8 +68,9 @@ while [ $# -gt 0 ]; do
     --threads) threads=$2; shift 2 ;;
     --eom) eom=1; shift ;;
     --ref-args) refargs=1; shift ;;
+    --tol) tol=1; shift ;;
     --cfourbin) cfourbin=$2; shift 2 ;;
-    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
     *) echo "regress.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -105,6 +115,7 @@ runset() {
         *) [ -f "$f" ] && cp -p "$f" "$d/" ;;
       esac
     done
+    echo "$c | CC_CONV $(grep -o 'CC_CONV=[0-9]*' "$d/ZMAT" | head -1 | cut -d= -f2)" >> "$txt"
     methods='ccsdt(q)_l (q) density'
     [ $eom = 1 ] && methods="$methods eom"
     for m in $methods; do
@@ -154,7 +165,51 @@ runset ref "$ref" $refargs
 runset new "$new" 0
 
 bad=0
-if diff "$scratch/ref.txt" "$scratch/new.txt" > "$scratch/diff.txt"; then
+if [ $tol = 1 ]; then
+  python - "$scratch/ref.txt" "$scratch/new.txt" <<'EOF' || bad=1
+import sys, re
+ref = open(sys.argv[1]).read().splitlines(); new = open(sys.argv[2]).read().splitlines()
+num = re.compile(r'^-?[0-9]+\.[0-9]+$')
+bad = 0; conv = {}; cyc = []; worst = {}
+if len(ref) != len(new):
+    print('the two binaries printed %d and %d lines' % (len(ref), len(new))); bad = 1
+for r, n in zip(ref, new):
+    fr = [x.strip() for x in r.split('|')]; fn = [x.strip() for x in n.split('|')]
+    case = fr[0]
+    if len(fr) == 2 and fr[1].startswith('CC_CONV'):
+        conv[case] = int(fr[1].split()[1])
+    if 'converged in' in r and 'converged in' in n:
+        cyc.append((case, fr[1], re.sub(r' *[0-9]+ cycles.*', '', fr[2]), re.findall(r'([0-9]+) cycles', fr[2])[0],
+                    re.findall(r'([0-9]+) cycles', fn[2])[0]))
+        continue
+    if r == n:
+        continue
+    tr = r.split(); tn = n.split()
+    tol = 10.0 ** (-conv.get(case, 9))
+    if 'omega' in tr:
+        tol = max(tol, 1e-7)
+    ok = len(tr) == len(tn)
+    for x, y in zip(tr, tn):
+        if x == y:
+            continue
+        if num.match(x) and num.match(y):
+            d = abs(float(x) - float(y))
+            key = (case, fr[1], 'omega' if 'omega' in tr else tr[4])
+            worst[key] = max(worst.get(key, 0.0), d)
+            ok = ok and d <= tol
+        else:
+            ok = False
+    if not ok:
+        print('DIFFERS (tolerance %.0e):\n  ref %s\n  new %s' % (tol, r, n)); bad = 1
+print('cycles, reference -> under test:')
+for c in cyc:
+    print('  %-18s %-11s %-28s %4s -> %4s' % c)
+print('largest differences of printed numbers (everything else is identical or listed above):')
+for k in sorted(worst):
+    print('  %-18s %-11s %-18s %.1e   (CC_CONV=%d)' % (k + (worst[k], conv.get(k[0], 9))))
+sys.exit(bad)
+EOF
+elif diff "$scratch/ref.txt" "$scratch/new.txt" > "$scratch/diff.txt"; then
   echo "printed lines (status, mode, cycles, energies to 12 decimals, sizes of the density files): $(wc -l < "$scratch/ref.txt"), all identical"
 else
   echo "printed lines DIFFER:"; cat "$scratch/diff.txt"; bad=1
@@ -170,21 +225,25 @@ done
 echo "density files: $nf, byte-identical: $nsame"
 if [ -n "$ndiff" ]; then
   # one record each: 4 bytes, the numbers (8-byte reals), 4 bytes
-  python - "$scratch" $ndiff <<'EOF' || bad=1
-import sys, os
+  python - "$scratch" $tol $ndiff <<'EOF' || bad=1
+import sys, os, re
 import numpy as np
-s = sys.argv[1]; worst = 0.0
-for n in sys.argv[2:]:
+s = sys.argv[1]; worst = 0.0; bad = 0
+# (--tol: 10^-CC_CONV of the case)
+conv = dict(re.findall(r'^(\S+) \| CC_CONV (\d+)', open(os.path.join(s, 'ref.txt')).read(), re.M))
+for n in sys.argv[3:]:
+    lim = 10.0 ** (-int(conv.get(n.rsplit('.', 1)[0], 9))) if sys.argv[2] == '1' else 1e-10
     a = os.path.join(s, 'ref.den', n); b = os.path.join(s, 'new.den', n)
     if not os.path.exists(b) or os.path.getsize(a) != os.path.getsize(b):
-        print('   %-28s missing or of another size' % n); worst = 1.0; continue
+        print('   %-28s missing or of another size' % n); worst = 1.0; bad = 1; continue
     x = np.fromfile(a, dtype=np.uint8)[4:-4].view(np.float64)
     y = np.fromfile(b, dtype=np.uint8)[4:-4].view(np.float64)
     d = abs(x - y).max() if x.size else 0.0
     worst = max(worst, d)
-    print('   %-28s largest difference %.2e (largest element %.3e)' % (n, d, abs(x).max() if x.size else 0.0))
+    bad = bad or d > lim
+    print('   %-28s largest difference %.2e (largest element %.3e; tolerance %.0e)' % (n, d, abs(x).max() if x.size else 0.0, lim))
 print('largest difference of an element of a density file: %.2e' % worst)
-sys.exit(0 if worst <= 1e-10 else 1)
+sys.exit(1 if bad else 0)
 EOF
 fi
 if [ $bad = 0 ]; then echo "REGRESSION OK"; else echo "REGRESSION FAILED (outputs in $scratch)"; fi
