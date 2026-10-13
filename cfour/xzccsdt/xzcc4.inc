@@ -60,7 +60,7 @@ subroutine N(xzt4)(w, kt1, kt2, kt3, kr2, kr3, omega)
   integer(8), intent(in) :: kt1, kt2, kt3, kr2, kr3
   real(8), intent(in) :: omega
   integer(8) :: m0, m1, ov, kt2pp
-  integer(8) :: kfoo, kfvo, kfvv, kpvv, kooood, kovvod, kovood, kk, ktt, kwv, kg2, kyb, kslab, kgq, kgh, kpib
+  integer(8) :: kfoo, kfvo, kfvv, kpvv, kooood, kovvod, kovood, kk, ktt, kwv, kg2, kyb, kgq, kgh, kpib, ktau
   integer(8) :: kg, kkm, kb, koo, h, lo, nqh, q0, nq, ndone, nmine
   logical :: dense
   real(8) :: t0, tq(6), tstart
@@ -77,7 +77,6 @@ subroutine N(xzt4)(w, kt1, kt2, kt3, kr2, kr3, omega)
   tq = 0d0
   tstart = omp_get_wtime()
   m0 = xzmark()
-  jv4 = jvvvv
 
   ! ---- what the quadruples read: the dressed blocks, T2 in three layouts, Xo
   g4fov = xzget(NW * ov, 'CC4: dressed f[m][e]')
@@ -85,13 +84,13 @@ subroutine N(xzt4)(w, kt1, kt2, kt3, kr2, kr3, omega)
   g4d = xzget(NW * ov * nvp, 'CC4: dressed <mb||ef>')
   g4q1 = xzget(NW * ov * nvp, 'CC4: dressed <ab||ex> [x][e][Q]')
   g4q2 = xzget(NW * no * no * ov, 'CC4: dressed <ma||ij> [i][j][m][a]')
-  g4tau = xzget(NW * npo * nvp, 'CC4: tau1')
   kt2pp = xzget(NW * npo * nvp, 'CC4: T2 [P][Q]')
   g4t2p = xzget(NW * no * no * nvp, 'CC4: T2 [i][m][Q]')
   g4t2px = xzget(NW * npo * nv * nv, 'CC4: T2 [P][e][a]')
   g4xo = xzget(NW * nto * no * nvp, 'CC4: Xo')
-  g4tm = xzget(NW * ov, 'CC4: - T1')
+  jv4 = xzget(NW * nvv, 'CC4: dressed <ab||cd>')
   m1 = xzmark()
+  ktau = xzget(NW * npo * nvp, 'CC4: tau1')
   kfoo = xzget(NW * no * no, 'CC4: work of the dressing')
   kfvo = xzget(NW * ov, 'CC4: work of the dressing')
   kfvv = xzget(NW * nv * nv, 'CC4: work of the dressing')
@@ -104,7 +103,6 @@ subroutine N(xzt4)(w, kt1, kt2, kt3, kr2, kr3, omega)
   kwv = xzget(NW * nvp * ov, 'CC4: dressed <ab||ei> [Q][e][i]')
   kg2 = xzget(NW * npo * ov, 'CC4: work [P][e][i]')
   kyb = xzget(NW * nba * nv * nv * no, 'CC4: batch of the dressing')
-  kslab = xzget(NW * nqs * nqmax, 'CC4: slab of the dressed <ab||cd>')
   kgq = jovvq
   kgh = jgpp
   kpib = jvpidx
@@ -126,11 +124,11 @@ subroutine N(xzt4)(w, kt1, kt2, kt3, kr2, kr3, omega)
     call N(xzdrov)(no, nv, nvp, w(kt1), w(jooov), w(jovvo), w(jovvq), w(g4d), w(kooood), &
                    w(jvpidx), w(kovvod), w(kovood), w(kk))
     call N(xzt2forms)(no, nv, npo, nvp, w(kt1), w(kt2), w(jopa), w(jopb), w(jvpa), w(jvpb), &
-                      w(g4t2p), w(kt2pp), w(g4tau), w(ktt))
+                      w(g4t2p), w(kt2pp), w(ktau), w(ktt))
     call N(xzqt2)(no, nv, npo, nvp, w(kt2), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kt2pp), w(g4t2p), w(g4t2px))
-    call N(xz4neg)(ov, w(kt1), w(g4tm))
-    ! the dressed <ab||ei>: its bra, then + sum_f ~<ab||ef> t1[i][f] from the rows of the dressed <ab||cd>
-    call N(xzbv)(no, nv, npo, nvp, nba, w(kt1), w(g4tau), w(jovvq), w(jooov), w(jovvo), &
+    ! the dressed <ab||ei>: its bra, then + sum_f ~<ab||ef> t1[i][f] from the rows of the dressed
+    ! <ab||cd>, which are kept for Xv
+    call N(xzbv)(no, nv, npo, nvp, nba, w(kt1), w(ktau), w(jovvq), w(jooov), w(jovvo), &
                  w(jopa), w(jopb), w(jvpa), w(jvpb), w(kwv), w(kg2), w(kyb))
     do h = 0, npg - 1
       lo = vpoff(h)
@@ -140,10 +138,11 @@ subroutine N(xzt4)(w, kt1, kt2, kt3, kr2, kr3, omega)
                                          w(kgh), w(kpib))
       do q0 = 0, nqh - 1, nqs
         nq = min(nqs, nqh - q0)
-        call N(xzdrrows)(no, nv, npo, nvp, nqh, nq, w(kt1), w(g4tau + NW * (lo + q0)), &
+        call N(xzdrrows)(no, nv, npo, nvp, nqh, nq, w(kt1), w(ktau + NW * (lo + q0)), &
                          w(jvvvv + NW * (vvoff(h) + q0 * nqh)), w(kgq), w(kgh), w(jvpa + lo + q0), &
-                         w(jvpb + lo + q0), w(kslab), w(kk))
-        call N(zc_pair_t1_contract)(w(kwv + NW * (lo + q0) * ov), w(kslab), w(kt1), nq, nv, nqh, w(kpib), no)
+                         w(jvpb + lo + q0), w(jv4 + NW * (vvoff(h) + q0 * nqh)), w(kk))
+        call N(zc_pair_t1_contract)(w(kwv + NW * (lo + q0) * ov), w(jv4 + NW * (vvoff(h) + q0 * nqh)), w(kt1), nq, nv, &
+                                    nqh, w(kpib), no)
       end do
     end do
     call N(xz4q12)(no, nv, nvp, w(kwv), w(kovood), w(g4q1), w(g4q2))
@@ -196,7 +195,7 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
   integer(8), intent(out) :: ndone, nmine
   integer(8) :: m0, na4, nslot, nxv, nrb, nt, s, mt
   integer(8) :: kev4, kz, kw22, kw13, kla, kra, klb, krb, klc, krc, kwh, kxv, kxvs, kwx, kmx, ky, klk, kbo, ktg
-  integer(8) :: ke22, ke13, kg1, kgp, qy12
+  integer(8) :: ke22, ke13, qy12
   integer(8) :: i, j, k, l, x, n, size, ng, g1, g2, g3, qq, g, kx
   integer(8) :: lo1, hi1, lo2, hi2, lo3, hi3, it, lastl, nx, nnew
   integer(8) :: slot(0:no-1), xnew(0:no-1), kind(2), ka(2), sw(2)
@@ -237,10 +236,8 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
     if (eom) kxvs = xzget(NW * nslot * nxv, 'CC4: Xv of the vector')
     kwx = xzget(NW * nt * qrows * nv * nv, 'CC4: rows of <vv||vv>')
     kmx = xzget(NW * qrows * nv * nv, 'CC4: product of Xv')
-    kg1 = xzget(NW * qrows * nvp, 'CC4: dressed rows of <vv||vv>')
     ke22 = kz
     ke13 = kz
-    kgp = kz
   else
     nrb = 4 + 6 * nocmax
     jqkv = xzget(nv / 2 + 1, 'CC4: tables')
@@ -291,8 +288,6 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
     if (eom) kxvs = xzget(NW * nslot * nxv, 'CC4: Xv of the vector')
     kwx = xzget(NW * nqmax * nvcmax * nvcmax, 'CC4: block of <vv||vv>')
     kmx = xzget(NW * nqmax * nv * nvcmax, 'CC4: products of Xv')
-    kg1 = xzget(NW * no * nv * nvcmax * nvcmax, 'CC4: <my||ef> of two classes')
-    kgp = xzget(NW * npo * nvcmax * nvcmax, 'CC4: <mn||ef> of two classes')
     kev4 = kz
     kw22 = kz
     kwh = kz
@@ -360,15 +355,13 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
                 kind = [0_8, 0_8]
                 ka = [kt2, kt2]
                 sw = [0_8, 0_8]
-                call N(xz4sxv)(w, x, l, 1_8, kind, ka, sw, 0_8, w(kt1), w(g4tm), w(g4tau), w(jqtri), &
-                               w(kxv + NW * slot(x) * nxv), w(kmx), w(kwx), w(kg1), w(kgp))
+                call N(xz4sxv)(w, x, l, 1_8, kind, ka, sw, 0_8, w(jqtri), w(kxv + NW * slot(x) * nxv), w(kmx), w(kwx))
                 if (eom) then
                   ! of the vector: T2 with <bc||ef>' and r2 with the dressed <bc||ef>
                   kind = [1_8, 0_8]
                   ka = [kt2, x4r2]
                   sw = [s, 0_8]
-                  call N(xz4sxv)(w, x, l, 2_8, kind, ka, sw, s, w(kt1), w(g4tm), w(g4tau), w(jqtri), &
-                                 w(kxvs + NW * slot(x) * nxv), w(kmx), w(kwx), w(kg1), w(kgp))
+                  call N(xz4sxv)(w, x, l, 2_8, kind, ka, sw, s, w(jqtri), w(kxvs + NW * slot(x) * nxv), w(kmx), w(kwx))
                 end if
               end if
             end if
@@ -376,13 +369,11 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
           if (dense .and. nnew > 0) then
             kind = [0_8, 0_8]
             ka = [kt2, kt2]
-            call N(xz4xv)(w, nnew, xnew, l, slot, 1_8, kind, ka, w(kt1), w(g4tau), w(kxv), w(kwx), w(kmx), &
-                          w(kg1), w(g4tm))
+            call N(xz4xv)(w, nnew, xnew, l, slot, 1_8, kind, ka, w(kxv), w(kwx), w(kmx))
             if (eom) then
               kind = [1_8, 0_8]
               ka = [kt2, x4r2]
-              call N(xz4xv)(w, nnew, xnew, l, slot, 2_8, kind, ka, w(kt1), w(g4tau), w(kxvs), w(kwx), w(kmx), &
-                            w(kg1), w(g4tm))
+              call N(xz4xv)(w, nnew, xnew, l, slot, 2_8, kind, ka, w(kxvs), w(kwx), w(kmx))
             end if
           end if
           tq(2) = tq(2) + omp_get_wtime() - t0
@@ -589,15 +580,6 @@ subroutine N(xz4ckpt)(w, rw, cconv, ecorr, dprev)
     omp_get_wtime() - t0, ' s)'
 end subroutine
 
-! out = - a
-subroutine N(xz4neg)(n, a, out)
-  implicit none
-  integer(8), intent(in) :: n
-  ZT, intent(in) :: a(n)
-  ZT, intent(out) :: out(n)
-  out = -a
-end subroutine
-
 ! ---------------------------------------------------------------------------
 ! The two dressed blocks of the products with T3 in the layouts of (Q):
 !   q1[x][e][Q] = - ~<Q||ex>  (wv[Q][e][x]; (Q) has <xe||ab>* there)
@@ -696,21 +678,19 @@ end subroutine
 ! Xv of N(xzqxv) (no labels) for the nnew occupied x of xnew, as a sum of
 ! nterm terms
 !   xv[e][(bcd)] = P(d/bc) 1/2 sum_f W[(bc)][e][f] a[x][l][f][d]
-!   kind 0   W = the T1-dressed <bc||ef>: its rows dressed (N(xzdrrows), the
-!            kernel of the sweep of the CCSDT step) before they are expanded
-!   kind 1   W = <bc||ef>' of H' = [H~, R1] (N(xzedrows)): x4r1, x4d0 of xzdata
+!   kind 0   W = the T1-dressed <bc||ef> (jv4 of xzdata)
+!   kind 1   W = <bc||ef>' of H' = [H~, R1] (x4vv)
 !   ka       the amplitudes a [i][j][a][b] of the term (index in w)
-! wx: work nterm * qrows * nv * nv; sl: work qrows * nvp; tm = - t1.
-subroutine N(xz4xv)(w, nnew, xnew, l, slot, nterm, kind, ka, t1, tau, xv, wx, mx, sl, tm)
+! wx: work nterm * qrows * nv * nv.
+subroutine N(xz4xv)(w, nnew, xnew, l, slot, nterm, kind, ka, xv, wx, mx)
   use xzdata
   use xzkern
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: nnew, l, nterm, kind(2), ka(2)
   integer(8), intent(in) :: xnew(0:*), slot(0:*)
-  ZT, intent(in) :: t1(*), tau(0:nvp-1, 0:*)
-  ZT :: xv(0:nv*nvt-1, 0:*), wx(0:qrows*nv*nv-1, *), mx(*), sl(*), tm(*)
-  integer(8) :: b0, nb, k, x, t
+  ZT :: xv(0:nv*nvt-1, 0:*), wx(0:qrows*nv*nv-1, *), mx(*)
+  integer(8) :: b0, nb, k, x, t, kw
   ZT :: one, zero, beta
   one = 1
   zero = 0
@@ -720,14 +700,10 @@ subroutine N(xz4xv)(w, nnew, xnew, l, slot, nterm, kind, ka, t1, tau, xv, wx, mx
   do b0 = 0, nvp - 1, qrows
     nb = min(qrows, nvp - b0)
     do t = 1, nterm
-      if (kind(t) == 0) then
-        call N(xzdrrows)(no, nv, npo, nvp, nvp, nb, t1, tau(b0, 0), w(jv4 + NW * b0 * nvp), w(jovvq), w(jgpp), &
-                         w(jvpa + b0), w(jvpb + b0), sl, tm)
-      else
-        call N(xzedrows)(no, nv, nvp, nb, w(x4r1), w(x4d0), w(jvpa + b0), w(jvpb + b0), sl, w(x4tmr))
-      end if
+      kw = merge(jv4, x4vv, kind(t) == 0)
       call zc_tn_zero(wx(0, t), 8 * NW * nb * nv * nv)
-      call N(zc_tn_expand)(sl, nb, nvp, int(nv, 4), 1_4, 1_4, 0_8, nv, 0_8, nv, wx(0, t), nv, 1_8, nv * nv, 1d0)
+      call N(zc_tn_expand)(w(kw + NW * b0 * nvp), nb, nvp, int(nv, 4), 1_4, 1_4, 0_8, nv, 0_8, nv, wx(0, t), nv, 1_8, &
+                           nv * nv, 1d0)
     end do
     do k = 0, nnew - 1
       x = xnew(k)
@@ -763,23 +739,21 @@ end function
 !   xv[e][(bcd)] = P(d/bc) 1/2 sum_f W[(bc)][e][f] a[x][l][f][d]
 ! of the shift sx = sw + (the shift of a): for e of class ke the triples of
 ! group ke + class(x) + class(l) + sx.
-!   kind 0   W = the T1-dressed <bc||ef> (sw = 0): the block [(bc)][e][f] of a
-!            group of pairs and two classes, dressed where it is,
-!              - sum_m t1[m][b] <mc||ef> + sum_m t1[m][c] <mb||ef> + sum_{m<n} tau1[mn][bc] <mn||ef>
+!   kind 0   W = the T1-dressed <bc||ef> (sw = 0): its block of the group of
+!            (bc) in the dressed <ab||cd> (jv4 of xzdata)
 !   kind 1   W = <bc||ef>' = - sum_m r1[m][b] ~<mc||ef> + sum_m r1[m][c] ~<mb||ef>
-!            (shift sw: the group of (bc) less the classes of e and f)
+!            (shift sw: the group of (bc) less the classes of e and f): its
+!            block of the group of (bc) at x4vv
 !   ka       the amplitudes a [i][j][a][b] of the term (index in w)
-! g1, gp: work (<my||ef> and <mn||ef> of two classes).  tm = - t1.
-subroutine N(xz4sxv)(w, x, l, nterm, kind, ka, sw, sx, t1, tm, tau, tri, xv, m3, wb, g1, gp)
+subroutine N(xz4sxv)(w, x, l, nterm, kind, ka, sw, sx, tri, xv, m3, wb)
   use xzdata
   use xzkern
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: x, l, nterm, kind(2), ka(2), sw(2), sx
-  ZT, intent(in) :: t1(*), tm(*), tau(0:nvp-1, 0:*)
   integer(4), intent(in) :: tri(0:2, 0:nvt-1)
-  ZT :: xv(0:*), m3(0:*), wb(*), g1(*), gp(*)
-  integer(8) :: kxl, ke, t, ne, nt, q2, kf, kd, nf, nd, nq, n, xoff, it
+  ZT :: xv(0:*), m3(0:*), wb(*)
+  integer(8) :: kxl, ke, t, ne, nt, q2, qc, kf, kd, nf, nd, nq, n, xoff, it
   integer(8) :: off(0:npg-1), ndd(0:npg-1)
   ZT :: one, zero, beta
   one = 1
@@ -810,16 +784,12 @@ subroutine N(xz4sxv)(w, x, l, nterm, kind, ka, sw, sx, t1, tm, tau, tri, xv, m3,
         if (nf == 0) cycle
         if (kind(it) == 0) then
           call N(xzqswb)(nv, nq, ne, nf, vcoff(ke), vcoff(kf), vpoff(q2), w(jvpidx), w(jv4 + NW * vvoff(q2)), wb)
-          call N(xz4g12)(no, nv, npo, nvp, ne, nf, vcoff(ke), vcoff(kf), w(jovvq), w(jgpp), w(jvpidx), g1, gp, .true.)
-          call N(zc_vvvv_dress)(wb, wb, nq, ne * nf, w(jvpa + vpoff(q2)), w(jvpb + vpoff(q2)), tm, nv, g1, no, nv, &
-                                t1, nv, g1, no, nv, tm, tm, 0_8)
-          if (npo > 0) call N(zc_gemm)(1_4, 0_4, nq, ne * nf, npo, one, tau(vpoff(q2), 0), nvp, gp, ne * nf, one, &
-                                       wb, ne * nf)
         else
-          call zc_vzero_d(NW * nq * ne * nf, wb)
-          call N(xz4g12)(no, nv, npo, nvp, ne, nf, vcoff(ke), vcoff(kf), w(x4d0), w(jgpp), w(jvpidx), g1, gp, .false.)
-          call N(zc_vvvv_dress)(wb, wb, nq, ne * nf, w(jvpa + vpoff(q2)), w(jvpb + vpoff(q2)), w(x4tmr), nv, g1, no, &
-                                nv, w(x4r1), nv, g1, no, nv, tm, tm, 0_8)
+          ! (the pairs (ef) are of the group q2 - sw)
+          qc = q2 - sw(it)
+          if (x4vvoff(q2) < 0) cycle
+          call N(xz4swb)(nv, nq, vpoff(qc + 1) - vpoff(qc), ne, nf, vcoff(ke), vcoff(kf), vpoff(qc), w(jvpidx), &
+                         w(x4vv + NW * x4vvoff(q2)), wb)
         end if
         call N(zc_gemm)(0_4, 0_4, nq * ne, nd, nf, one, wb, nf, &
                         w(ka(it) + NW * (((x * no + l) * nv + vcoff(kf)) * nv + vcoff(kd))), nv, beta, m3(n), nd)
@@ -836,46 +806,28 @@ subroutine N(xz4sxv)(w, x, l, nterm, kind, ka, sw, sx, t1, tm, tau, tri, xv, m3,
   end do
 end subroutine
 
-! g1[m][y][(e, f)] = <my||ef> (from gq[m][y][Q]) and, if withp,
-! gp[P][(e, f)] = <mn||ef>, for e and f of two ranges
-subroutine N(xz4g12)(no, nv, npo, nvp, ne, nf, e0, f0, gq, gpp, vpidx, g1, gp, withp)
+! wb[(bc)][e][f] = W[(bc)][(ef)] from a block vv[(bc)][(ef)] of nq rows and
+! the nqc pairs (ef) of one group, whose first pair is clo (N(xzqswb) for a
+! block that is not square)
+subroutine N(xz4swb)(nv, nq, nqc, ne, nf, e0, f0, clo, vpidx, vv, wb)
   implicit none
-  integer(8), intent(in) :: no, nv, npo, nvp, ne, nf, e0, f0
-  ZT, intent(in) :: gq(0:nvp-1, 0:no*nv-1)                     ! [m][y][Q]
-  ZT, intent(in) :: gpp(0:nvp-1, 0:npo-1)                      ! [P][Q]
+  integer(8), intent(in) :: nv, nq, nqc, ne, nf, e0, f0, clo
   integer(8), intent(in) :: vpidx(0:nv-1, 0:nv-1)              ! [p][q]
-  ZT, intent(out) :: g1(0:nf-1, 0:ne-1, 0:no*nv-1), gp(0:nf-1, 0:ne-1, 0:*)
-  logical, intent(in) :: withp
-  integer(8) :: r, e, f, ge, gf
-  !$omp parallel do private(r, e, f, ge, gf)
-  do r = 0, no * nv - 1
+  ZT, intent(in) :: vv(0:nqc-1, 0:nq-1)                        ! [(bc)][(ef)]
+  ZT, intent(out) :: wb(0:nf-1, 0:ne-1, 0:nq-1)                ! [(bc)][e][f]
+  integer(8) :: b, e, f, ge, gf
+  !$omp parallel do private(b, e, f, ge, gf)
+  do b = 0, nq - 1
     do e = 0, ne - 1
       ge = e0 + e
       do f = 0, nf - 1
         gf = f0 + f
         if (ge < gf) then
-          g1(f, e, r) = gq(vpidx(gf, ge), r)
+          wb(f, e, b) = vv(vpidx(gf, ge) - clo, b)
         else if (ge > gf) then
-          g1(f, e, r) = -gq(vpidx(ge, gf), r)
+          wb(f, e, b) = -vv(vpidx(ge, gf) - clo, b)
         else
-          g1(f, e, r) = 0
-        end if
-      end do
-    end do
-  end do
-  if (.not. withp) return
-  !$omp parallel do private(r, e, f, ge, gf)
-  do r = 0, npo - 1
-    do e = 0, ne - 1
-      ge = e0 + e
-      do f = 0, nf - 1
-        gf = f0 + f
-        if (ge < gf) then
-          gp(f, e, r) = gpp(vpidx(gf, ge), r)
-        else if (ge > gf) then
-          gp(f, e, r) = -gpp(vpidx(ge, gf), r)
-        else
-          gp(f, e, r) = 0
+          wb(f, e, b) = 0
         end if
       end do
     end do
@@ -1391,35 +1343,34 @@ subroutine N(xz4eomkeep)()
   implicit none
   integer(8) :: ov
   ov = no * nv
-  e4vv = xzget(NW * nvv, 'CC4: the bare <ab||cd>')
+  e4vv = xzget(NW * nvv, 'CC4: the dressed <ab||cd>')
   e4q1 = xzget(NW * ov * nvp, 'CC4: dressed <ab||ex> [x][e][Q]')
   e4q2 = xzget(NW * no * no * ov, 'CC4: dressed <ma||ij> [i][j][m][a]')
   e4xo = xzget(NW * nto * no * nvp, 'CC4: Xo')
   e4t2px = xzget(NW * npo * nv * nv, 'CC4: T2 [P][e][a]')
-  e4tau = xzget(NW * npo * nvp, 'CC4: tau1')
-  e4tm = xzget(NW * ov, 'CC4: - T1')
 end subroutine
 
 ! ---------------------------------------------------------------------------
 ! EOM-CC4: these arrays, from the amplitudes and the intermediates of
 ! N(xzeomim) (which has copied the bare <ab||cd> to e4vv before the pp
 ! operator took its place): the operands of N(xzt4) for the ground state.
+! The copy of <ab||cd> is dressed where it is.
 subroutine N(xz4eomim)(w)
   use xzdata
   use xzmem
   use xzkern
   implicit none
   real(8) :: w(*)
-  integer(8) :: m0, ov, ktt, kwv, kg2, kyb, kslab, kgq, kgh, kpib, kk, kg, kkm, kb, koo, h, lo, nqh, q0, nq
+  integer(8) :: m0, ov, ktau, ktt, kwv, kg2, kyb, kgq, kgh, kpib, kk, kg, kkm, kb, koo, h, lo, nqh, q0, nq
   logical :: dense
   ov = no * nv
   dense = ncls == 1
   m0 = xzmark()
+  ktau = xzget(NW * npo * nvp, 'CC4: tau1')
   ktt = xzget(NW * npo * nvp, 'CC4: T2 + tau1')
   kwv = xzget(NW * nvp * ov, 'CC4: dressed <ab||ei> [Q][e][i]')
   kg2 = xzget(NW * npo * ov, 'CC4: work [P][e][i]')
   kyb = xzget(NW * nba * nv * nv * no, 'CC4: batch of the dressing')
-  kslab = xzget(NW * nqs * nqmax, 'CC4: slab of the dressed <ab||cd>')
   kk = xzget(NW * ov, 'CC4: work of the dressing')
   kgq = jovvq
   kgh = jgpp
@@ -1436,10 +1387,9 @@ subroutine N(xz4eomim)(w)
   if (.not. xzdry) then
     call xztic()
     call N(xzt2forms)(no, nv, npo, nvp, w(jt1), w(jt2), w(jopa), w(jopb), w(jvpa), w(jvpb), &
-                      w(et2p), w(et2pp), w(e4tau), w(ktt))
+                      w(et2p), w(et2pp), w(ktau), w(ktt))
     call N(xzqt2)(no, nv, npo, nvp, w(jt2), w(jopa), w(jopb), w(jvpa), w(jvpb), w(et2pp), w(et2p), w(e4t2px))
-    call N(xz4neg)(ov, w(jt1), w(e4tm))
-    call N(xzbv)(no, nv, npo, nvp, nba, w(jt1), w(e4tau), w(jovvq), w(jooov), w(jovvo), &
+    call N(xzbv)(no, nv, npo, nvp, nba, w(jt1), w(ktau), w(jovvq), w(jooov), w(jovvo), &
                  w(jopa), w(jopb), w(jvpa), w(jvpb), w(kwv), w(kg2), w(kyb))
     do h = 0, npg - 1
       lo = vpoff(h)
@@ -1449,10 +1399,11 @@ subroutine N(xz4eomim)(w)
                                          w(kgh), w(kpib))
       do q0 = 0, nqh - 1, nqs
         nq = min(nqs, nqh - q0)
-        call N(xzdrrows)(no, nv, npo, nvp, nqh, nq, w(jt1), w(e4tau + NW * (lo + q0)), &
+        call N(xzdrrows)(no, nv, npo, nvp, nqh, nq, w(jt1), w(ktau + NW * (lo + q0)), &
                          w(e4vv + NW * (vvoff(h) + q0 * nqh)), w(kgq), w(kgh), w(jvpa + lo + q0), &
-                         w(jvpb + lo + q0), w(kslab), w(kk))
-        call N(zc_pair_t1_contract)(w(kwv + NW * (lo + q0) * ov), w(kslab), w(jt1), nq, nv, nqh, w(kpib), no)
+                         w(jvpb + lo + q0), w(e4vv + NW * (vvoff(h) + q0 * nqh)), w(kk))
+        call N(zc_pair_t1_contract)(w(kwv + NW * (lo + q0) * ov), w(e4vv + NW * (vvoff(h) + q0 * nqh)), w(jt1), nq, nv, &
+                                    nqh, w(kpib), no)
       end do
     end do
     call N(xz4q12)(no, nv, nvp, w(kwv), w(eovood), w(e4q1), w(e4q2))
@@ -1488,6 +1439,7 @@ end subroutine
 !   - <ab||ex>' = P(ab) r1[m][a] ~<mb||ex> - sum_f ~<ab||ef> r1[x][f]     x4q1
 !   <ma||ij>'                                                             x4q2
 !   <mb||ef>' = - sum_n r1[n][b] <mn||ef>                                 x4d
+!   <bc||ef>' = - P(bc) sum_m r1[m][b] ~<mc||ef>, for Xv                  x4vv
 !   Xo of (<mn||jk>', <md||el>'; t2) + Xo of (the dressed blocks; r2)     x4xos
 ! then the pass over the occupied quadruples (N(xz4run)); ks2 [P][Q] and ks3
 ! (the layout of the shift) are added to.
@@ -1499,8 +1451,8 @@ subroutine N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo, ks2, ks3
-  integer(8) :: m0, m1, ov, kdwv, kyb, kslab, kgq, kgh, kpib, kk, kg, kkm, kb, koo
-  integer(8) :: h, lo, nqh, q0, nq, x0, nb, m, ndone, nmine
+  integer(8) :: m0, m1, ov, kdwv, kyb, kgq, kgh, kpib, kk, kg, kkm, kb, koo
+  integer(8) :: h, hr, lo, lo2, nqh, nqr, x0, nb, m, ndone, nmine, s, nxvv
   logical :: dense
   ZT :: one, zero, mone
   one = 1
@@ -1508,19 +1460,32 @@ subroutine N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo
   mone = -1
   ov = no * nv
   dense = ncls == 1
+  s = eshift
+  if (dense) s = 0
+  ! the blocks of <bc||ef>': the pairs (bc) of group h + s, the pairs (ef) of group h
+  x4vvoff = -1
+  nxvv = 0
+  do h = 0, npg - 1
+    hr = h + s
+    if (hr < 0 .or. hr >= npg) cycle
+    nqh = vpoff(h + 1) - vpoff(h)
+    nqr = vpoff(hr + 1) - vpoff(hr)
+    if (nqh == 0 .or. nqr == 0) cycle
+    x4vvoff(hr) = nxvv
+    nxvv = nxvv + nqr * nqh
+  end do
   m0 = xzmark()
   x4q1 = xzget(NW * ov * nvp, 'CC4: <ab||ex> derivative')
   x4q2 = xzget(NW * no * no * ov, 'CC4: <ma||ij> derivative')
   x4d = xzget(NW * ov * nvp, 'CC4: <mb||ef> derivative')
   x4xos = xzget(NW * nto * no * nvp, 'CC4: Xo of the vector')
   x4r2px = xzget(NW * npo * nv * nv, 'CC4: R2 [P][e][a]')
-  x4tmr = xzget(NW * ov, 'CC4: - R1')
+  x4vv = xzget(NW * nxvv, 'CC4: <ab||cd> derivative')
   m1 = xzmark()
   kdwv = xzget(NW * nvp * ov, 'CC4: <ab||ei> derivative [Q][e][i]')
   kyb = xzget(NW * nba * nv * nv * no, 'CC4: batch of the dressing')
-  kslab = xzget(NW * nqs * nqmax, 'CC4: slab of the dressed <ab||cd>')
   kk = xzget(NW * ov, 'CC4: work of the dressing')
-  kgq = jovvq
+  kgq = ed
   kgh = jgpp
   kpib = jvpidx
   if (.not. dense) then
@@ -1546,15 +1511,15 @@ subroutine N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo
       lo = vpoff(h)
       nqh = vpoff(h + 1) - lo
       if (nqh == 0) cycle
-      if (.not. dense) call N(xzgrpcols)(no, nv, npo, nvp, lo, nqh, w(jovvq), w(jgpp), w(jvpidx), w(kgq), &
-                                         w(kgh), w(kpib))
-      do q0 = 0, nqh - 1, nqs
-        nq = min(nqs, nqh - q0)
-        call N(xzdrrows)(no, nv, npo, nvp, nqh, nq, w(jt1), w(e4tau + NW * (lo + q0)), &
-                         w(e4vv + NW * (vvoff(h) + q0 * nqh)), w(kgq), w(kgh), w(jvpa + lo + q0), &
-                         w(jvpb + lo + q0), w(kslab), w(kk))
-        call N(zc_pair_t1_contract)(w(kdwv + NW * (lo + q0) * ov), w(kslab), w(kr1), nq, nv, nqh, w(kpib), no)
-      end do
+      if (.not. dense) call N(xzgrpcols)(no, nv, npo, nvp, lo, nqh, w(ed), w(jgpp), w(jvpidx), w(kgq), w(kgh), w(kpib))
+      call N(zc_pair_t1_contract)(w(kdwv + NW * lo * ov), w(e4vv + NW * vvoff(h)), w(kr1), nqh, nv, nqh, w(kpib), no)
+      ! the rows of <bc||ef>' on the pairs (ef) of this group
+      hr = h + s
+      if (hr < 0 .or. hr >= npg) cycle
+      if (x4vvoff(hr) < 0) cycle
+      lo2 = vpoff(hr)
+      nqr = vpoff(hr + 1) - lo2
+      call N(xzedrows)(no, nv, nqh, nqr, w(kr1), w(kgq), w(jvpa + lo2), w(jvpb + lo2), w(x4vv + NW * x4vvoff(hr)), w(kk))
     end do
     call N(xz4q12)(no, nv, nvp, w(kdwv), w(kdovoo), w(x4q1), w(x4q2))
     do m = 0, no - 1
@@ -1566,29 +1531,24 @@ subroutine N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo
                   w(jvpa), w(jvpb), w(jofree), w(jopair), w(x4xos), w(kg), w(kkm), w(kb), w(koo), .false.)
     call N(xz4xo)(no, nv, npo, nvp, nto, w(eooood), w(eovvod), w(kr2p), w(x4r2px), w(jopa), w(jopb), &
                   w(jvpa), w(jvpb), w(jofree), w(jopair), w(x4xos), w(kg), w(kkm), w(kb), w(koo), .true.)
-    call N(xz4neg)(ov, w(kr1), w(x4tmr))
     call xztoc(5, 'CC4: sigma operands')
   end if
   call xzrel(m1)
-  x4s = eshift
-  if (dense) x4s = 0
+  x4s = s
   x4fov = kdfov
   x4ooov = kdooov
   x4r1 = kr1
   x4r2 = kr2
   x4r2p = kr2p
   x4r3 = kr3
-  x4d0 = ed
   g4fov = efov
   g4ooov = eooovd
   g4d = ed
   g4q1 = e4q1
   g4q2 = e4q2
-  g4tau = e4tau
   g4t2p = et2p
   g4t2px = e4t2px
   g4xo = e4xo
-  g4tm = e4tm
   jv4 = e4vv
   call N(xz4run)(w, jt1, jt2, jt3, ks2, ks3, eomega, .true., t4eom, ndone, nmine)
   if (.not. xzdry) call xztoc(5, 'CC4: the T4 terms')
