@@ -118,22 +118,41 @@ module xzdata
   logical :: cc4start = .false.     ! the CCSDT amplitudes of the file XZAMPS are the start
   integer(8) :: jd42 = 0, jd43 = 0  ! the T4 terms: of R2 [P][Q], of R3 (as T3 is stored)
   integer(8) :: nt4 = 0             ! evaluations of the T4 terms
+  ! the file XZCC4 of an earlier run (N(xz4ckpt)): 0 none; 1 the amplitudes and the T4 terms of its
+  ! last completed evaluation - the iterations go on from there; 2 its converged amplitudes are
+  ! taken; 3 its amplitudes, converged less tightly, are the start
+  integer :: cc4rst = 0
+  integer(8) :: nt4old = 0          ! evaluations of the earlier runs (of nt4)
+  integer(8) :: nt4run = 0          ! evaluations of this run, the sigma vectors of EOM-CC4 with them
+  integer(8) :: nt4stop = 0         ! option cc4stop n (a test hook): the run stops after n of them
+  ! the extrapolation over the macro iterations (N(xz4acc)): on - the plan found room for its three
+  ! sets of amplitudes in the work array of rank 0, and option cc4acc is not 0; their places (the
+  ! amplitudes of the last evaluation, g and f of the macro iteration before), the macro iterations
+  ! in its history, the largest factor between the first steps of two evaluations
+  logical :: acc4 = .false.
+  integer(8) :: a4x = 0, a4g = 0, a4f = 0, a4n = 0
+  real(8) :: a4kmax = 0d0
   real(8) :: e4ccsdt = 0d0          ! the CCSDT correlation energy of the start (0: none)
   real(8) :: t4sec = 0d0            ! seconds of the evaluations
-  integer(8) :: jv4 = 0             ! the bare <ab||cd> that the Xv of CC4 is made from (jvvvv; in the EOM e4vv)
+  ! the T1-dressed <ab||cd> that the Xv of CC4 is made from, [Q][Q'] in the blocks of jvvvv: made once per
+  ! evaluation by the sweep that makes the dressed <ab||ei> (N(xzt4); in the EOM once: e4vv)
+  integer(8) :: jv4 = 0
   ! the operands of the pass over the occupied quadruples (N(xz4run)), of the ground state:
-  ! dressed f[m][e], <mn||ie>, <mb||ef>; - <ab||ex> [x][e][Q], <ma||ij> [i][j][m][a]; tau1,
-  ! t2[i][m][Q], t2[P][e][a], Xo, - t1
-  integer(8) :: g4fov = 0, g4ooov = 0, g4d = 0, g4q1 = 0, g4q2 = 0, g4tau = 0, g4t2p = 0, g4t2px = 0, g4xo = 0, g4tm = 0
+  ! dressed f[m][e], <mn||ie>, <mb||ef>; - <ab||ex> [x][e][Q], <ma||ij> [i][j][m][a];
+  ! t2[i][m][Q], t2[P][e][a], Xo
+  integer(8) :: g4fov = 0, g4ooov = 0, g4d = 0, g4q1 = 0, g4q2 = 0, g4t2p = 0, g4t2px = 0, g4xo = 0
   ! and of a sigma vector of the label shift x4s: of H' = [H~, R1] f', <mn||ie>', <mb||ef>',
-  ! - <ab||ex>', <ma||ij>'; Xo of (H', t2) plus Xo of (H~, r2); r1, - r1, r2[i][j][a][b],
-  ! r2[i][m][Q], r2[P][e][a], R3; the dressed <mb||ef> of the ground state
+  ! - <ab||ex>', <ma||ij>'; Xo of (H', t2) plus Xo of (H~, r2); r1, r2[i][j][a][b],
+  ! r2[i][m][Q], r2[P][e][a], R3; <bc||ef>' in blocks [(bc) of group q][(ef) of group q - s],
+  ! the block of q at x4vvoff(q) (-1: none)
   integer(8) :: x4s = 0
   integer(8) :: x4fov = 0, x4ooov = 0, x4d = 0, x4q1 = 0, x4q2 = 0, x4xos = 0
-  integer(8) :: x4r1 = 0, x4tmr = 0, x4r2 = 0, x4r2p = 0, x4r2px = 0, x4r3 = 0, x4d0 = 0
-  ! kept for the sigma vectors of EOM-CC4 (N(xz4eomim)): the bare <ab||cd> (the pp operator
-  ! is in its place), and of the ground state - <ab||ex>, <ma||ij>, Xo, t2[P][e][a], tau1, - t1
-  integer(8) :: e4vv = 0, e4q1 = 0, e4q2 = 0, e4xo = 0, e4t2px = 0, e4tau = 0, e4tm = 0
+  integer(8) :: x4r1 = 0, x4r2 = 0, x4r2p = 0, x4r2px = 0, x4r3 = 0, x4vv = 0
+  integer(8) :: x4vvoff(0:maxgrp) = -1
+  ! kept for the sigma vectors of EOM-CC4 (N(xz4eomim)): the T1-dressed <ab||cd> (the pp
+  ! operator is in the place of the bare one), and of the ground state - <ab||ex>, <ma||ij>,
+  ! Xo, t2[P][e][a]
+  integer(8) :: e4vv = 0, e4q1 = 0, e4q2 = 0, e4xo = 0, e4t2px = 0
   real(8) :: t4eom(6) = 0d0         ! seconds of the T4 terms of the sigma vectors (as tq of N(xz4run))
   logical :: noring = .false.       ! pass 2 in blocks without its ring term (T3 is not read)
   integer(8) :: nc3w = 0            ! elements of the work of one CC3 batch (the plan)

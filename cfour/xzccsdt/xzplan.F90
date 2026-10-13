@@ -200,6 +200,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   pfile = .true.
   pslot = ndiis
   pchunk = min(max(n3, 1_8), 1048576_8)
+  acc4 = .false.
   if (myrank > 0 .and. flooronly) return
   floor_cc = 0
   floor_q = 0
@@ -262,6 +263,16 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     return
   end if
 
+  ! ---- CC4, macro / micro: the three sets of amplitudes of the extrapolation over
+  !      the macro iterations (rank 0), before any batch grows - they save an
+  !      evaluation of the T4 terms, a hundred iterations
+  if (cc4 .and. .not. planq .and. (cc4mode == 0 .or. cc4mode == 3)) then
+    call xzoptget('cc4acc', arg, larg)
+    acc4 = .not. (larg > 0 .and. arg(1:1) == '0')
+    if (acc4) then
+      if (xzpeak_cc(w) > xzsize) acc4 = .false.
+    end if
+  end if
   ! ---- the batches of the iterations, one after the other
   if (.not. planq) then
   do k = 1, 4
@@ -412,6 +423,20 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     write(6, '(a,i8,a,i8)') '     (Q): columns (cd) of a product:              ', qc22, '  of ', nvp
     write(6, '(a,i8,a,i8)') '     (Q): columns (bcd) of a product:             ', qc13, '  of ', nvt
     write(6, '(a,i8,a,i8)') '     (Q): rows (bc) of a step of Xv:              ', qrows, '  of ', nvp
+  end if
+  if (cc4 .and. (cc4mode == 0 .or. cc4mode == 3)) then
+    if (acc4) then
+      write(6, '(a,f10.1,a)') '     CC4: extrapolation over the macro iterations, three sets of amplitudes in the work array (', &
+        24d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB)'
+    else
+      call xzoptget('cc4acc', arg, larg)
+      if (larg > 0 .and. arg(1:1) == '0') then
+        write(6, '(a)') '     CC4: no extrapolation over the macro iterations (option cc4acc 0)'
+      else
+        write(6, '(a,f10.1,a)') '     CC4: no extrapolation over the macro iterations - no room for its three sets of amplitudes (', &
+          24d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB more): about one T4 evaluation more'
+      end if
+    end if
   end if
   if (cc4) then
     write(6, '(a,i8,a,i8)') '     T4 terms: occupied indices with Xv at a time:', qxv, '  of ', max(3_8, no - 1)

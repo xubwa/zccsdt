@@ -395,7 +395,7 @@ what the ZMAT asks for (as joda stored it in JOBARC):
                                         the equations of CCSDT with them are iterated
     CALC=CC4,EXCITE=EOMEE               CC4, then EOM-EE-CC4 (singles, doubles, triples;
                                         the quadruples folded in at the frequency of
-                                        every root), label shifts of %xzeom; one MPI rank
+                                        every root), label shifts of %xzeom
 
 CC_CONV (the amplitudes to 10^-CC_CONV, the energy to 10^-(CC_CONV+2)),
 CC_MAXCYC, MEMORY_SIZE (all working memory is CFOUR's work array), DROPMO /
@@ -410,8 +410,19 @@ with) CALC=CCSDT(Q) or EXCITE=EOMEE in the same directory computes only the
 new part; the output says "taken" or "solved here".  Remove the files to
 force a new solution.  CC3 amplitudes are solved in every run (a CC3 run
 does not read XZKEY and removes it).  CC4 takes the CCSDT amplitudes of
-XZAMPS as its start (or solves CCSDT first and writes them); its own
-amplitudes are not written, XZAMPS stays that of CCSDT.
+XZAMPS as its start (or solves CCSDT first and writes them); XZAMPS stays
+that of CCSDT.
+
+CC4 is restartable.  A T4 evaluation is the expensive step (hours for a
+large case), so after every completed one the program writes what a later
+run needs: the file XZCC4 (the amplitudes and the held T4 terms; at the end
+the converged CC4 amplitudes) and, for the excited states, XZE4R.nnn (the
+roots that are done and the vectors) and XZE4Q.nnn (the last evaluation of
+the root in hand) per label shift nnn.  Run the program again with the same
+ZMAT in the same directory: it continues after the last completed
+evaluation and says so ("this run CONTINUES from there"); a finished ground
+state is taken for the excited states.  The files carry the numbers of
+XZKEY; remove them to start again from the CCSDT amplitudes.
 
 CC3: the triples equation takes the Fock operator as the diagonal of the
 spinor energies.  The program prints the largest elements of the Fock
@@ -448,6 +459,9 @@ ordinary run needs none of them:
                      second-order amplitudes (no CCSDT first)
     cc4micro 1e-2    CC4: the equations with the T4 terms held are iterated to
                      this fraction of the change of the first step
+    cc4acc 1         0: no extrapolation of the amplitudes over the T4
+                     evaluations (it saves about one evaluation and takes three
+                     sets of amplitudes in the work array of rank 0, if they fit)
     cc4eom macro     davidson: every sigma vector of EOM-CC4 with the T4 terms
     start ccsd       CCSDT from T1, T2 of xx2cccsd (files t1guess, t2guess)
     hh pair          the hh ladder of dense T3 through occupied pairs
@@ -459,8 +473,9 @@ ordinary run needs none of them:
                      the memory plan by hand (docs/native.md, section 4)
 
 (docs/native.md, section 18, has these and the developer options.)  MPI
-(iterations, (Q), EOM-EE-CCSDT and the folded EOM-CC3 over ranks; the run
-directory with the integral files under the same path on every node):
+(iterations, (Q), the T4 evaluations of CC4, EOM-EE-CCSDT, the folded
+EOM-CC3 and EOM-EE-CC4 over ranks; the run directory with the integral files
+under the same path on every node):
 
     OMP_NUM_THREADS=24 I_MPI_PIN_DOMAIN=omp mpirun -np 2 ${prog}_mpi
 

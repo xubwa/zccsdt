@@ -96,11 +96,6 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a)') '             triples run over the ranks.'
     call xzerrex
   end if
-  if (with_eom .and. nrank > 1 .and. cc4) then
-    write(6, '(a)') ' @XZCCSDT-F, the excited states of CC4 (EOM-CC4) run with one rank: their sigma vectors are not distributed.'
-    write(6, '(a)') '             Run CALC=CC4,EXCITE=EOMEE with one rank.'
-    call xzerrex
-  end if
 
   ! ---- the symmetry labels
   allocate(lab(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
@@ -280,6 +275,7 @@ subroutine xzdrv(w, maxcor)
       ! (CC4 amplitudes are not written: XZAMPS keeps those of CCSDT, their start)
       write(6, '(a,i4,a,f10.2,a)') '   The T4 terms of the doubles and triples equations were evaluated ', nt4, &
         ' times (', t4sec, ' s).'
+      if (nt4old > 0) write(6, '(a,i4,a,i4,a)') '   (', nt4old, ' of them in earlier runs - the file XZCC4 -, ', nt4 - nt4old, ' in this run)'
     else
     ! the amplitudes for the steps that follow, here or in a later run
     t0 = omp_get_wtime()
@@ -714,24 +710,51 @@ subroutine xzreuse()
   common /flags/ iflags(100)
   logical, save :: done = .false.
   logical :: tok, lok
-  real(8) :: dec(2)
+  real(8) :: dec(4)
+  integer(8) :: st4, nev4
+  character(len=32) :: arg
+  integer :: larg
   if (done) return
   done = .true.
   tok = .false.
   lok = .false.
+  st4 = 0
+  nev4 = 0
   ! (CC3: its amplitudes are solved in every run; XZKEY is not written for them, so
   ! that no CCSDT run takes them and no CC3 run takes those of CCSDT)
   if (myrank == 0 .and. with_cc .and. cc3mode == 0) call xzkeychk(int(abs(iflags(4)), 8), with_lam, tok, lok)
-  dec = [merge(1d0, 0d0, tok), merge(1d0, 0d0, lok)]
-  call xzmpi_bcast(dec, 16_8)
+  ! (CC4: the file XZCC4 of an earlier run of these integrals - its converged
+  ! amplitudes, or those of its last completed T4 evaluation with the terms,
+  ! which only the macro / micro iterations continue; not with option cc4 scratch)
+  if (myrank == 0 .and. cc4 .and. cc4mode /= 2) then
+    call xz4chk(int(abs(iflags(4)), 8), st4, nev4)
+    if (st4 == 1 .and. cc4mode == 1) st4 = 0
+  end if
+  dec = [merge(1d0, 0d0, tok), merge(1d0, 0d0, lok), dble(st4), dble(nev4)]
+  call xzmpi_bcast(dec, 32_8)
   tok = dec(1) == 1d0
   lok = dec(2) == 1d0
+  cc4rst = nint(dec(3))
+  nev4 = nint(dec(4), 8)
   if (.not. with_cc) return
   if (cc4) then
+    ! (a test hook: option cc4stop n - the run stops after its n-th evaluation of the T4 terms)
+    call xzoptget('cc4stop', arg, larg)
+    if (larg > 0) read(arg(1:larg), *) nt4stop
     ! CC4: the amplitudes of XZAMPS are those of CCSDT (a CC4 run writes no
     ! others there) - the start of its iterations, never their result
-    cc4start = tok .and. cc4mode /= 2
-    if (cc4start) then
+    cc4start = tok .and. cc4mode /= 2 .and. cc4rst == 0
+    if (cc4rst == 2) then
+      write(6, '(/,a)') '   amplitudes: the file XZCC4 of an earlier run has the converged CC4 amplitudes of these integrals:'
+      write(6, '(a)') '               taken, the CC4 iterations are skipped'
+    else if (cc4rst == 3) then
+      write(6, '(/,a)') '   amplitudes: the file XZCC4 of an earlier run has CC4 amplitudes of these integrals, converged less'
+      write(6, '(a,i4,a)') '               tightly (after ', nev4, ' T4 evaluations): they are the start of the CC4 iterations'
+    else if (cc4rst == 1) then
+      write(6, '(/,a,i4,a)') '   amplitudes: the file XZCC4 of an earlier run of these integrals: its CC4 iterations after ', nev4, &
+        ' T4 evaluations'
+      write(6, '(a)') '               (the amplitudes of the last completed one and its T4 terms) - this run CONTINUES from there'
+    else if (cc4start) then
       write(6, '(/,a)') '   amplitudes: the file XZAMPS of an earlier run has the CCSDT amplitudes of these integrals (XZKEY):'
       write(6, '(a)') '               they are the start of the CC4 iterations'
     else if (cc4mode == 2) then
@@ -798,6 +821,39 @@ subroutine xzkeyw(lconv)
   write(76, '(2i6)') int(abs(iflags(4)), 8), lconv
   close(76)
 end subroutine xzkeyw
+
+! The file XZCC4 of the run directory (N(xz4ckpt), xzcc4.inc; rank 0): state 0
+! if it is not there or belongs to other integrals (the numbers of XZKEY), 1
+! if it has the amplitudes and the T4 terms of a completed evaluation of
+! iterations that did not finish, 2 if it has amplitudes converged to conv
+! (CC_CONV) or better, 3 if converged less tightly; nev: its T4 evaluations.
+subroutine xz4chk(conv, state, nev)
+  use xzdata
+  implicit none
+  integer(8), intent(in) :: conv
+  integer(8), intent(out) :: state, nev
+  character(len=8) :: tag
+  integer(8) :: hd(10)
+  real(8) :: e(3), ek(3)
+  integer :: ios
+  logical :: there
+  state = 0
+  nev = 0
+  inquire(file='XZCC4', exist=there)
+  if (.not. there) return
+  open(unit=77, file='XZCC4', form='unformatted', access='stream', status='old', action='read', iostat=ios)
+  if (ios == 0) read(77, iostat=ios) tag, hd, ek
+  close(77)
+  if (ios /= 0 .or. tag /= 'XZCC4_02') return
+  call xzkeyval(e)
+  if (hd(1) /= no .or. hd(2) /= nv .or. hd(3) /= ntot .or. hd(4) /= nfrozen) return
+  if (abs(e(1) - ek(1)) > 1d-9 * max(1d0, abs(e(1)))) return
+  if (abs(e(2) - ek(2)) > 1d-9 * max(1d0, abs(e(2)))) return
+  if (abs(e(3) - ek(3)) > 1d-9 * max(1d0, abs(e(3)))) return
+  nev = hd(8)
+  state = 1
+  if (hd(9) >= 0) state = merge(2, 3, hd(9) >= conv)
+end subroutine xz4chk
 
 ! the check of XZKEY, XZAMPS and XZLAMB (rank 0)
 subroutine xzkeychk(conv, needl, tok, lok)

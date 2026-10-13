@@ -394,6 +394,32 @@
       type(*), dimension(*) :: r, tgt, x
     end subroutine
 
+    ! the same in place (b and c become the amplitudes; the places of no quadruple zero)
+    subroutine N(zc_cc4_sector_t4i)(n, kv, modulus, m, ev, eo, kmin, nk, lid_of, lstart, lmem, qmin, nq, &
+                                    off22, nc22, off13, nc13, posv, posq, pos3, b, c) bind(C)
+      import
+      integer(c_int), value :: n, modulus, m, kmin, nk, qmin, nq
+      real(c_double), value :: eo
+      type(*), dimension(*) :: kv, ev, lid_of, lstart, lmem, off22, nc22, off13, nc13, posv, posq, pos3
+      type(*), dimension(*) :: b, c
+    end subroutine
+
+    ! x[a][c] = [x[a][c] +] sum_r l[r][a] row[r][c], the rows by their addresses (init 1: without the bracket)
+    subroutine N(zc_cc4_rowsmm)(row, l, nr, na, nc, init, x) bind(C)
+      import
+      integer(c_int64_t), value :: nr, na, nc, init
+      integer(c_intptr_t) :: row(*)
+      type(*), dimension(*) :: l, x
+    end subroutine
+
+    ! row[r][c] += sum_a l[r][a] e[a][c], the rows by their addresses
+    subroutine N(zc_cc4_addmm)(row, l, nr, na, nc, e) bind(C)
+      import
+      integer(c_int64_t), value :: nr, na, nc
+      integer(c_intptr_t) :: row(*)
+      type(*), dimension(*) :: l, e
+    end subroutine
+
     ! one batch of occupied triples of CC3 without stored triples (csrc/cc3_fly.c)
     subroutine N(zc_cc3_batch)(no, nv, nq, na, ncls, orng, vrng, qoff, aoff, vtri, vsgn, vfree, vpair, &
                                eo, ev3, omega, i0, i1, j, k, nset, at1, ao1, bv1, bo1, at2, ao2, bv2, bo2, &
