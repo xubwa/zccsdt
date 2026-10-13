@@ -32,7 +32,7 @@ def collect(d):
             data = json.load(open(path))
         except ValueError:
             continue
-        if name.startswith('str_'):
+        if name.startswith('str'):
             for h, r in data.items():
                 if '0' in r['E'] and '2' in r['E'] and h in HOLES:
                     out.setdefault((ham, space, (HOLES[h], r['T'].upper())), (r['E']['0'], r['E']['2'], name))

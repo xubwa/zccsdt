@@ -1165,7 +1165,7 @@ Thresholds: ground state |dT| < 1e-11; EOM residual norm < 1e-9 (folded:
 | 5p3h at lowest order, folded | CCSDTQ | 2.0953 |  |  |  |  |
 | 5p3h | CCSDT | 2.0698 | 2.2540 | 2.2718 |  |  |
 | 5p3h | CCSDTQ | 2.0825 | 2.2700 | 2.2888 |  |  |
-| 6p4h | CCSDTQ | 2.0677 |  |  |  |  |
+| 6p4h | CCSDTQ | 2.0677 | 2.2525 |  |  |  |
 
 *X2Ccorr*
 
@@ -1179,7 +1179,7 @@ Thresholds: ground state |dT| < 1e-11; EOM residual norm < 1e-9 (folded:
 | 5p3h | CCSDT | 3.5410 | 3.5180 | 3.5357 |  |  |
 | 5p3h | CCSDTQ | 3.5239 | 3.5006 | 3.5180 |  |  |
 | 6p4h | CCSDT | 3.5376 |  |  |  |  |
-| 6p4h | CCSDTQ | 3.5369 |  |  |  |  |
+| 6p4h | CCSDTQ | 3.5369 | 3.5107 |  |  |  |
 
 Total energies of the 116-spinor space (Eh):
 
@@ -1200,7 +1200,8 @@ Total energies of the 116-spinor space (Eh):
 - The series in the rank of R is not monotone in quality per rank: 3p1h
   alone (singles for the target) is off by 0.3 to 0.6 cm-1, complete 4p2h
   changes it by -0.5 (spin-orbit only) and +0.3 (X2Ccorr), 5p3h by
-  another -0.06 .. -0.08 and +0.08, 6p4h by -0.015 and +0.013 (n = 26).
+  another -0.06 .. -0.08 and +0.08, 6p4h by -0.015 and +0.013 (n = 26),
+  -0.018 and +0.010 (n = 30).
   The lowest-order rows are no substitute one rank down (the 3p1h row at
   lowest order: +1.0 to +1.3 cm-1; the 4p2h row at lowest order: 2.011
   against 2.126 complete).
@@ -1224,16 +1225,17 @@ Total energies of the 116-spinor space (Eh):
   | n | 3p1h | 4p2h | 5p3h | 6p4h | 7p5h | full CI |
   |---|---|---|---|---|---|---|
   | 26 | 4.5256 | 3.2397 | 3.2683 | 3.2684 | 3.2684 | 3.2683 |
-  | 28 | 4.0050 | 2.9130 | 2.9044 | | | 2.8864 |
+  | 28 | 4.0050 | 2.9130 | 2.9044 | 2.8857 | | 2.8864 |
   | 30 | 3.9157 | 2.8833 | 2.8710 | | | 2.8492 |
-  | 32 | 3.8848 | 2.8763 | | | | 2.8355 |
+  | 32 | 3.8848 | 2.8763 | 2.8584 | | | 2.8355 |
 
   n = 26, E(2 Omega = 0): -149.81654719716 (4p2h), -149.81654231670
   (5p3h), -149.81655060092 (6p4h), -149.81655022231 (7p5h); full CI
   -149.8165502235 (given to ten decimals): the errors are +3.0e-6,
   +7.9e-6, -3.8e-7 and +1e-9 Eh, the same for the two components to
   1e-9 from 5p3h on.  The top of the sequence is the full CI; at 5p3h the
-  splitting can still be 0.02 cm-1 off (n = 28, 30).
+  splitting is still 0.02 cm-1 off for n = 28, 30, 32 (+0.018, +0.022,
+  +0.023), at 6p4h 0.001 (n = 28: -0.0007).
 
 ### 11.7 Sizes and cost
 
