@@ -488,6 +488,7 @@ class Result:
     short: object = None        # IP / EA with short vectors: the Short of the problem (strip() takes the ghost out)
     label_shift: object = None  # the same in units of the labels (set by the front end)
     partner_of: object = None   # these are the time-reversed states of that label shift (no vectors)
+    left: object = None         # the eom_left.Result of these states, once computed (GCCSDT.eom_left)
 
 
 def denominators(g):

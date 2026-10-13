@@ -1722,6 +1722,37 @@ class GCCSDT(UCCSDT):
         self.eom, self.e_ee = out, {d: r.e for d, r in out.items()}
         return self.e_ee, out
 
+    def eom_left(self, right=None, roots=None, conv_tol=None, max_space=None, max_cycle=60):
+        '''The left-hand eigenvectors of EOM-EE-CCSDT states (zccsdt.cc.eom_left;
+        docs/eom.md, section 12): L_k A = omega_k L_k with the Jacobian A,
+        normalized to L_k R_k = 1 and biorthogonal to the other right-hand
+        vectors.  ``right``: the Result of eom_ee() (default: self.eom), or
+        the dict of Results of several shifts - then a dict comes back, the
+        shifts without vectors (time-reversed partners) left out.
+        ``roots``: of these roots only.  ``conv_tol``: the norm of
+        L A - omega L of a vector of norm one (default 1e-6).  The result
+        (zccsdt.cc.eom_left.Result: l1, l2, l3 per root in the layouts of
+        r1, r2, r3; e, the eigenvalues of the left problem; overlap,
+        biorthogonality) is kept as ``right.left`` and returned.'''
+        from zccsdt import disk
+        from zccsdt.cc import eom_left, t3pack
+        right = self.eom if right is None else right
+        if right is None:
+            raise RuntimeError('%s.eom_left(): no states (eom_ee() first)' % self.__class__.__name__)
+        if isinstance(right, dict):
+            return {d: self.eom_left(r, roots, conv_tol, max_space, max_cycle) for d, r in right.items()
+                    if r.r1 is not None}
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        sector = None
+        if right.shift is None and right.label_shift is not None and t3pack.classes_of(eris) is None:
+            sector = (self._state_labels(eris), right.label_shift)      # (a shift by masks on the packed block)
+        with disk.limit(self.max_disk):
+            res = eom_left.kernel(eris, self.t1, self.t2, self.t3, right, roots=roots, conv_tol=conv_tol,
+                                  max_space=max_space, max_cycle=max_cycle, opts=self._options(None, None),
+                                  verbose=self.verbose >= logger.NOTE, stdout=self.stdout, sector=sector)
+        right.left = res
+        return res
+
     def _state_labels(self, eris):
         '''A label per active spinor that adds (occupied, then virtual), by
         which states can be told apart on the packed block: 2 m_j of the
