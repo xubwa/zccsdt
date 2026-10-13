@@ -42,9 +42,28 @@ from zccsdt.cc import eom, pentuples as PT, t4pack as P
 PARTS = ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h')        # r of (P), without its left-hand side
 
 
-def drive(p, I):
+def _blocked(A, B, C, blocks, c0=0, c1=None):
+    '''C[(q), (t) - c0] = sum_x A[x, (q)] B[x, (t) - c0] for the blocks (q, t) of
+    ``blocks`` - pairs and triples whose labels add to the label of the row -
+    with the x for which A is not zero there; the rest of C is zero.'''
+    P.zero(C)
+    for qsel, tsel in blocks:
+        if c1 is not None:
+            tsel = tsel[(tsel >= c0) & (tsel < c1)] - c0
+        if not len(tsel) or not len(qsel):
+            continue
+        Aq = A[:, qsel]
+        rows = np.flatnonzero(np.abs(Aq).max(axis=1) > 1e-9)
+        if len(rows):
+            C[np.ix_(qsel, tsel)] = Aq[rows].T @ B[np.ix_(rows, tsel)]
+    return C
+
+
+def drive(p, I, blocks=None):
     '''r of (P) for the occupied pentuple I (zccsdt.cc.pentuples.Pentuples.both
-    without the left-hand side): a work array [C(nv,5)].'''
+    without the left-hand side): a work array [C(nv,5)].  ``blocks``: the
+    (pairs, triples) of virtual spinors that the labels of the row allow in
+    X[(de), (abc)] (the product is done for these only).'''
     no, nv, nQ, nA3, nA4 = p.nocc, p.nvir, p.nQ, p.nA3, p.nA4
     T3, T4 = p.T3, p.T4
     o41, o32, o31, o12 = p.o41, p.o32, p.o31, p.o12
@@ -79,7 +98,10 @@ def drive(p, I):
             R[kd + s * no:kd + (s + 1) * no] = Xq[s][:, c[0]:c[1]]
         P.tn_rows(R[kg:], p.Xv2, rowsv, sgnv, cols=c)
         X = p._work('X', (nQ, nc))
-        gemm(LA.T, R, X)
+        if blocks is None:
+            gemm(LA.T, R, X)
+        else:
+            _blocked(LA, R, X, blocks, c[0], c[1])
         P.tn_reduce(r, X, nv, 2, 3, cols=c)
     R = X = None
     for c in PT._batches(nA4, p.plan.cols14):
@@ -97,7 +119,11 @@ class Fold5:
     in at the frequency omega, on a problem of zccsdt.cc.dea of rank 4
     (Problem with the full 4p2h row, or ProblemSym).'''
 
-    def __init__(self, base, max_memory=None):
+    def __init__(self, base, max_memory=None, labels=None, parity=None, target=0, target_parity=0):
+        '''``labels``, ``parity`` (one integer per spinor of the problem,
+        occupied then virtual; 2 Omega, 0 / 1) with the ``target`` of the
+        problem: the products with two and three virtual indices are done
+        in the blocks that they allow.  Default: dense products.'''
         if base.rank != 4 or base.row4 != 'full':
             raise ValueError('the 5p3h row: on the complete rows to 4p2h')
         self.base = base
@@ -138,17 +164,38 @@ class Fold5:
         self.pair = np.zeros((no, no), dtype=np.int64)
         self.pair[i2, j2] = self.pair[j2, i2] = np.arange(len(i2))
         self.nsigma, self.seconds, self.timing = 0, 0.0, {'drive': 0.0, 'back': 0.0, 'setup': 0.0, 'base': 0.0}
+        self.blocks, self._buf = None, None
+        if labels is not None:
+            lab = np.asarray(labels, dtype=np.int64)
+            par = np.zeros(len(lab), dtype=np.int64) if parity is None else np.asarray(parity, dtype=np.int64)
+            lv, pv = lab[no:], par[no:]
+            v2, v3 = P.tuples(nv, 2), P.tuples(nv, 3)
+            gq, gt = {}, {}
+            for j, k in enumerate(zip(lv[v2].sum(axis=1).tolist(), (pv[v2].sum(axis=1) % 2).tolist())):
+                gq.setdefault(k, []).append(j)
+            for j, k in enumerate(zip(lv[v3].sum(axis=1).tolist(), (pv[v3].sum(axis=1) % 2).tolist())):
+                gt.setdefault(k, []).append(j)
+            gq = {k: np.array(v) for k, v in gq.items()}
+            gt = {k: np.array(v) for k, v in gt.items()}
+            self.blocks, self.row_key = {}, {}
+            for _, _, t in self.rows:
+                M = (int(target + lab[list(t)].sum()), int(target_parity + par[list(t)].sum()) % 2)
+                self.row_key[t] = M
+                if M not in self.blocks:
+                    self.blocks[M] = [(gq[q], gt[(M[0] - q[0], (M[1] - q[1]) % 2)]) for q in gq
+                                      if (M[0] - q[0], (M[1] - q[1]) % 2) in gt]
 
-    def back(self, r5, t, S3, S4):
+    def back(self, r5, t, S3, S4, blocks=None):
         '''The terms of r5[(abcde)] of the occupied triple t = (i<j<k) in the
         rows of 3p1h (S3[i, (abc)]) and 4p2h (S4[(ij), (abcd)]).'''
         nv = self.nv
         nQ, nA3, nA4 = comb(nv, 2), comb(nv, 3), comb(nv, 4)
-        E14 = np.empty((nv, nA4), dtype=self.dtype)
+        if self._buf is None:           # (kept: new arrays of this size pay their page faults per triple)
+            self._buf = (np.empty((nv, nA4), dtype=self.dtype), np.empty((nQ, nA3), dtype=self.dtype),
+                         np.empty((nv, nA3), dtype=self.dtype))
+        E14, E23, Z = self._buf
         P.tn_expand(E14, r5, nv, 1, 4)                                  # r5(e abcd)
-        E23 = np.empty((nQ, nA3), dtype=self.dtype)
         P.tn_expand(E23, r5, nv, 2, 3)                                  # r5(ef abc)
-        Z = np.empty((nv, nA3), dtype=self.dtype)
         for pos, sg in ((0, 1.0), (1, -1.0), (2, 1.0)):
             z = t[pos]
             m, n = [x for x in t if x != z]
@@ -163,15 +210,27 @@ class Fold5:
             x, y = m, n
             # sigma(4p2h)[(xy)] += f[m,e] r5(x y m; abcd e) + P(d/abc) <dm||ef> r5(x y m; abc ef)
             S4[self.pair[x, y]] += sg * (self.fov[z] @ E14)
-            gemm(self.vovv[z], E23, Z)                                  # [d, (abc)]
+            if blocks is None:
+                gemm(self.vovv[z], E23, Z)                              # [d, (abc)]
+            else:
+                P.zero(Z)
+                V = self.vovv[z]
+                for qsel, tsel in blocks:
+                    Vq = V[:, qsel]
+                    rows = np.flatnonzero(np.abs(Vq).max(axis=1) > 1e-9)
+                    if len(rows):
+                        Z[np.ix_(rows, tsel)] = Vq[rows] @ E23[np.ix_(qsel, tsel)]
             P.tn_reduce(S4[self.pair[x, y]], Z, nv, 1, 3, scale=-sg)
         return S3, S4
+
+    def _blocks_of(self, t):
+        return None if self.blocks is None else self.blocks[self.row_key[t]]
 
     def rows5(self, x):
         '''The right-hand side of the 5p3h row for x, [(i<j<k), (abcde)] (tests, small cases).'''
         X2, X3, X4 = self.base.padded(x)
         pent = PT.Pentuples(self.eris, X2, X3, X4, self.plan, only=PARTS)
-        return np.array([drive(pent, I) * sgn for I, sgn, _ in self.rows])
+        return np.array([drive(pent, I, self._blocks_of(t)) * sgn for I, sgn, t in self.rows])
 
     def add(self, x, y, omega):
         '''y += the 5p3h terms of the rows of x at the frequency omega.'''
@@ -185,10 +244,11 @@ class Fold5:
         S4 = np.zeros((comb(no, 2), comb(nv, 4)), dtype=self.dtype)
         for I, sgn, t in self.rows:
             t0 = time.perf_counter()
-            r5 = drive(pent, I) * sgn
+            blk = self._blocks_of(t)
+            r5 = drive(pent, I, blk) * sgn
             r5 /= omega - (self.ev5 - self.eo[list(t)].sum())
             t1 = time.perf_counter()
-            self.back(r5, t, S3, S4)
+            self.back(r5, t, S3, S4, blk)
             self.timing['drive'] += t1 - t0
             self.timing['back'] += time.perf_counter() - t1
         del pent
@@ -207,14 +267,14 @@ class Fold5:
         return apply
 
 
-def kernel(base, start, conv_tol=1e-8, omega_tol=1e-10, max_memory=None, verbose=False, stdout=None):
+def kernel(base, start, conv_tol=1e-8, omega_tol=1e-10, max_memory=None, verbose=False, stdout=None, **labels):
     '''The root of the folded problem that follows ``start`` = (omega,
     vector) - a root of ``base``, the complete rows to 4p2h: (omega, the
     Solved of zccsdt.cc.ccn.folded_roots, the Fold5).'''
     import sys
     from zccsdt.cc import ccn
     out = stdout or sys.stdout
-    f5 = Fold5(base, max_memory)
+    f5 = Fold5(base, max_memory, **labels)
     store = eom.Store(base.sizes, base.dtype)
 
     def log(k, outer, lam, gap, res, nsig):

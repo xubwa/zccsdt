@@ -43,7 +43,8 @@ def main():
                              target_parity=0)
         r4 = dea.kernel(None, None, None, problem=pb, nroots=1, nguess=4, conv_tol=tol, max_cycle=120, verbose=True)
         rec['E4'][tgt], rec['nsigma4'][tgt] = e_cc + float(r4.e[0]), r4.nsigma
-        omega, sol, f5 = dea5.kernel(pb, (float(r4.e[0]), r4.vectors[0]), conv_tol=tol, verbose=True)
+        omega, sol, f5 = dea5.kernel(pb, (float(r4.e[0]), r4.vectors[0]), conv_tol=tol, verbose=True, labels=lab, parity=par,
+                                     target=tgt, target_parity=0)
         rec['E5'][tgt], rec['nsigma5'][tgt] = e_cc + omega, f5.nsigma
         rec['sigma5_seconds'][tgt], rec['timing'][tgt] = f5.seconds / max(f5.nsigma, 1), f5.timing
         rec['omega_steps'][tgt], rec['residual5'][tgt] = [float(x) for x in sol.history[0]], float(sol.residuals[0])
