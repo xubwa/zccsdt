@@ -4,7 +4,7 @@ labels 2 Omega of a target; those of 2 Omega and parity), and the label
 blocks of the ghost route (T3, T4 with two ghosts) with the memory of the
 T4 engine.
 
-usage: python sizes.py <file.npz> [target ...]'''
+usage: python sizes.py <file.npz> [target ...] [--freeze k]'''
 import sys
 from math import comb
 
@@ -32,11 +32,16 @@ def count(lo, lv, po, pv, nh, target):
 
 
 def main():
+    freeze = 0
+    if '--freeze' in sys.argv:
+        k = sys.argv.index('--freeze')
+        freeze = int(sys.argv[k + 1])
+        del sys.argv[k:k + 2]
     z = np.load(sys.argv[1])
     targets = [int(x) for x in sys.argv[2:]] or [0, 2]
-    no = int(z['ncore'])
-    lab = np.asarray(z['omega2'], dtype=np.int64)
-    par = np.asarray(z['parity'], dtype=np.int64) if 'parity' in z.files else np.zeros(len(lab), dtype=np.int64)
+    no = int(z['ncore']) - freeze
+    lab = np.asarray(z['omega2'], dtype=np.int64)[freeze:]
+    par = (np.asarray(z['parity'], dtype=np.int64) if 'parity' in z.files else np.zeros(len(lab) + freeze, dtype=np.int64))[freeze:]
     lo, lv, po, pv = lab[:no], lab[no:], par[:no], par[no:]
     nv = len(lv)
     print('%s: %d occupied + %d virtual spinors' % (sys.argv[1], no, nv))
@@ -56,12 +61,12 @@ def main():
         lo_min = min(plo.min(), lvs.min())
         ko, kv = (plo - lo_min) // 2, (lvs - lo_min) // 2
         lay = S.Layout(ko, kv, int(max(ko.max(), kv.max())) + 1)
-        print('target %d, ghost route in label blocks (12 occupied): T3 %.3e, T4 %.3e elements (%.2f GB); packed T4 %.3e; '
+        print('target %d, ghost route in label blocks (two ghosts): T3 %.3e, T4 %.3e elements (%.2f GB); packed T4 %.3e; '
               'memory of one T4 residual %.1f GB (batches of 1 GB)'
               % (tgt, lay.t3off[-1], lay.size, lay.size * 8e-9, comb(no + 2, 4) * comb(nv, 4), S.memory(lay, 8) / 1e9))
     lo_min = min(lo.min(), lv.min())
     lay = S.Layout((np.sort(lo) - lo_min) // 2, (np.sort(lv) - lo_min) // 2, int((max(lo.max(), lv.max()) - lo_min) // 2) + 1)
-    print('ground state (10 occupied): T4 in label blocks %.3e elements (%.2f GB), memory of one T4 residual %.1f GB'
+    print('ground state: T4 in label blocks %.3e elements (%.2f GB), memory of one T4 residual %.1f GB'
           % (lay.size, lay.size * 8e-9, S.memory(lay, 8) / 1e9))
 
 

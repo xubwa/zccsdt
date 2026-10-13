@@ -32,10 +32,15 @@ def main():
         k = args.index('--tol')
         tol = float(args[k + 1])
         del args[k:k + 2]
+    freeze = 0
+    if '--freeze' in args:
+        k = args.index('--freeze')
+        freeze = int(args[k + 1])
+        del args[k:k + 2]
     path, out = args[0], args[1]
     levels = args[2:] or list(common.LEVELS)
     t0 = time.time()
-    eris, lab, par, info = common.load(path, drop_forbidden=drop, sort=sort)
+    eris, lab, par, info = common.load(path, drop_forbidden=drop, sort=sort, freeze=freeze)
     no = eris.nocc
     print('file %s: %d spinors, %d occupied; E(reference) = %.12f; %s integrals (max |imag| %.1e)'
           % (path, info['n'], no, info['e_ref'], 'real' if np.asarray(eris.oovv).dtype.kind == 'f' else 'complex',

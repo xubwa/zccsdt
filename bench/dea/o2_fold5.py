@@ -27,9 +27,14 @@ def main():
         k = args.index('--target')
         targets = (int(args[k + 1]),)
         del args[k:k + 2]
+    freeze = 0
+    if '--freeze' in args:
+        k = args.index('--freeze')
+        freeze = int(args[k + 1])
+        del args[k:k + 2]
     path, out, model = args[0], args[1], args[2]
     t0 = time.time()
-    eris, lab, par, info = common.load(path, sort=blocks)
+    eris, lab, par, info = common.load(path, sort=blocks, freeze=freeze)
     print('file %s: %d spinors; E(reference) = %.12f; T of %s; %s' % (path, info['n'], info['e_ref'], model.upper(),
                                                                     'label blocks' if blocks else 'packed layout'), flush=True)
     st = None

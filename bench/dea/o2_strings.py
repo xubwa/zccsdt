@@ -27,10 +27,15 @@ def main():
     drop = '--drop' in args
     if drop:
         args.remove('--drop')
+    freeze = 0
+    if '--freeze' in args:
+        k = args.index('--freeze')
+        freeze = int(args[k + 1])
+        del args[k:k + 2]
     path, out, model = args[0], args[1], args[2]
     hmaxs = [int(x) for x in args[3:]]
     t0 = time.time()
-    eris, lab, par, info = common.load(path, drop_forbidden=drop)
+    eris, lab, par, info = common.load(path, drop_forbidden=drop, freeze=freeze)
     print('  largest integral that the labels forbid %.1e%s; max |f_ov| %.1e' % (info['forbidden'], ' (set to zero)' if drop else '', info['fock_ov']))
     no = eris.nocc
     nv = info['n'] - no

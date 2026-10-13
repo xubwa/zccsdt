@@ -47,6 +47,8 @@ def frozen_field(mf, cf):
     mf4c.with_gaunt = True
     mf4c.with_breit = True
     hcore4 = mf4c.get_hcore()
+    if cf.shape[1] == 0:            # nothing frozen: the bare four-component one-electron operator
+        return hcore4, float(mf.mol.energy_nuc())
     c4f = np.vstack((fl, fs))
     dm = c4f @ c4f.conj().T
     vj, vk = mf4c.get_jk(xmol, dm)
@@ -177,13 +179,14 @@ def run(outdir, sizes):
     for p in range(n):
         print('  %4d %14.8f %3d %s%s' % (p + 1, f[p, p].real, lab[p], 'gu'[pr[p]], '  occupied' if p < no else ''))
     for m in sizes:
+        m = m or n
         if m < n and abs(eps[m] - eps[m - 1]) < 1e-7:
             raise RuntimeError('%d spinors cut a degenerate level' % m)
         s = slice(0, m)
         e_ref = ecore + np.einsum('ii->', h1[:no, :no]).real + 0.5 * (
             np.einsum('iijj->', eri[:no, :no, :no, :no]) - np.einsum('ijji->', eri[:no, :no, :no, :no])).real
         name = os.path.join(outdir, 'o2_hf2plus%s_n%d_x2ccorr.npz' % (o2_scf.TAG, m))
-        np.savez(name, h1=h1[s, s].astype(complex), eri=eri[s, s, s, s].astype(complex), ecore=ecore, nelec=12, ncore=no,
+        np.savez(name, h1=h1[s, s].astype(complex), eri=eri[s, s, s, s].astype(complex), ecore=ecore, nelec=no + 2, ncore=no,
                  nact=4, omega2=lab[s], parity=pr[s], eps=f.diagonal().real[s], mo_coeff=c[:, s],
                  mo_frozen=C[:, io[:nf]], e_hf=e_hf)
         print('n = %3d: %s  E(reference determinant) %.12f; pi*: 2 Omega %s parity %s  (%.0f s)'
@@ -195,4 +198,4 @@ if __name__ == '__main__':
     if sys.argv[1] == 'check':
         check(sys.argv[2], sys.argv[3])
     else:
-        run(sys.argv[2], [int(x) for x in sys.argv[3:]] or ([52] if o2_scf.DZ else [26, 30, 32, 116]))
+        run(sys.argv[2], [int(x) for x in sys.argv[3:]] or ([0] if o2_scf.TAG else [26, 30, 32, 116]))
