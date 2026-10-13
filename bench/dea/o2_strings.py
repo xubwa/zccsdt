@@ -1,7 +1,7 @@
 '''EOM-DEA of O2 on a Hamiltonian file by the reference route on determinants
 (zccsdt.cc.dea_strings): any number of holes of the operator, any T.
 
-usage: python o2_strings.py <file.npz> <out.json> <T: ccsd | ccsdt | ccsdtq> <hmax> [hmax ...] [--tol 1e-9]
+usage: python o2_strings.py <file.npz> <out.json> <T: ccsd | ccsdt | ccsdtq> <hmax> [hmax ...] [--tol 1e-9] [--drop]
 hmax: 1 (R to 3p1h), 2 (4p2h), 3 (5p3h), 4 (6p4h), ..'''
 import json
 import os
@@ -24,10 +24,14 @@ def main():
         k = args.index('--tol')
         tol = float(args[k + 1])
         del args[k:k + 2]
+    drop = '--drop' in args
+    if drop:
+        args.remove('--drop')
     path, out, model = args[0], args[1], args[2]
     hmaxs = [int(x) for x in args[3:]]
     t0 = time.time()
-    eris, lab, par, info = common.load(path)
+    eris, lab, par, info = common.load(path, drop_forbidden=drop)
+    print('  largest integral that the labels forbid %.1e%s; max |f_ov| %.1e' % (info['forbidden'], ' (set to zero)' if drop else '', info['fock_ov']))
     no = eris.nocc
     nv = info['n'] - no
     print('file %s: %d + %d spinors; E(reference) = %.12f; T of %s' % (path, no, nv, info['e_ref'], model.upper()), flush=True)

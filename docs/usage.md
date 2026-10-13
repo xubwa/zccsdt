@@ -563,6 +563,26 @@ the roots asked for the guess continues with doubles; a state without any
 single excitation in its sector may still need more start vectors
 (`extra=10`, default 2; `docs/eom.md` 4).
 
+**EOM-DEA** (two electrons more than the reference; `docs/eom.md`, section
+11):
+
+```python
+mycc = zccsdt.CCSDT(mf_dication).run()               # closed-shell reference, e.g. O2(2+)
+e, res = mycc.eom_dea(nroots=1, shift=0)             # R = 2p + 3p1h, T of CCSDT; E(N+2) - E(N)
+e, res = mycc.eom_dea(nroots=1, shift=2, rank=4)     # R to 4p2h: DEA-EOM-CCSDT
+e, res = mycc.eom_dea(shift=0, rank=4, fold5=True)   # with the 5p3h operators at lowest order, folded
+```
+
+`shift`: the sum of the labels (2 m_j) of the two electrons - 2 Omega of
+the state for a closed-shell reference; in the blocks of the labels where
+the iterations ran in them, by masks on the packed layout otherwise.
+`rank` 3 or 4 (default 4 after `CCSDTQ`, whose T4 is then in the matrix);
+`parity` (0 / 1 per active spinor) with `target_parity` restricts the
+vectors further.  The total energy of a state is `mycc.e_tot + e`.  The
+cost of a sigma vector is that of an iteration of the ground state with two
+more occupied spinors.  Any rank (5p3h, 6p4h, ..) for small spaces:
+`zccsdt.cc.dea_strings`.
+
 **EOM-CCSD** on CCSD amplitudes: `zccsdt.cc.eom.kernel(eris, t1, t2, None,
 nroots=..)` with the amplitudes of `zccsdt.cc.solver.kernel(eris, 'ccsd')`;
 on CFOUR's spinors with `zccsdt.cfour.from_cfour` it reproduces

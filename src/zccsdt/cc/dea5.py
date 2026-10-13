@@ -172,7 +172,7 @@ class Fold5:
         self.pair = np.zeros((no, no), dtype=np.int64)
         self.pair[i2, j2] = self.pair[j2, i2] = np.arange(len(i2))
         self.nsigma, self.seconds, self.timing = 0, 0.0, {'drive': 0.0, 'back': 0.0, 'setup': 0.0, 'base': 0.0}
-        self.blocks, self._buf = None, None
+        self.blocks, self._buf, self.say = None, None, None
         if labels is not None:
             lab = np.asarray(labels, dtype=np.int64)
             par = np.zeros(len(lab), dtype=np.int64) if parity is None else np.asarray(parity, dtype=np.int64)
@@ -271,6 +271,9 @@ class Fold5:
             self.add(x, y, omega)
             self.nsigma += 1
             self.seconds += time.perf_counter() - t0
+            if self.say is not None:
+                self.say('    sigma vector %d with the 5p3h rows folded in: %.1f s (so far: %s)' % (
+                    self.nsigma, time.perf_counter() - t0, ', '.join('%s %.0f s' % kv for kv in self.timing.items())))
             return y
         return apply
 
@@ -283,6 +286,8 @@ def kernel(base, start, conv_tol=1e-8, omega_tol=1e-10, max_memory=None, verbose
     from zccsdt.cc import ccn
     out = stdout or sys.stdout
     f5 = Fold5(base, max_memory, **labels)
+    if verbose:
+        f5.say = lambda msg: print(msg, file=out, flush=True)
     store = eom.Store(base.sizes, base.dtype)
 
     def log(k, outer, lam, gap, res, nsig):

@@ -1,7 +1,7 @@
 '''EOM-DEA of O2 on a Hamiltonian file with the 5p3h operators at lowest
 order, folded (zccsdt.cc.dea5), on top of the complete rows to 4p2h.
 
-usage: python o2_fold5.py <file.npz> <out.json> <T: ccsdt | ccsdtq> [--blocks] [--tol 1e-9]'''
+usage: python o2_fold5.py <file.npz> <out.json> <T: ccsdt | ccsdtq> [--blocks] [--tol 1e-9] [--target 0 | 2]'''
 import json
 import os
 import sys
@@ -22,6 +22,11 @@ def main():
     blocks = '--blocks' in args
     if blocks:
         args.remove('--blocks')
+    targets = (0, 2)
+    if '--target' in args:
+        k = args.index('--target')
+        targets = (int(args[k + 1]),)
+        del args[k:k + 2]
     path, out, model = args[0], args[1], args[2]
     t0 = time.time()
     eris, lab, par, info = common.load(path, sort=blocks)
@@ -34,7 +39,7 @@ def main():
     print('ground state %s: E = %.11f (%.1f s)' % (model.upper(), e_cc, st['seconds']), flush=True)
     rec = {'T': model, 'e_cc': e_cc, 'E4': {}, 'E5': {}, 'nsigma4': {}, 'nsigma5': {}, 'sigma5_seconds': {}, 'timing': {},
            'omega_steps': {}, 'residual5': {}}
-    for tgt in (0, 2):
+    for tgt in targets:
         if blocks:
             pb = dea.ProblemSym(st['eris'], st['t1'], st['t2'], st['t3'], st['t4'], rank=4, target=tgt, parity=par,
                                 target_parity=0)
@@ -54,6 +59,9 @@ def main():
         del pb, f5
         with open(out, 'w') as f:
             json.dump(rec, f, indent=1)
+    if len(targets) < 2:
+        print('total %.0f s' % (time.time() - t0))
+        return
     s4, s5 = rec['E4'][2] - rec['E4'][0], rec['E5'][2] - rec['E5'][0]
     rec['split4'], rec['split5'] = s4, s5
     print('LEVEL T %-6s 4p2h complete     E(0) = %.11f  E(2) = %.11f  split = %.4e Eh = %.4f cm-1'
