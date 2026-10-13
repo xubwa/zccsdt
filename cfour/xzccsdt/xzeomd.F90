@@ -69,7 +69,8 @@ module xzeomd
   ! the commands
   integer, parameter :: op_end = 0, op_shift = 1, op_endshift = 2, op_open = 3, op_close = 4, op_zero = 5, &
     op_dot = 6, op_scal = 7, op_mdot = 8, op_comb = 9, op_put = 10, op_sigma = 11, op_max = 12, op_prec = 13, &
-    op_trans = 14, op_axpy = 15, op_collect = 16, op_spread = 17
+    op_trans = 14, op_axpy = 15, op_collect = 16, op_spread = 17, op_fold = 18, op_qopen = 19, op_get = 20
+  integer(8) :: evlast = 0                  ! the vector of the basis that was put last
   ! the plan of the subspace (made by the dry run of rank 0, followed by the
   ! run: the other ranks have the memory of the plan): per problem the
   ! vectors and whether they are in files; the words that the subspace takes
@@ -93,7 +94,9 @@ module xzeomd
   ! after one evaluation of them, the eigenvalue at the first frequency
   logical :: evfin = .false., evfout = .false.
   ! macro / micro: the T4 terms held on e4nq orthonormal vectors (at e4kq;
-  ! their sigma vectors with the T4 terms at e4kf): N(xzesigm)
+  ! their sigma vectors with the T4 terms at e4kf): N(xzesigm).  More than
+  ! one rank: every rank its rows of them, as of the vectors of the subspace
+  ! (the kinds 3 and 4 of N(xzevput), N(xzevmdot), N(xzevcomb), N(xzevget))
   integer(8) :: e4nq = 0, e4kq = 0, e4kf = 0
   real(8) :: eritz0(64) = 0d0
   real(8) :: rpp(maxres) = 0d0, rshot(maxres) = 0d0, rfirst(maxres) = 0d0
@@ -115,6 +118,22 @@ contains
       write(xzevname, '(a4,i4.4,a1,i4.4)') merge('EOMC', 'EOMH', kind == 1), j, '.', myrank
     end if
   end function xzevname
+
+  ! the first word of the vectors of a kind that are in the work array: the
+  ! basis (1), its sigma vectors (2), q (3) and F (4) of EOM-CC4
+  integer(8) function xzevbase(kind)
+    integer, intent(in) :: kind
+    select case (kind)
+    case (1)
+      xzevbase = evc0
+    case (2)
+      xzevbase = evh0
+    case (3)
+      xzevbase = e4kq
+    case default
+      xzevbase = e4kf
+    end select
+  end function xzevbase
 
   integer function xzevunit(kind, j)
     integer, intent(in) :: kind

@@ -1531,6 +1531,7 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
   use xzmem
   use xzkern
   use xzeomd
+  use xzpar, only: nrank
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -1538,11 +1539,11 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
   complex(8), intent(in) :: ee(*)
   real(8), intent(in) :: ecorr
   integer(8) :: msf, msub, peak, avail, k, nsig, nit, nf1, outer, nsigr, i, a, r, ca, cb, nc, jc, kxc, ncmax
-  integer(8) :: kq, kf, c, d, nev, m0
+  integer(8) :: kq, kf, c, d, nev, m0, nloc
   integer(8), allocatable :: c1(:), l1(:, :)
   complex(8), allocatable :: e1(:), evs(:)
   real(8), allocatable :: x1mx(:), x1nm(:), w1(:, :)
-  ZT, allocatable :: v1(:, :), gm(:, :), ym(:, :)
+  ZT, allocatable :: v1(:, :), gm(:, :), ym(:, :), dd(:)
   real(8) :: omega, lam, gap, tol, otol, prevo, prevl, slope, nxt, t0, tr, tsg0, cwin, shot, ray, dw, dwprev, kap, rel, t4s
   real(8) :: eclu(64), rayc(64), shotc(64)
   logical :: haveprev, ok, davidson
@@ -1582,12 +1583,19 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
   m0 = xzmark()
   kq = 0
   kf = 0
+  ! (more than one rank: every rank holds its rows of q and F - rank 0 with
+  ! the singles and doubles - as of the vectors of the subspace)
+  nloc = nlen
+  if (edist) nloc = no * nv + npo * nvp + esoff(1)
   if (.not. davidson) then
-    kq = xzget(NW * ncmax * nlen, 'EOM-CC4: the vectors of a root')
-    kf = xzget(NW * ncmax * nlen, 'EOM-CC4: their sigma vectors with the T4 terms')
+    kq = xzget(NW * ncmax * nloc, 'EOM-CC4: the vectors of a root')
+    kf = xzget(NW * ncmax * nloc, 'EOM-CC4: their sigma vectors with the T4 terms')
+    e4kq = kq
+    e4kf = kf
+    if (edist) call xzecmd(op_qopen, dble(ncmax))
   end if
   allocate(e1(nfound), x1mx(nfound), x1nm(nfound), w1(3, nfound), c1(nfound), l1(nlead, nfound), v1(nlead, nfound), &
-           gm(ncmax, ncmax), ym(ncmax, ncmax), evs(ncmax))
+           gm(ncmax, ncmax), ym(ncmax, ncmax), evs(ncmax), dd(ncmax))
   efold = .true.
   call xzdry_begin()
   call N(xzesig)(w, kxa, kxb, .false.)
@@ -1601,6 +1609,8 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
     write(6, '(a)') '   macro / micro: the T4 terms evaluated on the vector of a root, held while the eigenproblem is solved'
     write(6, '(a)') '   with the sigma vectors of EOM-CCSDT'
   end if
+  if (edist) write(6, '(a,i4,a)') '   over ', nrank, ' ranks: every rank the occupied quadruples of its tasks in the T4 terms of a sigma' // &
+    ' vector, its batches in the rest'
   write(6, '(a,es9.2,a,es9.2)') '   convergence: the largest element of a residual below ', ethr, &
     ', the change of omega (|lambda(omega) - omega|) below ', otol
   write(6, '(a,f10.1,a,f10.1,a)') '   a sigma vector with the T4 terms takes ', 8d-6 * (peak - xztop), &
@@ -1652,6 +1662,7 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
         tol = min(1d-4, max(ethr, 0.1d0 * gap))
         nfollow = nc
         efold = .true.
+        if (edist) call xzecmd(op_fold, 1d0, eomega)
         evfin = .true.
         evfout = .true.
         call N(xzesolve)(w, .false., nc, tol, emaxcyc, msub, nc, kxc, singles, kxa, kxb, avail, &
@@ -1659,6 +1670,7 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
         evfin = .false.
         evfout = .false.
         efold = .false.
+        if (edist) call xzecmd(op_fold, 0d0, 0d0)
         nfollow = 0
         nsigr = nsigr + nsig
         nev = nev + nsig
@@ -1692,7 +1704,52 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
         cycle
       end if
       ! ---- macro / micro.  q: an orthonormal basis of the vectors of the cluster
+      if (edist) then
+        ! over the ranks: the vector of rank 0 to all, then every rank on its
+        ! rows (the commands of the solver, xzeoms.inc); F = (A_PP + dA(omega)) q
+        ! with the T4 terms dealt as those of the ground state
+        ecmd = .true.
+        evoff = 0
+        evlen = nloc
+        ekx = [kxa, kxb]
+        do c = 1, nc
+          call N(xzecopy)(nlen, w(kxc + NW * nlen * (c - 1)), w(kxa))
+          call N(xzepspread)(w, kxa)
+          if (c > 1) then
+            call N(xzevmdot)(w, 3, c - 1, kxa, dd)
+            dd(1:c - 1) = -CONJ(dd(1:c - 1))
+            call N(xzevcomb)(w, 3, c - 1, dd, kxa, .true.)
+          end if
+          call N(xzepdot)(w, kxa, kxa, .false., s)
+          call N(xzepscal)(w, kxa, 1d0 / sqrt(dble(s)))
+          call N(xzevput)(w, 3, c, kxa)
+        end do
+        t4s = omp_get_wtime()
+        efold = .true.
+        call xzecmd(op_fold, 1d0, eomega)
+        do c = 1, nc
+          call N(xzevget)(w, 3, c, kxa)
+          call N(xzepsig)(w, kxa, kxb, .false.)
+          call N(xzevput)(w, 4, c, kxb)
+          neomsig = neomsig + 1
+          nev = nev + 1
+        end do
+        efold = .false.
+        call xzecmd(op_fold, 0d0, 0d0)
+        t4s = omp_get_wtime() - t4s
+        teomsig = teomsig + t4s
+        if (outer == 1) then
+          do c = 1, nc
+            call N(xzevget)(w, 4, c, kxb)
+            call N(xzevmdot)(w, 3, nc, kxb, dd)
+            gm(1:nc, c) = CONJ(dd(1:nc))
+          end do
+          call N(xzesmall)(nc, gm, ncmax, evs, ym)
+        end if
+        ecmd = .false.
+      end if
       do c = 1, nc
+        if (edist) exit
         call N(xzecopy)(nlen, w(kxc + NW * nlen * (c - 1)), w(kq + NW * nlen * (c - 1)))
         do d = 1, c - 1
           call N(zc_vdot)(nlen, w(kq + NW * nlen * (d - 1)), w(kq + NW * nlen * (c - 1)), s)
@@ -1702,6 +1759,7 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
         call N(xzevscal)(nlen, 1d0 / sqrt(dble(s)), w(kq + NW * nlen * (c - 1)))
       end do
       ! F = (A_PP + dA(omega)) q: the sigma vectors with the T4 terms
+      if (.not. edist) then
       t4s = omp_get_wtime()
       efold = .true.
       do c = 1, nc
@@ -1712,7 +1770,8 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
       efold = .false.
       t4s = omp_get_wtime() - t4s
       teomsig = teomsig + t4s
-      if (outer == 1) then
+      end if
+      if (outer == 1 .and. .not. edist) then
         ! the folded matrix on the start vectors: its eigenvalues (one root: the Rayleigh quotient)
         do c = 1, nc
           do d = 1, nc
@@ -1803,6 +1862,6 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
         dble(v1(r, jc)), N(xzeimag)(v1(r, jc))
     end do
   end do
-  deallocate(e1, x1mx, x1nm, w1, c1, l1, v1, gm, ym, evs)
+  deallocate(e1, x1mx, x1nm, w1, c1, l1, v1, gm, ym, evs, dd)
   call xzrel(m0)
 end subroutine

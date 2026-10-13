@@ -96,11 +96,6 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a)') '             triples run over the ranks.'
     call xzerrex
   end if
-  if (with_eom .and. nrank > 1 .and. cc4) then
-    write(6, '(a)') ' @XZCCSDT-F, the excited states of CC4 (EOM-CC4) run with one rank: their sigma vectors are not distributed.'
-    write(6, '(a)') '             Run CALC=CC4,EXCITE=EOMEE with one rank.'
-    call xzerrex
-  end if
 
   ! ---- the symmetry labels
   allocate(lab(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))

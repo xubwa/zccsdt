@@ -186,8 +186,9 @@ subroutine N(xzevput)(w, kind, j, kx)
   if (ecmd .and. myrank == 0) call xzecmd(op_put, dble(kind), dble(j), xzewhich(kx))
   ! (the part of the vector that this rank holds)
   kl = kx + NW * evoff
-  if (.not. evfile) then
-    k = merge(evc0, evh0, kind == 1) + (j - 1) * NW * evlen
+  if (kind == 1) evlast = j
+  if (.not. evfile .or. kind > 2) then
+    k = xzevbase(kind) + (j - 1) * NW * evlen
     call N(xzecopy)(evlen, w(kl), w(k))
     return
   end if
@@ -207,6 +208,36 @@ subroutine N(xzevput)(w, kind, j, kx)
   evbytes = evbytes + 8d0 * NW * evlen
 end subroutine
 
+! vector j of a kind (the part that this rank holds) into the vector at kx
+subroutine N(xzevget)(w, kind, j, kx)
+  use xzdata
+  use xzeomd
+  use xzpar, only: myrank
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  integer, intent(in) :: kind
+  integer(8), intent(in) :: j, kx
+  integer(8) :: k, kl
+  integer :: ios
+  real(8) :: t0
+  if (ecmd .and. myrank == 0) call xzecmd(op_get, dble(kind), dble(j), xzewhich(kx))
+  kl = kx + NW * evoff
+  if (.not. evfile .or. kind > 2) then
+    k = xzevbase(kind) + (j - 1) * NW * evlen
+    call N(xzecopy)(evlen, w(k), w(kl))
+    return
+  end if
+  t0 = omp_get_wtime()
+  read(xzevunit(kind, j), pos=1, iostat=ios) w(kl:kl + NW * evlen - 1)
+  if (ios /= 0) then
+    write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', trim(xzevname(kind, j)), ' failed, iostat ', ios
+    call xzerrex
+  end if
+  evio = evio + omp_get_wtime() - t0
+  evbytes = evbytes + 8d0 * NW * evlen
+end subroutine
+
 ! the elements off .. off + nc - 1 of the vectors 1 .. n of a kind: their
 ! addresses (in the work array, or in the buffer after reading them)
 subroutine N(xzevchunk)(w, kind, n, off, nc, ptr)
@@ -222,9 +253,9 @@ subroutine N(xzevchunk)(w, kind, n, off, nc, ptr)
   integer(8) :: j, k
   integer :: ios
   real(8) :: t0
-  if (.not. evfile) then
+  if (.not. evfile .or. kind > 2) then
     do j = 1, n
-      k = merge(evc0, evh0, kind == 1) + (j - 1) * NW * evlen + NW * off
+      k = xzevbase(kind) + (j - 1) * NW * evlen + NW * off
       ptr(j) = loc(w(k))
     end do
     return
@@ -707,6 +738,17 @@ subroutine N(xzeserve)(w, nsig)
       call N(xzepcollect)(w, kx)
     case (op_spread)
       call N(xzepspread)(w, kx)
+    case (op_fold)
+      ! EOM-CC4: the sigma vectors that follow have the T4 terms at this frequency (or not)
+      efold = ctl(2) == 1d0
+      eomega = ctl(3)
+    case (op_qopen)
+      ! EOM-CC4, macro / micro: the rows of this rank of q and F
+      n = nint(ctl(2), 8)
+      e4kq = xzget(NW * n * evlen, 'EOM-CC4: the vectors of a root')
+      e4kf = xzget(NW * n * evlen, 'EOM-CC4: their sigma vectors with the T4 terms')
+    case (op_get)
+      call N(xzevget)(w, nint(ctl(2)), nint(ctl(3), 8), ekx(nint(ctl(4))))
     case default
       write(6, '(a,i6)') ' @XZCCSDT-F, EOM: a command of rank 0 that this rank does not know: ', op
       call xzerrex
@@ -714,6 +756,7 @@ subroutine N(xzeserve)(w, nsig)
   end do
   edist = .false.
   ecmd = .false.
+  efold = .false.
   evoff = 0
   deallocate(c, d)
 end subroutine
@@ -842,9 +885,21 @@ subroutine N(xzesigm)(w, kv, ks, sd)
   integer(8), intent(in) :: kv, ks
   logical, intent(in) :: sd
   integer(8) :: m, kt, nlen, c
-  ZT :: a(64)
+  ZT :: a(128)
   if (e4nq == 0 .or. sd .or. efold) then
-    call N(xzesig)(w, kv, ks, sd)
+    call N(xzepsig)(w, kv, ks, sd)
+    return
+  end if
+  if (ecmd) then
+    ! over the ranks: every rank on its rows of q and F (the vector at kv is
+    ! the one of the basis that was put last: it comes back from there)
+    call N(xzevmdot)(w, 3, e4nq, kv, a)
+    a(1:e4nq) = CONJ(a(1:e4nq))
+    a(e4nq + 1:2 * e4nq) = -a(1:e4nq)
+    call N(xzevcomb)(w, 3, e4nq, a(e4nq + 1), kv, .true.)
+    call N(xzepsig)(w, kv, ks, sd)
+    call N(xzevcomb)(w, 4, e4nq, a, ks, .true.)
+    call N(xzevget)(w, 1, evlast, kv)
     return
   end if
   nlen = no * nv + npo * nvp + n3s
@@ -958,6 +1013,8 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     call N(xzepzero)(w, kxa)
     if (kstart > 0) then
       call N(xzecopy)(nin, w(kstart + NW * nin * (g - 1)), w(kxa))
+      ! (a whole vector of rank 0: to all ranks)
+      if (evfin) call N(xzepspread)(w, kxa)
     else
       call N(xzeone)(w(kxa + NW * singles(g)))
     end if
@@ -1091,6 +1148,8 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
       wts(3, k) = dble(s)
     end if
     call N(xzelead)(no * nv, w(kxa), nlead, lead(1, k), vlead(1, k))
+    ! (a whole vector: the rows of the other ranks)
+    if (kout > 0 .and. evfout) call N(xzepcollect)(w, kxa)
     if (kout > 0) call N(xzecopy)(nout, w(kxa), w(kout + NW * nout * (k - 1)))
     if (iures > 0) then
       ! (the rows of the other ranks)
@@ -1174,13 +1233,9 @@ contains
     real(8) :: ts
     call N(xzevput)(w, 1, n + 1, kxa)
     ts = omp_get_wtime()
-    if (efold) call N(xzefsend)(w, kxa)
-    ! (over the ranks: N(xzepsig); EOM-CC4, one rank: the matrix with the T4 terms held, N(xzesigm))
-    if (ecmd) then
-      call N(xzepsig)(w, kxa, kxb, sd)
-    else
-      call N(xzesigm)(w, kxa, kxb, sd)
-    end if
+    if (efold .and. cc3mode == 2) call N(xzefsend)(w, kxa)
+    ! (over the ranks: N(xzepsig); EOM-CC4, macro / micro: the matrix with the T4 terms held)
+    call N(xzesigm)(w, kxa, kxb, sd)
     if (sd .and. .not. efold) then
       teomsd = teomsd + omp_get_wtime() - ts
       neomsd = neomsd + 1
@@ -1413,7 +1468,10 @@ subroutine N(xzeom)(w, ecorr)
       efold = cc4
       if (.not. worker) kst = xzget(NW * nkeep * nsd, 'EOM: vectors to start from')
       ! (EOM-CC4: the vectors of the roots; of a root, and its sigma vector, with the T4 terms held; one more)
-      if (cc4) kxf = xzget(NW * (3 * nroot + 1) * nlen, 'EOM: the vectors of the roots')
+      ! (over ranks: rank 0 the vectors of the roots, every rank its rows of q and F)
+      if (cc4 .and. .not. dist) kxf = xzget(NW * (3 * nroot + 1) * nlen, 'EOM: the vectors of the roots')
+      if (cc4 .and. dist .and. .not. worker) kxf = xzget(NW * nroot * (nlen + 2 * (nsd + esoff(1))), 'EOM: the vectors of the roots')
+      if (cc4 .and. dist .and. worker) kxf = xzget(2 * NW * nroot * esmax, 'EOM-CC4: the vectors of a root')
       kxa = xzget(NW * nlen, 'EOM: a vector')
       kxb = xzget(NW * nlen, 'EOM: its sigma vector')
       top = xztop
@@ -1467,8 +1525,9 @@ subroutine N(xzeom)(w, ecorr)
     call xzmpi_bcast_w(w(jt3), NW * n3)
     t0 = omp_get_wtime()
     call N(xzeomim)(w)
+    if (cc4) call N(xz4eomim)(w)
     teomim = omp_get_wtime() - t0
-    write(6, '(/,a)') '  EOM-EE-CCSDT: the batches of this rank in the sigma vectors, its rows of the vectors'
+    write(6, '(/,a,a,a)') '  EOM-EE-', trim(mname), ': the batches of this rank in the sigma vectors, its rows of the vectors'
     write(6, '(a,f10.2,a)') '   intermediates of the ground state: ', teomim, ' s'
     flush(6)
     call N(xzeserve)(w, neomsig)
@@ -1681,9 +1740,6 @@ subroutine N(xzeom)(w, ecorr)
     evfout = .false.
     t1 = omp_get_wtime() - t1
     tsg = teomsig - tsg
-    edist = .false.
-    eplan = 0
-    if (dist) call xzecmd(op_endshift)
     ! ---- the roots
     write(6, '(/,a,i5,a,i4,a,f10.2,a,f9.2,a)') '   sigma vectors: ', nsig, '   iterations: ', nit, '   time: ', t1, &
       ' s   (', t1 / max(nsig, 1_8), ' s per sigma vector, the solver included)'
@@ -1738,6 +1794,9 @@ subroutine N(xzeom)(w, ecorr)
     ! ---- EOM-CC4: the quadruples folded in, root by root (xzcc4.inc)
     if (cc4 .and. nfound > 0) call N(xzeom4f)(w, merge(0_8, eshl(ish), dense), nroot, nfound, ee, kxf, kxa, kxb, &
                                               singles, nlen, ecorr)
+    edist = .false.
+    eplan = 0
+    if (dist) call xzecmd(op_endshift)
     write(6, '(a,f10.2,a)') '   time of this problem: ', omp_get_wtime() - tsh, ' s'
     flush(6)
     deallocate(singles, ee, rmax, rnorm, wts, cyc, lead, vlead)

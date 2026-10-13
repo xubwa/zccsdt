@@ -254,8 +254,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
   integer(8) :: kdweff, ka2, kb2, kx2, kdwkl, kxp, kc1, kr1v, kzz, kyy
   integer(8) :: kdwv, kdwo, kxacc, kyall, kr1c, kra, kgpd, kgmq, kzpp, kbuf, kg2, kyb, ku, kxb, ktmp, ktmp2
   integer(8) :: kzero3, kwring, kadrv, kdo6, kslab, kgq, kgh, kpib, ktv, kxpp, kbd, ktb, kz, nbdw
-  integer(8) :: h, hr, lo, lo2, nqh, nqr, q0, nq, i0, nb, p0, x0, kex
-  logical :: dense, with3, fold, dist
+  integer(8) :: h, hr, lo, lo2, nqh, nqr, q0, nq, i0, nb, p0, x0, kex, kq2
+  logical :: dense, with3, fold, dist, fold4
   real(8) :: stats(4), tst, tsg
   ZT :: one, zero, half, mone
   one = 1
@@ -274,6 +274,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
   ! frequency eomega): the singles-doubles block and the triples folded in
   ! (N(xzefold)); the vectors are singles and doubles
   fold = sd .and. efold .and. cc3mode == 2
+  ! the T4 terms of CC4 at the frequency eomega (N(xze4))
+  fold4 = efold .and. cc4 .and. with3
   s = eshift
   if (dense) s = 0
   kr1 = kv
@@ -784,8 +786,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
         call N(xzbocc)(w, jt3, ks3, w(kdo6))
       end if
       call xztoc(5, 'T3: hh ladder, F_oo')
-      if (dist) then
-        ! the rows of sigma_3 to their owners
+      if (dist .and. .not. fold4) then
+        ! the rows of sigma_3 to their owners (CC4, folded: after the T4 terms)
         tsg = omp_get_wtime()
         tmeet(3) = tmeet(3) + tsg - tst
         call xzmpi_barrier()
@@ -802,7 +804,28 @@ subroutine N(xzesig)(w, kv, ks, sd)
   ! ---- CC3, folded: the triples at the frequency eomega, made per batch
   if (fold) call N(xzefold)(w, kr1, kr2, kr2p, kdwv, kdovoo, kdooov, kdfov, ks1, ks2)
   ! ---- CC4, folded: the T4 terms at the frequency eomega (xzcc4.inc)
-  if (efold .and. cc4 .and. with3) call N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo, ks2, ks3)
+  if (fold4 .and. .not. dist) call N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo, ks2, ks3)
+  if (fold4 .and. dist) then
+    ! over the ranks: every rank the occupied quadruples of its tasks (the
+    ! tasks of the ground state, N(xz4run)) - its part of the doubles term,
+    ! summed on all ranks, and its part of the triples term on all rows of
+    ! sigma_3, whose rows then go to their owners with the rest of sigma_3
+    kq2 = xzget(NW * npo * nvp, 'CC4: the T4 term of sigma_2 of this rank')
+    if (.not. xzdry) call zc_vzero_d(NW * npo * nvp, w(kq2))
+    call N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo, kq2, ks3)
+    if (.not. xzdry) then
+      tsg = omp_get_wtime()
+      tmeet(3) = tmeet(3) + tsg - tst
+      call xzmpi_barrier()
+      dsec(10, 3) = dsec(10, 3) + omp_get_wtime() - tsg
+      tsg = omp_get_wtime()
+      call xzmpi_allsum_w(w(kq2), NW * npo * nvp)
+      call N(xzeaxpy)(npo * nvp, w(kq2), w(ks2))
+      call xzmpi_slices_add(w(ks3), eswoff, w(kex))
+      call xztoc(5, 'MPI: sigma_3 to its rows')
+      dsec(5, 3) = dsec(5, 3) + omp_get_wtime() - tsg
+    end if
+  end if
 
   ! ---- with labels: sigma_1 and sigma_2 on the elements of the shift
   if (.not. dense .and. .not. xzdry) then
