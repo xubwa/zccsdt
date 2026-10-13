@@ -142,7 +142,7 @@ def hartree_fock(h1, eri, ecore, no, lab, par, tol=1e-12, max_cycle=100):
 
 
 def run(outdir, sizes):
-    mf = o2_scf.run_scf(os.path.join(outdir, 'o2_2plus_krhf_x2cmp.chk'), verbose=0)
+    mf = o2_scf.run_scf(os.path.join(outdir, 'o2_2plus_krhf_x2cmp%s.chk' % o2_scf.TAG), verbose=0)
     C, om2, par, io, iv, e = o2_scf.spinors(mf)
     nf = o2_scf.NFROZEN
     cols = np.concatenate((io[nf:], iv))
@@ -182,7 +182,7 @@ def run(outdir, sizes):
         s = slice(0, m)
         e_ref = ecore + np.einsum('ii->', h1[:no, :no]).real + 0.5 * (
             np.einsum('iijj->', eri[:no, :no, :no, :no]) - np.einsum('ijji->', eri[:no, :no, :no, :no])).real
-        name = os.path.join(outdir, 'o2_hf2plus_n%d_x2ccorr.npz' % m)
+        name = os.path.join(outdir, 'o2_hf2plus%s_n%d_x2ccorr.npz' % (o2_scf.TAG, m))
         np.savez(name, h1=h1[s, s].astype(complex), eri=eri[s, s, s, s].astype(complex), ecore=ecore, nelec=12, ncore=no,
                  nact=4, omega2=lab[s], parity=pr[s], eps=f.diagonal().real[s], mo_coeff=c[:, s],
                  mo_frozen=C[:, io[:nf]], e_hf=e_hf)
@@ -195,4 +195,4 @@ if __name__ == '__main__':
     if sys.argv[1] == 'check':
         check(sys.argv[2], sys.argv[3])
     else:
-        run(sys.argv[2], [int(x) for x in sys.argv[3:]] or [26, 30, 32, 116])
+        run(sys.argv[2], [int(x) for x in sys.argv[3:]] or ([52] if o2_scf.DZ else [26, 30, 32, 116]))

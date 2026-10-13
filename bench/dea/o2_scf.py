@@ -21,12 +21,18 @@ from pyscf import gto, lib
 
 BASIS = os.path.expanduser('~/scr4/zmr_runs/basis_opt/basis/pyscf/dyvtz_sog.py')
 NFROZEN = 4
+# --dz on the command line: cc-pVDZ-DK (PySCF's; 56 spinors, 52 correlated) in the place of DYVTZ-SOG,
+# files with the tag _dz
+DZ = '--dz' in sys.argv
+if DZ:
+    sys.argv.remove('--dz')
+TAG = '_dz' if DZ else ''
 
 
 def run_scf(chk=None, verbose=4):
     from socutils.scf import spinor_hf
     from socutils.somf import x2cmp
-    sog = runpy.run_path(BASIS)['O']
+    sog = 'cc-pvdz-dk' if DZ else runpy.run_path(BASIS)['O']
     mol = gto.M(atom='O 0 0 0; O 0 0 1.20752', basis={'O': sog}, verbose=verbose, nucmod='G', charge=2, spin=0)
     mf = spinor_hf.KRHF(mol)
     mf.with_x2c = x2cmp.X2CMP(mol, x2cmp='x2cmp', with_gaunt=True, with_breit=True)
@@ -83,10 +89,10 @@ def parities(mol, C, S):
 
 def main():
     outdir = sys.argv[1]
-    sizes = [int(x) for x in sys.argv[2:]] or [28, 30, 32, 116]
+    sizes = [int(x) for x in sys.argv[2:]] or ([52] if DZ else [28, 30, 32, 116])
     os.makedirs(outdir, exist_ok=True)
     t0 = time.time()
-    mf = run_scf(os.path.join(outdir, 'o2_2plus_krhf_x2cmp.chk'))
+    mf = run_scf(os.path.join(outdir, 'o2_2plus_krhf_x2cmp%s.chk' % TAG))
     mol = mf.mol
     print('SCF: E = %.12f  (%.0f s); nuclear repulsion %.12f' % (mf.e_tot, time.time() - t0, mol.energy_nuc()))
     from zccsdt import eris as E
@@ -132,7 +138,7 @@ def main():
         no = len(io) - NFROZEN
         e_ref = ecore + np.einsum('ii->', h1[:no, :no]).real + 0.5 * (
             np.einsum('iijj->', eri[:no, :no, :no, :no]) - np.einsum('ijji->', eri[:no, :no, :no, :no])).real
-        name = os.path.join(outdir, 'o2_hf2plus_n%d.npz' % n)
+        name = os.path.join(outdir, 'o2_hf2plus%s_n%d.npz' % (TAG, n))
         np.savez(name, h1=h1.astype(complex), eri=eri.astype(complex), ecore=ecore, nelec=12, ncore=no, nact=4,
                  omega2=om2[cols], parity=par[cols], eps=f.diagonal().real, mo_coeff=Ca, e_scf=e_scf)
         print('n = %3d: %s  E(reference determinant) from the file %.12f (SCF %.12f, difference %.1e); '
