@@ -1777,7 +1777,9 @@ end subroutine
 !               virtual, spinors, frozen occupied spinors, words per element,
 !               classes of the labels, shift in classes, roots asked for,
 !               elements of a vector, roots found, roots done with the T4
-!               terms, shift in labels; real(8): the three numbers of XZKEY,
+!               terms, shift in labels, the place in the file XZEOMR after
+!               the vectors of the roots that are done; real(8): the three
+!               numbers of XZKEY,
 !               the CC4 correlation energy; the energies of the roots without
 !               the T4 terms; of the last cluster in hand the energies, the
 !               Rayleigh quotients, the energies after the first evaluation
@@ -1821,14 +1823,14 @@ subroutine N(xz4er)(w, rw, ip, lshift, nroot, nlen, ecorr, kxf, ee, nfound, kdon
   logical, intent(out) :: ok
   character(len=9) :: fn
   character(len=8) :: tag
-  integer(8) :: hd(12), hf(12), k, n0, ios
+  integer(8) :: hd(13), hf(13), k, n0, ios
   real(8) :: key(3), kf3(3), ec
   real(8), allocatable :: rec(:, :)
   logical :: there
   ok = .false.
   write(fn, '(a6,i3.3)') 'XZE4R.', ip
   call xzkeyval(key)
-  hd = [no, nv, ntot, nfrozen, int(NW, 8), ncls, eshift, nroot, nlen, nfound, kdone, lshift]
+  hd = [no, nv, ntot, nfrozen, int(NW, 8), ncls, eshift, nroot, nlen, nfound, kdone, lshift, e4upos]
   if (rw == 'w') then
     n0 = nres - kdone
     allocate(rec(16, max(kdone, 1_8)))
@@ -1878,6 +1880,7 @@ subroutine N(xz4er)(w, rw, ip, lshift, nroot, nlen, ecorr, kxf, ee, nfound, kdon
   end if
   nfound = hf(10)
   kdone = hf(11)
+  e4rpos = hf(13)
   do k = 1, kdone
     if (nres >= maxres) exit
     nres = nres + 1
@@ -1900,6 +1903,72 @@ subroutine N(xz4er)(w, rw, ip, lshift, nroot, nlen, ecorr, kxf, ee, nfound, kdon
   end do
   deallocate(rec)
   ok = .true.
+end subroutine
+
+! ---------------------------------------------------------------------------
+! The file XZEOMR of EOM-CC4 (the format of N(xzeom): a header, then per root
+! the shift in classes, the number of the root, the elements of the vector,
+! omega - real and imaginary part -, the vector), written root by root when a
+! root is done with the T4 terms, so that a later run goes on behind the
+! roots that are done (the place is in XZE4R.nnn).
+!   'o'   before the roots of a problem: the file of this run is opened, or -
+!         roots of this problem were done in an earlier run - the file of
+!         that run, which must be there up to their end
+!   'w'   the vector at kv of the root k, its energy omega
+subroutine N(xz4evec)(w, what, k, nlen, omega, kv)
+  use xzdata
+  use xzeomd
+  implicit none
+  real(8) :: w(*)
+  character(len=1), intent(in) :: what
+  integer(8), intent(in) :: k, nlen, kv
+  real(8), intent(in) :: omega
+  character(len=8) :: tag
+  integer(8) :: hd(5), fsize, ios
+  logical :: there, bad
+  if (what == 'o') then
+    if (e4rst .and. e4kdone > 0) then
+      if (e4ures == 0) then
+        inquire(file='XZEOMR', exist=there, size=fsize)
+        bad = .not. there .or. e4rpos <= 0
+        if (.not. bad) then
+          e4ures = 78
+          open(unit=e4ures, file='XZEOMR', form='unformatted', access='stream', status='old', iostat=ios)
+          if (ios == 0) read(e4ures, iostat=ios) tag, hd
+          bad = ios /= 0
+          if (.not. bad) bad = tag /= 'XZEOMR01' .or. hd(1) /= no .or. hd(2) /= nv .or. hd(3) /= NW .or. hd(4) /= ncls &
+                               .or. fsize < e4rpos - 1
+          if (bad) close(e4ures, iostat=ios)
+        end if
+        if (bad) then
+          write(6, '(a)') ' @XZCCSDT-W, the file XZEOMR of the earlier run, with the vectors of the roots that are done, is not there:'
+          write(6, '(a)') '             no file XZEOMR is written.'
+          e4ures = 0
+          e4uwant = .false.
+          return
+        end if
+      end if
+      e4upos = e4rpos
+    else if (e4ures == 0) then
+      e4ures = 78
+      open(unit=e4ures, file='XZEOMR', form='unformatted', access='stream', status='replace', iostat=ios)
+      if (ios == 0) write(e4ures, iostat=ios) 'XZEOMR01', no, nv, int(NW, 8), ncls, labstep
+      if (ios == 0) inquire(unit=e4ures, pos=e4upos)
+      if (ios /= 0) then
+        write(6, '(a)') ' @XZCCSDT-W, the file XZEOMR of the vectors cannot be written: no vectors are kept.'
+        e4ures = 0
+        e4uwant = .false.
+      end if
+    end if
+    return
+  end if
+  write(e4ures, pos=e4upos, iostat=ios) eshift, k, nlen, omega, 0d0, w(kv:kv + NW * nlen - 1)
+  if (ios == 0) flush(e4ures, iostat=ios)
+  if (ios /= 0) then
+    write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZEOMR failed (iostat ', ios, '): disk full?'
+    call xzerrex
+  end if
+  inquire(unit=e4ures, pos=e4upos)
 end subroutine
 
 ! N(xz4eq): rw = 'w' writes the evaluation of the macro iteration `outer' of
@@ -2157,8 +2226,10 @@ subroutine N(xzeom4f)(w, ip, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, 
   else if (ckpt) then
     nfw = nfound
     kdw = 0
-    call N(xz4er)(w, 'w', ip, lshift, nroot, nlen, ecorr, kxf, ee, nfw, kdw, eclu, rayc, shotc, fok)
   end if
+  ! the file XZEOMR: of this run, or - roots of this problem done before - that of the earlier run
+  if (e4uwant) call N(xz4evec)(w, 'o', 0_8, 0_8, 0d0, kxf)
+  if (ckpt .and. .not. e4rst) call N(xz4er)(w, 'w', ip, lshift, nroot, nlen, ecorr, kxf, ee, nfw, kdw, eclu, rayc, shotc, fok)
   ca = 1
   cb = 0
   nc = 1
@@ -2422,7 +2493,9 @@ subroutine N(xzeom4f)(w, ip, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, 
         nfrozen + no + vperm(a) + 1, ' (', lab(nfrozen + no + vperm(a)), ',', w(jeps + no + a), ')   ', &
         dble(v1(r, jc)), N(xzeimag)(v1(r, jc))
     end do
-    ! the root is done: the roots and the vectors to the file XZE4R.nnn, the file of its evaluation goes
+    ! the root is done: its vector to the file XZEOMR;
+    if (e4uwant) call N(xz4evec)(w, 'w', k, nlen, omega, kxc + NW * nlen * (jc - 1))
+    ! the roots and the vectors to the file XZE4R.nnn, the file of its evaluation goes
     if (ckpt) then
       nfw = nfound
       kdw = k

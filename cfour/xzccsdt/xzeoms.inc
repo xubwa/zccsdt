@@ -1633,7 +1633,9 @@ subroutine N(xzeom)(w, ecorr)
 
   ! ---- the file of the vectors of the roots, if the disk of the run directory holds them
   iures = 0
-  if (ewvec /= 0 .and. .not. cc4) then
+  e4ures = 0
+  e4uwant = .false.
+  if (ewvec /= 0) then
     need = 0d0
     do ish = 1, nprob
       call problem(ish, s, nroot, ok)
@@ -1645,6 +1647,10 @@ subroutine N(xzeom)(w, ecorr)
     if (free_bytes >= 0 .and. need > dble(free_bytes) - 1073741824d0) then
       write(6, '(a,f12.1,a,f12.1,a)') ' @XZCCSDT-W, the disk of the run directory does not hold the vectors of the roots (', &
         1d-6 * need, ' MB; free: ', 1d-6 * free_bytes, ' MB): the file XZEOMR is not written.'
+    else if (cc4) then
+      ! (EOM-CC4: written root by root when the root is done with the T4 terms, N(xz4evec))
+      e4uwant = .true.
+      write(6, '(a,f12.1,a)') '   the vectors of the roots go to the file XZEOMR (', 1d-6 * need, ' MB; %xzeomvec 0: not written)'
     else
       iures = 78
       open(unit=iures, file='XZEOMR', form='unformatted', access='stream', status='replace', iostat=ios)
@@ -1825,6 +1831,8 @@ subroutine N(xzeom)(w, ecorr)
     call xzrel(ms)
   end do
   if (iures > 0) close(iures)
+  if (e4ures > 0) close(e4ures)
+  e4ures = 0
   if (dist) then
     call xzecmd(op_end)
     call xzdtable(3, neomsig)

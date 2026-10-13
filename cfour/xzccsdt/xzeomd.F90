@@ -105,6 +105,12 @@ module xzeomd
   ! and its energies after the first evaluation
   logical :: e4rst = .false.
   integer(8) :: e4kdone = 0
+  ! the file XZEOMR of EOM-CC4, written root by root (N(xz4evec)): wanted (%xzeomvec, the disk),
+  ! its unit (0: not open), the place of the next record; the place after the roots of the
+  ! problem that an earlier run has done (from XZE4R.nnn)
+  logical :: e4uwant = .false.
+  integer :: e4ures = 0
+  integer(8) :: e4upos = 0, e4rpos = 0
   real(8) :: e4eclu(64) = 0d0, e4rayc(64) = 0d0, e4shotc(64) = 0d0
   real(8) :: rpp(maxres) = 0d0, rshot(maxres) = 0d0, rfirst(maxres) = 0d0
   integer(8) :: neomsig = 0, neomsd = 0
