@@ -1,7 +1,12 @@
 !
 ! The CCSDT iterations (type-generic): second-order start, Jacobi steps
-! (xzstep.inc) with DIIS (xzdiis.F90), convergence as in the Python program:
-! the energy change below conv_e and |dT1| + |dT2| + |dT3| below conv_t.
+! (xzstep.inc) with DIIS (xzdiis.F90), convergence as in CFOUR's xx2cccsd:
+! the largest element (absolute value) of the Jacobi step - new amplitudes
+! minus the amplitudes they were made from, i.e. residual over denominator -
+! over T1, T2 and T3 below conv_t = 10**-CC_CONV; no test of the energy.
+! The amplitudes are written to XZAMPS (XZKEY: how far they are) every few
+! cycles and when the cycles run out, and a run that finds such a file of its
+! integrals and its model continues from it (N(xzsave), xzreuse).
 ! The amplitudes stay in the work array (jt1, jt2, jt3 of xzdata) for what
 ! follows; everything else that is taken here is released.
 !
@@ -26,7 +31,10 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   integer(8), intent(out) :: ncyc
   integer(8) :: kt1n, kt2n, kr3, icyc, m0, n, kb1, kb2, nsince
   logical :: fromccsd, t4now, fresh, conv, phase4, resumed, accel, havex, accx
-  real(8) :: fmicro, dmac, demac, t4s, dprev, kap, dsaved, theta
+  real(8) :: fmicro, dmac, t4s, dprev, kap, dsaved, theta
+  real(8) :: emax(3), big, tcsum, twr
+  integer(8) :: ksave, lastsave
+  logical, external :: N(xzfit)
   integer(8) :: kc4, nall
   character(len=24) :: mark
   integer(8), external :: N(xzdiis_target)
@@ -110,8 +118,16 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     ! CC4 from the CCSDT amplitudes of the file XZAMPS
     call N(xzamps)(w, 'l', e4ccsdt)
   else
-    if (.not. fromccsd) call N(xzguess)(no, nv, w(jeps), w(joovv), w(jt1), w(jt2))
-    call zc_vzero_d(NW * n3, w(jt3))
+    ! the amplitudes of an earlier run that did not converge (of these
+    ! integrals and this model: xzreuse; here: of this mode) are the start
+    if (amprst) amprst = N(xzfit)('XZAMPS', 0d0, .false.)
+    if (amprst) then
+      call N(xzamps)(w, 'l', eold)
+    else
+      ktcyc = 0
+      if (.not. fromccsd) call N(xzguess)(no, nv, w(jeps), w(joovv), w(jt1), w(jt2))
+      call zc_vzero_d(NW * n3, w(jt3))
+    end if
   end if
   call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
   eold = dble(e)
@@ -146,17 +162,27 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     write(6, '(/,a,f20.12)') '  Correlation energy of the start (the CC4 amplitudes of XZCC4):', eold
   else if (cc4start) then
     write(6, '(/,a,f20.12)') '  Correlation energy of the start (the CCSDT amplitudes of XZAMPS):', eold
+  else if (amprst) then
+    write(6, '(/,a,f20.12)') '  Correlation energy of the start (the amplitudes of XZAMPS, not converged):', eold
+    write(6, '(a,i5,a,es10.3)') '  The iterations CONTINUE those of earlier runs:', ktcyc, &
+      ' cycles so far, the largest element of their last step ', ktbig
   else if (fromccsd) then
     write(6, '(/,a,f20.12)') '  Correlation energy of the start (T1, T2 of t1guess, t2guess):', eold
   else
     write(6, '(/,a,f20.12)') '  Second-order correlation energy:', eold
   end if
   write(6, '(/,a,a,a)') '  ', trim(mname), trim(merge(' iterations (T3 stored)', ' iterations            ', cc3mode == 1))
-  write(6, '(a)') '  ' // repeat('-', 98)
+  write(6, '(a,es9.2,a)') '  converged when max|dT|, the largest element of the step over T1, T2, T3, is below ', conv_t, &
+    ' (CC_CONV)'
+  write(6, '(a)') '  ' // repeat('-', 109)
   write(6, '(a)') '   cycle     correlation energy      energy change      |dT1|      |dT2|' // &
-                  '      |dT3|   DIIS    time/s'
-  write(6, '(a)') '  ' // repeat('-', 98)
+                  '      |dT3|   max|dT|   DIIS    time/s'
+  write(6, '(a)') '  ' // repeat('-', 109)
   converged = .false.
+  ampsaved = .false.
+  ksave = 0
+  lastsave = 0
+  tcsum = 0d0
   ncyc = maxcyc
   ! CC4 (docs/native.md, section 19).  phase4: the T4 terms are in the
   ! equations (before that: CCSDT, whose amplitudes are the start).  t4now:
@@ -165,11 +191,12 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   ! are iterated (DIIS from new) until the change of the amplitudes is below
   ! fmicro times that of the first step after the evaluation, then the terms
   ! are evaluated again.  Converged when the first step after an evaluation
-  ! is below the thresholds - the test of the plain iteration - or, without
+  ! is below the threshold - the test of the plain iteration - or, without
   ! that last evaluation, when the first steps of the last two evaluations
   ! (d1, d2: a factor kap = d2 / d1 per evaluation) say that the next one
-  ! would be below them: 2 kap d2 < the thresholds (option cc4 confirm: only
-  ! the first test).
+  ! would be below it: 2 kap d2 < the threshold (option cc4 confirm: only
+  ! the first test).  The change of the amplitudes is its largest element
+  ! everywhere (max|dT| of the table).
   phase4 = cc4 .and. (cc4start .or. cc4mode == 2 .or. cc4rst > 0)
   t4now = phase4
   fresh = .false.
@@ -179,7 +206,6 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     t4sec = 0d0
   end if
   dmac = 0d0
-  demac = 0d0
   dprev = 0d0
   ! (the iterations of an earlier run go on: the T4 terms of its last
   ! evaluation are held, the first step is the first one after it)
@@ -237,7 +263,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       tsg = omp_get_wtime()
       ctl = [1d0, merge(0d0, 1d0, icyc == 1)]
       if (t4now) ctl(1) = merge(2d0, 3d0, cc4mode == 0 .or. cc4mode == 3 .or. nt4 == 0)
-      if (icyc == 1 .and. (cc4start .or. cc4rst > 0)) ctl(2) = 2d0
+      if (icyc == 1 .and. (cc4start .or. cc4rst > 0 .or. amprst)) ctl(2) = 2d0
       ! (the amplitudes of rank 0 were extrapolated: all of T3 to the ranks)
       if (accx) ctl(2) = 2d0
       accx = .false.
@@ -282,7 +308,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     call xzrebal(1)
     tsg = omp_get_wtime()
     call xztic()
-    call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms)
+    call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms, emax)
     call xztoc(1, 'DIIS')
     dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
     if (slices) then
@@ -298,10 +324,16 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     enew = dble(e)
     de = enew - eold
     eold = enew
-    normt = norms(1) + norms(2) + norms(3)
-    write(6, '(i8,f23.14,es19.6,3es11.3,i7,f10.2,a)') icyc, enew, de, norms, ncnt, omp_get_wtime() - t0, trim(mark)
+    big = maxval(emax)
+    write(6, '(i8,f23.14,es19.6,3es11.3,es10.2,i7,f10.2,a)') icyc, enew, de, norms, big, ncnt, omp_get_wtime() - t0, &
+      trim(mark)
     flush(6)
-    conv = abs(de) < conv_e .and. normt < conv_t
+    conv = big < conv_t
+    if (.not. phase4) then
+      ! (the cycles of CCSDT or CC3 in all runs, and how far they are: XZKEY)
+      ktcyc = ktcyc + 1
+      ktbig = big
+    end if
     if (.not. cc4) then
       if (conv) then
         converged = .true.
@@ -313,7 +345,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
         ! CCSDT is converged: its amplitudes to XZAMPS (for a later run), then CC4 from them
         e4ccsdt = enew
         call N(xzamps)(w, 'w', e4ccsdt)
-        call xzkeyw(-1_8)
+        call xzkeyw(nint(-log10(conv_t), 8), -1_8)
         write(6, '(a,i4,a)') '  CCSDT converged in ', icyc, ' cycles; its amplitudes written to the file XZAMPS (XZKEY).  CC4:'
         phase4 = .true.
         t4now = .true.
@@ -327,27 +359,24 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
           ncyc = icyc
           exit
         end if
-        dmac = normt
-        demac = abs(de)
+        dmac = big
       end if
       if (cc4mode == 1 .or. cc4mode == 2) then
         t4now = .true.
       else
-        t4now = .not. fresh .and. normt < max(0.3d0 * conv_t, fmicro * dmac) &
-                .and. abs(de) < max(0.3d0 * conv_e, fmicro * demac)
+        t4now = .not. fresh .and. big < max(0.3d0 * conv_t, fmicro * dmac)
         if (t4now) then
           ! the equations with the T4 terms of evaluation nt4 are solved
           kap = 0d0
           if (dprev > 0d0) kap = dmac / dprev
-          write(6, '(a,i3,a,f18.12,a,es9.2,a,es9.2,a,f7.4)') '     with the T4 terms of evaluation ', nt4, &
-            ': correlation energy ', enew, ';  its first step changed the amplitudes by ', dmac, ', the energy by ', &
-            demac, ';  factor ', kap
+          write(6, '(a,i3,a,f18.12,a,es9.2,a,f7.4)') '     with the T4 terms of evaluation ', nt4, &
+            ': correlation energy ', enew, ';  its first step changed the amplitudes by ', dmac, &
+            ' (the largest element);  factor ', kap
           ! (with the extrapolation the factors fall from one evaluation to the next:
           ! the estimate takes the largest that was seen)
           a4kmax = max(a4kmax, kap)
           if (accel) kap = a4kmax
-          if (cc4mode == 0 .and. dprev > 0d0 .and. kap < 0.5d0 .and. 2d0 * kap * dmac < conv_t &
-              .and. 2d0 * kap * demac < conv_e) then
+          if (cc4mode == 0 .and. dprev > 0d0 .and. kap < 0.5d0 .and. 2d0 * kap * dmac < conv_t) then
             write(6, '(a,es9.2,a)') '     new T4 terms would change the amplitudes by about ', kap * dmac, &
               ' in the first step (the factor of the last two evaluations): converged'
             converged = .true.
@@ -371,10 +400,28 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       fresh = .false.
     end if
     if (timing_run .and. icyc >= maxcyc) exit
+    ! the amplitudes of CCSDT or CC3 to XZAMPS every ksave cycles, so that a
+    ! run that is stopped loses few: the first time after cycle 2, then every
+    ! ksave cycles, with which the writes take about 1 % of the time (the first write is the measure)
+    tcsum = tcsum + omp_get_wtime() - t0
+    if (.not. phase4 .and. .not. timing_run .and. icyc >= 2 .and. icyc - lastsave >= max(ksave, 1_8)) then
+      call N(xzsave)(w, enew, twr)
+      lastsave = icyc
+      if (ksave == 0) then
+        ksave = max(1_8, int(100d0 * twr * dble(icyc) / tcsum, 8) + 1)
+        write(6, '(a,i4,a,f8.2,a,f9.2,a)') '     the amplitudes are written to XZAMPS every ', ksave, &
+          ' cycles (a write ', twr, ' s, a cycle ', tcsum / dble(icyc), ' s): a run that is stopped continues from them'
+      end if
+    end if
     if (nsince >= maxcyc .and. .not. t4now) exit
     if (cc4 .and. nt4 >= maxcyc) exit
   end do
-  write(6, '(a)') '  ' // repeat('-', 98)
+  write(6, '(a)') '  ' // repeat('-', 109)
+  ! the cycles ran out: the amplitudes of CCSDT or CC3 as they are to XZAMPS
+  if (.not. converged .and. .not. phase4 .and. .not. timing_run) then
+    if (lastsave /= icyc) call N(xzsave)(w, eold, twr)
+    ampsaved = .true.
+  end if
   if (nrank > 1) then
     ! the iterations are over
     ctl = 0d0
@@ -405,7 +452,7 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
   integer(8), intent(out) :: icyc
   integer(8), external :: N(xzdiis_target)
   integer(8) :: kr3
-  real(8) :: ctl(2), tsg, t0, norms(3)
+  real(8) :: ctl(2), tsg, t0, norms(3), emax(3)
   icyc = 0
   write(6, '(/,a,a,a)') '  ', trim(mname), ' iterations: the batches of this rank'
   if (slices) call zc_vzero_d(NW * n3, w(jt3))
@@ -450,7 +497,7 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
       ! DIIS on the slice of this rank, then the slices of the new T3 of all ranks
       tsg = omp_get_wtime()
       call xztic()
-      call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms)
+      call N(xzdiis_upd)(w, w(jt1), w(jt2), jt3, w(kt1n), w(kt2n), kr3, norms, emax)
       call xztoc(1, 'DIIS')
       dsec(8, 1) = dsec(8, 1) + omp_get_wtime() - tsg
       tsg = omp_get_wtime()
@@ -548,6 +595,7 @@ end subroutine
 subroutine N(xzamps)(w, rw, ecorr)
   use xzdata
   use xzmem
+  use xzkern
   implicit none
   real(8) :: w(*)
   character(len=1), intent(in) :: rw
@@ -558,14 +606,22 @@ subroutine N(xzamps)(w, rw, ecorr)
   logical :: there
   n1 = NW * no * nv
   n2 = NW * no * no * nv * nv
-  ! ('l': read into the regions that are there)
+  ! ('l': read into the regions that are there, T3 too)
   if (rw == 'w') then
-    open(unit=77, file='XZAMPS', form='unformatted', access='stream', status='replace', iostat=ios)
+    ! (to XZAMPS.new, which then takes the name: a run that is stopped while
+    ! it writes leaves the file of before.  XZKEY, which describes the file
+    ! of before, goes first; the caller writes the new one)
+    open(unit=77, file='XZAMPS.new', form='unformatted', access='stream', status='replace', iostat=ios)
     if (ios == 0) write(77, iostat=ios) 'XZAMPS01', no, nv, int(NW, 8), ncls, n3, ecorr
     if (ios == 0) write(77, iostat=ios) w(jt1:jt1 + n1 - 1)
     if (ios == 0) write(77, iostat=ios) w(jt2:jt2 + n2 - 1)
     if (ios == 0) write(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
     if (ios == 0) close(77, iostat=ios)
+    if (ios == 0) then
+      open(unit=76, file='XZKEY', status='old', iostat=ios)
+      if (ios == 0) close(76, status='delete')
+      ios = xz_rename('XZAMPS.new' // c_null_char, 'XZAMPS' // c_null_char)
+    end if
     if (ios /= 0) then
       write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZAMPS failed (iostat ', ios, '): disk full?'
       call xzerrex
@@ -599,15 +655,64 @@ subroutine N(xzamps)(w, rw, ecorr)
   end if
   read(77, iostat=ios) w(jt1:jt1 + n1 - 1)
   if (ios == 0) read(77, iostat=ios) w(jt2:jt2 + n2 - 1)
-  if (ios == 0 .and. .not. t3shared) read(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
+  if (ios == 0 .and. (rw == 'l' .or. .not. t3shared)) read(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
   close(77)
   if (ios /= 0) then
     write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZAMPS failed, iostat ', ios
     call xzerrex
   end if
   ! T3 where the file is mapped (stored there as the program uses it, in every mode)
-  if (t3shared) call xzmapt3(w, 'XZAMPS', n1 + n2, NW * n3, jt3)
+  if (t3shared .and. rw /= 'l') call xzmapt3(w, 'XZAMPS', n1 + n2, NW * n3, jt3)
 end subroutine
+
+! ---------------------------------------------------------------------------
+! The amplitudes as they are, not converged, to XZAMPS, and XZKEY with how
+! far they are: the digits d with the largest element of the last step
+! below 10**-d in the place of CC_CONV (a run that asks for no more takes
+! them as they are, any other continues from them), the cycles so far and
+! that element.  twr: the seconds of the write.
+subroutine N(xzsave)(w, ecorr, twr)
+  use xzdata
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  real(8), intent(in) :: ecorr
+  real(8), intent(out) :: twr
+  real(8) :: e
+  integer(8), external :: xzdigits
+  twr = omp_get_wtime()
+  e = ecorr
+  call N(xzamps)(w, 'w', e)
+  call xzkeyw(xzdigits(ktbig), -1_8)
+  twr = omp_get_wtime() - twr
+end subroutine
+
+! ---------------------------------------------------------------------------
+! Is the file (XZAMPS, XZLAMB) of an earlier run one of this mode - these
+! active spinors, this arithmetic, these classes of the labels, T3 stored as
+! here - and, for lambda (lam), of amplitudes of the correlation energy
+! ecorr?  If not, a line says so and the iterations start as without it.
+logical function N(xzfit)(name, ecorr, lam)
+  use xzdata
+  implicit none
+  character(len=*), intent(in) :: name
+  real(8), intent(in) :: ecorr
+  logical, intent(in) :: lam
+  character(len=8) :: tag
+  integer(8) :: head(5)
+  real(8) :: e
+  integer :: ios, ioc
+  N(xzfit) = .false.
+  open(unit=77, file=name, form='unformatted', access='stream', status='old', action='read', iostat=ios)
+  if (ios == 0) read(77, iostat=ios) tag, head, e
+  close(77, iostat=ioc)
+  if (ios == 0) then
+    if (tag == name // '01' .and. head(1) == no .and. head(2) == nv .and. head(3) == NW &
+        .and. head(4) == ncls .and. head(5) == n3) N(xzfit) = .not. lam .or. abs(e - ecorr) <= 1d-9
+  end if
+  if (.not. N(xzfit)) write(6, '(/,a,a,a)') '  the file ', name, &
+    ' of the earlier run is of another mode (labels, arithmetic, stored triples) or of other amplitudes: not the start'
+end function
 
 ! ---------------------------------------------------------------------------
 ! The second-order energy from the integrals in the work array.

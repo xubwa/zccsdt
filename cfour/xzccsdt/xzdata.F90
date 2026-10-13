@@ -169,7 +169,22 @@ module xzdata
   logical :: t3shared = .false.
   logical :: sizes_set = .false.    ! xzsizes was called (a rank other than 0, before its work array)
   logical :: den_active = .false.   ! option den_active: the files of the active spinors alone (a test hook)
-  real(8) :: conv_e = 1d-9, conv_t = 1d-7
+  ! CC_CONV=N: an iteration (amplitudes, lambda) is converged when the largest
+  ! element (absolute value) of its Jacobi step - residual over denominator,
+  ! over T1, T2 and T3 - is below conv_t = 10**-N: the test of CFOUR's xx2cccsd
+  ! (rmax < conv).  There is no test of the energy.
+  real(8) :: conv_t = 1d-7
+  ! The iterations of an earlier run that did not converge (docs/native.md,
+  ! section 1): amprst - the amplitudes of the file XZAMPS are the start of
+  ! the iterations; lamrst - lambda of XZLAMB is the start of the Lambda
+  ! iterations (rank 0 decides: xzreuse).  ktcyc, ktbig: the cycles of the
+  ! amplitudes in all runs so far and the largest element of the last step;
+  ! klcyc, klbig: the same of lambda (the last line of XZKEY).  ampsaved,
+  ! lamsaved: this run has written them unconverged.  ecckeep: the CCSDT
+  ! correlation energy that goes into the header of XZLAMB.
+  logical :: amprst = .false., lamrst = .false., ampsaved = .false., lamsaved = .false.
+  integer(8) :: ktcyc = 0, klcyc = 0
+  real(8) :: ktbig = 0d0, klbig = 0d0, ecckeep = 0d0
   integer(8) :: maxcyc = 50
   integer(8) :: ndiis = 8           ! DIIS vectors asked for
   real(8) :: escf = 0d0

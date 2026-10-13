@@ -121,24 +121,27 @@ end subroutine
 ! ---------------------------------------------------------------------------
 ! The new vector (t1n, t2n and, in the region kr3, T3) is stored and the
 ! extrapolated vector is written to t1, t2 and the region kt3.
-! norms: |dT1|, |dT2|, |dT3| of the full tensors (new minus previous).
-subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
+! norms: |dT1|, |dT2|, |dT3| of the full tensors (new minus previous: the
+! Jacobi step, residual over denominator); emax: the largest element (absolute
+! value) of each of the three - the measure of convergence, as r1max, r2max
+! of CFOUR's xx2cccsd.  With slices emax(3) is right on rank 0 only.
+subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms, emax)
   use xzdata
   use xzmem
   use xzkern
   use xzdiisd
-  use xzdist, only: myrank, xzmpi_allsum_w, xzmpi_bcast
+  use xzdist, only: myrank, xzmpi_allsum_w, xzmpi_bcast, xzmpi_max
   implicit none
   real(8) :: w(*)
   ZT, intent(inout) :: t1(0:nv-1, 0:no-1), t2(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)
   ZT, intent(in) :: t1n(0:nv-1, 0:no-1), t2n(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)
   integer(8), intent(in) :: kt3, kr3
-  real(8), intent(out) :: norms(3)
+  real(8), intent(out) :: norms(3), emax(3)
   integer(8) :: n1, n2, slot, k, l, s, ir, nn, off, m3, pr, pt, nrl
   integer(8) :: ptr(maxdiis)
   ZT :: cz(maxdiis), d(maxdiis), dd, one
   complex(8) :: h(maxdiis, maxdiis), c(maxdiis)
-  real(8) :: s1, s2, s3, sx, ss(1)
+  real(8) :: s1, s2, s3, sx, ss(1), mx, mr(1)
   logical :: small
   one = 1
   n1 = no * nv
@@ -153,9 +156,10 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
   ncall = ncall + 1
   s1 = 0d0
   s2 = 0d0
+  emax = 0d0
   if (small) then
-    call N(xzdiff2)(n1, t1n, t1, s1)
-    call N(xzdiff2)(nv * nv * no * no, t2n, t2, s2)
+    call N(xzdiff2m)(n1, t1n, t1, s1, emax(1))
+    call N(xzdiff2m)(nv * nv * no * no, t2n, t2, s2, emax(2))
   end if
 
   if (ncall == 1 .or. mdiis < 2) then
@@ -166,18 +170,23 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
       if (infile) nn = nchunk
       do off = 0, m3 - 1, nn
         l = min(nn, m3 - off)
-        call N(xzdiff2)(l, w(pr + NW * off), w(pt + NW * off), sx)
+        call N(xzdiff2m)(l, w(pr + NW * off), w(pt + NW * off), sx, mx)
         s3 = s3 + sx
+        emax(3) = max(emax(3), mx)
       end do
     else
       call N(zc_vsub)(n3, w(kr3), w(kt3), w(je3(1)))
       call N(zc_vdot)(n3, w(je3(1)), w(je3(1)), dd)
       s3 = dble(dd)
+      call N(xzamax)(n3, w(je3(1)), emax(3))
     end if
     if (split) then
       ss(1) = s3
       call xzmpi_allsum_w(ss, 1_8)
       s3 = ss(1)
+      mr(1) = emax(3)
+      call xzmpi_max(emax(3:3), mr, 1_8)
+      emax(3) = mr(1)
     end if
     norms = [sqrt(s1), sqrt(s2), 6d0 * sqrt(s3)]
     if (small) then
@@ -212,6 +221,8 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
     d(k) = d(k) + dd
     if (k == ncnt) s2 = dble(dd)
   end do
+  call N(xzamax)(n1, w(je1(slot)), emax(1))
+  call N(xzamax)(n2, w(je2(slot)), emax(2))
   end if
   nrl = (m3 + nchunk - 1) / max(nchunk, 1_8)
   if (.not. infile) then
@@ -222,6 +233,7 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
       call N(zc_vlincomb)(m3, 1_8, ptr, cz, w(jx3(slot)))
     end if
     call N(zc_vsub)(m3, w(pr), w(pt), w(je3(slot)))
+    call N(xzamax)(m3, w(je3(slot)), emax(3))
     do k = 1, ncnt
       ptr(k) = loc(w(je3(ord(k))))
     end do
@@ -233,6 +245,8 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
       off = ir * nchunk
       l = min(nchunk, m3 - off)
       call N(zc_vsub)(l, w(pr + NW * off), w(pt + NW * off), w(jchunk1))
+      call N(xzamax)(l, w(jchunk1), mx)
+      emax(3) = max(emax(3), mx)
       call N(xzdiis_io)('w', slot, 1_8, ir, w(jchunk1), l)
       call N(xzdiis_io)('w', slot, 0_8, ir, w(pr + NW * off), l)
       do k = 1, ncnt - 1
@@ -248,6 +262,9 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
     ! the overlaps are sums over the slices of the ranks; with the small parts
     ! of rank 0 they are the same numbers on every rank
     call xzmpi_allsum_w(cz, NW * ncnt)
+    mr(1) = emax(3)
+    call xzmpi_max(emax(3:3), mr, 1_8)
+    emax(3) = mr(1)
   end if
   d(1:ncnt) = d(1:ncnt) + cz(1:ncnt)
   s3 = dble(cz(ncnt))
@@ -358,6 +375,40 @@ subroutine N(xzdiff2)(n, a, b, s)
   do i = 1, n
     s = s + dble((a(i) - b(i)) * CONJ(a(i) - b(i)))
   end do
+end subroutine
+
+! s = sum |a - b|**2, mx = the largest |a - b|
+subroutine N(xzdiff2m)(n, a, b, s, mx)
+  implicit none
+  integer(8), intent(in) :: n
+  ZT, intent(in) :: a(n), b(n)
+  real(8), intent(out) :: s, mx
+  integer(8) :: i
+  real(8) :: x
+  s = 0d0
+  mx = 0d0
+  !$omp parallel do reduction(+:s) reduction(max:mx) private(x)
+  do i = 1, n
+    x = dble((a(i) - b(i)) * CONJ(a(i) - b(i)))
+    s = s + x
+    mx = max(mx, x)
+  end do
+  mx = sqrt(mx)
+end subroutine
+
+! mx = the largest |a|
+subroutine N(xzamax)(n, a, mx)
+  implicit none
+  integer(8), intent(in) :: n
+  ZT, intent(in) :: a(n)
+  real(8), intent(out) :: mx
+  integer(8) :: i
+  mx = 0d0
+  !$omp parallel do reduction(max:mx)
+  do i = 1, n
+    mx = max(mx, dble(a(i) * CONJ(a(i))))
+  end do
+  mx = sqrt(mx)
 end subroutine
 
 ! y += alpha x
