@@ -31,10 +31,12 @@ CCSDT with the files for `xx2czvec`, frozen and dropped spinors included
 (section 13), validated against the Python hand-over of section 10 and
 through `xx2czvec` and `xsox2cprop`.  Excited states: EOM-EE-CCSDT
 (`EXCITE=EOMEE`) in all four modes, in blocks for the states of a label shift,
-with CFOUR's solver design and input - section 16; one MPI rank.  CC3:
+with CFOUR's solver design and input - section 16; over MPI ranks: 16.7.  CC3:
 without stored triples (the batches of `csrc/cc3_fly.c`, over MPI ranks;
 EOM-CC3 folded, the totally symmetric states) and, as a check, with T3
-stored (its EOM in every label shift) - section 17.
+stored (its EOM in every label shift) - section 17.  CC4 and EOM-EE-CC4
+without stored quadruples, over MPI ranks, with checkpoints after every
+evaluation of the T4 terms - section 19.
 
 **The program takes no argument** (since commit a38e493): the job comes from
 the ZMAT as joda stored it, and the steps that were arguments before (`(q)`,
@@ -201,9 +203,9 @@ decided alike ...`).
   rank 0 runs the solver and sends the converged amplitudes once; every
   rank does its batches of a sigma vector and holds its rows of R3 of every
   vector of the subspace.  A node-local directory on every node is enough.
-  (EOM-CC3 folded: section 17.4.  The check route `cc3 stored` with
-  `EXCITE=EOMEE` and EOM-CC4, section 19, run with one rank: with more the
-  program stops with a message.)
+  (EOM-CC3 folded: section 17.4; EOM-CC4: section 19.4.  The check route
+  `cc3 stored` with `EXCITE=EOMEE` runs with one rank: with more the program
+  stops with a message.)
 
 The steps can be separate invocations in one directory: `CALC=CCSDT`
 (serial or one rank), then `CALC=CCSDT(Q)` with `mpirun ...`: the second
@@ -246,7 +248,9 @@ Written:
 | `xfull`, `dpoo`, `dpvv`, `dii0`, `daa0`, `dpopo`, `dpvpv` | `density`, `ccsdt_density`: the input of CFOUR's `xx2czvec` (section 10.2: one record each, complex, CFOUR's order of the spinors) |
 | `xzccsdt.rNNNN` | output of the ranks other than 0 (MPI) |
 | `XZEOM`; `JOBARC`: `TOTENER2` | `eom`, `ccsdt_eom`: a text line per excited state (shift, root, omega, total energy, residual, weights); the total energy of the lowest state (section 16.1) |
-| `XZEOMR` | the vectors of the roots (section 16.1; not with `%xzeomvec 0`, not if the disk is short) |
+| `XZEOMR` | the vectors of the roots (section 16.1; not with `%xzeomvec 0`, not if the disk is short); EOM-CC4: written root by root (19.3) |
+| `XZCC4` | CC4: the amplitudes and the held T4 terms of the last completed T4 evaluation, or the converged CC4 amplitudes - what a later run of the same ZMAT continues from or takes (19.5) |
+| `XZE4R.nnn`, `XZE4Q.nnn` | EOM-CC4, per problem (label shift) nnn: the roots that are done and the vectors; the last T4 evaluation of the root in hand (19.5) |
 | `EOMCnnnn`, `EOMHnnnn` | only if the subspace of the EOM solver does not fit in the work array: its vectors and their sigma vectors (CFOUR's names), deleted at the end (section 16.4); over ranks `EOMCnnnn.<rank>`, `EOMHnnnn.<rank>`: the rows of a rank other than 0 (16.7) |
 
 A run that reads `XZAMPS` or `XZLAMB` must run in the mode of the run that wrote it
@@ -312,6 +316,7 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzq.inc`, `xzqs.inc` | (Q) and (Q)_Lambda: the task loop and the dense quadruple; the quadruple in sectors of the labels |
 | `xzeom.inc`, `xzeoms.inc`, `xzeomd.F90` | EOM-EE-CCSDT: the intermediates of the ground state and the sigma vector; the solver, the driver, the test hooks and the vector operations over ranks; the input (flags, ZMAT sections), the label shifts and their layout, the slices and commands of the ranks, the results (section 16) |
 | `xzcc3.inc` | CC3 (section 17): the step without stored triples, the batches of occupied triples and their fold, the diagonal Fock operator of T3, the folded EOM sigma vector and its driver |
+| `xzcc4.inc` | CC4 (section 19): the T4 terms of the doubles and triples equations per occupied quadruple (dense and in sectors, with label shifts), the extrapolation over the macro iterations, the T4 terms of a sigma vector and the folded EOM driver, the files of a later run (`XZCC4`, `XZE4R`, `XZE4Q`, `XZEOMR`) |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
 Kernels of `csrc/` that are called: `zc_t3_pass1r`, `zc_t3_pass2r` (the
@@ -4213,6 +4218,7 @@ package):
 | `eomsig file`, `eomsd` | the sigma vector of the vector of a file; its singles-doubles block (16.5); over ranks too (16.7) |
 | `mpitest n` | the chunked transfers on arrays of n words (15.2) |
 | `qsample x`, `qstop n` | (Q): a sample of the quadruples; stop after n tasks (restart test, section 5) |
+| `cc4stop n` | CC4: the run stops after its n-th evaluation of the T4 terms (restart test, 19.5) |
 | `qcost file`, `bcost file` | the seconds of the tasks of (Q) / of the batches of the iterations |
 | `r0load a b` | a load of rank 0 by hand in the deal of the batches |
 
@@ -4227,7 +4233,7 @@ line `foo 3` - the program stops with the two lists; the variables
 
     CALC=CC4                    CC4, the quadruples never stored
     CALC=CC4, EXCITE=EOMEE      CC4, then EOM-EE-CC4 with the quadruples folded in (the label shifts of %xzeom)
-    mpirun -np 4 xzccsdt        the ground state over ranks (the excited states: one rank)
+    mpirun -np 4 xzccsdt        the ground state and the excited states over ranks (19.4)
 
 `CALC=CC4` is joda's level 52.  CC4 of docs/ccn.md (sections 1, 2, 11): the
 singles, doubles and triples equations of CCSDTQ, the quadruples equation to
@@ -4237,7 +4243,12 @@ the check of 17.1 runs for CC4 too.  The reference of every number is the
 Python program (`ccn.cc4_kernel(store_t4=False)`, `cc.cc4fly`), which is
 validated against MRCC's CC4.  Sources: `xzcc4.inc`, `csrc/cc4_native.c`
 (added; not in the Python build), the loop of `xzcc.inc`, two lines of
-`xzstep.inc`.
+`xzstep.inc`, and for the excited states the solver of section 16
+(`xzeoms.inc`, `xzeomd.F90`).
+
+A run of production size takes days, so every completed evaluation of the T4
+terms is written down: a run of the same ZMAT in the same directory goes on
+after the last one (19.5).
 
 ### 19.1 The T4 terms (`xzt4`, `xz4run`)
 
@@ -4250,58 +4261,86 @@ of T4 exists at any time:
    routines of the CCSDT step (`xzfock`, `xzdroo`, `xzdrovvq`, `xzdrov`,
    `xzbv` and a sweep over the rows of the dressed `<ab||cd>` for
    `<ab||ei>~`), T2 in three layouts, Xo (`xz4xo`: `xzqxo` of (Q) with the
-   dressed `<mn||jk>`, `<md||el>`).  (Q) reads `<ab||ei>` and `<ma||ij>` as
-   conjugates of the stored `<ie||ab>`, `<ij||ma>`, which holds for bare
-   integrals only: here the two dressed blocks are laid out as (Q) wants its
-   operands, `- <ab||ex>~` as `[x][e][Q]` and `<ma||ij>~` as `[i][j][m][a]`
-   (`xz4q12`), and nothing is conjugated.
+   dressed `<mn||jk>`, `<md||el>`).  **The rows of the dressed `<ab||cd>` of
+   that sweep are kept** - one array in the blocks of the bare integral -
+   for Xv.  (Q) reads `<ab||ei>` and `<ma||ij>` as conjugates of the stored
+   `<ie||ab>`, `<ij||ma>`, which holds for bare integrals only: here the two
+   dressed blocks are laid out as (Q) wants its operands, `- <ab||ex>~` as
+   `[x][e][Q]` and `<ma||ij>~` as `[i][j][m][a]` (`xz4q12`), and nothing is
+   conjugated.
 2. **per occupied quadruple** - the task list of (Q) (section 5: groups of
-   one largest index l that share Xv(x, l), dealt to the ranks; no
-   checkpoints):
-   - the right-hand side: the five products of (Q) (section 5) summed into
-     one row (dense: `xz4fwd`, in batches of columns as (Q); in the sectors
-     of the labels: `xz4sfw`, the blocks of the total class of the
-     quadruple);
-   - the row over `e_ijkl - e_abcd`: dense `zc_cc4_divide`; in sectors
-     `zc_cc4_sector_t4`, which walks through the virtual quadruples of the
-     sector as `zc_q_sector_energy` does and writes every amplitude, with
-     the sign of the split, to the places of the blocks it was summed from -
-     the row expanded on two pairs and on an index and a triple at once;
-   - the four sums (`xz4back`, `xz4sbk`): `R2[P] += sgn X22 <P'||.>` (six
-     splits), `R3[J] += sgn f~[m] X13`, `R3[J] += ` the reduction (c | ab)
-     of `sgn <mc||ef>~ X22` (four splits; in sectors `zc_cc4_red12`), and
-     the rows `R3[(k, P)] += sgn sgn' <P'||ke>~ X13` - the last two terms of
-     the triples as one product with a stack of coefficient rows and one
-     scatter (`zc_cc4_addrows`).  Dense: the row is expanded (`zc_tn_expand`)
-     in the batches of columns of the products, so the buffers of a
-     quadruple are those of (Q) plus `[nv][columns]` and `[4 + 6 o][columns]`.
+   one largest index l that share Xv(x, l), dealt to the ranks) - a row of
+   T4 is made and contracted.  In the sectors of the labels (`xz4sfw`,
+   `zc_cc4_sector_t4i`, `xz4sbk`) the row lives twice, as in (Q): blocks on
+   two pairs `[(ab)][(cd)]` (one per group of (ab)) and blocks on an index
+   and a triple `[a][(bcd)]` (one per class of a), about 8 n_v^4 / (4
+   classes) and 8 n_v^4 / (6 classes) bytes.  A pass over them is what an
+   evaluation costs, so every block is touched as few times as the algebra
+   allows:
+   - *right-hand side, two pairs*: one product per block.  The rows of both
+     kinds of splits - `- <ab||ex>~` with `t(J; e, cd)` and `t(x m, ab)` with
+     `Xo(m; J; cd)` - are stacked along the summed index (all blocks of the
+     row in one parallel loop over block and split) and the block is set by
+     one GEMM;
+   - *right-hand side, an index and a triple*: one pass over the columns of
+     a block (`zc_cc4_rowsmm`).  Its right operands are rows that lie
+     elsewhere - rows of T3 for `<ma||ij>~ t(m kl; bcd)`, rows of three Xv
+     for `2 t(ij, ae) Xv(e; kl; bcd)` -; a thread takes blocks of 512
+     columns, gathers the rows of a block into its cache and multiplies them
+     there;
+   - *the row over `e_ijkl - e_abcd`* in place (`zc_cc4_sector_t4i`): every
+     place of the blocks with four different indices is one split of one
+     virtual quadruple, so the quadruple reads its ten places, and the
+     amplitude, with the sign of the split, is written over them.  The ten
+     places are found from the tables for the first d of a run of
+     consecutive d and stepped from there (one element where d is in the
+     columns, one row where it is in the rows).  The places with a common
+     index belong to no quadruple and are set to zero; nothing else is;
+   - *contractions, two pairs*: a block is read once - one GEMM whose left
+     operand has the rows of `<mc||ef>~` of the four splits (m | J) and
+     those of `<mn||ef>` of the doubles term stacked; its result is the
+     doubles term and, reduced (c | ab) onto the triples (`zc_cc4_red12`),
+     the term `R3[J] += <mc||ef>~ X22`;
+   - *contractions, an index and a triple*: one pass over the columns of a
+     block (`zc_cc4_addmm`): `R3[J] += f~[m] X13` and `R3[(k, P)] +=
+     <P'||ke>~ X13` are added to the rows of R3 where they are.
+
+   Without labels (`xz4fwd`, `zc_cc4_divide`, `xz4back`) the row is one
+   packed array C(v,4) and the products run in batches of columns, as in
+   (Q): the buffers of a quadruple are those of (Q) plus `[nv][columns]` and
+   `[4 + 6 o][columns]`.
 3. **ranks**: every rank its tasks and its own two sums; the doubles term is
    summed on all ranks, the triples term onto rank 0 (chunked, section 15).
 
-**Xv with the dressed `<bc||ef>`.**  The dressed `<ab||cd>` is never stored
-(the CCSDT step makes it in slabs).  Dense: the rows of a step of Xv are
-dressed with the kernel of the sweep (`xzdrrows`) before they are expanded.
-In sectors the block `[(bc)][e][f]` of a group of pairs and two classes is
-dressed where it is (`xz4sxv`: `zc_vvvv_dress` on these columns, with
-`<my||ef>` and `<mn||ef>` of the two classes gathered for it).  This makes
-Xv dearer than in (Q) - 36 s of 380 s for 26 + 120, 0.6 s of 1.4 s for 8 +
-78 (few occupied spinors: few quadruples per Xv) - and is the first thing
-to make faster (the classes of m are not used in the dressing).
+**Xv** is that of (Q) (`xzqsxv`, `xzqxv`) on the kept dressed `<ab||cd>`:
+per pair (x, l) the block `[(bc)][e][f]` of a group of pairs and two classes
+is read and multiplied with `t2[x][l][f][d]`.  (Until 2026-10-13 the block
+was dressed again for every pair, with `<my||ef>` and `<mn||ef>` gathered
+for all m: 34 s of 358 s for 26 + 120, 0.45 s of 0.79 s for 8 + 78.)
 
-### 19.2 The iterations: from CCSDT, macro / micro
+**What bounds an evaluation now** (19.8): the passes over memory.  For 26 +
+120 a row is 67 MB, and a quadruple reads or writes about 0.4 GB (counted
+from the sizes of the arrays, not measured) - 46 MB of stacked operands and
+blocks on two pairs, 143 MB for the blocks on an index and a triple (the
+rows of three Xv are 81 MB of it), the row once in place, and 130 MB in the
+contractions (66 MB of it rows of R3) - in 11.8 ms on 24 cores of one
+socket.  The two GEMMs with a long summed index (two pairs,
+forward and back) are a fifth of the time.
+
+### 19.2 The iterations: from CCSDT, macro / micro, extrapolated
 
 The CCSDT step takes the two sums as fixed parts of its residuals (`cc4` of
 `xzdata`; `jd42`, `jd43`: one array of the size of T3 more on every rank).
-A T4 evaluation costs as much as 1.3 (Q) - about a hundred CCSDT iterations
-for 26 + 120 -, so the iterations are arranged to need few of them:
+A T4 evaluation costs as much as 0.61 (Q) - 42 CCSDT iterations for 26 +
+120 (19.8; 1.24 (Q) before 2026-10-13) -, so the iterations are arranged to
+need few of them:
 
 - **Start: the CCSDT amplitudes.**  If `XZAMPS` belongs to these integrals
   (`XZKEY`, section 1: a CCSDT run of this directory, converged at least as
   tightly) it is the start; otherwise CCSDT is solved first in the same run
-  and written to `XZAMPS` / `XZKEY` exactly as a CCSDT run writes it.  **CC4
-  amplitudes are never written**: `XZAMPS` is always that of CCSDT, the
-  start of CC4 and never its result, so no other run can take CC4
-  amplitudes for those of CCSDT.
+  and written to `XZAMPS` / `XZKEY` exactly as a CCSDT run writes it.
+  `XZAMPS` is always that of CCSDT, the start of CC4 and never its result;
+  the CC4 amplitudes go to a file of their own, `XZCC4` (19.5).
 - **Macro / micro.**  The T4 terms are evaluated at the present amplitudes
   (a cycle marked `T4 n`), the DIIS sequence starts again, and the equations
   of CCSDT with these terms are iterated - cycles of the cost of CCSDT -
@@ -4309,34 +4348,57 @@ for 26 + 120 -, so the iterations are arranged to need few of them:
   of the first step after the evaluation; then the terms are evaluated
   again.  Converged when the first step after an evaluation is below the
   thresholds of `CC_CONV` (the test of a plain iteration), or - saving that
-  last evaluation - when the first steps of the last two evaluations d1, d2
-  say that the next would be: `2 (d2 / d1) d2` below the thresholds (the
+  last evaluation - when the first steps of the evaluations say that the
+  next would be: `2 kappa d` below the thresholds, d the last first step
+  and kappa the largest factor between two of them that was seen (the
   output says so: `new T4 terms would change the amplitudes by about ..`).
   `cc4 confirm` asks for the confirming evaluation.
+- **Extrapolation over the macro iterations** (`xz4acc`; Anderson with one
+  step of history).  A macro iteration is a map G: amplitudes x, at which
+  the terms are evaluated, to the amplitudes g that solve the equations with
+  them.  With f = g - x of this and of the macro iteration before, the next
+  evaluation is made at
+
+      x' = g - theta (g - g_before),   theta = <f, f - f_before> / |f - f_before|^2
+
+  (measured theta: -0.01 to -0.04; a theta beyond 1/2 in size is not
+  taken).  The first steps then fall by a factor of 0.01 to 0.06 per
+  evaluation instead of 0.04 to 0.08, which **saves one evaluation in five
+  of the seven cases below and two in one**.  It takes three sets of
+  amplitudes on rank 0 (x, g_before, f_before: three times T3 and T2); the
+  plan puts them into the work array if they fit there before any batch
+  grows, and says so if they do not (`no room for its three sets of
+  amplitudes: about one T4 evaluation more`).  `cc4acc 0` switches it off.
 - `cc4 plain`: the T4 terms in every iteration (from the CCSDT amplitudes);
   `cc4 scratch`: the same from the second-order amplitudes without CCSDT -
   the iteration of the Python program.
 
 Every macro iteration prints the energy that its T4 terms give and the
-factor by which the first step fell; measured factors: 0.04 to 0.08 per
-evaluation.
+factor by which the first step fell.
 
 **T4 evaluations to convergence** (all runs converge to the same energy
-within the threshold; 8 threads, the holding job):
+within the threshold; 8 threads, the holding jobs; QZ: 24 threads, 19.8):
 
-| case | CC_CONV | macro / micro | `cc4 confirm` | `cc4 plain` (from CCSDT) | `cc4 scratch` |
-|---|---|---|---|---|---|
-| H2O / 6-31G (10 + 16) | 9 | 6 | 7 | 13 | 17 |
-| | 7 | 5 | 5 | 9 | 13 |
-| HBr / cc-pVDZ-DK (8 + 28) | 10 | 6 | 7 | 15 | 19 |
-| | 7 | 4 | 5 | 9 | 14 |
-| HBr / cc-pVTZ-DK (8 + 78) | 10 | 8 | 8 | 17 | 21 |
-| | 7 | 5 | | 11 | 14 |
-| HBr / cc-pVQZ-DK (26 + 120; 19.6) | 7 | 6 | | 13 | |
+| case | CC_CONV | macro / micro (default) | `cc4acc 0` | `cc4 confirm` | `cc4 confirm`, `cc4acc 0` | `cc4 plain` (from CCSDT) | `cc4 scratch` |
+|---|---|---|---|---|---|---|---|
+| H2O / 6-31G (10 + 16) | 9 | 5 | 6 | 6 | 7 | 13 | 17 |
+| | 7 | 4 | 5 | 5 | 5 | 9 | 13 |
+| HBr / cc-pVDZ-DK (8 + 28) | 10 | 5 | 6 | 6 | 7 | 15 | 19 |
+| | 7 | 4 | 4 | 4 | 5 | 9 | 14 |
+| HBr / cc-pVTZ-DK (8 + 78) | 10 | 6 | 8 | 7 | 8 | 17 | 21 |
+| | 7 | 4 | 5 | 5 | | 11 | 14 |
+| HBr / cc-pVQZ-DK (26 + 120; 19.8) | 7 | 5 | 6 | | | 13 | |
+
+The first steps of 26 + 120, CC_CONV=7 (the change of the amplitudes; job
+of the holding node, 24 threads): 1.6e-2, 1.2e-3, 5.0e-5, 1.5e-6, 9.2e-8
+with the extrapolation, 1.6e-2, 1.2e-3, 9.0e-5, 7.2e-6, 6.0e-7 and a sixth
+evaluation without; E(CC4) -2605.340463043361 and ..043035 (3.3e-10 apart,
+CC_CONV=7).
 
 **How good are few evaluations?**  The error of the correlation energy
 after the equations with the T4 terms of evaluation n are solved (Eh; the
-effect of T4 is E(CC4) - E(CCSDT)):
+effect of T4 is E(CC4) - E(CCSDT); without the extrapolation, which acts
+from n = 3 on):
 
 | case | E(CC4) - E(CCSDT) | n = 1 | 2 | 3 | 4 |
 |---|---|---|---|---|---|
@@ -4351,7 +4413,8 @@ One evaluation on the converged CCSDT amplitudes gives 97 to 99.9 % of the
 effect where the effect is ordinary and two thirds of it for 26 + 120
 (where E(CC4) - E(CCSDT) is a small sum of larger parts: (Q) is +8.7e-5
 there); every further evaluation gains a factor of 12 or more.  Three
-evaluations are within 1.2e-7 Eh in all cases.
+evaluations are within 1.2e-7 Eh in all cases (26 + 120 with the
+extrapolation: 5e-8 after three, 1e-9 after four).
 
 ### 19.3 EOM-EE-CC4 (`xze4`, `xzeom4f`)
 
@@ -4368,18 +4431,19 @@ over the occupied quadruples, `xz4run` with `eom`):
     t4 of the ground state (made again)                                                            with H'   -> sigma_2, sigma_3
 
 H' = [H~, R1]: `<ab||ei>' = - P(ab) r1[m][a] <mb||ei>~ + <ab||ef>~ r1[i][f]`
-(the second part from the dressed rows of the bare `<ab||cd>`, of which
-`xzeomim` keeps a copy for CC4: the pp operator is in its place), the
-derivatives of the small blocks that `xzesig` has (`xzehs`, `xzeh1`),
-`<mb||ef>' = - r1[n][b] <mn||ef>`, and for Xv `<bc||ef>'` (`xzedrows`).
-The right-hand side of r4 is not made by polarization (the Python program:
+(the second part from the dressed `<ab||cd>`, of which `xzeomim` keeps a
+copy for CC4 - the pp operator is in the place of the bare one - that
+`xz4eomim` dresses where it is), the derivatives of the small blocks that
+`xzesig` has (`xzehs`, `xzeh1`), `<mb||ef>' = - r1[n][b] <mn||ef>`, and for
+Xv `<bc||ef>' = - P(bc) r1[m][b] <mc||ef>~`, made once per sigma vector in
+blocks of the shift (rows of group q, pairs (ef) of group q - s).  The
+right-hand side of r4 is not made by polarization (the Python program:
 three passes with T +- R) but directly, in two calls of the products: (H'
 operands; t2, T3; Xo and Xv of (H', t2) plus those of (H~, r2), which enter
 with the same left operand and are summed once) and (H~ operands; r2, R3;
 Xo, Xv of the ground state).  So a sigma vector with the T4 terms is three
-right-hand sides and two contractions - measured 2.4 to 2.8 T4 evaluations of
-the ground state (19.6) - and holds two Xo and
-two sets of Xv.
+right-hand sides and two contractions - measured 2.3 to 2.4 T4 evaluations of
+the ground state (19.8) - and holds two Xo and two sets of Xv.
 
 **Label shifts.**  Every operand of a product has a shift in classes (0:
 ground state; s: r1, r2, R3 and H').  A quadruple of total class M has its
@@ -4410,7 +4474,12 @@ of the vector, which follows them only in the next macro iteration).
 
 `cc4eom davidson`: the solver on the folded matrix at fixed omega, every
 sigma vector with the T4 terms, omega by the secant step - the algorithm of
-17.4, as a check.  No file `XZEOMR`; one MPI rank.
+17.4, as a check.
+
+**The file `XZEOMR`** has the vectors of the roots in the format of the
+other EOM methods (16.1; not with `%xzeomvec 0`): a root is written when it
+is done with the T4 terms - singles, doubles and triples at its own
+frequency -, so that a later run goes on behind it (19.5).
 
 **Is one evaluation enough?**  Per root the output has (i) omega without
 the T4 terms (A_PP at the CC4 amplitudes), (ii) the Rayleigh quotient of
@@ -4443,32 +4512,170 @@ So one evaluation is enough for 1e-4 Eh, not for 1e-5.  Note that
 most of what CC4 changes in an excitation energy is in (i) already, through
 the ground-state amplitudes.
 
-### 19.4 Memory
+### 19.4 EOM-EE-CC4 over MPI ranks
+
+    mpirun -np 4 xzccsdt        # CALC=CC4,EXCITE=EOMEE; no option
+
+The excited states run over the ranks in every mode (real and complex, the
+blocks of every label shift and dense, both solvers).  Two things are
+distributed, each as its ground-state or EOM-CCSDT counterpart is:
+
+- **The T4 terms of a sigma vector** as those of the ground state: the pass
+  over the occupied quadruples goes over the tasks of (Q), every rank its
+  tasks (`xz4run`).  A rank adds its part of the triples term to all rows
+  of its sigma_3 and its part of the doubles term to an array of its own;
+  the doubles term is summed on all ranks (`MPI_Allreduce`), and the rows of
+  sigma_3 go to their owners in the one exchange that ends a distributed
+  sigma vector (16.7) - the T4 terms are made before it.  Every rank makes
+  the operands itself (the kept ones once, `xz4eomim`; those of the vector
+  per sigma vector), as it makes the intermediates of 16.7.
+- **The rest of a sigma vector and the vectors of the solver** by the route
+  of 16.7: rank 0 runs the solver and commands; every rank does its batches
+  of the two residuals and holds its rows of R3 of every vector of the
+  subspace.  Macro / micro adds the two sets of vectors q and F: **every
+  rank holds its rows of them** (kinds 3 and 4 of the vector store of the
+  solver, `xzevput`, `xzevmdot`, `xzevcomb`, `xzevget`), and the matrix B of
+  19.3 is applied by rows - the overlaps (q|x) summed onto rank 0, `x - q
+  (q|x)` on the rows of every rank, the distributed sigma vector, `+ F
+  (q|x)` on the rows; the vector of the basis comes back from the store.
+  Three commands were added: `fold` (the sigma vectors that follow have the
+  T4 terms at this frequency), `qopen` (the place of q and F), `get` (a
+  vector of the store into the work vector).  Rank 0 has the whole vectors
+  of the roots of the problem (the start of every root, the result).
+
+**What a rank holds** (the plan of rank 0 runs the EOM stage as itself and
+as another rank, 16.7; the excited states of CC4 are in it):
+
+| | every rank | rank 0 besides |
+|---|---|---|
+| for all sigma vectors | integrals with the pp operator, T1, T2, **T3**, the kept intermediates of 16.2, the dressed `<ab||cd>`, **Xo of the ground state** | the vectors of the roots (roots x a vector) |
+| a sigma vector with the T4 terms | 2 whole vectors, the arrays of 16.2, **Xo of the vector**, `<bc||ef>'`, two sets of Xv, the row of one quadruple with its stacks | |
+| macro / micro | its rows of q and F (2 x roots of a cluster x its slice) | with the singles and doubles |
+| the solver | its rows of the subspace (16.7) | |
+
+Measured (MB; HBr / cc-pVDZ-DK 8 + 28, shifts 0, 2, 4, 6, two ranks): rank
+0 plans 27.4 and holds up to 10.3 of the subspace besides, used 29.7; the
+other rank plans 28.0, used 24.5.  For 26 + 120: 19.8.
+
+**Xo is the large piece: 40 GB per rank at the size of ThF+, twice (ground
+state and vector), and the same numbers on every rank.**  The ranks of a
+node could share Xo of the ground state, the dressed `<ab||cd>` and T3 - all
+read-only during the excited states - as (Q) shares T3, by mapping a file;
+Xo of the vector is the same on all ranks as well but changes with every
+sigma vector, so sharing it means one rank of a node writing it and the
+others waiting.  **Not implemented**: the four arrays are regions of the
+stack of the work array, which the plan runs dry rank by rank; taking them
+out needs a second kind of region (mapped, per node, written by one rank),
+its place in the plan, the wait of the other ranks per sigma vector, and a
+file of 40 to 80 GB per node in the page cache or in `/dev/shm`.  It would
+save 80 GB and T3 for every further rank of a node; on one rank per node
+(the layout of 19.9) it saves nothing.
+
+**Validation** (holding job 31915920, node c432; the roots of `XZEOM`,
+12 digits printed; serial against ranks):
+
+| case | runs | largest difference of a root / Eh |
+|---|---|---|
+| HBr / cc-pVDZ-DK, `%dglin`, real blocks, shifts 0, 2, 4, 6 (2, 2, 2, 1 roots; shift 0 a cluster of two), 1e-8 | serial; MPI build on 1, 2, 3, 4 ranks (8 and 4 threads per rank); `eomvec f` on 2 ranks; 3 ranks of one thread with `plan 5 2 1 1 3 0 0 0`, `mpichunk 3001`, `slices 0` | 0 (all 12 digits) |
+| the same, `cc4eom davidson` | serial, 2, 3 ranks | 0 |
+| the same, complex blocks (`real 0`) | serial, 2, 3 ranks | 0 |
+| H2O / 6-31G, complex dense, 4 roots (a cluster of three), 1e-9 | serial, 2, 3, 4 ranks | 0 |
+| HBr, complex dense (`labels 0`, `real 0`), 4 roots | serial, 2, 3, 4 ranks | 0 |
+| HBr, real dense (`labels 0`), 14 roots, 1e-8 | serial, 2, 4 ranks | 6.3e-10 (roots 10, 11, 13, 14: clusters; the solver of the stage without T4 terms takes another path over ranks, 16.7; threshold 1e-8) |
+
+E(CC4) is that of the serial run in all of them.  `regress.sh --eom`
+serial and `--np 2 --eom`: REGRESSION OK.
+
+### 19.5 Checkpoint and restart
+
+Nothing has to be asked for: the files are written by rank 0 in its run
+directory, each as `<name>.new` that then takes the name (an interrupted
+write leaves the file of before), each with the numbers of `XZKEY` (the
+active spaces, E(SCF), the sums of the spinor energies: section 1), so that
+the files of another calculation in the directory are not taken.  **A run
+of the same ZMAT in the directory goes on after the last completed
+evaluation and says so**:
+
+      amplitudes: the file XZCC4 of an earlier run of these integrals: its CC4 iterations after    2 T4 evaluations
+                  (the amplitudes of the last completed one and its T4 terms) - this run CONTINUES from there
+
+| file | written | content |
+|---|---|---|
+| `XZCC4` | after every T4 evaluation of the ground state (macro / micro), and at convergence | the amplitudes at which the evaluation was made, its two held terms (R2, R3), the count, g and f of the extrapolation; at convergence the converged amplitudes alone |
+| `XZE4R.nnn` | per problem (label shift) nnn of the excited states: when the roots without the T4 terms are there, and after every root | these roots and the vectors (the start), the roots that are done (the line of the table), the place in `XZEOMR` |
+| `XZE4Q.nnn` | after every T4 evaluation of the root in hand; removed when the root is done | q, F, the frequency of the evaluation, the counts |
+
+What a rerun does:
+
+- `XZCC4` with a completed evaluation: the amplitudes and the held terms are
+  read (over ranks: rank 0 sends the doubles term), and the equations with
+  them are iterated - the first step is the first one after that
+  evaluation, DIIS from new, as in the run that wrote the file.  The
+  micro iterations that the earlier run did after it are done again (cheap).
+- `XZCC4` with converged amplitudes, `CC_CONV` at least that of this run:
+  taken, no iteration (`taken, the CC4 iterations are skipped`).  Converged
+  less tightly: they are the start (an evaluation first).  **This is what
+  the excited states of a later run start from**; `XZAMPS` stays the CCSDT
+  file.
+- `XZE4R.nnn`: the stage without T4 terms of that problem is skipped, the
+  roots that are done are printed from the file, and the root in hand
+  continues - with `XZE4Q.nnn` from the eigenproblem of its last evaluation
+  (q, F and the frequency from the file; q is also the start of the
+  solver), otherwise from its first evaluation.
+- The files of a finished calculation stay; a rerun prints the result
+  without an evaluation.  A file of another mode (option `labels`, `real`
+  changed) stops the run with the message of `XZAMPS`.  `cc4 plain` and
+  `cc4 scratch` write the converged amplitudes only, and `cc4 scratch` does
+  not read `XZCC4`; `cc4eom davidson` has no files of its roots but
+  `XZEOMR`.
+
+`cc4stop n` (a test hook) stops the run after its n-th T4 evaluation -
+those of the ground state and the sigma vectors with the T4 terms counted
+together.
+
+**Check** (HBr / cc-pVDZ-DK 8 + 28, CC_CONV=10; `XZEOM` to 12 digits; the
+counts are evaluations of the earlier runs + of the last run):
+
+| chain | result | evaluations |
+|---|---|---|
+| CC4: stopped after evaluation 2 (serial), continued on 3 ranks | E_corr -0.143067769768; theta of the three extrapolations as in the uninterrupted run (-0.00938, -0.03367, -0.01038) | 2 + 3 = 5 |
+| stopped after 3 (2 ranks), continued serial; a third run | the same; the third run takes the converged amplitudes | 3 + 2 = 5; 5 + 0 |
+| HBr / cc-pVTZ-DK (8 + 78): stopped after 4 | E_corr -0.199127895284 | 4 + 2 = 6 |
+| `cc4acc 0` (the state of commit 7562fba): stopped after 1, after 2, after 3, on 1 to 3 ranks | E(CC4) -2604.989510441935 in every chain | 2 + 4, 3 + 3, 1 + 2 + 3 = 6 |
+| CC_CONV=11 on the file of CC_CONV=10 | the amplitudes are the start | 6 + 2 |
+| EOM-CC4, 4 shifts (7 roots): stopped inside the cluster of shift 0 (2 sigma vectors with the T4 terms), again after its first root and the first evaluation of the second, again inside shift 2; 1, 2, 1, 3 ranks | all roots to the 12 digits; `XZEOMR` as that of the uninterrupted run (1 - \|<v\|v'>\| below 1e-15); a fifth run prints everything from the files | shift 0, root 1: 10 = 2 + 8; root 2: 4 = 2 + 2; shift 2, root 1: 5 = 1 + 4 |
+| H2O / 6-31G, the cluster of three: stopped after 6 and after 12 sigma vectors with the T4 terms; 1, 2, 1 ranks | the four roots to the 12 digits | 21 = 6 + 6 + 9 |
+| the same with `XZEOMR` removed after the first run | the roots; the program says that the file of the earlier run is not there and writes none | |
+
+### 19.6 Memory
 
 The plan (section 4) runs the scheduler dry through the T4 evaluation as a
 stage of the iterations, with the batch parameters of (Q) (`qxv`, `qc22`,
 `qc13`, `qrows`: raised after those of the CCSDT step, before the DIIS
 vectors are placed), on every rank; the floor stops the run with the words
 needed.  On top of what CCSDT holds: the two sums (one array of the size of
-T3); during an evaluation the dressed `<mb||ef>` and `<ab||ex>` (2 o v
-v(v-1)/2), Xo (C(o,3) o v(v-1)/2: the largest), Xv for the planned
-occupied indices, and the buffers of one quadruple - in sectors two sets of
-blocks on two pairs and two on an index and a triple (one less of each
-than (Q)), dense one row C(v,4) and the column batches.  The arrays of a
-CCSDT step and those of an evaluation are not held together.  Measured,
-26 + 120 in real blocks (19.6): the plan 18.1 GB with the 8 DIIS vectors in
-the work array (CCSDT alone: 14.5 GB; the least: 8.3 GB), used to the word,
-peak resident set 14.3 GB; (Q) of the same case: 5.5 GB.  The Python
-program peaked at 36 times the memory of (Q) for its CC4.
+T3); on rank 0 the three sets of amplitudes of the extrapolation if they
+fit (19.2; they are not part of the floor); during an evaluation the
+dressed `<mb||ef>`, `<ab||ex>` (2 o v v(v-1)/2) and `<ab||cd>` (as the bare
+one), Xo (C(o,3) o v(v-1)/2: the largest), Xv for the planned occupied
+indices, and the buffers of one quadruple - in sectors the row once (its
+blocks on two pairs and on an index and a triple), the stacked operands of
+its blocks on two pairs (2 x 4 (v + o) x the largest group of pairs) and of
+the contractions, dense one row C(v,4) and the column batches.  The arrays
+of a CCSDT step and those of an evaluation are not held together.
+Measured, 26 + 120 in real blocks (19.8): the plan 20.4 GB with the 8 DIIS vectors and the
+three sets of the extrapolation (2.2 GB) in the work array (CCSDT alone:
+14.5 GB; the least: 8.3 GB), used to the word, peak resident set 15.2 GB;
+(Q) of the same case: 5.5 GB.  The Python program
+peaked at 36 times the memory of (Q) for its CC4.
 
-The excited states: a sigma vector with the T4 terms holds a second Xo, a
-second set of Xv and the operands of H'; the solver keeps the vectors of
-the roots and, for the macro iterations, two vectors per member of a
-cluster; its subspace goes to files if the work array is short (16.4).
-HBr / cc-pVDZ-DK with `maxcor` 0.9 % above the floor of 27.0 MB: the same
-roots, the subspace of the largest problem in files.
+The excited states: 19.4.  The solver keeps the vectors of the roots and,
+for the macro iterations, two vectors per member of a cluster; its subspace
+goes to files if the work array is short (16.4).  HBr / cc-pVDZ-DK with
+`maxcor` 1 % above the floor of 26.8 MB: the same roots (5e-12), the
+work array used to 100.0 %.
 
-### 19.5 Validation
+### 19.7 Validation
 
 Native against Python on the same CFOUR files (`zccsdt.cfour.from_cfour`,
 `ccn.cc4_kernel(eris, 1e-12, 1e-10, store_t4=False)`; reference directories
@@ -4477,28 +4684,33 @@ of 16.5):
 | case | Python | native |
 |---|---|---|
 | H2O / 6-31G, X2C-1e (10 + 16), complex dense, CC_CONV=9: E_corr(CCSDT) | -0.13650476098947 | -0.136504760992 |
-| E_corr(CC4) | -0.13697006920966 | -0.136970069211 (macro / micro), ..210 (confirm, plain), ..212 (scratch) |
-| HBr / cc-pVDZ-DK, `%dglin`, 28 frozen (8 + 28), CC_CONV=10: E_corr(CC4) | -0.14306776976830 | -0.143067769769 (macro / micro), ..768 (confirm, plain, scratch) |
-| H2O / 6-31G, nonrelativistic RHF as spin orbitals (`h2o_631g_nr`: the integrals of the MRCC reference): E(CC4) | -76.120890191123 (docs/ccn.md 12; MRCC: 8e-13) | -76.120890191106 (CC_CONV=9) |
+| E_corr(CC4) | -0.13697006920966 | -0.136970069209 (default), ..211 (`cc4acc 0`), ..210 (confirm, plain), ..212 (scratch) |
+| HBr / cc-pVDZ-DK, `%dglin`, 28 frozen (8 + 28), CC_CONV=10: E_corr(CC4) | -0.14306776976830 | -0.143067769768 (default, plain, scratch), ..769 (`cc4acc 0`, confirm) |
+| H2O / 6-31G, nonrelativistic RHF as spin orbitals (`h2o_631g_nr`: the integrals of the MRCC reference): E(CC4) | -76.120890191123 (docs/ccn.md 12; MRCC: 8e-13) | -76.120890191106 (CC_CONV=9, `cc4acc 0`) |
 | HF / 6-31G, X2C-1e (10 + 12; the package test, without labels): E_corr(CC4) | -0.13230791419589 | -0.132307914197 |
-| EOM-CC4, the three lowest roots (`cc4fly.eom`, 1e-8; native `%eomthrs 1e-9`, macro / micro) | 0.377265907539 (twice), 0.378090274216 | 0.377265907522 (twice), 0.378090274212: 1.7e-11 |
+| EOM-CC4, the three lowest roots (`cc4fly.eom`, 1e-8; native `%eomthrs 1e-9`, macro / micro) | 0.377265907539 (twice), 0.378090274216 | 0.377265907522 (twice), 0.378090274212: 1.7e-11 (`cc4acc 0`); 0.377265907520 (twice), 0.378090274211 with the extrapolation in the ground state, serial and on 2 ranks |
 | H2O / 6-31G (10 + 16), EOM-CC4, the lowest triplet | its folded solver does not settle on the three nearly degenerate components (the weakness of 17.4): root 1 moves within 0.284455224 .. 232 over 30 frequencies, root 2 reached 0.284455510848 with |lambda - omega| 1e-8 and then drifts | 0.284455230604, 0.284455512076 (inside that scatter, 5e-9) |
 
-Modes, all to the digits printed (HBr 8 + 28, E_corr(CC4) =
--0.143067769769 / ..768): real blocks of 6 classes, real dense (`labels
-0`), complex blocks (`real 0`), complex dense; 1 and 8 threads; 2 and 4
-ranks with slices, 3 ranks with `slices 0`, `cc4 plain` on 2 ranks; the
-start from `XZAMPS` of an earlier run on 1 and 2 ranks; `maxcor` 1 % above
-the floor (DIIS in the file); explicit small batches (`plan 0 0 0 0 3 7 50
-11` dense: Xv for 3 occupied indices of 7, 7 and 50 columns, 11 rows; `plan
-7 3 2 1 4 1 1 1` for H2O: one column per product) - and below the floor the
-message with the words needed.  H2O (-0.136970069211) likewise on 1, 2, 3
-and 4 ranks.  Larger occupied spaces, blocks against dense: HBr /
-cc-pVDZ-DK with 10 frozen spinors (26 + 28, the 3d shell occupied): E(CC4)
--2605.010443509274 in both; 18 + 28: -2605.002915235616 (E(CCSDT(Q))
--2605.002920087064).
+Modes, all to the digits printed (HBr 8 + 28): real blocks of 6 classes,
+real dense (`labels 0`), complex blocks (`real 0`), complex dense; 1 and 8
+threads; 2, 3 and 4 ranks with and without slices; the start from `XZAMPS`
+of an earlier run on 1 and 2 ranks; `maxcor` 1 % above the floor (DIIS in
+the file, no room for the extrapolation: the path of `cc4acc 0`); explicit
+small batches (`plan 0 0 0 0 3 7 50 11` dense: Xv for 3 occupied indices of
+7, 7 and 50 columns, 11 rows; `plan 7 3 2 1 4 1 1 1` for H2O: one column
+per product) - and below the floor the message with the words needed.  H2O
+likewise on 1, 2, 3 and 4 ranks.  Larger occupied spaces, blocks against
+dense (before the extrapolation): HBr / cc-pVDZ-DK with 10 frozen spinors
+(26 + 28, the 3d shell occupied): E(CC4) -2605.010443509274 in both; 18 +
+28: -2605.002915235616 (E(CCSDT(Q)) -2605.002920087064).
 
-EOM-CC4, internal checks (HBr 8 + 28, `%eomthrs 1e-8`; Eh):
+**The restructured evaluation of 2026-10-13** (19.1) against the one before
+it, same amplitudes: E(CC4) and all roots of the table of 19.4 to the 12
+digits printed, in real and complex blocks, serial and over ranks; the
+first cycle of 26 + 120 and of 8 + 78 (energy, the three norms) to all
+digits printed.
+
+EOM-CC4, internal checks (HBr 8 + 28, `%eomthrs 1e-8`, `cc4acc 0`; Eh):
 
 | shift, root | real blocks, macro / micro | `cc4eom davidson` | complex blocks | dense (one problem, 14 roots) |
 |---|---|---|---|---|
@@ -4514,73 +4726,160 @@ The same digits on one thread with small batches (`plan 5 2 1 1 3 0 0 0`).
 The two solvers agree to 8e-10 (their threshold 1e-8), blocks and dense to
 2e-11.  H2O (complex dense, four roots, `%eomthrs 1e-9`): macro / micro
 0.284455230604, 0.284455512076, 0.284456180025, 0.311283423249; `cc4eom
-davidson` 0.284455230693, ..512127, ..6180139, 0.311283423118.
+davidson` 0.284455230693, ..512127, ..6180139, 0.311283423118.  With the
+extrapolation in the ground state (the default) the roots of HBr are these
+digits but the last of shift 6 (..991), those of H2O move by 2e-12.
 
-`regress.sh` (serial with `--eom`, and 2 ranks) against the binary of
-master (11c6f1d): REGRESSION OK with the final sources - the numbers of the
-other methods are unchanged.  `cfour/merge/test/run.sh`: E(CC4) of HF /
-6-31G, -100.196781330907, added; PASS.
+`regress.sh` (serial with `--eom`, and 2 ranks with `--eom`) against the
+binary of master (29ff500): REGRESSION OK with the final sources - the
+numbers of the other methods are unchanged.  `cfour/merge/test/run.sh`:
+E(CC4) of HF / 6-31G -100.196781330906 (5 evaluations; `cc4acc 0`:
+..907, 6 evaluations; the reference of the test is ..907 to 1e-8); PASS.
 
-### 19.6 Timings
+### 19.8 Timings
 
 HBr / cc-pVQZ-DK, X2C-1e, `%dglin`, `DROPMO=1>5`, `%vircut 4.124587`: 26 +
 120, real, 10 classes (the case of 16.6 and 17.6), CC_CONV=7, MEMORY_SIZE
-60 GB; 2 x Xeon Gold 6248R, the binary built on the node from commit
-11d2b2e (`cc4_time.sbatch` of the work directory), no other job on the
-nodes.  Measured once.
+60 GB; 2 x Xeon Gold 6248R (48 cores, 189 GB).
 
-| | job 31913002 (c134): 24 threads, one socket | job 31913003 (c514): 2 ranks x 24 threads |
+**One T4 evaluation, stage by stage** (node c432, holding job 31915920; 24
+threads on the cores and the memory of socket 0; the first cycle from the
+CCSDT amplitudes, `ncyc 1`; seconds, measured once each):
+
+| HBr / cc-pVQZ-DK, 26 + 120 (14 950 occupied quadruples) | master 29ff500 | Xv from the kept `<ab||cd>` (bc22bc9) | the row with half the passes (22cc8d5) |
+|---|---|---|---|
+| operands | 2.05 | 2.05 | 2.12 |
+| Xv | 34.49 | 2.19 | 2.20 |
+| right-hand side, blocks on two pairs | 38.62 | 38.83 | 25.18 |
+| right-hand side, blocks on an index and a triple | 88.14 | 88.09 | 37.47 |
+| the row over the denominators | 104.38 | 104.71 | 64.30 |
+| contractions | 77.31 | 78.55 | 44.87 |
+| **an evaluation** | **357.85** | 327.33 | **176.23** |
+
+| HBr / cc-pVTZ-DK, 8 + 78 (70 occupied quadruples) | master | bc22bc9 | 22cc8d5 |
+|---|---|---|---|
+| operands | 0.04 | 0.04 | 0.04 |
+| Xv | 0.45 | 0.06 | 0.06 |
+| right-hand side, blocks on two pairs | 0.05 | 0.05 | 0.03 |
+| right-hand side, blocks on an index and a triple | 0.07 | 0.07 | 0.04 |
+| the row over the denominators | 0.09 | 0.09 | 0.08 |
+| contractions | 0.08 | 0.08 | 0.05 |
+| **an evaluation** | **0.79** | 0.40 | **0.28** |
+
+(Xv was 10 % of an evaluation for 26 + 120 and 57 % for 8 + 78; it is 1 %
+and 21 %.)  Inside the stages of 26 + 120 before the second change
+(temporary clocks): of the blocks on an index and a triple 59 s in the
+product with rows of T3 - a loop over columns, not vectorized -; of the
+contractions 45 s in five readings of every block on two pairs; 26 s in
+setting the blocks to zero twice per quadruple; the stacking of small
+operands on one thread.  After it: the two long GEMMs 18 and 20 s, the pass
+of `zc_cc4_rowsmm` 37 s, the row 64 s, `zc_cc4_addmm` 15 s, the reduction
+(c | ab) 4 s.  Tried and not kept: the virtual quadruples of the row in
+tiles of 8^4 (82 s against 78 s for the plain order: the row is not bound
+by its cache lines but by what it reads and writes once); one range of the
+first index per thread (117 s: the ranges cannot be balanced).
+
+**CC4 to convergence and the excited states, before and after** (one job,
+one node, built there from `git archive`; node c432, holding job 31915920, nothing else on the node;
+`cc4f_time.sbatch` of the work directory; master 29ff500 against 398d0c1;
+24 threads on the cores and the memory of socket 0, or 2 ranks x 24 threads
+with `I_MPI_PIN_DOMAIN=omp`; measured once):
+
+| | master 29ff500 | 398d0c1 | ratio |
+|---|---|---|---|
+| CCSDT iteration; (Q), once (24 threads) | 4.16 s (17 cycles); 289.0 s | | |
+| **24 threads: one T4 evaluation** | 358.2 s = 1.24 (Q) = 86 CCSDT iterations | **176.2 s** = 0.61 (Q) = 42 iterations | 2.03 |
+| CC4 from the CCSDT amplitudes, to CC_CONV=7 | 2262.8 s: 6 evaluations (2149.6 s), 27 cycles | **995.2 s: 5 evaluations (882.2 s), 25 cycles** | 2.27 |
+| **2 ranks x 24: one T4 evaluation** | 183.8 s | **91.6 s** (1.92 of 24 threads) | 2.01 |
+| CC4 from the CCSDT amplitudes | 1197.3 s: 6 evaluations (1103.0 s), 27 cycles | **554.1 s**: 5 evaluations (457.5 s), 25 cycles | 2.16 |
+| E(CC4) / Eh | -2605.340463043037 | -2605.340463043362 (both) | |
+| work array, 24 threads: plan = used; peak resident set | 18150.9 MB; 14.3 GB | 20360.8 MB (2198.7 MB: the extrapolation); 15.2 GB | |
+| 2 ranks: plan of rank 0 / of the other; resident (rank 0) | 13565.8 / 13565.8 MB; 12.7 GB | 15775.7 / 13577.0 MB; 15.0 GB | |
+| **EOM-CC4, one root** of shift 2, `%eomthrs 1e-5`, from `XZCC4` (3 macro iterations, 3 + 10 sigma vectors), 24 threads: a sigma vector with the T4 terms; the root | one rank only; job 31913400 on c332, waiting threads asleep: 1073 s; 3300 s | 410.9 s = 2.33 evaluations; **1304.7 s** | |
+| 2 ranks x 24 | stops | 212.2 s; **692.9 s** (1.88 of 24 threads) | |
+| EOM, 24 threads: the least; used; resident | 17.0 GB; 40.6 GB; 30.1 GB | 16995.3 MB; 40594.7 MB (the subspace takes what is free); 29.0 GB | |
+| EOM, 2 ranks: plan of rank 0 (its rows of the subspace besides) / of the other (with its rows); used; resident | | 16763.4 / 29770.7 MB; 25886.3 / 24320.4 MB; 21.8 / 21.3 GB | |
+
+omega of the root: 0.235170618224 Eh in all runs of this section (`XZEOM`:
+0.23517061822382 serial, on 2 ranks, on 4 and on 8 ranks over four nodes).
+
+**The waiting of the threads.**  The jobs of 2026-10-12 set
+`OMP_WAIT_POLICY=PASSIVE`; the numbers above are with the default of the
+OpenMP library (a thread spins for 200 ms before it sleeps).  An evaluation
+is tens of short parallel regions per occupied quadruple, and threads
+that sleep between them cost: master 419.7 s for an evaluation on c432 with
+PASSIVE (16 of 24 cores busy; 380 s on c134 in the job of 2026-10-12)
+against 358.2 s, 398d0c1 213 s against 185 s (c054).  The README of the
+package asks for `OMP_NUM_THREADS` alone.
+
+**Over nodes** (two jobs of four nodes each, 2 x Xeon Gold 6248R, run
+directories in the node-local `/tmp` of every node, Intel MPI 2021 with
+`I_MPI_PIN_DOMAIN=omp`; `cc4f_nodes.sbatch`, `cc4f_nodes2.sbatch`; commit
+398d0c1; CC4 from the CCSDT amplitudes and the root as above in one run):
+
+| | job 31916937 (c054, c058, c069, c577) | job 31916947 (c488, c507, c520, c526) |
 |---|---|---|
-| CCSDT iteration | 4.14 s (17 cycles) | 4.03 s |
-| (Q), once | 299 s | 177 s |
-| one T4 evaluation of CC4 | 380 s = 1.27 (Q) = 92 CCSDT iterations | 230 s = 1.30 (Q) |
-| of it: operands, Xv; right-hand sides (operands, products, reductions); contractions | 2, 36; 58, 88, 104; 92 s | 3, 20; 35, 54, 57; 61 s (rank 0) |
-| CC4 from the CCSDT amplitudes, macro / micro | 2389 s: 6 evaluations (2278 s), 27 cycles | 1483 s: 6 evaluations (1377 s) |
-| CC4 from the CCSDT amplitudes, `cc4 plain` | 4988 s: 13 evaluations (4934 s), 13 cycles; E(CC4) ..043434 | not run |
-| work array: plan = used; peak resident set | 18.1 GB; 14.3 GB | 13.6 GB per rank; 12.7, 12.4 GB |
-| E(CCSDT), E(CCSDT(Q)), E(CC4) / Eh | -2605.340564528660, -2605.340477349027, -2605.340463043034 | ..664, ..032, ..038 |
+| serial, 24 threads: a CCSDT iteration | 4.10 s | 4.68 s |
+| serial, 24 threads: a T4 evaluation; CC4; a sigma vector with the T4 terms; the root | 185.0 s; 1033.9 s; 442.1 s; 1399.0 s | |
+| 1 node x 2 ranks x 24 | 107.7 s; 626.8 s; 258.4 s; 829.4 s (1.72, 1.65, 1.71, 1.69) | |
+| 4 nodes x 1 rank x 48 | 72.8 s (70.3 to 76.7); 432.9 s; 162 to 168 s; 532.8 s | 68.7 s (65.3 to 72.0); 416.6 s; 158 to 182 s; 535.2 s |
+| **4 nodes x 2 ranks x 24** | | **31.3 s; 225.1 s; 71.5 s; 247.8 s** |
 
-(The sixth evaluation of the macro / micro runs is the confirming one: the
-estimate of the fifth, 2 x 0.084 x 6.0e-7, was just above the threshold
-1e-7.)  An evaluation runs at 16 of 24 cores busy.
+(CC4: 5 evaluations and 25 cycles in every run.)  Eight ranks of 24 threads
+on four nodes make an evaluation in 31.3 s - 5.6 times the 24 threads of
+c432, 5.9 times those of c054 - and the root in 248 s (5.3, 5.6).  One rank
+of 48 threads per node is half as fast as two of 24 (12 to 17 ms per
+occupied quadruple on 48 threads; 24 threads on one socket of c432 take
+11.8) - presumably because the work array of a rank lies on the socket of
+the thread that touched it first; not examined.  **One rank per socket.**  Memory per rank of the run on 8 ranks (EOM included): rank 0
+plans 16291.2 MB and used 15547.6, the others plan 18436.9 and used 14805;
+resident 15.2 to 16.0 GB each, 37 to 39 GB of work arrays per node.
 
-EOM-CC4, the same case on another node (job 31913400, c332, 24 threads of one
-socket, commit a1724f7; the node ran slower: a T4 evaluation 448 s there),
-one root of shift 2, `%eomthrs 1e-5`:
+A first job of four nodes (31916803) did not get through its first
+evaluation: the rank of one node (c060) was still at it after 19 minutes
+while the three others had done their quarters within a minute and waited.
+The node was excluded from the two jobs above; what was wrong with it was
+not found (no other job on it, cores and memory as the others).
 
-| | |
-|---|---|
-| a sigma vector of the matrix without the T4 terms (EOM-CCSDT at the CC4 amplitudes) | 7.5 s (10 for the start root) |
-| a sigma vector with the T4 terms | 1073 s = 2.4 T4 evaluations of that node (2.8 of c134) = 3.6 (Q) |
-| the root: 3 macro iterations (changes 1.35e-4, 2.8e-5, 6.7e-8 Eh), 3 + 10 sigma vectors | 3300 s |
-| work array: the least for CC4 with EOM; used; peak resident set | 17.0 GB; 40.6 GB (the subspace of the solver takes what is free); 30.1 GB |
-
-
-### 19.7 An estimate for ThF+ (28 + 330, real, 12 classes)
+### 19.9 An estimate for ThF+ (28 + 330, real, 12 classes)
 
 **An estimate, not a measurement** - no CC4 job was run for ThF+.
 Measured there (17.7; job 31861231, 24 cores): a CCSDT iteration 258 s,
-(Q) 5.4 h.  Taken from 19.6: one T4 evaluation = 1.27 to 1.30 (Q); 4 to 6
-evaluations from converged CCSDT amplitudes at CC_CONV=7 (19.2), each
-followed by about 5 CCSDT-like cycles.
+(Q) 5.4 h.  Taken from 19.8: one T4 evaluation = 0.61 (Q) (it was
+1.24 to 1.30 before the work of 2026-10-13) - if the ratio of 26 + 120
+holds for classes of 27 virtual spinors; 4 to 5 evaluations from converged
+CCSDT amplitudes at CC_CONV=7 with the extrapolation (19.2), about 25
+CCSDT-like cycles in all; a sigma vector with the T4 terms = 2.3 to 2.4
+evaluations; the ratios of 19.8 for the ranks.
 
-| | one node, 24 cores | 4 nodes (4 ranks x 24 cores) |
-|---|---|---|
-| one T4 evaluation | 1.3 x 5.4 h = 7.0 h | 1.9 h, if the ranks scale as those of (Q) on one node (3.8 of 4, section 14; not measured across nodes for (Q)) |
-| CC4 from the CCSDT amplitudes, converged (5 +- 1 evaluations, 25 cycles) | 37 h (30 to 44) | 10 to 12 h (the cycles between at the rates of 15.7) |
-| the energy to about 1e-7 Eh (3 evaluations) | 22 h | 6 to 7 h |
-| one evaluation (93 to 99.9 % of the effect of T4 in the small cases, two thirds in the worst) | 7.4 h | 2 h |
-| excited state: one sigma vector with the T4 terms | 2.4 to 2.8 evaluations: 17 to 20 h | not implemented over ranks |
-| excited state, one evaluation and the relaxation (error 5e-6 to 2.5e-5 Eh in the small cases) | about 20 h per state, after CC4 and the roots without the T4 terms | - |
-| excited state, converged to 1e-7 Eh (4 evaluations) | 3 to 4 evaluations: 55 to 80 h per state | - |
+| | one node, 24 cores | one node, 2 ranks x 24 | 4 nodes x 2 ranks x 24 |
+|---|---|---|---|
+| one T4 evaluation | 0.61 x 5.4 h = 3.3 h (estimate of 2026-10-12: 7.0 h) | 1.7 to 1.9 h | 0.6 h, if the ranks scale as for 26 + 120 (5.6 to 5.9 on eight ranks) |
+| CC4 from the CCSDT amplitudes, converged (4 to 5 evaluations, 25 cycles of 258 s) | 15 to 18 h (was 37 h) | 9 to 11 h | 3 to 4 h (the cycles between at the rates of 15.7) |
+| the energy to about 1e-7 Eh (3 evaluations) | 11 h | 6 h | 2.5 h |
+| one evaluation (93 to 99.9 % of the effect of T4 in the small cases, two thirds in the worst) | 3.7 h | 2 h | 0.8 h |
+| excited state: one sigma vector with the T4 terms | 7.6 to 7.9 h (was 17 to 20 h) | 4 h | 1.4 h |
+| excited state, one evaluation and the relaxation (error 5e-6 to 2.5e-5 Eh in the small cases) | about 8.5 h per state, after CC4 and the roots without the T4 terms | 4.5 h | 1.6 h |
+| excited state, converged to 1e-5 Eh (3 evaluations; 1e-7: 4) | 24 to 26 h per state (was 55 to 80 h) | 13 h | 4.5 h |
+
+Every evaluation is followed by a checkpoint (19.5), so a job limit inside
+this costs at most the evaluation in hand: 3.3 h, or one sigma vector.
 
 Memory: Xo alone is C(28,3) x 28 x C(330,2) = 5.0e9 numbers = 40 GB per rank
-(dense in every mode), T3 and its two companions 3 x 13 GB; the ground
-state fits a 192 GB node per rank without the DIIS vectors in memory (they
-go to the file), the excited states (two Xo, the vectors of the solver
-with their R3 parts) want a large-memory node as the EOM-CCSDT job did.
+(dense in every mode), T3 and its two companions 3 x 13 GB, the three sets
+of the extrapolation 3 x 13 GB more on rank 0 (left out by the plan if they
+do not fit: one evaluation more); the ground state fits a 192 GB node per
+rank without the DIIS vectors in memory (they go to the file) and, on rank
+0, without the extrapolation or with it and little else.  The excited
+states: 107 GB of the EOM-CCSDT sigma vector (16.7), two Xo (80 GB), the
+dressed `<ab||cd>` and `<bc||ef>'` (2 x 2 GB), Xv of two kinds for 3 to 27
+occupied indices (2 x 1.3 GB each), the row and its stacks (about 5 GB):
+200 to 270 GB per rank, on rank 0 the vector of every root (15.4 GB)
+besides - nodes of the bigmem kind, as the EOM-CCSDT job.  Disk: `XZCC4`
+is 2 x T3 and the history of the extrapolation, 52 GB at most; `XZE4Q` 31
+GB per root of a cluster, `XZE4R` and `XZEOMR` 15.4 GB per root.
 
-### 19.8 Options
+### 19.10 Options
 
 Lines of `%xzccsdt` (section 18; an ordinary run needs none):
 
@@ -4588,29 +4887,38 @@ Lines of `%xzccsdt` (section 18; an ordinary run needs none):
 |---|---|---|
 | `cc4 confirm` | macro | macro / micro, converged only when new T4 terms leave the first step below the thresholds (one evaluation more) |
 | `cc4 plain` | | the T4 terms in every iteration, from the CCSDT amplitudes |
-| `cc4 scratch` | | the same from the second-order amplitudes, no CCSDT first (`XZAMPS` not read) |
+| `cc4 scratch` | | the same from the second-order amplitudes, no CCSDT first (`XZAMPS` and `XZCC4` not read) |
 | `cc4micro x` | 0.01 | the equations with the T4 terms held are iterated until the change is x times that of the first step |
-| `cc4eom davidson` | macro | EOM-CC4: every sigma vector with the T4 terms (the solver of 17.4) |
+| `cc4acc 0` | 1 | no extrapolation over the macro iterations (19.2) |
+| `cc4eom davidson` | macro | EOM-CC4: every sigma vector with the T4 terms (the solver of 17.4); no checkpoints |
 | `omegatol x`, `foldwin x` | ESTATE_CONV / 100, 5e-4 | EOM-CC4 as EOM-CC3 (17.4): the change of omega at convergence; roots closer than this are solved together |
 | `plan`, `diis`, `maxcor` | | the plan by hand: its numbers 5 to 8 are the batches of the T4 evaluation (section 4) |
+| `cc4stop n` | | a test hook: the run stops after its n-th T4 evaluation (19.5) |
 
-### 19.9 Not done
+### 19.11 Not done
 
-- The excited states over MPI ranks (the T4 terms of a sigma vector are a
-  pass over the tasks of (Q) and would be dealt out as those of the ground
-  state; the EOM-CCSDT part of the sigma vector is not distributed either,
-  16.7).  No file `XZEOMR` for CC4.
-- A left-hand vector: the perturbative estimate of the T4 effect on an
-  excitation energy (the analogue of (Q)) needs it; the Rayleigh quotient
-  with the right-hand vector overshoots (19.3).
-- Acceleration over the macro iterations (the changes fall by a constant
-  factor: an extrapolation of the T4 terms, or of the vector of a root,
-  would save an evaluation; it needs two more arrays of the size of T3).
-- Xv with the dressed `<bc||ef>` in sectors does not use the classes of the
-  occupied index of the dressing (19.1); Xo is formed by every rank (as in
-  (Q), section 5).
-- The CC4 amplitudes are not written; (Q)-like restart of an interrupted T4
-  evaluation (checkpoints of the tasks) is not there: an interrupted run
-  starts again from `XZAMPS`, the CCSDT amplitudes.
+- **A left-hand vector** and with it the perturbative estimate of the T4
+  effect on an excitation energy (the analogue of (Q)); the Rayleigh
+  quotient with the right-hand vector overshoots (19.3).  An estimate of
+  the work: the left eigenproblem of EOM-CCSDT is not in this program
+  either (16.9) - the transposed sigma vector is the Lambda machinery of
+  section 11 with the label shifts of 16.2 and the terms of `xzlam.inc`
+  without the inhomogeneity, about the size of `xzeom.inc` (1500 lines)
+  with its validation against the Python program, which has the left
+  vectors of EOM-CCSDT only without labels; the correction itself is one
+  pass of `xz4run` with a left contraction (the products of (Q)_Lambda,
+  `xzq.inc`, in the place of the contractions of 19.1) at the cost of one
+  sigma vector with the T4 terms.  Two to three weeks at the pace of this
+  work, most of it the left sigma vector.
+- An extrapolation over the macro iterations of a root (its changes fall by
+  a constant factor as those of the ground state do).
+- The ranks of a node sharing Xo, the dressed `<ab||cd>` and T3 in the
+  excited states (19.4); Xo is formed by every rank (as in (Q), section 5).
+- A restart inside a T4 evaluation (checkpoints of its tasks, as (Q) has
+  them): an interrupted evaluation is done again from its start.
+- The three sets of amplitudes of the extrapolation in a file when the work
+  array has no room for them.
+- The row of T4 without labels is not restructured (it is the dense code of
+  (Q) with the divide and the contractions in batches of columns).
 - Density, Lambda, IP / EA for CC4; the label-shifted Python reference
   (cc4fly has shift 0 only).
