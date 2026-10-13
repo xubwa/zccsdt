@@ -12,6 +12,7 @@ complex: excitation energies and right-hand vectors.
 | states with a label shift in the blocks of the symmetry labels | `src/zccsdt/cc/t3shift.py`, `tests/test_eom_shift.py` |
 | IP and EA with short vectors | `eom.ghost_short`, `tests/test_eom_short.py` |
 | front end | `GCCSDT.eom_ee`, `eom_ip`, `eom_ea` (`src/zccsdt/ccsdt.py`; `docs/usage.md`) |
+| double electron attachment (EOM-DEA; section 11): two ghost spinors, label blocks, the 5p3h operators folded, any rank on determinants | `src/zccsdt/cc/dea.py`, `dea5.py`, `dea_strings.py`, `tests/test_dea*.py`, `GCCSDT.eom_dea`, `bench/dea/` |
 | reference runs | `bench/refs/reference_energies.json` (`eom_ee`), `bench/dirac/mrcc_eom.sh`, `bench/cfour/eom_ccsd.sh` |
 | timing | `bench/eom_bench.py`, `bench/slurm_eom.sh`; label blocks: `bench/eom2_bench.py`, `bench/slurm_eom2.sh` |
 | the native program in CFOUR's chain (`xzccsdt eom`, `ccsdt_eom`): the sigma vector of section 3 and the label shifts of section 6 in Fortran, with the solver of section 9 | `cfour/xzccsdt/xzeom.inc`, `xzeoms.inc`, `xzeomd.F90`; docs/native.md, section 16 |
@@ -976,3 +977,317 @@ layouts; the subspace is in the work array if it fits and in the files
   roots of a shift (or follows a guess).
 - In the native Fortran program: IP / EA, the block solver of section 4
   (it has the solver of section 9: docs/native.md, section 16.3).
+
+## 11. Double electron attachment (EOM-DEA)
+
+States with two electrons more than a closed-shell reference: the three
+components of a triplet, and the singlets beside it, come from one
+determinant on the same footing (O2 from O2(2+); the application below is
+the zero-field splitting of X 3Sigma_g-).
+
+| What | Where |
+|---|---|
+| the route through two ghost spinors, packed layout and label blocks | `src/zccsdt/cc/dea.py` (`Problem`, `ProblemSym`, `kernel`), `tests/test_dea.py` |
+| the 5p3h operators at lowest order, folded | `src/zccsdt/cc/dea5.py`, `tests/test_dea5.py` |
+| any rank on determinants (reference route) | `src/zccsdt/cc/dea_strings.py`, `tests/test_dea_strings.py` |
+| front end | `GCCSDT.eom_dea` (`docs/usage.md`) |
+| O2: SCF of O2(2+), Hamiltonian files, levels | `bench/dea/` (`o2_scf.py`, `o2_x2ccorr.py`, `common.py`, `o2_dea.py`, `o2_strings.py`, `o2_fold5.py`, `sizes.py`) |
+
+### 11.1 Operators and levels
+
+R = 2p + 3p1h + 4p2h + ..: `r[(a<b)]`, `r[i, (a<b<c)]`,
+`r[(i<j), (a<b<c<d)]`, `r[(i<j<k), (a<b<c<d<e)]`.  The matrix is
+`<mu| [Hbar, R] |0>`, Hbar of the cluster operator T of the reference; its
+eigenvalues are E(N+2) - E_CC(N).
+
+For the **target** states the operators count as excitations of the two
+attached electrons: 2p is the model space, 3p1h the single excitations,
+4p2h the doubles, 5p3h the triples, 6p4h the quadruples.  A complete
+4p2h truncation therefore describes the targets as CCSD describes a ground
+state, complete 5p3h as CCSDT does.
+
+| Level (`rank` / hmax) | R | T | For the target states |
+|---|---|---|---|
+| DEA-EOM-CCSD | 2p + 3p1h | CCSD | singles only |
+| the same with the T of CCSDT | 2p + 3p1h | CCSDT | singles only |
+| "DEA-EOM-CC3" (`row3='cc3'`) | 3p1h row at lowest order, `<3p1h\| [V~, R2] + [F, R3] \|0>` | CC3 | singles at lowest order (CC2-like; a negative control) |
+| DEA-EOM-CCSDT | .. + 4p2h | CCSDT | CCSD-like |
+| the same with the T of CCSDTQ or CC4 | .. + 4p2h | T1 .. T4 | CCSD-like |
+| "DEA-EOM-CC4" (`row4='cc4'`) | 4p2h row at lowest order | CC4 | doubles at lowest order (CC2-like one rank up) |
+| + 5p3h at lowest order, folded (`dea5`) | complete to 4p2h; `(omega - D5) r5 = <5p3h\| [V, R4] + [[V, T2], R3] + [[V, R2], T3] + 1/2 [[[V, T2], T2], R2] \|0>` | CCSDT or CCSDTQ | triples at lowest order on complete doubles (CC3-like) |
+| complete 5p3h (`dea_strings`, hmax 3) | .. + 5p3h | any | CCSDT-like |
+| 6p4h (`dea_strings`, hmax 4) | .. + 6p4h | any | CCSDTQ-like |
+
+### 11.2 Two ghost spinors: one residual per sigma vector
+
+The reference gets two more occupied spinors g1, g2 that no integral
+touches and whose Fock elements are zero.  The EE operators that empty
+both - `r[g1 g2, ab]`, `r[g1 g2 i, abc]`, `r[g1 g2 ij, abcd]` - are the DEA
+operators, and the EE Jacobian maps them to themselves (section 5 has the
+same for one ghost).  There are no singles in this sector.
+
+Two operators of the sector have the product zero (each empties g1 and
+g2), T has no ghost index and no term of the amplitude equations without R
+has one.  So on the rows with both ghosts the residual of the amplitude
+equations at T + R is **exactly linear in R**,
+
+    sigma_mu(R) = Res_mu(T + R),
+
+one evaluation of the residual code of the ground state - not the four of
+the stencil of section 1, and no code of its own: the CCSDT step
+(`ccsdt_opt.update_amps`, its Jacobi step undone) for the rows of 2p and
+3p1h, the T4 equation and the T4 terms of CCSDTQ (`t4engine.residual`) for
+4p2h; for the lowest-order rows the residuals of CC3 and CC4.  The ghosts
+have an orbital energy far below the others (it enters the Jacobi steps
+only).  With T3 = 0 and the amplitudes of CCSD the rows of 2p and 3p1h are
+those of Hbar(CCSD): DEA-EOM-CCSD.
+
+Vectors are stored short (the rows with both ghosts).  The residual code
+works on the padded arrays: a sigma vector costs an iteration of the
+ground state with o + 2 occupied spinors, about (o + 2)^4 / (6 o^2) times
+what the sector alone would cost in the T4 terms (5.8 for o = 10).
+
+**States** are selected by masks on the packed layout (`Problem`: a label
+that adds with its `target`, and a parity), or by blocks:
+
+**Label blocks** (`ProblemSym`).  The ghosts get labels *inside* the range
+of the others, 1 and target - 1.  The operators of the target - the sum
+of the labels of the two electrons, 2 Omega of the state - are then
+totally symmetric on the padded spinors, T + R has the block structure of
+T, and the label-block engines of the ground state (`t3engine`,
+`t4engine_sym`) are called as they are; the short vector is the elements
+with both ghosts, by index arrays into the flat block arrays.  (Section 5
+puts its one ghost far outside the labels and uses shifted layouts; a
+shifted T4 layout does not exist, and is not needed this way.)  The
+blocks also hold amplitudes with one ghost that happen to be symmetric:
+zeros that are carried along.  Parity is a mask on the short vector.
+
+**Guess**: unit vectors on the lowest pairs (a<b) of the block; the
+Davidson solver of section 4.
+
+### 11.3 The 5p3h operators at lowest order, folded (`dea5`)
+
+    (omega - D5) r5 = <5p3h| [V, R4] + [[V, T2], R3] + [[V, R2], T3] + 1/2 [[[V, T2], T2], R2] |0>
+    sigma(3p1h) += <3p1h| V r5 |0>,      sigma(4p2h) += <4p2h| (F~ + V~) r5 |0>
+
+D5 the differences of the orbital energies (canonical spinors), V bare in
+the 5p3h row, the rows below complete in r5 (`f~[m,e]`, `<dm||ef>~`,
+`<mn||le>~` T1-dressed, `<mn||ef>`).  The right-hand side is the quantity
+r of (P) (`pentuples.Pentuples`: `<P| [V, T4] + [[V, T2], T3] + 1/6 [[[V,
+T2], T2], T2] |0>`) at the amplitudes T + R, on the rows with both ghosts
+- linear in R again.  For one occupied triple (i<j<k) at a time:
+r5[(abcde)] from the class of (P), divided by omega - D5, expanded on
+(e | abcd) and (ef | abc) and contracted into the rows of 3p1h and 4p2h;
+nothing of the size of the 5p3h vector is kept.  The products with two
+and three virtual indices are done in the blocks that the labels of the
+triple allow (2 Omega and parity), with the summed indices for which the
+operand is not zero there.  The eigenproblem depends on omega and is
+solved to self-consistency from the root of the rows to 4p2h
+(`ccn.folded_roots`; the slope is the weight of 5p3h in the state, 0.2%).
+
+### 11.4 Any rank on determinants (`dea_strings`): the reference
+
+`P exp(-T) H exp(T) P` on the determinants `|K, B>` - K the occupied
+spinors still filled, B the h + 2 virtual ones - with at most hmax holes,
+evaluated as it stands: exp(T) on the vector up to hmax + 2 holes, H,
+exp(-T).  Every operator is `sum coef[X, Yc, Ya] v+(Yc) v(Ya) O(X)`; for a
+determinant of the result the strings are gathered, multiplied with the
+coefficients in one matrix product and scattered, label by label (2 Omega
+and parity).  No diagrams, any T, any rank; with all holes it is full CI.
+Its intermediates are the determinants with hmax + 2 holes, which is why
+it is a reference for small spaces only (section 11.7).
+
+### 11.5 Validation
+
+| Check | Agreement |
+|---|---|
+| complete operator: LiH from LiH(2+) (STO-3G; ghost route with R to 4p2h, determinant route with two holes); LiH(2-) from LiH with T of CCSDTQ and four holes - against the full CI | 1e-9 |
+| sigma of every level of the ghost route (CCSD, CCSDT, CC3 row, 4p2h with T3 / T4, CC4 row; real and complex) against the dense term tables (`ccsdtq_ref`, `ccn_ref`) at T + R, and against the dense EE Jacobian on R (`eom_ref.sigma`); linear in R | 1e-11 |
+| the determinant matrix with one and two holes against the matrix of the ghost route (T to T4), eigenvalues; the two routes on one vector element by element | 1e-9 |
+| the determinant matrix with three holes (2p .. 5p3h, 896 determinants, random T1 .. T4) against `P exp(-T) H exp(T) P` of second-quantized operators in the Fock space | 1e-9 |
+| `dea5`: the terms of r5 in the rows of 3p1h and 4p2h against the blocks of the determinant matrix; the right-hand side term by term against `<5p3h\| [Hbar, R] \|0>` of second-quantized operators (no T: [V, R4]; odd in T2: [[V, T2], R3]; T3 alone; T2 alone); the folded root against the lowest eigenvalue of the model matrix with the 5p3h rows written out | 1e-10, 1e-10, 1e-8 |
+| label blocks against masks on the packed layout: BH from BH(2+) / 6-31G, X2C (front end; 3p1h, 4p2h, folded 5p3h); O2 / 26 spinors, every level | 1e-9; all 11 printed digits |
+| O2 / 26 spinors: the 4p2h roots of the ghost route and of the determinant route | 1e-11 |
+
+### 11.6 O2: the zero-field splitting of X 3Sigma_g-
+
+**Setup** (`bench/dea/`).  O2(2+), closed shell, r = 1.20752 Angstrom on
+the z axis, Gaussian nuclei; Kramers-restricted HF with the X2CMP
+Hamiltonian (Gaunt and Breit in the mean field, `socutils.somf.x2cmp`) and
+Coulomb two-electron integrals; basis DYVTZ-SOG (Dyall TZ primitives,
+contracted per kappa: 120 spinors) - E(SCF) = -148.313899397728 - and, as
+a complete double-zeta basis, cc-pVDZ-DK (56 spinors; E(SCF) =
+-148.242607249637; the directory of the SOG sets has no double zeta for
+O).  The canonical spinors are adapted to m_j (real integrals) and carry a
+parity (computed, not assumed); O 1s frozen: 10 + 106 (10 + 42) correlated
+spinors.  The states: the lowest root of the blocks 2 Omega = 0 and
+2 Omega = 2 of parity g; splitting = E(2) - E(0).
+
+Two Hamiltonians:
+
+- **spin-orbit only**: the X2CMP one-electron operator, Coulomb
+  two-electron integrals;
+- **X2Ccorr** (contains the spin-spin interaction; `o2_x2ccorr.py`): the
+  X2C spinors taken back to the four-component picture, the no-pair
+  Dirac-Coulomb-Breit two-electron integrals between them, the bare
+  four-component one-electron operator plus the four-component mean field
+  of the frozen 1s spinors.  The assembly reproduces a file of the group
+  made for other spinors (ecore 1e-11, h1 1e-12, integrals 1e-13).  The
+  spinors of the X2CMP calculation are not Hartree-Fock spinors of this
+  operator (max |f_ov| 1.1e-5): a closed-shell HF for the 10 electrons
+  inside the correlated space, block by block of (2 Omega, parity), lowers
+  the energy by 7.5e-10 Eh (largest rotation angle 3.5e-5 rad; TZ:
+  -148.322050765318 -> -148.322050766066; DZ: -148.250738032661 ->
+  -148.250738033179) and gives the canonical spinors used here.
+
+Small spaces for comparison with full CI: the n lowest canonical spinors,
+n = 26, 30, 32 (cut between shells; 28 would cut the pi_g(1/2, 3/2) pair of
+virtual spinors in two).  The Hamiltonian of every space is written as
+`o2_hf2plus[_dz]_n<n>[_x2ccorr].npz` (h1, (pq|rs), ecore, labels; the
+reference energy recomputed from the file equals the SCF to 5e-13).
+
+Thresholds: ground state |dT| < 1e-11; EOM residual norm < 1e-9 (folded:
+|lambda(omega) - omega| < 1e-10).
+
+**Splitting / cm-1** (experiment 3.96; it corresponds to X2Ccorr).
+
+*Spin-orbit only*
+
+| R | T of | 26 | 30 | 32 | DZ (52) | TZ (116) |
+|---|---|---|---|---|---|---|
+| 3p1h | CCSD | 2.6150 | 2.9682 | 2.9942 | 2.2098 | 2.5618 |
+| 3p1h | CCSDT | 2.6235 | 2.9898 | 3.0190 | 2.3928 | 2.7787 |
+| 3p1h, row at lowest order | CC3 | 3.6557 | 4.2506 | 4.3181 |  |  |
+| 4p2h | CCSDT | 2.1260 | 2.3324 | 2.3538 | 1.9537 | 2.3269 |
+| 4p2h | CCSDTQ | 2.1414 | 2.3526 | 2.3753 | 1.9772 |  |
+| 4p2h, row at lowest order | CC4 | 2.0107 |  |  |  |  |
+| 5p3h at lowest order, folded | CCSDT | 2.0807 | 2.2657 | 2.2822 | 1.8273 |  |
+| 5p3h at lowest order, folded | CCSDTQ | 2.0953 |  |  |  |  |
+| 5p3h | CCSDT | 2.0698 | 2.2540 | 2.2718 |  |  |
+| 5p3h | CCSDTQ | 2.0825 | 2.2700 | 2.2888 |  |  |
+| 6p4h | CCSDTQ | 2.0677 | 2.2525 |  |  |  |
+
+*X2Ccorr*
+
+| R | T of | 26 | 30 | 32 | DZ (52) | TZ (116) |
+|---|---|---|---|---|---|---|
+| 3p1h | CCSD | 3.1639 | 3.2682 | 3.2933 | 2.8872 | 3.3575 |
+| 3p1h | CCSDT | 3.1088 | 3.2207 | 3.2462 | 2.6530 | 3.1421 |
+| 4p2h | CCSDT | 3.4605 | 3.4396 | 3.4540 | 3.1699 | 3.6026 |
+| 4p2h | CCSDTQ | 3.4415 | 3.4219 | 3.4362 | 3.1442 |  |
+| 5p3h at lowest order, folded | CCSDT | 3.5439 | 3.5261 | 3.5455 | 3.4354 |  |
+| 5p3h | CCSDT | 3.5410 | 3.5180 | 3.5357 |  |  |
+| 5p3h | CCSDTQ | 3.5239 | 3.5006 | 3.5180 |  |  |
+| 6p4h | CCSDT | 3.5376 |  |  |  |  |
+| 6p4h | CCSDTQ | 3.5369 | 3.5107 |  |  |  |
+
+Total energies of the 116-spinor space (Eh):
+
+| Hamiltonian | R, T | E(2 Omega = 0) | E(2 Omega = 2) | splitting / Eh |
+|---|---|---|---|---|
+| spin-orbit only | 3p1h, CCSD | -150.16748498689 | -150.16747331453 | 1.1672e-05 |
+| | 3p1h, CCSDT | -150.17621137304 | -150.17619871233 | 1.2661e-05 |
+| | 4p2h, CCSDT | -150.20882789470 | -150.20881729275 | 1.0602e-05 |
+| X2Ccorr | 3p1h, CCSD | -150.17574146051 | -150.17572616260 | 1.5298e-05 |
+| | 3p1h, CCSDT | -150.18447008413 | -150.18445576778 | 1.4316e-05 |
+| | 4p2h, CCSDT | -150.21709561323 | -150.21707919864 | 1.6415e-05 |
+
+(The energies of every space and level are in the json files of the runs;
+`bench/dea/tables.py` prints them.)
+
+**What the numbers say.**
+
+- The series in the rank of R is not monotone in quality per rank: 3p1h
+  alone (singles for the target) is off by 0.3 to 0.6 cm-1, complete 4p2h
+  changes it by -0.5 (spin-orbit only) and +0.3 (X2Ccorr), 5p3h by
+  another -0.06 .. -0.08 and +0.08, 6p4h by -0.015 and +0.013 (n = 26),
+  -0.018 and +0.010 (n = 30).
+  The lowest-order rows are no substitute one rank down (the 3p1h row at
+  lowest order: +1.0 to +1.3 cm-1; the 4p2h row at lowest order: 2.011
+  against 2.126 complete).
+- **The folded lowest-order 5p3h row** against the complete one, same T:
+  +0.0109, +0.0117, +0.0104 cm-1 (spin-orbit only, n = 26, 30, 32),
+  +0.0029, +0.0081, +0.0098 (X2Ccorr): it carries the 5p3h step to about
+  0.01 cm-1, always from above.
+- In the complete double-zeta basis the 5p3h step (folded) is larger than
+  in the truncated spaces: -0.126 (spin-orbit only: 1.9537 -> 1.8273),
+  +0.266 (X2Ccorr: 3.1699 -> 3.4354); the complete 5p3h row had not
+  finished there when this was written (section 11.7), so the error of
+  the folded row is calibrated on the truncated spaces only.
+- T4 of the ground state at fixed R: +0.015 .. +0.02 cm-1 (spin-orbit
+  only), -0.02 (X2Ccorr).
+- **Against the exact full CI.**  On the Hamiltonian files of another
+  calculation - state-averaged CASSCF spinors of O2, 26 to 32 spinors,
+  spin-orbit only, where the full CI is known - with the O2(2+)
+  determinant of those spinors as the reference (f_ov is not zero there;
+  the complete rows take it as it is), T of CCSDTQ, determinant route:
+
+  | n | 3p1h | 4p2h | 5p3h | 6p4h | 7p5h | full CI |
+  |---|---|---|---|---|---|---|
+  | 26 | 4.5256 | 3.2397 | 3.2683 | 3.2684 | 3.2684 | 3.2683 |
+  | 28 | 4.0050 | 2.9130 | 2.9044 | 2.8857 | | 2.8864 |
+  | 30 | 3.9157 | 2.8833 | 2.8710 | | | 2.8492 |
+  | 32 | 3.8848 | 2.8763 | 2.8584 | | | 2.8355 |
+
+  n = 26, E(2 Omega = 0): -149.81654719716 (4p2h), -149.81654231670
+  (5p3h), -149.81655060092 (6p4h), -149.81655022231 (7p5h); full CI
+  -149.8165502235 (given to ten decimals): the errors are +3.0e-6,
+  +7.9e-6, -3.8e-7 and +1e-9 Eh, the same for the two components to
+  1e-9 from 5p3h on.  The top of the sequence is the full CI; at 5p3h the
+  splitting is still 0.02 cm-1 off for n = 28, 30, 32 (+0.018, +0.022,
+  +0.023), at 6p4h 0.001 (n = 28: -0.0007).
+
+### 11.7 Sizes and cost
+
+Counted (`bench/dea/sizes.py`), block 2 Omega = 0 (2 Omega = 2: 4% less):
+
+| | 10 + 22 | 10 + 42 (DZ) | 10 + 106 (TZ) |
+|---|---|---|---|
+| 3p1h: all / 2 Omega / 2 Omega and parity | 1.5e4 / 3.6e3 / 1.8e3 | 1.1e5 / 2.0e4 / 1.0e4 | 1.9e6 / 2.8e5 / 1.4e5 |
+| 4p2h | 3.3e5 / 6.5e4 / 3.3e4 | 5.0e6 / 7.6e5 / 3.8e5 | 2.2e8 / 2.8e7 / 1.4e7 |
+| 5p3h | 3.2e6 / 5.7e5 / 2.8e5 | 1.0e8 / 1.4e7 / 7.0e6 | 1.2e10 / 1.4e9 / 6.8e8 (5.5 GB) |
+| 6p4h | 1.6e7 / 2.6e6 / 1.3e6 | 1.1e9 / 1.4e8 / 7.0e7 | 3.6e11 / 3.7e10 / 1.9e10 |
+| T4 of the ghost route, label blocks (packed) | 6.7e5 (3.6e6) | 8.1e6 (5.5e7) | 3.0e8 = 2.4 GB (2.5e9) |
+| T4 of O2(2+), label blocks | 2.8e5 | 3.4e6 | 1.3e8 |
+
+Measured (one run each; the node of the first three columns was shared
+with other steps of this work):
+
+| | n = 26 | DZ (52) | TZ (116) |
+|---|---|---|---|
+| 3p1h sigma vector, label blocks | 0.15 s | 0.47 s | 2.5 s (12 threads); 0.7 s (24 cores of a node) |
+| the same on the packed layout | 0.07 s | | 39 s |
+| 4p2h sigma vector, label blocks | 0.6 s (packed: 2.7 s) | 8.7 s | 98 - 104 s (12 threads); 43 s (24 cores) |
+| sigma vectors per root, 4p2h | 30 - 42 | 30 - 37 | 38 - 62 |
+| folded 5p3h sigma vector | 7 - 9 s | 66 - 117 s (8 threads) | 1167 s, 1591 s (the first of two runs, 48 cores: right-hand side 402 - 536 s, rows below 472 - 735 s, intermediates of (P) 248 - 270 s, rows to 4p2h 44 - 48 s); 64 GB |
+| folded 5p3h: sigma vectors after the 4p2h root | 28 - 36 | 32 - 36 | |
+| determinant route, 5p3h sigma vector | 4 s | more than 45 min (not finished) | not possible |
+| determinant route, 6p4h | 27 - 32 s | | |
+
+The determinant route needs the determinants with hmax + 2 holes as
+intermediates: for 5p3h with 106 virtual spinors 3.4e12 before the labels.
+It is the reference of the small spaces.
+
+### 11.8 Not done
+
+- The complete 5p3h row for large spaces: the R-linear terms of the
+  pentuples equation of CCSDTQP beyond the lowest order - the ladders and
+  the ring term on r5, the terms with one de-excitation line (V T2 R4,
+  V T3 R4, V T3 R3, V T4 R3, V T2 T2 R3, V T4 R2, V T2 T3 R2, V T2 R5) -
+  as tensor contractions in the sector.  The folded lowest-order row is
+  what exists (0.01 cm-1 of the complete one for O2).
+- A sigma vector of the ghost route costs an iteration of the ground state
+  with o + 2 occupied spinors: the engines work on the padded arrays, not
+  on the sector (the passes over rows of T4 that hold a ghost and those
+  that hold none are both done).  The folded 5p3h row makes its
+  intermediates of (P) for all occupied pairs and quadruples of the padded
+  spinors at every sigma vector, although T2 + R2 differs from T2 in one
+  occupied pair.
+- DIP, and the sectors with other numbers of ghosts; left-hand vectors,
+  properties.
+- Complex arithmetic in `dea5` and `dea_strings` (real integrals: axial
+  spinors); the ghost route of `dea.Problem` takes both.
+- Out-of-core vectors: the Davidson subspace of the 4p2h problem is in
+  memory (116 spinors: 2.8e7 numbers, 224 MB, per vector).
+- The guess is unit vectors on the lowest pairs (a<b): a block whose
+  lowest states have little weight there needs `nguess`.
