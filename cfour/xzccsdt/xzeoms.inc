@@ -1424,7 +1424,7 @@ subroutine N(xzeom)(w, ecorr)
   ZT, allocatable :: vlead(:, :)
   real(8) :: t0, t1, tsh, tsg, need
   integer(8) :: free_bytes
-  logical :: ok, dense
+  logical :: ok, dense, ck4
   character(len=256) :: arg
   integer :: larg, ios, iures
   real(8), external :: N(xzeimag)
@@ -1697,6 +1697,27 @@ subroutine N(xzeom)(w, ecorr)
     allocate(ee(nkeep), rmax(nkeep), rnorm(nkeep), wts(3, nkeep), cyc(nkeep), lead(nlead, nkeep), vlead(nlead, nkeep))
     nst = nroot
     nsgd = 0
+    ! ---- EOM-CC4, macro / micro: the roots of this problem of an earlier run
+    !      (the file XZE4R.nnn: those without the T4 terms, and those done with them)
+    e4rst = .false.
+    e4kdone = 0
+    ck4 = .false.
+    if (cc4) then
+      call xzoptget('cc4eom', arg, larg)
+      ck4 = .not. (larg > 0 .and. (arg(1:1) == 'd' .or. arg(1:1) == 'D'))
+    end if
+    if (ck4) call N(xz4er)(w, 'r', ish, merge(0_8, eshl(ish), dense), nroot, nlen, ecorr, kxf, ee, nfound, e4kdone, &
+                           e4eclu, e4rayc, e4shotc, e4rst)
+    if (e4rst) then
+      write(6, '(a,i3.3,a)') '   the roots of the matrix without the T4 terms and the vectors: from the file XZE4R.', ish, &
+        ' of an earlier run'
+      write(6, '(a,8f14.8)') '     roots / Eh: ', (dble(ee(k)), k = 1, min(nfound, 8_8))
+      write(6, '(a,i4,a,i4,a)') '     ', e4kdone, ' of ', min(nroot, nfound), ' roots are done with the T4 terms'
+      edist = dist
+      eplan = 0
+      if (dist) eplan = ish
+    end if
+    if (.not. e4rst) then
     if (eguess == 1) then
       ! ---- the singles-doubles block of the matrix, from unit vectors
       t1 = omp_get_wtime()
@@ -1791,8 +1812,9 @@ subroutine N(xzeom)(w, ecorr)
           dble(vlead(r, k)), N(xzeimag)(vlead(r, k))
       end do
     end do
+    end if
     ! ---- EOM-CC4: the quadruples folded in, root by root (xzcc4.inc)
-    if (cc4 .and. nfound > 0) call N(xzeom4f)(w, merge(0_8, eshl(ish), dense), nroot, nfound, ee, kxf, kxa, kxb, &
+    if (cc4 .and. nfound > 0) call N(xzeom4f)(w, ish, merge(0_8, eshl(ish), dense), nroot, nfound, ee, kxf, kxa, kxb, &
                                               singles, nlen, ecorr)
     edist = .false.
     eplan = 0

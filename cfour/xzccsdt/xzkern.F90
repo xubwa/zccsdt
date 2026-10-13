@@ -49,6 +49,13 @@ module xzkern
       integer(c_int64_t) :: nbytes
     end function
 
+    ! the file `from' takes the name `to' (0: done)
+    function xz_rename(from, to) bind(C) result(ierr)
+      import
+      character(kind=c_char) :: from(*), to(*)
+      integer(c_int64_t) :: ierr
+    end function
+
     ! the file mapped read-only and shared: its address (0: failed), its bytes
     function xz_map_file(path, nbytes, populate) bind(C) result(addr)
       import

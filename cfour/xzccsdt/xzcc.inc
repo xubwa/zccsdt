@@ -25,9 +25,10 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   logical, intent(out) :: converged
   integer(8), intent(out) :: ncyc
   integer(8) :: kt1n, kt2n, kr3, icyc, m0, n, kb1, kb2, nsince
-  logical :: fromccsd, t4now, fresh, conv, phase4
-  real(8) :: fmicro, dmac, demac, t4s, dprev, kap
-  character(len=12) :: mark
+  logical :: fromccsd, t4now, fresh, conv, phase4, resumed
+  real(8) :: fmicro, dmac, demac, t4s, dprev, kap, dsaved
+  integer(8) :: kc4
+  character(len=24) :: mark
   integer(8), external :: N(xzdiis_target)
   real(8) :: norms(3), eold, enew, de, normt, t0, t1w, ctl(2), tsg
   ZT :: e
@@ -87,7 +88,12 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     call zc_vzero_d(NW * npo * nvp, w(jd42))
     call zc_vzero_d(NW * n3, w(jd43))
   end if
-  if (cc4start) then
+  dsaved = 0d0
+  if (cc4rst > 0) then
+    ! CC4 from the file XZCC4 of an earlier run: its amplitudes (cc4rst 1: and the T4 terms of its last evaluation)
+    call N(xz4ckpt)(w, 'r', kc4, eold, dsaved)
+    nt4old = nt4
+  else if (cc4start) then
     ! CC4 from the CCSDT amplitudes of the file XZAMPS
     call N(xzamps)(w, 'l', e4ccsdt)
   else
@@ -123,7 +129,9 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     return
   end if
 
-  if (cc4start) then
+  if (cc4rst > 0) then
+    write(6, '(/,a,f20.12)') '  Correlation energy of the start (the CC4 amplitudes of XZCC4):', eold
+  else if (cc4start) then
     write(6, '(/,a,f20.12)') '  Correlation energy of the start (the CCSDT amplitudes of XZAMPS):', eold
   else if (fromccsd) then
     write(6, '(/,a,f20.12)') '  Correlation energy of the start (T1, T2 of t1guess, t2guess):', eold
@@ -149,15 +157,25 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   ! (d1, d2: a factor kap = d2 / d1 per evaluation) say that the next one
   ! would be below them: 2 kap d2 < the thresholds (option cc4 confirm: only
   ! the first test).
-  phase4 = cc4 .and. (cc4start .or. cc4mode == 2)
+  phase4 = cc4 .and. (cc4start .or. cc4mode == 2 .or. cc4rst > 0)
   t4now = phase4
   fresh = .false.
   nsince = 0
-  nt4 = 0
-  t4sec = 0d0
+  if (cc4rst == 0) then
+    nt4 = 0
+    t4sec = 0d0
+  end if
   dmac = 0d0
   demac = 0d0
   dprev = 0d0
+  ! (the iterations of an earlier run go on: the T4 terms of its last
+  ! evaluation are held, the first step is the first one after it)
+  resumed = cc4rst == 1
+  if (resumed) then
+    t4now = .false.
+    fresh = .true.
+    dprev = dsaved
+  end if
   fmicro = 1d-2
   call xzoptget('cc4micro', dbg, ldbg)
   if (ldbg > 0) read(dbg(1:ldbg), *) fmicro
@@ -178,6 +196,12 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   end if
   icyc = 0
   do
+    if (cc4rst == 2) then
+      ! (the converged amplitudes of an earlier run: no iterations)
+      converged = .true.
+      ncyc = 0
+      exit
+    end if
     icyc = icyc + 1
     nsince = nsince + 1
     t0 = omp_get_wtime()
@@ -189,15 +213,19 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       tsg = omp_get_wtime()
       ctl = [1d0, merge(0d0, 1d0, icyc == 1)]
       if (t4now) ctl(1) = merge(2d0, 3d0, cc4mode == 0 .or. cc4mode == 3 .or. nt4 == 0)
-      if (icyc == 1 .and. cc4start) ctl(2) = 2d0
+      if (icyc == 1 .and. (cc4start .or. cc4rst > 0)) ctl(2) = 2d0
+      ! (4: the T4 term of the doubles equation of an earlier run follows)
+      if (icyc == 1 .and. resumed) ctl(1) = 4d0
       call xzmpi_bcast(ctl, 16_8)
       call xzmpi_bcast_w(w(jt1), NW * no * nv)
       call xzmpi_bcast_w(w(jt2), NW * no * no * nv * nv)
       if ((icyc > 1 .and. .not. slices) .or. ctl(2) == 2d0) call xzmpi_bcast_w(w(jt3), NW * n3)
+      if (ctl(1) == 4d0) call xzmpi_bcast_w(w(jd42), NW * npo * nvp)
       call xztoc(1, 'MPI: amplitudes to the ranks')
       dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
     end if
     mark = ' '
+    if (icyc == 1 .and. resumed) write(mark, '(a,i3,a)') '   T4', nt4, ' (XZCC4)'
     if (t4now) then
       t4s = omp_get_wtime()
       call xztic()
@@ -206,10 +234,17 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       ! (macro / micro: the DIIS sequence starts again with the new terms)
       if (cc4mode == 0 .or. cc4mode == 3 .or. nt4 == 0) call N(xzdiis_restart)()
       nt4 = nt4 + 1
+      nt4run = nt4run + 1
       t4sec = t4sec + omp_get_wtime() - t4s
       write(mark, '(a,i3)') '   T4', nt4
       fresh = .true.
       nsince = 1
+      ! the checkpoint: these amplitudes and their T4 terms (macro / micro)
+      if (cc4mode == 0 .or. cc4mode == 3) call N(xz4ckpt)(w, 'w', -1_8, eold, dprev)
+      if (nt4stop > 0 .and. nt4run >= nt4stop) then
+        write(6, '(/,a,i4,a)') ' @XZCCSDT-F, option cc4stop: the run stops after its evaluation ', nt4run, ' of the T4 terms.'
+        call xzerrex
+      end if
     end if
     kr3 = N(xzdiis_target)()
     call N(xzstepm)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
@@ -299,6 +334,10 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     ctl = 0d0
     call xzmpi_bcast(ctl, 16_8)
   end if
+  ! CC4 converged: its amplitudes to the file XZCC4 (a later run of these
+  ! integrals - the excited states - takes them)
+  if (cc4 .and. converged .and. cc4rst /= 2 .and. .not. timing_run) &
+    call N(xz4ckpt)(w, 'w', nint(-log10(conv_t), 8), eold, dprev)
   ecorr = eold
   call N(xzdiis_close)()
   call xzrel(m0)
@@ -346,7 +385,13 @@ subroutine N(xzccwork)(w, kt1n, kt2n, icyc)
     end if
     call xztoc(1, 'MPI: amplitudes from rank 0')
     dsec(6, 1) = dsec(6, 1) + omp_get_wtime() - tsg
-    if (ctl(1) >= 2d0) then
+    if (ctl(1) == 4d0) then
+      ! CC4, the iterations of an earlier run go on: the T4 term of the doubles
+      ! equation from rank 0 (that of the triples equation is rank 0's)
+      call xzmpi_bcast_w(w(jd42), NW * npo * nvp)
+      call zc_vzero_d(NW * n3, w(jd43))
+      call N(xzdiis_restart)()
+    else if (ctl(1) >= 2d0) then
       ! CC4: the part of this rank of the T4 terms (2: the DIIS sequence starts again)
       call N(xzt4)(w, jt1, jt2, jt3, jd42, jd43, 0d0)
       call xztoc(1, 'CC4: the T4 terms')

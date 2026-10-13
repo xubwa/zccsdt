@@ -490,6 +490,105 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
   call xzrel(m0)
 end subroutine
 
+! ---------------------------------------------------------------------------
+! The file XZCC4 of the run directory: the CC4 iterations for a later run
+! (docs/native.md, section 19.9).  Rank 0 writes it after every completed
+! evaluation of the T4 terms (macro / micro) and when CC4 has converged; an
+! unformatted stream:
+!   character(8)  'XZCC4_01'
+!   integer(8)    active occupied, active virtual, spinors, frozen occupied
+!                 spinors; words per element, classes of the labels, elements
+!                 of T3 as stored; T4 evaluations so far; CC_CONV of converged
+!                 amplitudes, or -1: the amplitudes at which the last
+!                 evaluation was made, followed by its terms
+!   real(8)       the three numbers of XZKEY (xzkeyval); the CCSDT correlation
+!                 energy of the start, the correlation energy of the
+!                 amplitudes, the change of the amplitudes in the first step
+!                 after the evaluation before, the seconds of the evaluations
+!   T1 [i][a], T2 [i][j][a][b], T3 as stored
+!   if not converged: the T4 terms of R2 [P][Q] and of R3 (as T3)
+! rw = 'w': written from jt1, jt2, jt3, jd42, jd43 - to XZCC4.new, which then
+! takes the name (an interrupted write leaves the file of before); a failure
+! is a warning.  'r': into these places; cconv, ecorr, dprev of the file,
+! nt4, t4sec and e4ccsdt of xzdata set.
+subroutine N(xz4ckpt)(w, rw, cconv, ecorr, dprev)
+  use xzdata
+  use xzkern
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  character(len=1), intent(in) :: rw
+  integer(8), intent(inout) :: cconv
+  real(8), intent(inout) :: ecorr, dprev
+  character(len=8) :: tag
+  integer(8) :: hd(9), n1, n2
+  real(8) :: key(3), st(4), t0
+  integer(8) :: ios
+  n1 = NW * no * nv
+  n2 = NW * no * no * nv * nv
+  t0 = omp_get_wtime()
+  if (rw == 'w') then
+    call xzkeyval(key)
+    open(unit=77, file='XZCC4.new', form='unformatted', access='stream', status='replace', iostat=ios)
+    if (ios == 0) write(77, iostat=ios) 'XZCC4_01', no, nv, ntot, nfrozen, int(NW, 8), ncls, n3, nt4, cconv, key, &
+                                        e4ccsdt, ecorr, dprev, t4sec
+    if (ios == 0) write(77, iostat=ios) w(jt1:jt1 + n1 - 1)
+    if (ios == 0) write(77, iostat=ios) w(jt2:jt2 + n2 - 1)
+    if (ios == 0) write(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
+    if (ios == 0 .and. cconv < 0) write(77, iostat=ios) w(jd42:jd42 + NW * npo * nvp - 1)
+    if (ios == 0 .and. cconv < 0) write(77, iostat=ios) w(jd43:jd43 + NW * n3 - 1)
+    if (ios == 0) close(77, iostat=ios)
+    if (ios == 0) ios = xz_rename('XZCC4.new' // c_null_char, 'XZCC4' // c_null_char)
+    if (ios /= 0) then
+      write(6, '(a,i8,a)') ' @XZCCSDT-W, the file XZCC4 could not be written (iostat ', ios, &
+        '; disk full?): a later run cannot continue from here.'
+      close(77, status='delete', iostat=ios)
+    else if (cconv < 0) then
+      write(6, '(a,i3,a,f10.1,a,f8.2,a)') '     checkpoint: the amplitudes and the T4 terms of evaluation ', nt4, &
+        ' written to the file XZCC4 (', 8d-6 * (n1 + n2 + 2 * NW * n3 + NW * npo * nvp), ' MB, ', omp_get_wtime() - t0, &
+        ' s): a run of this ZMAT in this directory continues after it'
+    else
+      write(6, '(a,f10.1,a,f8.2,a)') '  the converged CC4 amplitudes written to the file XZCC4 (', &
+        8d-6 * (n1 + n2 + NW * n3), ' MB, ', omp_get_wtime() - t0, ' s)'
+    end if
+    flush(6)
+    return
+  end if
+  open(unit=77, file='XZCC4', form='unformatted', access='stream', status='old', action='read', iostat=ios)
+  if (ios == 0) read(77, iostat=ios) tag, hd, key, st
+  if (ios /= 0 .or. tag /= 'XZCC4_01') then
+    write(6, '(/,a)') ' @XZCCSDT-F, the file XZCC4 cannot be read.'
+    call xzerrex
+  end if
+  if (hd(1) /= no .or. hd(2) /= nv .or. hd(5) /= NW .or. hd(6) /= ncls .or. hd(7) /= n3) then
+    write(6, '(/,a)') ' @XZCCSDT-F, the file XZCC4 belongs to another calculation or another mode:'
+    write(6, '(a,5i12)') '   occupied, virtual, words per element, classes, T3 in the file: ', hd(1), hd(2), hd(5), hd(6), hd(7)
+    write(6, '(a,5i12)') '   and here:                                                      ', no, nv, &
+      int(NW, 8), ncls, n3
+    write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: option labels, option real;'
+    write(6, '(a)') '    remove the file to start again from the CCSDT amplitudes)'
+    call xzerrex
+  end if
+  nt4 = hd(8)
+  cconv = hd(9)
+  e4ccsdt = st(1)
+  ecorr = st(2)
+  dprev = st(3)
+  t4sec = st(4)
+  read(77, iostat=ios) w(jt1:jt1 + n1 - 1)
+  if (ios == 0) read(77, iostat=ios) w(jt2:jt2 + n2 - 1)
+  if (ios == 0) read(77, iostat=ios) w(jt3:jt3 + NW * n3 - 1)
+  if (ios == 0 .and. cconv < 0) read(77, iostat=ios) w(jd42:jd42 + NW * npo * nvp - 1)
+  if (ios == 0 .and. cconv < 0) read(77, iostat=ios) w(jd43:jd43 + NW * n3 - 1)
+  close(77)
+  if (ios /= 0) then
+    write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file XZCC4 failed, iostat ', ios
+    call xzerrex
+  end if
+  write(6, '(/,a,f10.1,a,f8.2,a)') '   the file XZCC4 read (', 8d-6 * (n1 + n2 + NW * n3), ' MB of amplitudes, ', &
+    omp_get_wtime() - t0, ' s)'
+end subroutine
+
 ! out = - a
 subroutine N(xz4neg)(n, a, out)
   implicit none
@@ -1497,6 +1596,252 @@ subroutine N(xze4)(w, kr1, kr2, kr2p, kr3, kdfov, kdooov, kdoooo, kdovvo, kdovoo
 end subroutine
 
 ! ---------------------------------------------------------------------------
+! EOM-CC4, macro / micro: the files of a problem (number ip of the input: a
+! label shift) for a later run of the same ZMAT in the run directory
+! (docs/native.md, section 19.9), written by rank 0, unformatted streams:
+!
+!   XZE4R.nnn   the roots.  'XZE4R_01'; integer(8): active occupied, active
+!               virtual, spinors, frozen occupied spinors, words per element,
+!               classes of the labels, shift in classes, roots asked for,
+!               elements of a vector, roots found, roots done with the T4
+!               terms, shift in labels; real(8): the three numbers of XZKEY,
+!               the CC4 correlation energy; the energies of the roots without
+!               the T4 terms; of the last cluster in hand the energies, the
+!               Rayleigh quotients, the energies after the first evaluation
+!               (64 each); 16 numbers per root that is done (the line of the
+!               table of the states); the vectors of the roots found - of
+!               the roots that are done, and of the others of their clusters,
+!               those with the T4 terms, of the rest the start vectors.
+!               Written when the roots without the T4 terms are there and
+!               after every root.
+!   XZE4Q.nnn   the last evaluation of the T4 terms of the root in hand.
+!               'XZE4Q_01'; integer(8): the first seven of XZE4R, elements of
+!               a vector, the root, the first root of its cluster, the roots
+!               of the cluster, the macro iteration, sigma vectors of the root
+!               with the T4 terms and without; real(8): the numbers of XZKEY,
+!               the CC4 correlation energy, the frequency of the evaluation,
+!               the change of omega in the macro iteration before; q (the
+!               orthonormal vectors of the cluster), F (their sigma vectors
+!               with the T4 terms).  Written after every evaluation, removed
+!               when the root is done.
+!
+! A file is taken if its integers and the numbers of XZKEY are those of this
+! run and its CC4 energy is within 1e-7 Eh.  Both are written to <name>.new,
+! which then takes the name.
+!
+! N(xz4er): rw = 'w' writes the roots (kdone of them done: the last kdone
+! lines of the results of xzeomd); 'r' reads - ok: the file was taken; ee,
+! nfound, kdone, eclu, rayc, shotc and the vectors at kxf from it, the lines
+! of the roots that are done added to the results.
+subroutine N(xz4er)(w, rw, ip, lshift, nroot, nlen, ecorr, kxf, ee, nfound, kdone, eclu, rayc, shotc, ok)
+  use xzdata
+  use xzkern
+  use xzeomd
+  implicit none
+  real(8) :: w(*)
+  character(len=1), intent(in) :: rw
+  integer(8), intent(in) :: ip, lshift, nroot, nlen, kxf
+  real(8), intent(in) :: ecorr
+  complex(8) :: ee(*)
+  integer(8), intent(inout) :: nfound, kdone
+  real(8), intent(inout) :: eclu(64), rayc(64), shotc(64)
+  logical, intent(out) :: ok
+  character(len=9) :: fn
+  character(len=8) :: tag
+  integer(8) :: hd(12), hf(12), k, n0, ios
+  real(8) :: key(3), kf3(3), ec
+  real(8), allocatable :: rec(:, :)
+  logical :: there
+  ok = .false.
+  write(fn, '(a6,i3.3)') 'XZE4R.', ip
+  call xzkeyval(key)
+  hd = [no, nv, ntot, nfrozen, int(NW, 8), ncls, eshift, nroot, nlen, nfound, kdone, lshift]
+  if (rw == 'w') then
+    n0 = nres - kdone
+    allocate(rec(16, max(kdone, 1_8)))
+    do k = 1, kdone
+      rec(:, k) = [rom(n0 + k), rim(n0 + k), rmx(n0 + k), rnm(n0 + k), rwt(1, n0 + k), rwt(2, n0 + k), rwt(3, n0 + k), &
+                   rpp(n0 + k), rshot(n0 + k), rfirst(n0 + k), rlv(n0 + k), merge(1d0, 0d0, rconv(n0 + k)), &
+                   dble(rcyc(n0 + k)), dble(rnsig(n0 + k)), dble(rli(n0 + k)), dble(rla(n0 + k))]
+    end do
+    open(unit=77, file=fn // '.new', form='unformatted', access='stream', status='replace', iostat=ios)
+    if (ios == 0) write(77, iostat=ios) 'XZE4R_01', hd, key, ecorr, ee(1:nfound), eclu, rayc, shotc
+    if (ios == 0 .and. kdone > 0) write(77, iostat=ios) rec(:, 1:kdone)
+    do k = 1, nfound
+      if (ios == 0) write(77, iostat=ios) w(kxf + NW * nlen * (k - 1):kxf + NW * nlen * k - 1)
+    end do
+    if (ios == 0) close(77, iostat=ios)
+    if (ios == 0) ios = xz_rename(fn // '.new' // c_null_char, fn // c_null_char)
+    if (ios /= 0) then
+      write(6, '(a,a,a,i8,a)') ' @XZCCSDT-W, the file ', fn, ' could not be written (iostat ', ios, &
+        '; disk full?): a later run cannot continue from here.'
+      close(77, status='delete', iostat=ios)
+    else
+      ok = .true.
+    end if
+    deallocate(rec)
+    return
+  end if
+  inquire(file=fn, exist=there)
+  if (.not. there) return
+  open(unit=77, file=fn, form='unformatted', access='stream', status='old', action='read', iostat=ios)
+  if (ios == 0) read(77, iostat=ios) tag, hf, kf3, ec
+  if (ios /= 0 .or. tag /= 'XZE4R_01' .or. any(hf(1:9) /= hd(1:9)) .or. hf(12) /= lshift &
+      .or. any(abs(kf3 - key) > 1d-9 * max(1d0, abs(key))) .or. abs(ec - ecorr) > 1d-7 &
+      .or. hf(10) < 1 .or. hf(10) > nroot + 2 .or. hf(11) < 0 .or. hf(11) > hf(10)) then
+    close(77, iostat=ios)
+    return
+  end if
+  allocate(rec(16, max(hf(11), 1_8)))
+  read(77, iostat=ios) ee(1:hf(10)), eclu, rayc, shotc
+  if (ios == 0 .and. hf(11) > 0) read(77, iostat=ios) rec(:, 1:hf(11))
+  do k = 1, hf(10)
+    if (ios == 0) read(77, iostat=ios) w(kxf + NW * nlen * (k - 1):kxf + NW * nlen * k - 1)
+  end do
+  close(77)
+  if (ios /= 0) then
+    deallocate(rec)
+    return
+  end if
+  nfound = hf(10)
+  kdone = hf(11)
+  do k = 1, kdone
+    if (nres >= maxres) exit
+    nres = nres + 1
+    rshift(nres) = lshift
+    rroot(nres) = k
+    rom(nres) = rec(1, k)
+    rim(nres) = rec(2, k)
+    rmx(nres) = rec(3, k)
+    rnm(nres) = rec(4, k)
+    rwt(:, nres) = rec(5:7, k)
+    rpp(nres) = rec(8, k)
+    rshot(nres) = rec(9, k)
+    rfirst(nres) = rec(10, k)
+    rlv(nres) = rec(11, k)
+    rconv(nres) = rec(12, k) == 1d0
+    rcyc(nres) = nint(rec(13, k), 8)
+    rnsig(nres) = nint(rec(14, k), 8)
+    rli(nres) = nint(rec(15, k), 8)
+    rla(nres) = nint(rec(16, k), 8)
+  end do
+  deallocate(rec)
+  ok = .true.
+end subroutine
+
+! N(xz4eq): rw = 'w' writes the evaluation of the macro iteration `outer' of
+! the root k (the first of its cluster: ca; nc roots) - q and F from kq, kf
+! (more than one rank: the rows of all ranks through the vector at kxa);
+! 'r' reads one of this root - ok: taken; outer, omega, dwprev, nev, nsigr
+! from it, q and F into their places, q also into the vectors of the cluster
+! at kxc (the start of the eigenproblem; the same span); 'd' removes the file.
+subroutine N(xz4eq)(w, rw, ip, nlen, ecorr, k, ca, nc, outer, omega, dwprev, nev, nsigr, kxa, kxb, kq, kf, kxc, ok)
+  use xzdata
+  use xzkern
+  use xzeomd
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  character(len=1), intent(in) :: rw
+  integer(8), intent(in) :: ip, nlen, k, ca, nc, kxa, kxb, kq, kf, kxc
+  real(8), intent(in) :: ecorr
+  integer(8), intent(inout) :: outer, nev, nsigr
+  real(8), intent(inout) :: omega, dwprev
+  logical, intent(out) :: ok
+  character(len=9) :: fn
+  character(len=8) :: tag
+  integer(8) :: hd(14), hf(14), c, ios, fsize, kv, base
+  integer :: kind
+  real(8) :: key(3), kf3(3), st(3), t0
+  logical :: there
+  ok = .false.
+  write(fn, '(a6,i3.3)') 'XZE4Q.', ip
+  if (rw == 'd') then
+    open(unit=77, file=fn, status='old', iostat=ios)
+    if (ios == 0) close(77, status='delete', iostat=ios)
+    return
+  end if
+  t0 = omp_get_wtime()
+  call xzkeyval(key)
+  hd = [no, nv, ntot, nfrozen, int(NW, 8), ncls, eshift, nlen, k, ca, nc, outer, nev, nsigr]
+  if (edist) then
+    ecmd = .true.
+    evoff = 0
+    evlen = no * nv + npo * nvp + esoff(1)
+    ekx = [kxa, kxb]
+  end if
+  if (rw == 'w') then
+    open(unit=77, file=fn // '.new', form='unformatted', access='stream', status='replace', iostat=ios)
+    if (ios == 0) write(77, iostat=ios) 'XZE4Q_01', hd, key, ecorr, omega, dwprev
+    do kind = 3, 4
+      base = merge(kq, kf, kind == 3)
+      do c = 1, nc
+        kv = base + NW * nlen * (c - 1)
+        if (edist) then
+          ! (the rows of the other ranks)
+          kv = kxa
+          call N(xzevget)(w, kind, c, kxa)
+          call N(xzepcollect)(w, kxa)
+        end if
+        if (ios == 0) write(77, iostat=ios) w(kv:kv + NW * nlen - 1)
+      end do
+    end do
+    if (ios == 0) close(77, iostat=ios)
+    if (ios == 0) ios = xz_rename(fn // '.new' // c_null_char, fn // c_null_char)
+    if (ios /= 0) then
+      write(6, '(a,a,a,i8,a)') ' @XZCCSDT-W, the file ', fn, ' could not be written (iostat ', ios, &
+        '; disk full?): a later run cannot continue from here.'
+      close(77, status='delete', iostat=ios)
+    else
+      ok = .true.
+      write(6, '(a,a,a,f10.1,a,f8.2,a)') '          (checkpoint: q, F and the frequency of this evaluation written to the file ', fn, &
+        ', ', 16d-6 * NW * nlen * nc, ' MB, ', omp_get_wtime() - t0, ' s)'
+    end if
+    ecmd = .false.
+    return
+  end if
+  inquire(file=fn, exist=there, size=fsize)
+  if (there) then
+    open(unit=77, file=fn, form='unformatted', access='stream', status='old', action='read', iostat=ios)
+    if (ios == 0) read(77, iostat=ios) tag, hf, kf3, st
+    there = ios == 0 .and. tag == 'XZE4Q_01' .and. all(hf(1:11) == hd(1:11)) .and. hf(12) >= 1 &
+            .and. all(abs(kf3 - key) <= 1d-9 * max(1d0, abs(key))) .and. abs(st(1) - ecorr) <= 1d-7 &
+            .and. fsize == 8 * (1 + 14 + 3 + 3 + 2 * nc * NW * nlen)
+    if (.not. there) close(77, iostat=ios)
+  end if
+  if (.not. there) then
+    ecmd = .false.
+    return
+  end if
+  do kind = 3, 4
+    base = merge(kq, kf, kind == 3)
+    do c = 1, nc
+      kv = base + NW * nlen * (c - 1)
+      if (edist) kv = kxa
+      read(77, iostat=ios) w(kv:kv + NW * nlen - 1)
+      if (ios /= 0) then
+        write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', fn, ' failed, iostat ', ios
+        call xzerrex
+      end if
+      if (kind == 3) call N(xzecopy)(nlen, w(kv), w(kxc + NW * nlen * (c - 1)))
+      if (edist) then
+        ! (to all ranks, every rank its rows)
+        call N(xzepspread)(w, kxa)
+        call N(xzevput)(w, kind, c, kxa)
+      end if
+    end do
+  end do
+  close(77)
+  outer = hf(12)
+  nev = hf(13)
+  nsigr = hf(14)
+  omega = st(2)
+  dwprev = st(3)
+  ecmd = .false.
+  ok = .true.
+end subroutine
+
+! ---------------------------------------------------------------------------
 ! EOM-CC4 for the problem of one label shift (called by N(xzeom) after its
 ! solver): the folded eigenproblem
 !   [A_PP + dA(omega)] R = omega R,   dA(omega) = A_PQ (omega - A_QQ)^-1 A_QP + (the T4 terms with H'),
@@ -1526,7 +1871,7 @@ end subroutine
 !
 ! Per root also: the Rayleigh quotient of the start vector with the folded
 ! matrix at its own energy, and omega after the first evaluation.
-subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen, ecorr)
+subroutine N(xzeom4f)(w, ip, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen, ecorr)
   use xzdata
   use xzmem
   use xzkern
@@ -1535,9 +1880,11 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
   use omp_lib
   implicit none
   real(8) :: w(*)
-  integer(8), intent(in) :: lshift, nroot, nfound, kxf, kxa, kxb, singles(*), nlen
+  integer(8), intent(in) :: ip, lshift, nroot, nfound, kxf, kxa, kxb, singles(*), nlen
   complex(8), intent(in) :: ee(*)
   real(8), intent(in) :: ecorr
+  integer(8) :: ostart, nres0, nev0, nfw, kdw
+  logical :: ckpt, resume, held, fok
   integer(8) :: msf, msub, peak, avail, k, nsig, nit, nf1, outer, nsigr, i, a, r, ca, cb, nc, jc, kxc, ncmax
   integer(8) :: kq, kf, c, d, nev, m0, nloc
   integer(8), allocatable :: c1(:), l1(:, :)
@@ -1568,6 +1915,8 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
   end if
   call xzoptget('cc4eom', arg, larg)
   davidson = larg > 0 .and. (arg(1:1) == 'd' .or. arg(1:1) == 'D')
+  ! (macro / micro: the files XZE4R.nnn, XZE4Q.nnn for a later run)
+  ckpt = .not. davidson
   ! the largest cluster
   ncmax = 1
   nc = 1
@@ -1621,6 +1970,22 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
     write(6, '(/,a)') '   root macro         omega / Eh         new omega / Eh        change      max |r|   sigma vectors: T4, others' // &
       '   time/s: T4, all'
   end if
+  ! the roots of an earlier run (N(xzeom) has read the file XZE4R.nnn), or
+  ! the roots without the T4 terms to that file
+  eclu = 0d0
+  rayc = 0d0
+  shotc = 0d0
+  nres0 = nres
+  if (e4rst) then
+    eclu = e4eclu
+    rayc = e4rayc
+    shotc = e4shotc
+    nres0 = nres - e4kdone
+  else if (ckpt) then
+    nfw = nfound
+    kdw = 0
+    call N(xz4er)(w, 'w', ip, lshift, nroot, nlen, ecorr, kxf, ee, nfw, kdw, eclu, rayc, shotc, fok)
+  end if
   ca = 1
   cb = 0
   nc = 1
@@ -1641,6 +2006,11 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
     end if
     kxc = kxf + NW * nlen * (ca - 1)
     jc = k - ca + 1
+    if (k <= e4kdone) then
+      write(6, '(a,i4,a,f20.12,a,i3.3,a,a)') '   root', k, ': omega ', rom(nres0 + k), ' Eh   (done in an earlier run: the file XZE4R.', &
+        ip, ')', trim(merge('               ', '  NOT converged', rconv(nres0 + k)))
+      cycle
+    end if
     omega = dble(ee(k))
     ! (a later root of a cluster: from the last solution of the cluster)
     if (k > ca .and. .not. davidson) omega = eclu(jc)
@@ -1654,7 +2024,13 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
     shot = 0d0
     ray = 0d0
     dwprev = 0d0
-    do outer = 1, maxouter
+    ! (an evaluation of the T4 terms of this root of an earlier run, the file
+    ! XZE4Q.nnn: q, F, the frequency - the iterations go on with its eigenproblem)
+    ostart = 1
+    resume = .false.
+    if (ckpt) call N(xz4eq)(w, 'r', ip, nlen, ecorr, k, ca, nc, ostart, omega, dwprev, nev, nsigr, kxa, kxb, kq, kf, kxc, resume)
+    nev0 = nev
+    do outer = ostart, maxouter
       t0 = omp_get_wtime()
       eomega = omega
       msub = min(64_8, max(msf, 3 * nc + 4))
@@ -1703,15 +2079,24 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
         omega = nxt
         cycle
       end if
-      ! ---- macro / micro.  q: an orthonormal basis of the vectors of the cluster
+      ! ---- macro / micro.  q: an orthonormal basis of the vectors of the
+      !      cluster; F = (A_PP + dA(omega)) q: the sigma vectors with the T4
+      !      terms.  More than one rank: the vector of rank 0 to all, then every
+      !      rank on its rows (the commands of the solver, xzeoms.inc), the T4
+      !      terms dealt as those of the ground state.  held: q and F of this
+      !      step are those of an earlier run.
+      held = resume .and. outer == ostart
+      t4s = 0d0
       if (edist) then
-        ! over the ranks: the vector of rank 0 to all, then every rank on its
-        ! rows (the commands of the solver, xzeoms.inc); F = (A_PP + dA(omega)) q
-        ! with the T4 terms dealt as those of the ground state
         ecmd = .true.
         evoff = 0
         evlen = nloc
         ekx = [kxa, kxb]
+      end if
+      if (held) then
+        write(6, '(a,i3,a,i3.3,a,f18.12,a)') '          (the T4 terms of step ', outer, ' of this root: from the file XZE4Q.', ip, &
+          ' of an earlier run, evaluated at omega ', omega, ')'
+      else if (edist) then
         do c = 1, nc
           call N(xzecopy)(nlen, w(kxc + NW * nlen * (c - 1)), w(kxa))
           call N(xzepspread)(w, kxa)
@@ -1731,56 +2116,57 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
           call N(xzevget)(w, 3, c, kxa)
           call N(xzepsig)(w, kxa, kxb, .false.)
           call N(xzevput)(w, 4, c, kxb)
-          neomsig = neomsig + 1
-          nev = nev + 1
         end do
         efold = .false.
         call xzecmd(op_fold, 0d0, 0d0)
         t4s = omp_get_wtime() - t4s
+      else
+        do c = 1, nc
+          call N(xzecopy)(nlen, w(kxc + NW * nlen * (c - 1)), w(kq + NW * nlen * (c - 1)))
+          do d = 1, c - 1
+            call N(zc_vdot)(nlen, w(kq + NW * nlen * (d - 1)), w(kq + NW * nlen * (c - 1)), s)
+            call N(xzeaxpyc)(nlen, -s, w(kq + NW * nlen * (d - 1)), w(kq + NW * nlen * (c - 1)))
+          end do
+          call N(zc_vdot)(nlen, w(kq + NW * nlen * (c - 1)), w(kq + NW * nlen * (c - 1)), s)
+          call N(xzevscal)(nlen, 1d0 / sqrt(dble(s)), w(kq + NW * nlen * (c - 1)))
+        end do
+        t4s = omp_get_wtime()
+        efold = .true.
+        do c = 1, nc
+          call N(xzesig)(w, kq + NW * nlen * (c - 1), kf + NW * nlen * (c - 1), .false.)
+        end do
+        efold = .false.
+        t4s = omp_get_wtime() - t4s
+      end if
+      if (.not. held) then
         teomsig = teomsig + t4s
-        if (outer == 1) then
-          do c = 1, nc
+        neomsig = neomsig + nc
+        nev = nev + nc
+        nt4run = nt4run + nc
+        ! the checkpoint: q, F and the frequency of this evaluation
+        if (ckpt) call N(xz4eq)(w, 'w', ip, nlen, ecorr, k, ca, nc, outer, omega, dwprev, nev, nsigr, kxa, kxb, kq, kf, kxc, fok)
+        if (nt4stop > 0 .and. nt4run >= nt4stop) then
+          write(6, '(/,a,i4,a)') ' @XZCCSDT-F, option cc4stop: the run stops after its evaluation ', nt4run, ' of the T4 terms.'
+          call xzerrex
+        end if
+      end if
+      if (outer == 1) then
+        ! the folded matrix on the start vectors: its eigenvalues (one root: the Rayleigh quotient)
+        do c = 1, nc
+          if (edist) then
             call N(xzevget)(w, 4, c, kxb)
             call N(xzevmdot)(w, 3, nc, kxb, dd)
             gm(1:nc, c) = CONJ(dd(1:nc))
-          end do
-          call N(xzesmall)(nc, gm, ncmax, evs, ym)
-        end if
-        ecmd = .false.
-      end if
-      do c = 1, nc
-        if (edist) exit
-        call N(xzecopy)(nlen, w(kxc + NW * nlen * (c - 1)), w(kq + NW * nlen * (c - 1)))
-        do d = 1, c - 1
-          call N(zc_vdot)(nlen, w(kq + NW * nlen * (d - 1)), w(kq + NW * nlen * (c - 1)), s)
-          call N(xzeaxpyc)(nlen, -s, w(kq + NW * nlen * (d - 1)), w(kq + NW * nlen * (c - 1)))
-        end do
-        call N(zc_vdot)(nlen, w(kq + NW * nlen * (c - 1)), w(kq + NW * nlen * (c - 1)), s)
-        call N(xzevscal)(nlen, 1d0 / sqrt(dble(s)), w(kq + NW * nlen * (c - 1)))
-      end do
-      ! F = (A_PP + dA(omega)) q: the sigma vectors with the T4 terms
-      if (.not. edist) then
-      t4s = omp_get_wtime()
-      efold = .true.
-      do c = 1, nc
-        call N(xzesig)(w, kq + NW * nlen * (c - 1), kf + NW * nlen * (c - 1), .false.)
-        neomsig = neomsig + 1
-        nev = nev + 1
-      end do
-      efold = .false.
-      t4s = omp_get_wtime() - t4s
-      teomsig = teomsig + t4s
-      end if
-      if (outer == 1 .and. .not. edist) then
-        ! the folded matrix on the start vectors: its eigenvalues (one root: the Rayleigh quotient)
-        do c = 1, nc
-          do d = 1, nc
-            call N(zc_vdot)(nlen, w(kq + NW * nlen * (d - 1)), w(kf + NW * nlen * (c - 1)), s)
-            gm(d, c) = s
-          end do
+          else
+            do d = 1, nc
+              call N(zc_vdot)(nlen, w(kq + NW * nlen * (d - 1)), w(kf + NW * nlen * (c - 1)), s)
+              gm(d, c) = s
+            end do
+          end if
         end do
         call N(xzesmall)(nc, gm, ncmax, evs, ym)
       end if
+      ecmd = .false.
       ! the eigenproblem with the T4 terms held on q
       e4nq = nc
       e4kq = kq
@@ -1824,6 +2210,8 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
     write(6, '(a,i4,a,f20.12,a,f12.6,a,f14.4,a,i4,a,i5,a,i6,a,f10.2,a)') '   root', k, ': omega ', omega, ' Eh = ', &
       omega * ev, ' eV = ', omega * cm, ' cm-1   (', min(outer, maxouter), ' steps, ', nev, ' sigma vectors with the T4 terms, ', &
       nsigr - merge(nev, 0_8, davidson), ' others, ', omp_get_wtime() - tr, ' s)'
+    if (resume) write(6, '(a,i4,a,i4,a)') '          (', nev0, ' of the sigma vectors with the T4 terms in earlier runs, ', nev - nev0, &
+      ' in this run; the time is that of this run)'
     write(6, '(a,f18.12,a,f18.12,a,f18.12,a)') '          without the T4 terms ', dble(ee(k)), &
       ';  Rayleigh quotient of the start vector ', ray, ';  after the first step ', shot, ' Eh'
     if (.not. ok) write(6, '(a)') '          NOT converged'
@@ -1861,6 +2249,13 @@ subroutine N(xzeom4f)(w, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, nlen
         nfrozen + no + vperm(a) + 1, ' (', lab(nfrozen + no + vperm(a)), ',', w(jeps + no + a), ')   ', &
         dble(v1(r, jc)), N(xzeimag)(v1(r, jc))
     end do
+    ! the root is done: the roots and the vectors to the file XZE4R.nnn, the file of its evaluation goes
+    if (ckpt) then
+      nfw = nfound
+      kdw = k
+      call N(xz4er)(w, 'w', ip, lshift, nroot, nlen, ecorr, kxf, ee, nfw, kdw, eclu, rayc, shotc, fok)
+      call N(xz4eq)(w, 'd', ip, nlen, ecorr, k, ca, nc, outer, omega, dwprev, nev, nsigr, kxa, kxb, kq, kf, kxc, fok)
+    end if
   end do
   deallocate(e1, x1mx, x1nm, w1, c1, l1, v1, gm, ym, evs, dd)
   call xzrel(m0)

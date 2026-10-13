@@ -118,6 +118,13 @@ module xzdata
   logical :: cc4start = .false.     ! the CCSDT amplitudes of the file XZAMPS are the start
   integer(8) :: jd42 = 0, jd43 = 0  ! the T4 terms: of R2 [P][Q], of R3 (as T3 is stored)
   integer(8) :: nt4 = 0             ! evaluations of the T4 terms
+  ! the file XZCC4 of an earlier run (N(xz4ckpt)): 0 none; 1 the amplitudes and the T4 terms of its
+  ! last completed evaluation - the iterations go on from there; 2 its converged amplitudes are
+  ! taken; 3 its amplitudes, converged less tightly, are the start
+  integer :: cc4rst = 0
+  integer(8) :: nt4old = 0          ! evaluations of the earlier runs (of nt4)
+  integer(8) :: nt4run = 0          ! evaluations of this run, the sigma vectors of EOM-CC4 with them
+  integer(8) :: nt4stop = 0         ! option cc4stop n (a test hook): the run stops after n of them
   real(8) :: e4ccsdt = 0d0          ! the CCSDT correlation energy of the start (0: none)
   real(8) :: t4sec = 0d0            ! seconds of the evaluations
   integer(8) :: jv4 = 0             ! the bare <ab||cd> that the Xv of CC4 is made from (jvvvv; in the EOM e4vv)

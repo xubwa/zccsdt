@@ -99,6 +99,13 @@ module xzeomd
   ! (the kinds 3 and 4 of N(xzevput), N(xzevmdot), N(xzevcomb), N(xzevget))
   integer(8) :: e4nq = 0, e4kq = 0, e4kf = 0
   real(8) :: eritz0(64) = 0d0
+  ! the files XZE4R.nnn, XZE4Q.nnn of an earlier run (N(xz4er), N(xz4eq)): the
+  ! roots of the problem came from there, e4kdone of them done with the T4
+  ! terms; of the last cluster in hand: its energies, its Rayleigh quotients
+  ! and its energies after the first evaluation
+  logical :: e4rst = .false.
+  integer(8) :: e4kdone = 0
+  real(8) :: e4eclu(64) = 0d0, e4rayc(64) = 0d0, e4shotc(64) = 0d0
   real(8) :: rpp(maxres) = 0d0, rshot(maxres) = 0d0, rfirst(maxres) = 0d0
   integer(8) :: neomsig = 0, neomsd = 0
 

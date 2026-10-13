@@ -24,6 +24,12 @@ int64_t xz_free_disk(const char *path)
     return (int64_t)s.f_bavail * (int64_t)s.f_frsize;
 }
 
+/* the file `from' takes the name `to', replacing a file of that name (0: done) */
+int64_t xz_rename(const char *from, const char *to)
+{
+    return rename(from, to) == 0 ? 0 : 1;
+}
+
 /* kb[0]: peak resident set (VmHWM), kb[1]: resident set now (VmRSS), kB */
 void xz_rss(int64_t *kb)
 {
