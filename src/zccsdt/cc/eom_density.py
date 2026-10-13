@@ -106,6 +106,12 @@ class View:
         out[np.ix_(*self.lex)] = layout.to_dense(np.asarray(x, dtype=self.dtype))
         return out.ravel()
 
+    def back3(self, x):
+        '''A totally symmetric rank-3 array of the view in the layout of T3.'''
+        if not self.dense:
+            return x
+        return ccsdt_opt.blocked_t3(self.source, np.asarray(x).reshape(self.om.ntri, self.vm.ntri))
+
     def dense2(self, x2p):
         '''[i,j,a,b] of [(i<j),(a<b)] in the pairs of the maps of the vectors.'''
         return t3pack.unpack_pairs(np.asarray(x2p, dtype=self.dtype), self.om, self.vm)
@@ -166,7 +172,7 @@ class State:
     left: np.ndarray = None     # <k~| p+ q |0> = <0| L_k Obar |0>
     right: np.ndarray = None    # <0~| p+ q |k> = <0| (1 + Lambda) Obar R_k |0>
     ground_overlap: float = 0.0     # |r0 + Lambda . R_k|: zero for converged vectors
-    zeta: tuple = None          # Zt = Lambda + the response to xi'' (l1, l2 dense, l3 in the layout of the view)
+    zeta: tuple = None          # Zt = Lambda + the response to xi'' (l1, l2 dense, l3 in the layout of T3)
     lambda_cycles: int = 0
     timings: dict = None
 
@@ -290,10 +296,11 @@ def kernel(eris, t1, t2, t3, right, left, roots=None, lam=None, response=False, 
                 warnings.warn('EOM density: the Lambda equations of the response of state %d did not converge in %d cycles'
                               % (k + 1, zr.ncycle))
             times['lambda'] = time.perf_counter() - t_1
-            st.zeta, st.lambda_cycles = (zr.l1, zr.l2, zr.l3), zr.ncycle
+            st.lambda_cycles = zr.ncycle
             del xi
             t_1 = time.perf_counter()
-            st.d1_response = dens(T, st.zeta) + F
+            st.d1_response = dens(T, (zr.l1, zr.l2, zr.l3)) + F
+            st.zeta = (zr.l1, zr.l2, view.back3(zr.l3))
             times['density'] += time.perf_counter() - t_1
         st.timings = times
         say('  state %d: r0 = %.6f; %s' % (k + 1, abs(r0), ', '.join('%s %.1f s' % kv for kv in times.items())))

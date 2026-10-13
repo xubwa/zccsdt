@@ -14,7 +14,6 @@ import tracemalloc
 
 import numpy as np
 import pytest
-from pyscf import gto, x2c
 
 import zccsdt
 from test_eom_opt import pack2, pack3, random_case
@@ -59,7 +58,7 @@ def test_left_product_against_the_transposed_jacobian(name, cplx):
     assert abs(r1 - e1).max() < 1e-13 and abs(r2 - e2).max() < 1e-13 and abs(r3).max() < 1e-13
 
 
-from test_eom_shift import hbr, lih    # noqa: E402,F401  (the fixtures: CCSDT of LiH and HBr with X2C spinors)
+from test_eom_shift import lih    # noqa: E402,F401  (the fixture: CCSDT of LiH with X2C spinors)
 
 
 def _apply(ops, x):

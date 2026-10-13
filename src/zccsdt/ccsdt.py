@@ -1744,6 +1744,8 @@ class GCCSDT(UCCSDT):
         if isinstance(right, dict):
             return {d: self.eom_left(r, roots, conv_tol, max_space, max_cycle) for d, r in right.items()
                     if r.r1 is not None}
+        if getattr(right, 'short', None) is not None:
+            raise NotImplementedError('left-hand vectors of IP / EA states are not wired (EOM-EE-CCSDT only)')
         eris = self._eris if self._eris is not None else self.ao2mo()
         sector = None
         if right.shift is None and right.label_shift is not None and t3pack.classes_of(eris) is None:
@@ -1888,6 +1890,46 @@ class GCCSDT(UCCSDT):
             for line in out.text():
                 print('  ' + line, file=self.stdout, flush=True)
         return out
+
+    def eom_quadruples(self, right=None, roots=None, ground=True):
+        '''A one-shot quadruples correction to the excitation energies of
+        EOM-EE-CCSDT (zccsdt.cc.eom_q; docs/eom.md, section 14): the
+        first-order change of each omega under what CC4 adds to CCSDT, with
+        the left and right vectors - the quadruples of the state folded in
+        at omega, the T4 of the ground state with the integrals of
+        [H~, R1], and (``ground``) the shift of the ground-state amplitudes
+        by T4, which takes the response vector of the density of the state
+        (eom_density(response=True): a Lambda-like equation per state) and
+        Lambda.  Returns an eom_q.Result (.states[k].estimate: omega + the
+        correction; .text()), kept as ``right.quadruples``.  The spinors
+        must be the canonical ones of the SCF.'''
+        from zccsdt import disk
+        from zccsdt.cc import eom_q
+        right = self.eom if right is None else right
+        if right is None or isinstance(right, dict):
+            raise RuntimeError('%s.eom_quadruples(): the Result of one eom_ee() (of one shift)' % self.__class__.__name__)
+        lam = zetas = None
+        if ground:
+            states = getattr(right, 'states', None)
+            if (states is None or any(s.zeta is None for s in states)
+                    or (roots is not None and [s.root for s in states] != list(roots))):
+                states = self.eom_density(right, roots, response=True)
+            lam, zetas = (self.l1, self.l2, self.l3), [s.zeta for s in states]
+            roots = [s.root for s in states]
+        left = right.left
+        if left is None or (roots is not None and not set(roots) <= set(left.roots)):
+            left = self.eom_left(right, roots)
+        pos = None if roots is None else [left.roots.index(k) for k in roots]
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        note = self.verbose >= logger.NOTE
+        if note:
+            print('EOM-EE-CCSDT: one-shot quadruples correction of the excitation energies', file=self.stdout, flush=True)
+        with disk.limit(self.max_disk):
+            res = eom_q.kernel(eris, self.t1, self.t2, self.t3, right, left, roots=pos, lam=lam, zetas=zetas,
+                               max_memory=self.max_memory, workers=getattr(self, 'workers', None), verbose=note,
+                               stdout=self.stdout)
+        right.quadruples = res
+        return res
 
     def _ground_d1(self):
         '''d1[p,q] = <p+ q> of t and Lambda over the active spinors (kept).'''

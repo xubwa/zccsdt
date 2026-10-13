@@ -492,6 +492,7 @@ class Result:
     states: object = None       # their densities (eom_density.State), once computed (GCCSDT.eom_density)
     properties: object = None   # eom_density.Properties (GCCSDT.eom_properties)
     conv_tol: float = None      # the threshold these roots were converged to
+    quadruples: object = None   # eom_q.Result: the one-shot quadruples correction (GCCSDT.eom_quadruples)
 
 
 def denominators(g):

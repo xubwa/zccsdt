@@ -185,7 +185,7 @@ class Plan:
     nroots: int
     max_space: int              # vectors of the subspace at most
     mapped: bool                # their rank-3 parts are in a scratch file
-    need: int                   # bytes of ordinary memory, beyond what is there (T3, the right-hand vectors)
+    need: int                   # bytes of ordinary memory: the Lambda machinery with T3 (which is there) and the subspace
     vectors: int                # bytes of the 2 max_space vectors (memory or disk)
     disk: int
     lam: object                 # the lambda_opt.LambdaPlan of the product
@@ -209,7 +209,7 @@ def plan_for(eris, t1, dtype, nroots, sizes, max_space=None, opts=None, shift=No
     their rank-3 parts in a scratch file.  A state with a shift in the
     blocks of the labels ('dense'): the packed T3 and the two copies of a
     conversion besides.  MemoryError / DiskFullError with the numbers.'''
-    from zccsdt import disk, memory
+    from zccsdt import disk
     from zccsdt.cc import solver
     opts = opts or solver.Options()
     om, vm = t3pack.maps_for(eris)

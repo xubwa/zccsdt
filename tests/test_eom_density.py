@@ -24,7 +24,7 @@ from test_eom_opt import pack2, pack3
 from test_eom_shift import hbr, lih    # noqa: F401  (fixtures)
 from test_lambda_opt import _amps, _model_eris
 from zccsdt import eris as E
-from zccsdt.cc import (ccsdtq_ref as R, ccsdtq_terms as Q, eom, eom_density as ED, eom_left as EL, eom_opt,
+from zccsdt.cc import (ccsdtq_ref as R, eom, eom_density as ED, eom_left as EL, eom_opt,
                        eom_ref as EOM, lambda_opt, solver, t3pack)
 
 
