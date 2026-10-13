@@ -1548,6 +1548,10 @@ table has the peak above the start.)
   of a Lagrangian that is implemented), IP / EA / DEA.
 - The right-hand operands are not released for the left solve.
 - U / R-form integrals.
+- Not measured: the shifted passes beyond 8 + 78 spinors (HBr / cc-pVQZ-DK,
+  26 + 120, where the sigma vector was timed), and complex spinors with
+  labels at a production size (tested on LiH with phases).  The densities
+  of a state with a shift still go through the packed block (13.2).
 
 ## 13. Densities of excited states and transition moments (`zccsdt.cc.eom_density`)
 
@@ -1939,7 +1943,7 @@ for 10 + 106 spinors).
 
 **A state with a shift** needs the Lambda step in blocks with shift
 arguments; the native one takes arrays without a shift (`xzlblk.inc` =
-`lambda_blk`).  The model is `lambda_shift.ShiftL3` (12.2), 300 lines
+`lambda_blk`).  The model is `lambda_shift.ShiftL3` (12.2), 400 lines
 that list every place where the shift enters, validated against the route
 through the packed block and against the shifted sigma vector.  The block
 passes that the native Lambda step shares with the T3 equation take the
