@@ -277,8 +277,10 @@ subroutine xzdrv(w, maxcor)
       call xzerrex
     end if
     write(6, '(a,a,a,i4,a)') '   ', trim(mname), ' converged in ', ncyc, ' cycles.'
-    if (amprst) write(6, '(a,a,a,i5,a)') '   (', trim(merge('its CCSDT iterations ', '                     ', cc4)), &
-      ' continued from the amplitudes of earlier runs: ', ktcyc, ' cycles in all runs)'
+    if (amprst .and. cc4) write(6, '(a,i5,a)') '   (its CCSDT iterations continued from the amplitudes of earlier runs: ', &
+      ktcyc, ' cycles in all runs)'
+    if (amprst .and. .not. cc4) write(6, '(a,i5,a)') '   (continued from the amplitudes of earlier runs: ', ktcyc, &
+      ' cycles in all runs)'
     call xztable(1, 'the ' // trim(mname) // ' iterations', tcc, ncyc)
     if (cc3mode == 2) write(6, '(a,4f10.2)') '     (of it in the CC3 kernel: products, amplitudes, gather, contractions /s)', tfly
     if (cc4) then

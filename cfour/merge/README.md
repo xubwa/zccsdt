@@ -204,6 +204,21 @@ through this Makefile, a CFOUR configured with `--enable-mpi`.
 
 ## Results
 
+**2026-10-13, `CC_CONV` as in `xx2cccsd`, iterations saved and continued**
+(node c260, 8 threads; docs/native.md, section 1).  The private tree
+`cfour_merge_test/serial`, assembled as `zccsdt`: `make` and `make XZMPI=1
+MPICC=mpiicc` exit 0, no `Circular` line; `test/run.sh <tree>/bin` PASS
+(E(CCSDT) -100.196412398985, E(CC3) -100.196407469108, E(CC4)
+-100.196781330924: 1.5e-11, 1.2e-11, 1.7e-11 from the reference numbers of
+the tighter test of before, tolerance 1e-8).  `bin/xzccsdt` and
+`bin/xzccsdt_mpi` (2 ranks) against the repository binaries of the same
+source, `--eom`: 28 + 28 and 28 + 28 runs, all printed lines identical,
+density files within 5.6e-17.  The repository binaries against those of the
+commit before (fbbd196), `--tol --eom`, serial and 2 ranks: REGRESSION OK -
+CCSDT 2 cycles fewer in every case, Lambda 2 to 4 fewer, energies within
+3.4e-11 (`CC_CONV=9`) and 5e-12 (`CC_CONV=10`), density files within
+9.3e-11, excitation energies and EOM iterations identical.
+
 **2026-10-12, the interface without arguments** (node c510, 8 threads).
 Reference: the repository binaries of 2026-10-10 (with arguments,
 `--ref-args`); under test: `bin/xzccsdt` (`bin/xzccsdt_mpi`) of the private
