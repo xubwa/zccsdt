@@ -23,14 +23,16 @@ the column of the reference of L (Hbar - E0) = omega L reads l0 omega = 0.
 A left vector of a state with the label shift D has its elements where
 those of the right vector are - l1[i,a] where l_a - l_i = D, the rank-3
 part in the blocks of t3shift.ShiftLayout(D) - (as an operator it lowers
-the sum of the labels by D: the shift -D).  Where the Lambda engine has the
-layout of the vector the product runs in it: the packed block without
-labels (states of one shift by masks: eom.Sector), and the blocks of the
-labels for the totally symmetric states.  A state with a shift in the
-blocks of the labels: the Lambda engine of the blocks is written for
-arrays without a shift, so the vector is put on the packed block, the
-product is taken there and projected on the shift - right, at the cost and
-with the memory of the packed block (LeftOps.mode == 'dense').
+the sum of the labels by D: the shift -D).  The product runs in the layout
+of the vector: the packed block without labels (states of one shift by
+masks: eom.Sector); the blocks of the labels for the totally symmetric
+states (lambda_blk.BlockL3) and, for a state with a shift, the blocks of
+that shift (lambda_shift.ShiftL3: the passes of BlockL3 with the shift of
+l).  Without the engine of the blocks (no C kernels), or with ``dense``,
+the vector of labelled integrals is put on the packed block, the product is
+taken there and projected on the shift - right, at the cost and with the
+memory of the packed block (LeftOps.mode == 'dense'; the reference of the
+tests).
 
 The solver is that of the right-hand vectors (eom.davidson) on the
 transposed matrix, started from the conjugates of the converged right-hand
@@ -65,8 +67,9 @@ class LeftOps:
     layout of the right-hand vectors of eom.kernel(shift=, sector=): the
     intermediates of the Lambda equations, made once.
 
-    mode 'same'   the Lambda engine has the layout of the vectors
-         'dense'  labels in use and a shift (or no block engine): the
+    mode 'same'   the Lambda engine has the layout of the vectors (with a
+                  shift in the blocks of the labels: lambda_shift.ShiftL3)
+         'dense'  labels in use but no block engine, or ``dense``: the
                   rank-3 part goes to the packed block in lexicographic
                   order and back, the product is projected on the shift.'''
 
@@ -84,7 +87,7 @@ class LeftOps:
             if labelled or shift is not None:
                 raise ValueError('sector: for the packed block; in the blocks of the labels the states are chosen by shift')
             self.sector = eom.Sector(om, vm, sector[0], sector[1])
-        blocks = labelled and not shift and not dense and lambda_opt.block_engine(eris, dtype) is not None
+        blocks = labelled and not dense and lambda_opt.block_engine(eris, dtype) is not None
         self.mode = 'same' if (blocks or not labelled) else 'dense'
         self.blocks = bool(blocks)
         self.masks = None
@@ -93,7 +96,7 @@ class LeftOps:
         if self.mode == 'same':
             self.view, self.T3 = eris, np.ascontiguousarray(np.asarray(t3, dtype=dtype).ravel())
             if labelled:
-                self.masks = _masks(om, vm, 0)
+                self.masks = _masks(om, vm, shift or 0)
         else:
             import copy
             eng = ccsdt_opt.engine_for(eris, dtype)
@@ -114,6 +117,12 @@ class LeftOps:
             self.buf = None
         with timer('eom.left.prepare'):
             self.im = lambda_opt.make_intermediates(self.view, t1, t2, self.T3, mem_mb=mem, blocks=self.blocks)
+        if self.blocks and shift:
+            # the passes over l3 in the blocks of the shift; the intermediates are those of T
+            import copy
+            from zccsdt.cc import lambda_shift
+            self.im = copy.copy(self.im)
+            self.im.eng = lambda_shift.ShiftL3(self.im.eng, eom._shifter(self.im.eng.t3), shift)
         self.setup = time.perf_counter() - t0
         self.nocc, self.nvir = om.n, vm.n
 
@@ -207,17 +216,28 @@ def plan_for(eris, t1, dtype, nroots, sizes, max_space=None, opts=None, shift=No
     2 nroots + 2 at least, to what fits) vectors of the lengths ``sizes``
     with their products - in memory if ``opts.max_memory`` holds them, else
     their rank-3 parts in a scratch file.  A state with a shift in the
-    blocks of the labels ('dense'): the packed T3 and the two copies of a
-    conversion besides.  MemoryError / DiskFullError with the numbers.'''
+    blocks of the labels: the work array of the shifted passes where it is
+    larger; through the packed block ('dense'): the packed T3 and the two
+    copies of a conversion besides.  MemoryError / DiskFullError with the
+    numbers.'''
     from zccsdt import disk
     from zccsdt.cc import solver
     opts = opts or solver.Options()
     om, vm = t3pack.maps_for(eris)
     isz = np.dtype(dtype).itemsize
     labelled = om.spins is not None
-    blocks = labelled and not shift and not dense and lambda_opt.block_engine(eris, dtype) is not None
+    blocks = labelled and not dense and lambda_opt.block_engine(eris, dtype) is not None
     mode = 'same' if (blocks or not labelled) else 'dense'
     view = eris
+    # the work array of the passes in the blocks of a shift, beyond that of the plan of Lambda
+    more = 0
+    if blocks and shift:
+        eng = ccsdt_opt.engine_for(eris, dtype)
+        more = max(0, int(eom._shifter(eng).buffer_bytes(opts.mem_mb, shift)) - int(eng.buffer_bytes(opts.mem_mb)))
+    # (Lambda_3 and the residual of the plan of Lambda: two arrays of the size of T3)
+    t3b = ccsdt_opt.engine_for(eris, dtype).size * isz if mode == 'same' else 0
+    # l2 of a product as a dense array [i,j,a,b] and the array it is unpacked from
+    more += 2 * om.n ** 2 * vm.n ** 2 * isz
     if mode == 'dense':
         import copy
         view = copy.copy(eris)
@@ -242,11 +262,11 @@ def plan_for(eris, t1, dtype, nroots, sizes, max_space=None, opts=None, shift=No
         for space in range(asked, floor - 1, -1):
             if mode == 'same':
                 # in memory, a vector and its product are Lambda_3 and the residual of the plan
-                own = 2 * space * (one - big) if mapped else 2 * space * one - 2 * big
+                own = (2 * space * (one - big) if mapped else 2 * space * one - 2 * t3b) + more
             else:
                 # T3 on the packed block (the plan takes it to be there), and the copies of a
                 # conversion (the array in the order of the maps and the gathered one)
-                own = (2 * space * (one - big) if mapped else 2 * space * one) + 3 * pk
+                own = (2 * space * (one - big) if mapped else 2 * space * one) + 3 * pk + more
             if mapped and left is not None and 2 * space * big > left:
                 continue
             try:
@@ -383,17 +403,8 @@ def kernel(eris, t1, t2, t3, right, roots=None, conv_tol=None, max_space=None, m
         for lv in levels:
             C = np.linalg.inv(M[np.ix_(lv, lv)])            # L' = C L:  L' R = 1 in the level
             C = C.real.copy() if dtype.kind == 'f' else C
-            new = [[np.zeros_like(np.asarray(p)) for p in vec[lv[0]]] for _ in lv]
-            for a in range(len(lv)):
-                for b in range(len(lv)):
-                    for p in range(3):
-                        if new[a][p].size:
-                            new[a][p] += C[a, b] * np.asarray(vec[lv[b]][p])
-            for a, k in enumerate(lv):
-                for p in range(3):
-                    if new[a][p].size:
-                        vec[k][p][:] = new[a][p]
-            del new
+            # (in place and in chunks: no array of the size of a vector)
+            eom.transform([vec[k] for k in lv], np.ascontiguousarray(C.T, dtype=dtype))
     M2 = np.array([[_dotu(l, r) for r in R] for l in vec])
     times['total'] = time.perf_counter() - t_all
     result = Result(e=e.real.copy(), e_imag=e.imag.copy(), e_right=e_right, converged=conv, residuals=rn,

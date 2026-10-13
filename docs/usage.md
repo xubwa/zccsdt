@@ -605,9 +605,9 @@ q = mycc.eom_quadruples()                 # one-shot quadruples: q.states[k].est
   machinery of the Lambda equations (a left product costs a Lambda
   iteration, 0.63 to 0.70 of a sigma vector; the whole left solve 0.6 to
   0.75 of the right one), from the right-hand vectors, with their
-  threshold.  In the blocks of the labels for the totally symmetric
-  states; a state with a label shift goes through the packed block (2.4
-  times a sigma vector of the shifted blocks for HBr with 8 + 78).
+  threshold.  With the labels of a linear molecule in use it runs in the
+  blocks of the shift of the states (`zccsdt.cc.lambda_shift`), at the
+  same cost for every shift.
 - `eom_density` gives the density of the EOM-CC state, `<0| L_k exp(-T)
   p+ q exp(T) R_k |0>` (the spinors and the amplitudes fixed), and with
   `response=True` the one that is the derivative of the energy of the

@@ -16,7 +16,7 @@ and a one-shot quadruples correction of the excitation energies (sections
 | IP and EA with short vectors | `eom.ghost_short`, `tests/test_eom_short.py` |
 | front end | `GCCSDT.eom_ee`, `eom_ip`, `eom_ea` (`src/zccsdt/ccsdt.py`; `docs/usage.md`) |
 | double electron attachment (EOM-DEA; section 11): two ghost spinors, label blocks, the 5p3h operators folded, any rank on determinants | `src/zccsdt/cc/dea.py`, `dea5.py`, `dea_strings.py`, `tests/test_dea*.py`, `GCCSDT.eom_dea`, `bench/dea/` |
-| left-hand vectors of EOM-EE-CCSDT (section 12) | `src/zccsdt/cc/eom_left.py`, `tests/test_eom_left.py`, `GCCSDT.eom_left` |
+| left-hand vectors of EOM-EE-CCSDT (section 12) | `src/zccsdt/cc/eom_left.py`, `lambda_shift.py` (the Lambda passes in the blocks of a label shift), `tests/test_eom_left.py`, `GCCSDT.eom_left` |
 | densities of excited states, transition densities, dipole and transition moments (section 13) | `src/zccsdt/cc/eom_density.py`, `tests/test_eom_density.py`, `GCCSDT.eom_density`, `eom_rdm1`, `eom_properties` |
 | one-shot quadruples correction of the excitation energies (section 14) | `src/zccsdt/cc/eom_q.py`, `tests/test_eom_q.py`, `GCCSDT.eom_quadruples`, `bench/eom_q_bench.py` |
 | reference runs | `bench/refs/reference_energies.json` (`eom_ee`), `bench/dirac/mrcc_eom.sh`, `bench/cfour/eom_ccsd.sh` |
@@ -1332,8 +1332,9 @@ the Jacobian, with no use of the amplitude equations.  So
 with (r1, r2, R3) = `lambda_opt.residuals`: **no term was written for the
 left product**, and both engines of the Lambda equations serve as they are
 - `lambda_opt.DenseL3` on the packed block, `lambda_blk.BlockL3` in the
-blocks of the symmetry labels -, with the intermediates of
-`make_intermediates` made once (`eom_left.LeftOps`).  Its cost is that of a
+blocks of the symmetry labels (for a vector with a shift: its passes with
+shift arguments, 12.2) -, with the intermediates of `make_intermediates`
+made once (`eom_left.LeftOps`).  Its cost is that of a
 Lambda iteration less the Jacobi step and DIIS (section 12.4).
 
 `tests/test_eom_left.py`: for random amplitudes that solve nothing and a
@@ -1376,22 +1377,44 @@ left state carries the shift -D, and `L R` is totally symmetric.)
 | the packed block, no labels | `DenseL3` on the same layout |
 | the packed block, the states of one shift by masks (`sector=`: 2 m_s of spin orbitals, 2 m_j with `symmetry = False`) | the same, the product projected on the shift (`eom.Sector`) |
 | the blocks of the labels, totally symmetric states | `BlockL3` on the layout of T3; the parts of rank one and two masked to the shift, as the sigma vector is |
-| the blocks of the labels, a state with a shift | **through the packed block** (`LeftOps.mode == 'dense'`): the rank-3 part is put on the packed block in lexicographic order, the product is taken there with `DenseL3` and projected on the shift, and what the layout of the shift holds of it is read back |
+| the blocks of the labels, a state with a shift | **in the blocks of that shift** (`lambda_shift.ShiftL3`): the passes of `BlockL3` with the shift of l |
+| labels in use but no engine of the blocks (no C kernels), or `dense=True` | through the packed block (`LeftOps.mode == 'dense'`): the rank-3 part is put on the packed block in lexicographic order, the product is taken there with `DenseL3` and projected on the shift, and what the layout of the shift holds of it is read back - right, at the cost and with the memory of the packed block; the reference of the tests |
 
-The last row is right and not efficient: the engine of the Lambda
-equations in blocks is written for arrays without a shift (every
-intermediate - the densities of l3 with T3 and t2, the drive operands - is
-taken diagonal in the labels there), so a state with a shift pays the
-packed block in time and memory (measured: 12.4).  What the efficient
-version needs is the list of 12.5.
+**The passes with a shift** (`lambda_shift`; T3 and every operand of the
+ground state have no shift, l1, l2, l3 and the three residuals have the
+shift s of the vector; no kernel was written - the gathers and reductions
+of `csrc/t3pack.c` are driven by the tables of `t3shift.ShiftLayout`):
+
+- the half-expanded `L[P, D_delta, Q]` (delta = class(d) - class(m)) has
+  its pairs Q in the group gP - delta + s;
+- pass 1: the density `Dr[(a i), (g o)]` of l3 with T3 couples the index
+  pairs of delta + s with those of delta (a rectangular block per delta);
+  `D1` (l2 with T3) lives in delta = -s; the two stacked products have
+  operands of different classes - x of class gP - class(d), y of class
+  gQ - class(m), which coincide without a shift;
+- the Gram matrix of l3 and T3 is between the occupied triples of group g
+  and g + s;
+- pass 2: the outer product with l1 goes to the blocks gQ = gP (rows of
+  delta = s), that with l2 to gQ = gP + s (rows of delta = 0); of the four
+  parts of the summed index of the drive products the two whose left
+  operand is made of l (l2 and `Y1`) have the class of the other two plus
+  s; the reduction takes the targets of the shifted layout;
+- the ladder: the pairs of the gathered `Lv[Q, I, c]` are in the group
+  g + s - class(c); `Xq` meets the occupied pairs of group g - class(c),
+  `X2` the occupied index of class class(c) - s;
+- the occupied operator does not change the group: block by block;
+- of the dense residuals of rank one and two only the product of l2 with
+  the diagonal pair blocks of the pp operator knows the labels (the
+  occupied pairs of block h - s; `lambda_opt.residuals`).
 
 `tests/test_eom_left.py`: LiH with X2C spinors (4 + 18, labels -3 .. 3) -
 for every shift (-4 .. 4 classes; 14 to 868 of the 3264 triples) the
-product of a random vector is the one of the packed block without labels
-to 1e-10, **`l (A r) = (l A) r` with the sigma vector of the shifted
-blocks** (`t3shift`: code that shares nothing with the Lambda engines) to
-1e-10, and with a phase on every spinor (complex integrals) the product
-has the conjugate phases to 1e-11.
+product of a random vector in the blocks of the shift is the one of the
+packed block without labels to 1e-10 and the one that goes through the
+packed block to 1e-11, **`l (A r) = (l A) r` with the sigma vector of the
+shifted blocks** (`t3shift`: code that shares nothing with the Lambda
+engines) to 1e-10, and with a phase on every spinor (complex integrals)
+the product has the conjugate phases to 1e-11.
 
 ### 12.3 The solver
 
@@ -1458,40 +1481,52 @@ shrink first when memory is short) and the 2 `max_space` vectors of the
 subspace (default 4 + 3 nroots; at least 2 nroots + 2) - in memory if
 `max_memory` holds them, else their rank-3 parts in a scratch file
 (`max_disk`), the subspace lowered one vector at a time to what fits.
-Through the packed block ('dense') the packed T3 and the two copies of a
-conversion are counted besides.  `MemoryError` / `DiskFullError` with the
+With a shift in the blocks the work array of the shifted passes is
+counted where it is larger; through the packed block ('dense') the packed
+T3 and the two copies of a conversion besides.  `MemoryError` / `DiskFullError` with the
 numbers.  The operands of the right-hand side (`Result.ground`) stay
 allocated and are resident memory that the budget sees.
 `tests/test_eom_left.py`: H2O / cc-pVDZ, 8 + 38 - what numpy allocates
 (tracemalloc) is between half and all of the plan less T3 and the
 allowance for the threads; budgets that give a smaller subspace, the
-scratch file, the error.
+scratch file, the error.  HBr / cc-pVDZ-DK, 8 + 28 in blocks: planned
+21.7 MB and allocated 21.2 MB for shift 0, 21.4 and 20.7 MB for shift 2,
+where the route through the packed block plans 66.5 MB.  (The first
+version combined the vectors of a degenerate level in new arrays - one
+more vector per root of the level, not in the plan - and did not count
+the dense l2 of a product: 21.2 MB allocated against 20.9 planned; the
+level is combined in place now and l2 is counted.)
 
-**Measured** (`bench/slurm_eom_left.sh`, job 31939788, Xeon Gold 6248R, 8
-threads, `max_memory` 26 GB, both sides converged to 1e-7; the right-hand
-side from its singles-doubles guess, the left from conj(R)):
+**Measured** (`bench/slurm_eom_left.sh`, job 31939788 - the column of
+shift 2: job 31945925 -, Xeon Gold 6248R, 8 threads, `max_memory` 26 GB,
+both sides converged to 1e-7; the right-hand side from its singles-doubles
+guess, the left from conj(R)):
 
-| | H2O / cc-pVTZ, packed block | HBr / cc-pVTZ-DK, blocks, shift 0 | blocks, shift 2 (through the packed block) | HBr, packed block |
+| | H2O / cc-pVTZ, packed block | HBr / cc-pVTZ-DK, blocks, shift 0 | blocks, shift 2 | HBr, packed block |
 |---|---|---|---|---|
 | occupied + virtual, roots | 10 + 106, 2 | 8 + 78, 2 | 8 + 78, 2 | 8 + 78, 3 |
 | CCSDT iteration | 4.63 s | 0.24 s | 0.24 s | 0.74 s |
 | sigma vector (right) | 9.16 s = 1.98 iterations | 0.45 s = 1.85 | 0.42 s = 1.75 | 1.50 s = 2.01 |
-| **left product** | **6.32 s = 1.36 iterations** | **0.28 s = 1.16** | 1.02 s = 4.25 | **1.05 s = 1.41** |
-| left product / sigma vector | 0.69 | 0.63 | 2.42 | 0.70 |
+| **left product** | **6.32 s = 1.36 iterations** | **0.28 s = 1.16** | **0.28 s = 1.15** | **1.05 s = 1.41** |
+| left product / sigma vector | 0.69 | 0.63 | 0.66 | 0.70 |
 | sigma vectors, iterations (right) | 34, 16 | 33, 16 | 33, 16 | 60, 28 |
 | left products, iterations | 38, 19 | 37, 21 | 38, 21 | 58, 24 |
-| right solve in all (guess stage included) | 330.9 s | 18.3 s | 17.1 s | 97.1 s |
-| **left solve in all** | **244.6 s = 0.74** | **10.9 s = 0.59** | 39.6 s = 2.31 | **61.4 s = 0.63** |
+| right solve in all (guess stage included) | 330.9 s | 18.3 s | 16.9 s | 97.1 s |
+| **left solve in all** | **244.6 s = 0.74** | **10.9 s = 0.59** | **11.0 s = 0.65** | **61.4 s = 0.63** |
 | omega(left) - omega(right), largest | 6.6e-9 | 6.5e-9 | 2.4e-9 | 2.7e-9 |
 | biorthogonality between levels | (one level) | 2.4e-12 | 1.2e-7 | 7e-14 |
-| resident memory above the start of the left solve, peak | 5.87 GB | 0.36 GB | 1.32 GB | 1.98 GB |
-| plan less T3 | 6.54 GB | 1.06 GB | 2.09 GB | 2.69 GB |
+| resident memory above the start of the left solve, peak | 5.87 GB | 0.36 GB | 0.35 GB | 1.98 GB |
+| plan less T3 | 6.54 GB | 1.06 GB | 1.06 GB | 2.69 GB |
 
 A left product costs 1.2 to 1.4 CCSDT iterations - a Lambda iteration -
 against 1.8 to 2.0 for a sigma vector (two residuals of the T3 engine and
 two passes 1), and the left solve as a whole 0.6 to 0.75 of the right one,
-with as many products.  A state with a shift in the blocks costs the
-packed block: 2.4 times the sigma vector of the shifted blocks for HBr.
+with as many products.  A state with a shift costs what a totally
+symmetric one costs.  Through the packed block - the first version of the
+states with a shift, job 31939788 - the same two roots of shift 2 took
+1.02 s per product (2.4 times the sigma vector of the shifted blocks),
+39.6 s in all and 1.32 GB, with the same eigenvalues to all ten digits
+printed.
 **Under a budget** (job 31942452, H2O / cc-pVTZ, thresholds 1e-6;
 `EB_LEFTMEM`: `max_memory` = the resident memory at the start of the left
 solve + 3600 MB, where the unlimited run takes 5.87 GB more): the plan
@@ -1507,16 +1542,6 @@ table has the peak above the start.)
 
 ### 12.5 Not done
 
-- **The left product of a state with a shift in the blocks of the labels**:
-  `lambda_blk.BlockL3` with shift arguments, as `t3shift.ShiftT3` has them
-  for the T3 engine - pass 1 (the classes of the stacked products and of
-  the density `Dr`, which is no longer diagonal: `Dr[(a i), (g o)]` with
-  class(a) - class(i) - class(g) + class(o) = D), the Gram matrix between
-  the triples of group g and g + D, pass 2 (the drive operands `Y1`, `Y2`
-  and the outer products with a shift), the ladder with `Xq`, `X2`, and
-  the dense residuals of rank one and two, whose intermediates (`Gvv`,
-  `Goo`, `Dov`, `Do4`) get a shift.  The layout, the masks and the
-  conversions are there (`ShiftLayout`).
 - EOM-CCSD without the T3 machinery (the product runs through the Lambda
   equations of CCSDT; `zccsdt.zccsd` has its own Lambda of CCSD), the
   approximate models (CC2, CC3, CC4: their Jacobians are not derivatives
@@ -1638,8 +1663,8 @@ would take one pass for g(k); this one took no new contraction.
 in use and a totally symmetric state: T + x R and L have the layout of T3
 - everything runs in the blocks (`eom_density.View`); a state with a shift
 is put on the packed block (T + x R is then not totally symmetric: the
-Lambda and density engines of the blocks cannot take it at all, whatever
-is done about 12.5).  Memory: the density code and the Lambda equations
+Lambda and density engines of the blocks cannot take it: the left solve of
+such a state runs in its blocks, 12.2, its densities do not).  Memory: the density code and the Lambda equations
 plan themselves under `max_memory`; the arrays of the size of T3 that are
 made besides (the displaced T3, a rank-3 part of zeros; on the packed
 block the copies of T3, R3, L3, Lambda3) are checked against the budget
@@ -1912,20 +1937,20 @@ for 10 + 106 spinors).
   there); the vector operations of the solver are those of the right-hand
   side (16.7).
 
-**What does not exist natively and is needed for a state with a shift**:
-the Lambda step in blocks takes arrays without a shift (`xzlblk.inc` =
-`lambda_blk`).  The Python code goes through the packed block there
-(12.2); the native program should not - its EOM is for the shifted blocks.
-The block passes that the Lambda step shares with the T3 equation take
-the shifts of their operands from the module variables of `xzshctx`
-already (docs/native.md 16.2: pass 2, the stacked products of pass 1, the
-operator on occupied triples); the parts that are the Lambda step's own
-do not - the density `Dr` and `D1` of pass 1, the Gram matrix, the ladder
-with `Xq` and `X2`, and the dense routines of the residuals of rank one
-and two with their intermediates (the list of 12.5).  That is the real
-work of the port, and it should be written and checked in Python first
-(`lambda_blk` with shifts against `LeftOps` through the packed block,
-which is the reference now).  Totally symmetric states need none of it.
+**A state with a shift** needs the Lambda step in blocks with shift
+arguments; the native one takes arrays without a shift (`xzlblk.inc` =
+`lambda_blk`).  The model is `lambda_shift.ShiftL3` (12.2), 300 lines
+that list every place where the shift enters, validated against the route
+through the packed block and against the shifted sigma vector.  The block
+passes that the native Lambda step shares with the T3 equation take the
+shifts of their operands from the module variables of `xzshctx` already
+(docs/native.md 16.2: pass 2, the stacked products of pass 1, the operator
+on occupied triples); the parts that are the Lambda step's own do not -
+the density `Dr` and `D1` of pass 1 (rectangular blocks), the Gram matrix
+between two groups, the ladder with `Xq` and `X2`, the two classes of the
+outer products and of the four parts of the drive index in pass 2, and
+the loop over the pair blocks of the pp operator in the residual of rank
+two.  Totally symmetric states need none of it.
 
 **Then, in this order** (each small once the left vectors are there):
 

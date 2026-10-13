@@ -69,11 +69,12 @@ def _apply(ops, x):
 
 def test_left_product_with_a_label_shift(lih):
     '''LiH, X2C spinors (4 + 18, labels -3 .. 3): l A of a random vector of
-    every shift - in the blocks of the labels for the totally symmetric
-    one, through the packed block for the others - is the one of the packed
-    block without labels, and l (A r) = (l A) r with the sigma vector of
-    the blocks of that shift (zccsdt.cc.t3shift: other code); with a phase
-    on every spinor the product has the conjugate phases.'''
+    every shift in the blocks of that shift (lambda_blk for the totally
+    symmetric one, lambda_shift for the others) is the one of the packed
+    block without labels and the one that goes through the packed block,
+    and l (A r) = (l A) r with the sigma vector of the blocks of that
+    shift (zccsdt.cc.t3shift: other code); with a phase on every spinor
+    the product has the conjugate phases.'''
     cc = lih[True]
     eb = cc._eris
     ed, t3d = cc._dense_view()
@@ -90,7 +91,7 @@ def test_left_product_with_a_label_shift(lih):
     for s in sh.shifts():
         L = sh.layout(s)
         ops = EL.LeftOps(eb, cc.t1, cc.t2, cc.t3, shift=s if s else None)
-        assert (ops.mode, ops.blocks) == (('same', True) if s == 0 else ('dense', False))
+        assert (ops.mode, ops.blocks) == ('same', True) and (s == 0 or ops.im.eng.shift == s)
         l1, l2, rng = _random_vector(omb, vmb, s, 40 + s)
         l3 = rng.standard_normal(L.size)
         x = [l1.ravel().copy(), _p2(l2, omb, vmb).ravel(), l3]
@@ -110,12 +111,14 @@ def test_left_product_with_a_label_shift(lih):
         sb = eom_opt.sigma(gb, r1, _p2(r2, omb, vmb), r3, shift=s if s else None)
         a, b = EL._dotu(x, [np.asarray(p).ravel() for p in sb]), EL._dotu(y, r)
         assert abs(a - b) < 1e-10 * abs(a) and abs(a) > 1e-2
-        if s == 0:      # the totally symmetric vectors through the packed block as well
-            yy = _apply(EL.LeftOps(eb, cc.t1, cc.t2, cc.t3, dense=True), x)
-            assert max(abs(p - q).max() for p, q in zip(y, yy)) < 1e-11
+        # ... and through the packed block (the route for integrals without a block engine)
+        od = EL.LeftOps(eb, cc.t1, cc.t2, cc.t3, shift=s if s else None, dense=True)
+        assert (od.mode, od.blocks) == ('dense', False)
+        yy = _apply(od, x)
+        assert max(abs(p - q).max() for p, q in zip(y, yy)) < 1e-11
         if s in (0, 1, -2):
             oc = EL.LeftOps(ec, cc.t1 * f1, cc.t2 * f2, t3c, shift=s if s else None)
-            assert oc.dtype == np.complex128 and oc.blocks == (s == 0)
+            assert oc.dtype == np.complex128 and oc.blocks
             yc = _apply(oc, [(l1 * f1.conj()).ravel(), _p2(l2 * f2.conj(), omb, vmb).ravel(),
                              _phase3(L, l3, po.conj(), pv.conj())])
             assert abs(yc[0] - y[0] * f1.conj().ravel()).max() < 1e-11 * abs(y2).max()
@@ -140,7 +143,8 @@ def test_left_vectors_lih(lih):
     ea, ra = a.eom_ee(nroots=[4, 3], conv_tol=1e-8, shift=[0, 2], nguess=6)
     la = a.eom_left(conv_tol=1e-8)
     assert set(la) == {0, 2} and ra[0].left is la[0]
-    assert la[0].plan.blocks and la[0].ops.mode == 'same' and la[2].ops.mode == 'dense' and la[2].shift == 1
+    assert la[0].plan.blocks and la[0].ops.mode == 'same' and la[2].ops.mode == 'same' and la[2].shift == 1
+    assert la[2].plan.blocks and la[2].ops.im.eng.shift == 1
     for d in (0, 2):
         l, r = la[d], ra[d]
         assert l.converged.all() and abs(l.e - r.e).max() < 1e-9 and abs(l.e_imag).max() < 1e-9
@@ -291,3 +295,46 @@ def test_memory_against_the_plan(monkeypatch, tmp_path):
     monkeypatch.setattr(disk, 'budget', lambda max_disk=None, where=None: 5)
     with pytest.raises(MemoryError, match='do not fit in memory'):
         EL.plan_for(eris, rt.t1, dtype, 2, sizes)
+
+
+def test_plan_and_memory_with_a_shift_in_the_blocks():
+    """HBr / cc-pVDZ-DK, 8 + 28 in label blocks, the shifts 0 and 2: the
+    plan of the left vectors is that of the blocks (far below the packed
+    block, which the route through it takes), and what a run allocates
+    (tracemalloc: numpy's arrays, the work array of the engine among them)
+    is below the plan less T3 and the allowance for the threads."""
+    from pyscf import gto, x2c
+    from zccsdt.cc import t3engine
+    mol = gto.M(atom='Br 0 0 0; H 0 0 1.4145', basis='cc-pvdz-dk', verbose=0)
+    mf = x2c.UHF(mol).run(conv_tol=1e-10)
+    cc = zccsdt.CCSDT(mf, frozen=28)
+    cc.verbose, cc.max_cycle = 0, 3
+    cc.kernel()
+    eris = cc._eris
+    om, vm = t3pack.maps_for(eris)
+    eng = ccsdt_opt.engine_for(eris, np.float64)
+    assert (om.n, vm.n) == (8, 28) and om.spins is not None
+    opts = solver.Options(incore_complete=True)
+    for d in (0, 2):
+        s = eom.class_shift(eris, d) or None
+        res = eom.kernel(eris, cc.t1, cc.t2, cc.t3, nroots=2, conv_tol=1e-3, max_cycle=3, max_space=6, shift=s)
+        sizes = res.ground.sizes(s)
+        res.ground.c = {k: v for k, v in res.ground.c.items() if isinstance(k, tuple)}      # (the masks stay)
+        ccsdt_opt.release_cached(eris)
+        plan = EL.plan_for(eris, cc.t1, np.float64, 2, sizes, max_space=6, opts=opts, shift=s)
+        dense = EL.plan_for(eris, cc.t1, np.float64, 2, sizes, max_space=6, opts=opts, shift=s, dense=True)
+        ov = ccsdt_opt.overhead()
+        assert plan.blocks and plan.mode == 'same' and dense.mode == 'dense' and plan.need - ov < 0.5 * (dense.need - ov)
+        arrays = plan.need - eng.size * 8 - ccsdt_opt.overhead()
+        t3engine.release_workspace()
+        gc.collect()
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        left = EL.kernel(eris, cc.t1, cc.t2, cc.t3, res, conv_tol=1e-3, max_cycle=3, plan=plan)
+        peak = tracemalloc.get_traced_memory()[1] - base
+        tracemalloc.stop()
+        assert left.nsigma >= 4 and left.l3[0].size == sizes[2] and left.ops.blocks
+        assert (s is None) or left.ops.im.eng.shift == s
+        print('HBr 8 + 28, shift %d: plan %.1f MB (through the packed block %.1f MB), allocated %.1f MB'
+              % (d, arrays / 1e6, (dense.need - ov) / 1e6, peak / 1e6))
+        assert arrays / 4 < peak <= arrays, (d, peak, arrays, plan)
