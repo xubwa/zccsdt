@@ -89,8 +89,9 @@ $(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o $(BUILD)/xzpar.o: $(BUILD)/
 $(BUILD)/xzdata.o: $(BUILD)/xzopt.o
 $(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzfrzd.o
 $(BUILD)/xzpland.o: $(BUILD)/xzdata.o
-$(BUILD)/xzeomd.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o
+$(BUILD)/xzeomd.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzpar.o
 $(BUILD)/xzdrv.o: $(BUILD)/xzplan.o
+$(BUILD)/xzplan.o: $(BUILD)/xzeomd.o
 $(BUILD)/xzdist.o: $(BUILD)/xzdata.o $(BUILD)/xzpar.o $(BUILD)/xzopt.o
 
 $(BUILD):

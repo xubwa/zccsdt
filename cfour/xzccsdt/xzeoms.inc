@@ -30,6 +30,13 @@
 ! chunks through a buffer of the work array; two vectors are in the work
 ! array in either case (the new vector and its sigma vector).
 !
+! More than one rank (xzeomd.F90; docs/native.md, section 16.7): rank 0 runs
+! this solver; every rank holds its rows of R3 of every vector of the
+! subspace, and every operation on vectors below is a command of rank 0
+! that all ranks carry out on their rows (N(xzeserve) on the other ranks),
+! the dot products summed onto rank 0.  The singles and doubles of a vector
+! are rank 0's.
+!
 
 ! ---------------------------------------------------------------------------
 ! The place of the subspace of evcap vectors of nlen elements: the work
@@ -48,23 +55,23 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
   integer(8), intent(in) :: nlen, nmin, nmem, avail
   integer(8), intent(inout) :: msub
   logical, intent(in) :: mayfile
-  integer(8) :: need, free_bytes, per, nfit
+  integer(8) :: need, free_bytes, per, nfit, masked
   character(len=8) :: arg
   integer :: larg
   evlen = nlen
   evnc = 0
   evnh = 0
+  ! (more than one rank: as the dry run of rank 0 planned it - the other
+  ! ranks have the memory of that plan)
+  if (ecmd .and. eplan > 0) msub = min(msub, epm(eplan))
+  masked = msub
+  call xzevplace(int(NW, 8), nlen, nmem, avail, mayfile, msub, evfile)
+  if (msub /= masked) write(6, '(a,i4,a,i4,a)') '   the work array holds ', msub, &
+    ' vectors of the subspace with their sigma vectors (', masked, &
+    ' asked for): the subspace is that small and stays in the work array'
   need = 2 * msub * (NW * nlen + xzalign)
-  evfile = need > avail
-  if (evfile .and. mayfile) then
-    nfit = avail / (2 * (NW * nlen + xzalign))
-    if (nfit >= nmem) then
-      write(6, '(a,i4,a,i4,a)') '   the work array holds ', nfit, ' vectors of the subspace with their sigma vectors (', msub, &
-        ' asked for): the subspace is that small and stays in the work array'
-      msub = nfit
-      need = 2 * msub * (NW * nlen + xzalign)
-      evfile = .false.
-    end if
+  if (ecmd .and. eplan > 0) then
+    if (epf(eplan)) evfile = .true.
   end if
   ! a test hook: option eomvec f (files), m (the work array)
   call xzoptget('eomvec', arg, larg)
@@ -80,6 +87,7 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
     evcap = msub
     evc0 = xzget(msub * NW * nlen, 'EOM: the vectors of the subspace')
     evh0 = xzget(msub * NW * nlen, 'EOM: their sigma vectors')
+    if (ecmd) call N(xzevopenw)(msub)
     return
   end if
   ! ---- files: the buffer, the disk
@@ -90,6 +98,8 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
     call xzerrex
   end if
   per = 2 * 8 * NW * nlen
+  ! (over ranks: the ranks of a node may share the run directory - whole vectors)
+  if (ecmd) per = 2 * 8 * NW * (no * nv + npo * nvp + n3s)
   free_bytes = xz_free_disk('.' // c_null_char)
   if (free_bytes >= 0 .and. per * msub > free_bytes - 1073741824_8) then
     nfit = max(0_8, (free_bytes - 1073741824_8) / max(per, 1_8))
@@ -105,14 +115,46 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
   end if
   evcap = msub
   evbuf = xzget(msub * NW * evnch, 'EOM: buffer of the vectors in files')
+  if (ecmd) call N(xzevopenw)(msub)
+end subroutine
+
+! More than one rank: the place of the subspace as rank 0 decided it - msub
+! vectors, in the work array or in files (evfile), through a buffer of evnch
+! elements per vector (rank 0: the command; another rank: its rows of the
+! vectors, in its own work array or in its own files EOMCnnnn.<rank>).
+subroutine N(xzevopenw)(msub)
+  use xzdata
+  use xzmem
+  use xzeomd
+  use xzpar, only: myrank
+  implicit none
+  integer(8), intent(in) :: msub
+  if (myrank == 0) then
+    call xzecmd(op_open, dble(msub), merge(1d0, 0d0, evfile), dble(evnch))
+    return
+  end if
+  evoff = no * nv + npo * nvp + esoff(myrank)
+  evlen = esoff(myrank + 1) - esoff(myrank)
+  evnc = 0
+  evnh = 0
+  evcap = msub
+  if (evfile) then
+    evnch = max(1_8, min(evnch, evlen))
+    evbuf = xzget(msub * NW * evnch, 'EOM: buffer of the vectors in files')
+  else
+    evc0 = xzget(msub * NW * evlen, 'EOM: the vectors of the subspace')
+    evh0 = xzget(msub * NW * evlen, 'EOM: their sigma vectors')
+  end if
 end subroutine
 
 ! the files are closed and deleted
 subroutine N(xzevclose)()
   use xzeomd
+  use xzpar, only: myrank
   implicit none
   integer(8) :: j
   integer :: ios
+  if (ecmd .and. myrank == 0) call xzecmd(op_close)
   if (evfile) then
     do j = 1, evnc
       close(xzevunit(1, j), status='delete', iostat=ios)
@@ -131,6 +173,7 @@ end subroutine
 subroutine N(xzevput)(w, kind, j, kx)
   use xzdata
   use xzeomd
+  use xzpar, only: myrank
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -139,18 +182,22 @@ subroutine N(xzevput)(w, kind, j, kx)
   integer(8) :: k
   integer :: ios, u
   real(8) :: t0
+  integer(8) :: kl
+  if (ecmd .and. myrank == 0) call xzecmd(op_put, dble(kind), dble(j), xzewhich(kx))
+  ! (the part of the vector that this rank holds)
+  kl = kx + NW * evoff
   if (.not. evfile) then
     k = merge(evc0, evh0, kind == 1) + (j - 1) * NW * evlen
-    call N(xzecopy)(evlen, w(kx), w(k))
+    call N(xzecopy)(evlen, w(kl), w(k))
     return
   end if
   t0 = omp_get_wtime()
   u = xzevunit(kind, j)
-  open(unit=u, file=xzevname(kind, j), form='unformatted', access='stream', status='replace', iostat=ios)
-  if (ios == 0) write(u, iostat=ios) w(kx:kx + NW * evlen - 1)
+  open(unit=u, file=trim(xzevname(kind, j)), form='unformatted', access='stream', status='replace', iostat=ios)
+  if (ios == 0) write(u, iostat=ios) w(kl:kl + NW * evlen - 1)
   if (ios == 0) flush(u, iostat=ios)
   if (ios /= 0) then
-    write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', xzevname(kind, j), ' failed (iostat ', ios, '): disk full?'
+    write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', trim(xzevname(kind, j)), ' failed (iostat ', ios, '): disk full?'
     write(6, '(a,f12.1,a)') '   a vector of the EOM subspace: ', 8d-6 * NW * evlen, ' MB'
     call xzerrex
   end if
@@ -187,7 +234,7 @@ subroutine N(xzevchunk)(w, kind, n, off, nc, ptr)
     k = evbuf + (j - 1) * NW * evnch
     read(xzevunit(kind, j), pos=1 + 8 * NW * off, iostat=ios) w(k:k + NW * nc - 1)
     if (ios /= 0) then
-      write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', xzevname(kind, j), ' failed, iostat ', ios
+      write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', trim(xzevname(kind, j)), ' failed, iostat ', ios
       call xzerrex
     end if
     ptr(j) = loc(w(k))
@@ -201,6 +248,7 @@ subroutine N(xzevmdot)(w, kind, n, kx, res)
   use xzdata
   use xzeomd
   use xzkern
+  use xzpar, only: myrank
   implicit none
   real(8) :: w(*)
   integer, intent(in) :: kind
@@ -211,14 +259,30 @@ subroutine N(xzevmdot)(w, kind, n, kx, res)
   integer(8) :: off, nc, step
   res = 0
   if (n == 0) return
-  step = evlen
+  if (ecmd .and. myrank == 0) call xzecmd(op_mdot, dble(kind), dble(n), xzewhich(kx))
+  step = max(evlen, 1_8)
   if (evfile) step = evnch
   do off = 0, evlen - 1, step
     nc = min(step, evlen - off)
     call N(xzevchunk)(w, kind, n, off, nc, ptr)
-    call N(zc_vmdot)(nc, n, w(kx + NW * off), ptr, part)
+    call N(zc_vmdot)(nc, n, w(kx + NW * (evoff + off)), ptr, part)
     res = res + part
   end do
+  ! (the sum of the parts of the ranks, on rank 0)
+  if (ecmd) call N(xzesum)(n, res)
+end subroutine
+
+! x (n numbers) of rank 0 becomes the sum of x over the ranks
+subroutine N(xzesum)(n, x)
+  use xzpar, only: myrank, xzmpi_sum
+  implicit none
+  integer(8), intent(in) :: n
+  ZT, intent(inout) :: x(n)
+  real(8) :: a(NW * n), b(NW * n)
+  a = transfer(x, a, NW * n)
+  b = 0d0
+  call xzmpi_sum(a, b, NW * n)
+  if (myrank == 0) x = transfer(b, x, n)
 end subroutine
 
 ! x = [x +] sum_j coef(j) X_j for the vector x at kx
@@ -226,6 +290,7 @@ subroutine N(xzevcomb)(w, kind, n, coef, kx, add)
   use xzdata
   use xzeomd
   use xzkern
+  use xzpar, only: myrank, xzmpi_bcast
   implicit none
   real(8) :: w(*)
   integer, intent(in) :: kind
@@ -235,21 +300,24 @@ subroutine N(xzevcomb)(w, kind, n, coef, kx, add)
   ZT :: c(n + 1)
   integer(c_intptr_t) :: ptr(n + 1)
   integer(8) :: off, nc, step, nk
+  if (ecmd .and. myrank == 0) call xzecmd(op_comb, dble(kind), dble(n), xzewhich(kx), merge(1d0, 0d0, add))
   if (n == 0) then
-    if (.not. add) call zc_vzero_d(NW * evlen, w(kx))
+    if (.not. add) call zc_vzero_d(NW * evlen, w(kx + NW * evoff))
     return
   end if
   c(1:n) = coef
+  ! (the coefficients of rank 0)
+  if (ecmd) call xzmpi_bcast(c, 8_8 * NW * n)
   c(n + 1) = 1
   nk = n
   if (add) nk = n + 1
-  step = evlen
+  step = max(evlen, 1_8)
   if (evfile) step = evnch
   do off = 0, evlen - 1, step
     nc = min(step, evlen - off)
     call N(xzevchunk)(w, kind, n, off, nc, ptr)
-    ptr(n + 1) = loc(w(kx + NW * off))
-    call N(zc_vlincomb)(nc, nk, ptr, c, w(kx + NW * off))
+    ptr(n + 1) = loc(w(kx + NW * (evoff + off)))
+    call N(zc_vlincomb)(nc, nk, ptr, c, w(kx + NW * (evoff + off)))
   end do
 end subroutine
 
@@ -259,16 +327,19 @@ subroutine N(xzevtrans)(w, n, m, q)
   use xzdata
   use xzeomd
   use xzkern
+  use xzpar, only: myrank, xzmpi_bcast
   use omp_lib
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: n, m
-  ZT, intent(in) :: q(*)                                       ! [j][k], n x m
+  ZT :: q(*)                                                   ! [j][k], n x m
   integer(c_intptr_t) :: ptr(n)
   integer(8) :: off, nc, step, j, k
   integer :: kind, ios
   real(8) :: t0
-  step = evlen
+  if (ecmd .and. myrank == 0) call xzecmd(op_trans, dble(n), dble(m))
+  if (ecmd) call xzmpi_bcast(q, 8_8 * NW * n * m)
+  step = max(evlen, 1_8)
   if (evfile) step = evnch
   do kind = 1, 2
     do off = 0, evlen - 1, step
@@ -281,7 +352,7 @@ subroutine N(xzevtrans)(w, n, m, q)
           k = evbuf + (j - 1) * NW * evnch
           write(xzevunit(kind, j), pos=1 + 8 * NW * off, iostat=ios) w(k:k + NW * nc - 1)
           if (ios /= 0) then
-            write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', xzevname(kind, j), ' failed (iostat ', ios, ')'
+            write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', trim(xzevname(kind, j)), ' failed (iostat ', ios, ')'
             call xzerrex
           end if
         end do
@@ -359,28 +430,292 @@ subroutine N(xzesmall)(n, g, ldg, ev, y)
 end subroutine
 
 ! The test of convergence of CFOUR's eomconv and its line of output: the
-! largest element of the residual c0 (nd elements) against the threshold.
-subroutine N(xzeconv)(c0, e, idav, icyc, nd, ieomconv, eomthr)
+! largest element z of the residual (absolute value; N(xzepmax), over the
+! ranks) against the threshold.  Complex arithmetic: eomconv itself, given
+! that element.
+subroutine N(xzeconv)(z, e, idav, icyc, ieomconv, eomthr)
   implicit none
-  integer(8), intent(in) :: nd, icyc, idav
-  ZT, intent(in) :: c0(nd)
+  integer(8), intent(in) :: icyc, idav
+  real(8), intent(in) :: z
   complex(8), intent(in) :: e
   integer(8), intent(out) :: ieomconv
   real(8), intent(in) :: eomthr
 #ifdef XZ_REAL
-  real(8) :: z
-  integer(8) :: i
-  z = 0d0
-  !$omp parallel do reduction(max:z)
-  do i = 1, nd
-    z = max(z, abs(c0(i)))
-  end do
   ieomconv = 1
   if (z > eomthr) ieomconv = 0
   write(6, '("EOM cycle",3X,I4,2X,I4,F22.15,5X,D20.10,5X,D20.10)') icyc, idav, dble(e), z, eomthr
 #else
-  call eomconv(c0, e, idav, icyc, nd, ieomconv, eomthr)
+  complex(8) :: c0(1)
+  c0(1) = cmplx(z, 0d0, 8)
+  call eomconv(c0, e, idav, icyc, 1_8, ieomconv, eomthr)
 #endif
+end subroutine
+
+! ---------------------------------------------------------------------------
+! Operations on the two vectors of the work array (kx, ky: their addresses),
+! each on the part that this rank holds; with more than one rank a command
+! of rank 0 first, and the numbers summed onto rank 0.
+!
+! x = 0
+subroutine N(xzepzero)(w, kx)
+  use xzeomd
+  use xzkern
+  use xzpar, only: myrank
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx
+  if (ecmd .and. myrank == 0) call xzecmd(op_zero, xzewhich(kx))
+  call zc_vzero_d(NW * evlen, w(kx + NW * evoff))
+end subroutine
+
+! res = <x | y>; r3only: of the triples alone
+subroutine N(xzepdot)(w, kx, ky, r3only, res)
+  use xzdata
+  use xzeomd
+  use xzkern
+  use xzpar, only: myrank
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx, ky
+  logical, intent(in) :: r3only
+  ZT, intent(out) :: res
+  ZT :: r(1)
+  integer(8) :: lo, nsd
+  if (ecmd .and. myrank == 0) call xzecmd(op_dot, xzewhich(kx), xzewhich(ky), merge(1d0, 0d0, r3only))
+  nsd = no * nv + npo * nvp
+  lo = evoff
+  if (r3only) lo = max(lo, nsd)
+  call N(zc_vdot)(evoff + evlen - lo, w(kx + NW * lo), w(ky + NW * lo), r(1))
+  if (ecmd) call N(xzesum)(1_8, r)
+  res = r(1)
+end subroutine
+
+! x <- alpha x
+subroutine N(xzepscal)(w, kx, alpha)
+  use xzeomd
+  use xzpar, only: myrank
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx
+  real(8), intent(in) :: alpha
+  if (ecmd .and. myrank == 0) call xzecmd(op_scal, xzewhich(kx), alpha)
+  call N(xzevscal)(evlen, alpha, w(kx + NW * evoff))
+end subroutine
+
+! z = the largest element of x (absolute value)
+subroutine N(xzepmax)(w, kx, z)
+  use xzeomd
+  use xzpar, only: myrank, xzmpi_max
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx
+  real(8), intent(out) :: z
+  real(8) :: a(1), b(1)
+  if (ecmd .and. myrank == 0) call xzecmd(op_max, xzewhich(kx))
+  call N(xzevmax)(evlen, w(kx + NW * evoff), z)
+  if (ecmd) then
+    a(1) = z
+    b(1) = z
+    call xzmpi_max(a, b, 1_8)
+    z = b(1)
+  end if
+end subroutine
+
+! y += alpha x
+subroutine N(xzepaxpy)(w, alpha, kx, ky)
+  use xzeomd
+  use xzpar, only: myrank
+  implicit none
+  real(8) :: w(*)
+  ZT, intent(in) :: alpha
+  integer(8), intent(in) :: kx, ky
+  real(8), external :: N(xzeimag)
+  if (ecmd .and. myrank == 0) call xzecmd(op_axpy, xzewhich(kx), xzewhich(ky), dble(alpha), N(xzeimag)(alpha))
+  call N(xzeaxpyc)(evlen, alpha, w(kx + NW * evoff), w(ky + NW * evoff))
+end subroutine
+
+! The triples of x: the rows of every rank to all ranks (rank 0 then has the
+! whole vector).  One rank: nothing.
+subroutine N(xzepcollect)(w, kx)
+  use xzdata
+  use xzeomd
+  use xzpar, only: myrank, xzmpi_slices_put
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx
+  if (.not. ecmd) return
+  if (myrank == 0) call xzecmd(op_collect, xzewhich(kx))
+  call xzmpi_slices_put(w(kx + NW * (no * nv + npo * nvp)), eswoff)
+end subroutine
+
+! The vector x of rank 0, all of it, to every rank (the test hook eomsig).
+subroutine N(xzepspread)(w, kx)
+  use xzdata
+  use xzeomd
+  use xzpar, only: myrank, xzmpi_bcast_w
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx
+  if (.not. ecmd) return
+  if (myrank == 0) call xzecmd(op_spread, xzewhich(kx))
+  call xzmpi_bcast_w(w(kx), NW * (no * nv + npo * nvp + n3s))
+end subroutine
+
+! The sigma vector of x into y.  More than one rank (and R3): the singles
+! and doubles of rank 0 and the rows of R3 of every rank go to all ranks,
+! every rank does its batches of the two residuals (N(xzesig)), and the
+! rows of sigma_3 go to their owners; sigma_1 and sigma_2 are made by every
+! rank, rank 0's are used.
+subroutine N(xzepsig)(w, kx, ky, sd)
+  use xzdata
+  use xzeomd
+  use xzdist
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx, ky
+  logical, intent(in) :: sd
+  integer(8) :: nsd
+  real(8) :: t0
+  if (.not. ecmd .or. sd) then
+    call N(xzesig)(w, kx, ky, sd)
+    return
+  end if
+  if (myrank == 0) call xzecmd(op_sigma, xzewhich(kx), xzewhich(ky))
+  nsd = no * nv + npo * nvp
+  t0 = omp_get_wtime()
+  call xztic()
+  call xzmpi_bcast_w(w(kx), NW * nsd)
+  call xzmpi_slices_put(w(kx + NW * nsd), eswoff)
+  call xztoc(5, 'MPI: the vector to the ranks')
+  dsec(6, 3) = dsec(6, 3) + omp_get_wtime() - t0
+  dwords(3) = dwords(3) + dble(NW * (n3s - (esoff(myrank + 1) - esoff(myrank))))
+  call N(xzesig)(w, kx, ky, .false.)
+  call xzrebal_eom()
+end subroutine
+
+! ---------------------------------------------------------------------------
+! A rank other than 0 in the problems with R3: it carries out the commands
+! of rank 0 (xzeomd: op_...) on its rows of the vectors until rank 0 says
+! that the excited states are done.  nsig: the sigma vectors it took part in.
+subroutine N(xzeserve)(w, nsig)
+  use xzdata
+  use xzmem
+  use xzkern
+  use xzeomd
+  use xzdist
+  use omp_lib
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(out) :: nsig
+  real(8) :: ctl(6), z, t0
+  integer(8) :: ms, mv, nsd, n, m, kx, ky, msub
+  integer :: op, kind
+  ZT :: res, om
+  ZT, allocatable :: c(:), d(:)
+  nsd = no * nv + npo * nvp
+  nsig = 0
+  ms = xzmark()
+  mv = ms
+  allocate(c(64 * 64), d(64))
+  do
+    call xzmpi_bcast(ctl, 48_8)
+    op = nint(ctl(1))
+    kx = ekx(max(1, min(2, nint(ctl(2)))))
+    ky = ekx(max(1, min(2, nint(ctl(3)))))
+    select case (op)
+    case (op_end)
+      exit
+    case (op_shift)
+      ! a problem starts: the layout of its shift, the slices, the batches, two vectors
+      call xzeomlay(w, nint(ctl(2), 8))
+      call xzeslices()
+      call xzdeal_eom(eshift)
+      ms = xzmark()
+      ekx(1) = xzget(NW * (nsd + n3s), 'EOM: a vector')
+      ekx(2) = xzget(NW * (nsd + n3s), 'EOM: its sigma vector')
+      mv = xzmark()
+      edist = .true.
+      ecmd = .true.
+      evfile = .false.
+      evoff = nsd + esoff(myrank)
+      evlen = esoff(myrank + 1) - esoff(myrank)
+      write(6, '(a,i5,a,i14,a,i14,a,i14,a,f10.1,a)') '   label shift ', eshift, ' classes: the rows of this rank are the triples ', &
+        esoff(myrank), ' to ', esoff(myrank + 1) - 1, ' of ', n3s, ' (', 8d-6 * NW * evlen, ' MB of a vector)'
+      flush(6)
+    case (op_endshift)
+      call xzrel(ms)
+    case (op_open)
+      msub = nint(ctl(2), 8)
+      evfile = ctl(3) == 1d0
+      evnch = nint(ctl(4), 8)
+      mv = xzmark()
+      call N(xzevopenw)(msub)
+      if (evfile) then
+        write(6, '(a,i4,a,f10.1,a)') '   subspace: its rows of at most ', msub, ' vectors and their sigma vectors, in files (', &
+          16d-6 * NW * evlen * msub, ' MB)'
+      else
+        write(6, '(a,i4,a,f10.1,a)') '   subspace: its rows of at most ', msub, ' vectors and their sigma vectors, in the work array (', &
+          16d-6 * NW * evlen * msub, ' MB)'
+      end if
+      flush(6)
+    case (op_close)
+      call N(xzevclose)()
+      call xzrel(mv)
+    case (op_zero)
+      call N(xzepzero)(w, kx)
+    case (op_dot)
+      call N(xzepdot)(w, kx, ky, ctl(4) == 1d0, res)
+    case (op_scal)
+      call N(xzepscal)(w, kx, ctl(3))
+    case (op_mdot)
+      kind = nint(ctl(2))
+      n = nint(ctl(3), 8)
+      call N(xzevmdot)(w, kind, n, ekx(nint(ctl(4))), d)
+    case (op_comb)
+      kind = nint(ctl(2))
+      n = nint(ctl(3), 8)
+      call N(xzevcomb)(w, kind, n, d, ekx(nint(ctl(4))), ctl(5) == 1d0)
+    case (op_put)
+      call N(xzevput)(w, nint(ctl(2)), nint(ctl(3), 8), ekx(nint(ctl(4))))
+    case (op_sigma)
+      t0 = omp_get_wtime()
+      call N(xzepsig)(w, kx, ky, .false.)
+      teomsig = teomsig + omp_get_wtime() - t0
+      nsig = nsig + 1
+    case (op_max)
+      call N(xzepmax)(w, kx, z)
+    case (op_prec)
+#ifdef XZ_REAL
+      om = ctl(3)
+#else
+      om = cmplx(ctl(3), ctl(4), 8)
+#endif
+      call N(xzeprec)(w, kx, om, .false.)
+    case (op_trans)
+      n = nint(ctl(2), 8)
+      m = nint(ctl(3), 8)
+      call N(xzevtrans)(w, n, m, c)
+    case (op_axpy)
+#ifdef XZ_REAL
+      om = ctl(4)
+#else
+      om = cmplx(ctl(4), ctl(5), 8)
+#endif
+      call N(xzepaxpy)(w, om, kx, ky)
+    case (op_collect)
+      call N(xzepcollect)(w, kx)
+    case (op_spread)
+      call N(xzepspread)(w, kx)
+    case default
+      write(6, '(a,i6)') ' @XZCCSDT-F, EOM: a command of rank 0 that this rank does not know: ', op
+      call xzerrex
+    end select
+  end do
+  edist = .false.
+  ecmd = .false.
+  evoff = 0
+  deallocate(c, d)
 end subroutine
 
 ! the largest element of x (absolute value)
@@ -416,28 +751,39 @@ end subroutine
 subroutine N(xzeprec)(w, kx, omega, sd)
   use xzdata
   use xzkern
+  use xzeomd
+  use xzpar, only: myrank
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: kx
   ZT, intent(in) :: omega
   logical, intent(in) :: sd
+  real(8), external :: N(xzeimag)
   real(8) :: eo2(0:max(npo, 1_8) - 1), ev2(0:max(nvp, 1_8) - 1)
-  integer(8) :: nsd, g, ni, na
+  integer(8) :: nsd, g, ni, na, a, b
   real(8), parameter :: floor = 1d-3
+  if (ecmd .and. myrank == 0) call xzecmd(op_prec, xzewhich(kx), dble(omega), N(xzeimag)(omega))
   nsd = no * nv + npo * nvp
-  call N(zc_vprecond)(w(kx), no, nv, w(jeps), w(jeps + no), omega, floor)
-  call xzepsum(npo, no, w(jopa), w(jopb), w(jeps), eo2)
-  call xzepsum(nvp, nv, w(jvpa), w(jvpb), w(jeps + no), ev2)
-  if (npo > 0) call N(zc_vprecond)(w(kx + NW * no * nv), npo, nvp, eo2, ev2, omega, floor)
+  ! (the singles and doubles: rank 0's)
+  if (myrank == 0) then
+    call N(zc_vprecond)(w(kx), no, nv, w(jeps), w(jeps + no), omega, floor)
+    call xzepsum(npo, no, w(jopa), w(jopb), w(jeps), eo2)
+    call xzepsum(nvp, nv, w(jvpa), w(jvpb), w(jeps + no), ev2)
+    if (npo > 0) call N(zc_vprecond)(w(kx + NW * no * nv), npo, nvp, eo2, ev2, omega, floor)
+  end if
   if (sd) return
+  ! (the triples: the rows of this rank)
   if (ncls == 1) then
-    call N(zc_vprecond)(w(kx + NW * nsd), nto, nvt, w(jeo3), w(jev3), omega, floor)
+    call xzeslrows(0_8, a, b)
+    if (b > a) call N(zc_vprecond)(w(kx + NW * (nsd + a * nvt)), b - a, nvt, w(jeo3 + a), w(jev3), omega, floor)
   else
     do g = 0, ntg - 1
       ni = otoff(g + 1) - otoff(g)
       na = xzna(eshift, g)
       if (ni == 0 .or. na == 0) cycle
-      call N(zc_vprecond)(w(kx + NW * (nsd + boff_s(g))), ni, na, w(jeo3 + otoff(g)), &
+      call xzeslrows(g, a, b)
+      if (b <= a) cycle
+      call N(zc_vprecond)(w(kx + NW * (nsd + boff_s(g) + a * na)), b - a, na, w(jeo3 + otoff(g) + a), &
                           w(jev3 + vtoff(g + eshift)), omega, floor)
     end do
   end if
@@ -457,11 +803,11 @@ subroutine N(xzeorth)(w, n, kx, rel)
   ZT :: d(max(n, 1_8)), s
   real(8) :: nrm0, nrm
   integer :: pass
-  call N(zc_vdot)(evlen, w(kx), w(kx), s)
+  call N(xzepdot)(w, kx, kx, .false., s)
   nrm0 = sqrt(dble(s))
   rel = 0d0
   if (nrm0 == 0d0) return
-  call N(xzevscal)(evlen, 1d0 / nrm0, w(kx))
+  call N(xzepscal)(w, kx, 1d0 / nrm0)
   nrm = 1d0
   do pass = 1, 2
     if (n > 0) then
@@ -469,14 +815,14 @@ subroutine N(xzeorth)(w, n, kx, rel)
       d(1:n) = -CONJ(d(1:n))
       call N(xzevcomb)(w, 1, n, d, kx, .true.)
     end if
-    call N(zc_vdot)(evlen, w(kx), w(kx), s)
+    call N(xzepdot)(w, kx, kx, .false., s)
     nrm = sqrt(dble(s))
     if (pass == 1) rel = nrm
     if (nrm < 1d-12) then
       rel = 0d0
       return
     end if
-    call N(xzevscal)(evlen, 1d0 / nrm, w(kx))
+    call N(xzepscal)(w, kx, 1d0 / nrm)
   end do
 end subroutine
 
@@ -504,6 +850,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   use xzmem
   use xzkern
   use xzeomd
+  use xzpar, only: nrank
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -516,7 +863,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   integer(8), intent(out) :: cyc(nroot), nfound, nsig, nit, lead(nlead, nroot)
   ZT, intent(out) :: vlead(nlead, nroot)
   integer, intent(in) :: iures
-  integer(8) :: nsd, nlen, n, n0, nconv, it, k, j, g, c, ntarget, nun, mkeep, nadded, icv, mv, jbest, nkeep, i
+  integer(8) :: nsd, nlen, n, n0, nconv, it, k, j, g, c, ntarget, nun, mkeep, nadded, icv, mv, jbest, nkeep, i, nloc
   ZT, allocatable :: gm(:, :), ym(:, :), cr(:, :), coef(:), dots(:), qm(:, :), qr(:), gq(:, :)
   complex(8), allocatable :: ev(:)
   logical, allocatable :: flag(:)
@@ -534,15 +881,27 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   nsig = 0
   nit = 0
   mv = xzmark()
-  call N(xzevopen)(nlen, msub, min(msub, 2 * nroot + 2), min(msub, 3 * nroot + 4), avail, .not. sd)
+  ! (more than one rank, with R3: the vector operations are commands to all
+  ! ranks; rank 0 holds the singles and doubles and its rows of R3)
+  ecmd = edist .and. .not. sd
+  nloc = nlen
+  if (ecmd) then
+    nloc = nsd + esoff(1)
+    ekx = [kxa, kxb]
+  end if
+  evoff = 0
+  call N(xzevopen)(nloc, msub, min(msub, 2 * nroot + 2), min(msub, 3 * nroot + 4), avail, .not. sd)
   if (.not. quiet) then
+    if (ecmd) write(6, '(a,i4,a,f10.1,a,f10.1,a)') '   over ', nrank, &
+      ' ranks: every rank holds its rows of R3 of every vector (rank 0 with the singles and doubles: ', &
+      8d-6 * NW * nloc, ' MB of ', 8d-6 * NW * nlen, ' MB)'
     if (evfile) then
       write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the files EOMCnnnn, ' // &
-        'EOMHnnnn of the run directory (', 16d-6 * NW * nlen * msub, ' MB),'
+        'EOMHnnnn of the run directory (', 16d-6 * NW * nloc * msub, ' MB),'
       write(6, '(a,i10,a)') '     read through a buffer of ', evnch, ' elements per vector'
     else
       write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the work array (', &
-        16d-6 * NW * nlen * msub, ' MB)'
+        16d-6 * NW * nloc * msub, ' MB)'
     end if
     flush(6)
   end if
@@ -553,7 +912,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   ! ---- the vectors to start from
   do g = 1, nstart
     if (n >= msub) exit
-    call zc_vzero_d(NW * nlen, w(kxa))
+    call N(xzepzero)(w, kxa)
     if (kstart > 0) then
       call N(xzecopy)(nsd, w(kstart + NW * nsd * (g - 1)), w(kxa))
     else
@@ -567,6 +926,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     write(6, '(a)') ' @XZCCSDT-W, EOM: no vector to start from.'
     call N(xzevclose)()
     call xzrel(mv)
+    ecmd = .false.
     return
   end if
 
@@ -612,11 +972,11 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
 #endif
       coef(1:n0) = -om * ym(1:n0, k)
       call N(xzevcomb)(w, 1, n0, coef, kxa, .true.)
+      call N(xzepmax)(w, kxa, z)
       if (quiet) then
-        call N(xzevmax)(nlen, w(kxa), z)
         icv = merge(1_8, 0_8, z <= thr)
       else
-        call N(xzeconv)(w(kxa), ev(k), n0, it, nlen, icv, thr)
+        call N(xzeconv)(z, ev(k), n0, it, icv, thr)
       end if
       if (icv == 1) then
         nconv = min(nconv + 1, nroot)
@@ -665,9 +1025,9 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
 #else
     om = ev(k)
 #endif
-    call N(xzeaxpyc)(nlen, -om, w(kxa), w(kxb))
-    call N(xzevmax)(nlen, w(kxb), z)
-    call N(zc_vdot)(nlen, w(kxb), w(kxb), s)
+    call N(xzepaxpy)(w, -om, kxa, kxb)
+    call N(xzepmax)(w, kxb, z)
+    call N(xzepdot)(w, kxb, kxb, .false., s)
     ee(k) = ev(k)
     xmx(k) = z
     xnm(k) = sqrt(dble(s))
@@ -683,12 +1043,14 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     wts(2, k) = dble(s)
     wts(3, k) = 0d0
     if (.not. sd) then
-      call N(zc_vdot)(n3s, w(kxa + NW * nsd), w(kxa + NW * nsd), s)
+      call N(xzepdot)(w, kxa, kxa, .true., s)
       wts(3, k) = dble(s)
     end if
     call N(xzelead)(no * nv, w(kxa), nlead, lead(1, k), vlead(1, k))
     if (kout > 0) call N(xzecopy)(nsd, w(kxa), w(kout + NW * nsd * (k - 1)))
     if (iures > 0) then
+      ! (the rows of the other ranks)
+      call N(xzepcollect)(w, kxa)
       if (k == 1) then
         write(iures, pos=wpos, iostat=ios) eshift, k, nlen, dble(ev(k)), aimag(ev(k)), w(kxa:kxa + NW * nlen - 1)
       else
@@ -707,6 +1069,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   end do verify
   call N(xzevclose)()
   call xzrel(mv)
+  ecmd = .false.
 
 contains
 
@@ -768,7 +1131,7 @@ contains
     call N(xzevput)(w, 1, n + 1, kxa)
     ts = omp_get_wtime()
     if (efold) call N(xzefsend)(w, kxa)
-    call N(xzesig)(w, kxa, kxb, sd)
+    call N(xzepsig)(w, kxa, kxb, sd)
     if (sd .and. .not. efold) then
       teomsd = teomsd + omp_get_wtime() - ts
       neomsd = neomsd + 1
@@ -943,12 +1306,14 @@ subroutine N(xzeom)(w, ecorr)
   use xzmem
   use xzkern
   use xzeomd
+  use xzdist
   use omp_lib
   implicit none
   real(8) :: w(*)
   real(8), intent(in) :: ecorr
   integer(8) :: m0, ms, ish, s, nsd, nlen, kxa, kxb, kst, nroot, nkeep, nsing, msd, msub, k, peak, sigw, avail
-  integer(8) :: nfound, nsig, nit, nsgd, nitd, nst, i, a, r, nprob
+  integer(8) :: nfound, nsig, nit, nsgd, nitd, nst, i, a, r, nprob, pk, top, nloc, mp, ep0n, epwn
+  logical :: dist, worker, pf
   integer(8), allocatable :: singles(:), lead(:, :), cyc(:)
   complex(8), allocatable :: ee(:)
   real(8), allocatable :: rmax(:), rnorm(:), wts(:, :)
@@ -968,6 +1333,11 @@ subroutine N(xzeom)(w, ecorr)
     call N(xzeom3)(w, ecorr)
     return
   end if
+  ! more than one rank: the sigma vectors with R3 and the vectors of the
+  ! solver over the ranks (section 16.7 of docs/native.md); a rank other
+  ! than 0 serves rank 0 (N(xzeserve))
+  dist = nrank > 1
+  worker = xzworker()
   m0 = xzmark()
   call N(xzeomkeep)()
   if (.not. dense) jobase_s = xzget(nto, 'layout of the label shift')
@@ -976,24 +1346,80 @@ subroutine N(xzeom)(w, ecorr)
   if (dense) nprob = 1
 
   if (xzdry) then
+    edist = dist
     call N(xzeomim)(w)
+    ep0n = 0
+    epwn = 0
     do ish = 1, nprob
       call problem(ish, s, nroot, ok)
       if (.not. ok) cycle
       call xzeomlay(w, s)
+      if (dist) call xzeslices()
       nlen = nsd + n3s
       nkeep = nroot + 2
       msd = min(64_8, 8 + 4 * nkeep)
       msub = subspace(nroot)
       ms = xzmark()
-      kst = xzget(NW * nkeep * nsd, 'EOM: vectors to start from')
+      if (.not. worker) kst = xzget(NW * nkeep * nsd, 'EOM: vectors to start from')
       kxa = xzget(NW * nlen, 'EOM: a vector')
       kxb = xzget(NW * nlen, 'EOM: its sigma vector')
-      ! (the least: the singles-doubles stage in the work array, or the buffer of the files)
-      k = xzget(max(2 * msd * (NW * nsd + xzalign), msub * NW * min(nlen, 1024_8) + 64), 'EOM: the subspace')
-      call N(xzesig)(w, kxa, kxb, .false.)
+      top = xztop
+      if (worker) then
+        ! (a rank other than 0: its rows of the subspace as rank 0 planned them)
+        k = xzget(epw, 'EOM: the subspace')
+        call N(xzesig)(w, kxa, kxb, .false.)
+      else
+        ! (the least: the singles-doubles stage in the work array, or the buffer of the files)
+        k = xzget(max(2 * msd * (NW * nsd + xzalign), msub * NW * min(nlen, 1024_8) + 64), 'EOM: the subspace')
+        mp = xztop
+        pk = xzpeak
+        xzpeak = xztop
+        call N(xzesig)(w, kxa, kxb, .false.)
+        sigw = xzpeak - mp
+        xzpeak = max(pk, xzpeak)
+        if (dist) then
+          ! the subspace that the run will have with this work array: what
+          ! the other ranks need for their rows of it
+          avail = max(0_8, xzsize - top - sigw)
+          nloc = nsd + esoff(1)
+          call xzevplace(int(NW, 8), nloc, min(msub, 3 * nroot + 4), avail, .true., msub, pf)
+          epm(ish) = msub
+          epf(ish) = pf
+          if (pf) then
+            ep0n = max(ep0n, msub * NW * min(nloc, 1048576_8))
+            epwn = max(epwn, msub * NW * min(esmax, 1048576_8) + xzalign)
+          else
+            ep0n = max(ep0n, 2 * msub * (NW * nloc + xzalign))
+            epwn = max(epwn, 2 * msub * (NW * esmax + xzalign))
+          end if
+        end if
+      end if
       call xzrel(ms)
     end do
+    if (.not. worker) then
+      ep0 = ep0n
+      if (myrank == 0) epw = epwn
+    end if
+    edist = .false.
+    call xzrel(m0)
+    return
+  end if
+
+  if (myrank > 0) then
+    ! ---- a rank other than 0: the amplitudes of rank 0, the intermediates of
+    !      the ground state made here, then the commands of rank 0
+    call xzmpi_bcast_w(w(jt1), NW * no * nv)
+    call xzmpi_bcast_w(w(jt2), NW * no * no * nv * nv)
+    call xzmpi_bcast_w(w(jt3), NW * n3)
+    t0 = omp_get_wtime()
+    call N(xzeomim)(w)
+    teomim = omp_get_wtime() - t0
+    write(6, '(/,a)') '  EOM-EE-CCSDT: the batches of this rank in the sigma vectors, its rows of the vectors'
+    write(6, '(a,f10.2,a)') '   intermediates of the ground state: ', teomim, ' s'
+    flush(6)
+    call N(xzeserve)(w, neomsig)
+    call xzdtable(3, neomsig)
+    write(6, '(a,i6,a)') '   ', neomsig, ' sigma vectors'
     call xzrel(m0)
     return
   end if
@@ -1003,12 +1429,23 @@ subroutine N(xzeom)(w, ecorr)
   !      takes the place of <ab||cd>)
   call xzoptget('eomtest', arg, larg)
   if (larg > 0) then
+    if (dist) then
+      write(6, '(/,a)') ' @XZCCSDT-F, option eomtest (the sigma vector against the derivative of the amplitude step)'
+      write(6, '(a)') '             runs with one rank only; option eomsig is the test of a sigma vector over ranks.'
+      call xzerrex
+    end if
     call N(xzeomtest)(w, arg(1:larg))
     call xzrel(m0)
     return
   end if
 
   t0 = omp_get_wtime()
+  if (dist) then
+    ! the converged amplitudes to all ranks; every rank makes the intermediates
+    call xzmpi_bcast_w(w(jt1), NW * no * nv)
+    call xzmpi_bcast_w(w(jt2), NW * no * no * nv * nv)
+    call xzmpi_bcast_w(w(jt3), NW * n3)
+  end if
   call N(xzeomim)(w)
   teomim = omp_get_wtime() - t0
   write(6, '(/,a)') '  EOM-EE-CCSDT: excitation energies and right-hand vectors'
@@ -1023,6 +1460,8 @@ subroutine N(xzeom)(w, ecorr)
   end if
   if (dense .and. enshift > 1) write(6, '(a,i4,a)') '   no blocks of labels: the states of all shifts are roots of one problem; ', &
     sum(enr(1:enshift)), ' roots (the sum of those asked for)'
+  if (dist) write(6, '(a,i4,a)') '   over ', nrank, ' ranks: every rank does its batches of the two residuals of a sigma vector and ' // &
+    'holds its rows of R3 of every vector; rank 0 runs the solver'
 
   ! ---- a test hook: option eomsig file, sigma of the vector of the file (of the
   !      first shift), written to file.out
@@ -1031,8 +1470,14 @@ subroutine N(xzeom)(w, ecorr)
     call problem(1_8, s, nroot, ok)
     call xzeomlay(w, s)
     nlen = nsd + n3s
+    if (dist) then
+      call xzeslices()
+      call xzecmd(op_shift, dble(s))
+      call xzdeal_eom(eshift)
+    end if
     kxa = xzget(NW * nlen, 'EOM: a vector')
     kxb = xzget(NW * nlen, 'EOM: its sigma vector')
+    ekx = [kxa, kxb]
     open(unit=74, file=arg(1:larg), form='unformatted', access='stream', status='old', iostat=ios)
     if (ios == 0) read(74, iostat=ios) w(kxa:kxa + NW * nlen - 1)
     close(74)
@@ -1041,7 +1486,22 @@ subroutine N(xzeom)(w, ecorr)
       call xzerrex
     end if
     call xzoptget('eomsd', length=larg)
-    call N(xzesig)(w, kxa, kxb, larg > 0)
+    ! (over ranks: the vector to all, sigma_3 from the owners of its rows)
+    edist = dist
+    ecmd = dist .and. larg == 0
+    evoff = 0
+    evlen = nlen
+    if (dist) evlen = nsd + esoff(1)
+    call N(xzepspread)(w, kxa)
+    call N(xzepsig)(w, kxa, kxb, larg > 0)
+    call N(xzepcollect)(w, kxb)
+    ecmd = .false.
+    edist = .false.
+    if (dist) then
+      call xzecmd(op_endshift)
+      call xzecmd(op_end)
+      call xzdtable(3, 1_8)
+    end if
     call xzoptget('eomsig', arg, larg)
     open(unit=74, file=arg(1:larg) // '.out', form='unformatted', access='stream', status='replace')
     write(74) w(kxb:kxb + NW * nlen - 1)
@@ -1102,6 +1562,12 @@ subroutine N(xzeom)(w, ecorr)
     end if
     nkeep = min(nkeep, nsing)
     nroot = min(nroot, nsing)
+    if (dist) then
+      ! the problem to the other ranks: its layout, its slices, its batches
+      call xzeslices()
+      call xzecmd(op_shift, dble(s))
+      call xzdeal_eom(eshift)
+    end if
     ms = xzmark()
     kst = xzget(NW * nkeep * nsd, 'EOM: vectors to start from')
     kxa = xzget(NW * nlen, 'EOM: a vector')
@@ -1126,6 +1592,9 @@ subroutine N(xzeom)(w, ecorr)
     end if
     ! ---- the problem with triples
     msub = subspace(nroot)
+    edist = dist
+    eplan = 0
+    if (dist) eplan = ish
     call xzdry_begin()
     call N(xzesig)(w, kxa, kxb, .false.)
     call xzdry_end(peak)
@@ -1147,6 +1616,9 @@ subroutine N(xzeom)(w, ecorr)
     end if
     t1 = omp_get_wtime() - t1
     tsg = teomsig - tsg
+    edist = .false.
+    eplan = 0
+    if (dist) call xzecmd(op_endshift)
     ! ---- the roots
     write(6, '(/,a,i5,a,i4,a,f10.2,a,f9.2,a)') '   sigma vectors: ', nsig, '   iterations: ', nit, '   time: ', t1, &
       ' s   (', t1 / max(nsig, 1_8), ' s per sigma vector, the solver included)'
@@ -1204,6 +1676,10 @@ subroutine N(xzeom)(w, ecorr)
     call xzrel(ms)
   end do
   if (iures > 0) close(iures)
+  if (dist) then
+    call xzecmd(op_end)
+    call xzdtable(3, neomsig)
+  end if
   call xzrel(m0)
 
 contains
