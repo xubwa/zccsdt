@@ -4665,7 +4665,7 @@ the contractions, dense one row C(v,4) and the column batches.  The arrays
 of a CCSDT step and those of an evaluation are not held together.
 Measured, 26 + 120 in real blocks (19.8): the plan 20.4 GB with the 8 DIIS vectors and the
 three sets of the extrapolation (2.2 GB) in the work array (CCSDT alone:
-14.5 GB; the least: 8.3 GB), used to the word, peak resident set 15.2 GB;
+14.5 GB; the least: 8.3 GB), used to the word, peak resident set 16.6 GB;
 (Q) of the same case: 5.5 GB.  The Python program
 peaked at 36 times the memory of (Q) for its CC4.
 
@@ -4793,15 +4793,17 @@ with `I_MPI_PIN_DOMAIN=omp`; measured once):
 | **2 ranks x 24: one T4 evaluation** | 183.8 s | **91.6 s** (1.92 of 24 threads) | 2.01 |
 | CC4 from the CCSDT amplitudes | 1197.3 s: 6 evaluations (1103.0 s), 27 cycles | **554.1 s**: 5 evaluations (457.5 s), 25 cycles | 2.16 |
 | E(CC4) / Eh | -2605.340463043037 | -2605.340463043362 (both) | |
-| work array, 24 threads: plan = used; peak resident set | 18150.9 MB; 14.3 GB | 20360.8 MB (2198.7 MB: the extrapolation); 15.2 GB | |
+| work array, 24 threads: plan = used; peak resident set | 18150.9 MB; 14.3 GB | 20360.8 MB (2198.7 MB: the extrapolation); 16.6 GB | |
 | 2 ranks: plan of rank 0 / of the other; resident (rank 0) | 13565.8 / 13565.8 MB; 12.7 GB | 15775.7 / 13577.0 MB; 15.0 GB | |
 | **EOM-CC4, one root** of shift 2, `%eomthrs 1e-5`, from `XZCC4` (3 macro iterations, 3 + 10 sigma vectors), 24 threads: a sigma vector with the T4 terms; the root | one rank only; job 31913400 on c332, waiting threads asleep: 1073 s; 3300 s | 410.9 s = 2.33 evaluations; **1304.7 s** | |
 | 2 ranks x 24 | stops | 212.2 s; **692.9 s** (1.88 of 24 threads) | |
 | EOM, 24 threads: the least; used; resident | 17.0 GB; 40.6 GB; 30.1 GB | 16995.3 MB; 40594.7 MB (the subspace takes what is free); 29.0 GB | |
-| EOM, 2 ranks: plan of rank 0 (its rows of the subspace besides) / of the other (with its rows); used; resident | | 16763.4 / 29770.7 MB; 25886.3 / 24320.4 MB; 21.8 / 21.3 GB | |
+| EOM, 2 ranks: plan of rank 0 (its rows of the subspace besides) / of the other (with its rows); used and resident, rank 0 | | 16763.4 / 29770.7 MB; 25886.3 MB, 21.8 GB (the other rank, in the run of the same plan on c054: 24320.4 MB, 21.3 GB) | |
 
-omega of the root: 0.235170618224 Eh in all runs of this section (`XZEOM`:
-0.23517061822382 serial, on 2 ranks, on 4 and on 8 ranks over four nodes).
+omega of the root: 0.235170618224 Eh in all runs of this section; in
+`XZEOM`, within a job (each has its own SCF): 0.23517061822375 on 24 threads
+and ..371 on 2 ranks and on four nodes (job 31916937), ..382 on 4 and on 8
+ranks (job 31916947).
 
 **The waiting of the threads.**  The jobs of 2026-10-12 set
 `OMP_WAIT_POLICY=PASSIVE`; the numbers above are with the default of the
