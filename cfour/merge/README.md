@@ -45,6 +45,12 @@ are.  The directory is generated; the sources stay here.
        cfour/merge/regress.sh --ref build/xzccsdt/xzccsdt     --new <cfour>/bin/xzccsdt --eom
        cfour/merge/regress.sh --ref build/xzccsdt_mpi/xzccsdt --new <cfour>/bin/xzccsdt_mpi --np 2 --eom
 
+   Two builds of one source print identical lines.  When the source of
+   the two differs in what it converges to (the test of convergence was
+   changed on 2026-10-13: `CC_CONV` as in `xx2cccsd`), add `--tol`: numbers
+   are compared to 10^-`CC_CONV` of the case (excitation energies to 1e-7),
+   the cycles are listed old and new and not compared.
+
    The binaries take no argument: `regress.sh` sets `CALC` (`PROPS`,
    `EXCITE`) of the ZMAT of each case and runs `xjoda` again before each
    step (`--cfourbin`); the steps after the first take the files `XZAMPS`,
