@@ -165,9 +165,16 @@ subroutine N(xzt4)(w, kt1, kt2, kt3, kr2, kr3, omega)
     call xzmpi_sum0_w(w(kr3), NW * n3)
     tq(1) = tq(1) + omp_get_wtime() - t0
   end if
-  write(6, '(a,i10,a,i5,a,f10.2,a,f9.2,a,f9.2,a,3f10.2,a,f10.2,a)') '     T4 terms: ', ndone, ' occupied quadruples, ', &
-    nmine, ' tasks, ', omp_get_wtime() - tstart, ' s  (operands ', tq(1), ', Xv ', tq(2), &
-    ', right-hand sides: operands, products, reductions ', tq(3), tq(4), tq(5), ', contractions ', tq(6), ')'
+  if (dense) then
+    write(6, '(a,i10,a,i5,a,f10.2,a,f9.2,a,f9.2,a,3f10.2,a,f10.2,a)') '     T4 terms: ', ndone, ' occupied quadruples, ', &
+      nmine, ' tasks, ', omp_get_wtime() - tstart, ' s  (operands ', tq(1), ', Xv ', tq(2), &
+      ', right-hand sides: operands, products, reductions ', tq(3), tq(4), tq(5), ', contractions ', tq(6), ')'
+  else
+    write(6, '(a,i10,a,i5,a,f10.2,a,f9.2,a,f9.2,a,2f10.2,a,f10.2,a,f10.2,a)') '     T4 terms: ', ndone, ' occupied quadruples, ', &
+      nmine, ' tasks, ', omp_get_wtime() - tstart, ' s  (operands ', tq(1), ', Xv ', tq(2), &
+      ', right-hand sides: blocks on two pairs, on an index and a triple ', tq(3), tq(4), ', the row of T4 ', tq(5), &
+      ', contractions ', tq(6), ')'
+  end if
   flush(6)
 end subroutine
 
@@ -195,7 +202,7 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
   integer(8), intent(out) :: ndone, nmine
   integer(8) :: m0, na4, nslot, nxv, nrb, nt, s, mt
   integer(8) :: kev4, kz, kw22, kw13, kla, kra, klb, krb, klc, krc, kwh, kxv, kxvs, kwx, kmx, ky, klk, kbo, ktg
-  integer(8) :: ke22, ke13, qy12
+  integer(8) :: kl2, qy12
   integer(8) :: i, j, k, l, x, n, size, ng, g1, g2, g3, qq, g, kx
   integer(8) :: lo1, hi1, lo2, hi2, lo3, hi3, it, lastl, nx, nnew
   integer(8) :: slot(0:no-1), xnew(0:no-1), kind(2), ka(2), sw(2)
@@ -236,8 +243,6 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
     if (eom) kxvs = xzget(NW * nslot * nxv, 'CC4: Xv of the vector')
     kwx = xzget(NW * nt * qrows * nv * nv, 'CC4: rows of <vv||vv>')
     kmx = xzget(NW * qrows * nv * nv, 'CC4: product of Xv')
-    ke22 = kz
-    ke13 = kz
   else
     nrb = 4 + 6 * nocmax
     jqkv = xzget(nv / 2 + 1, 'CC4: tables')
@@ -248,16 +253,13 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
     jqposq = xzget(nvp / 2 + 1, 'CC4: tables')
     jqpos3 = xzget(nvt / 2 + 1, 'CC4: tables')
     jqtri = xzget(3 * nvt / 2 + 2, 'CC4: tables')
-    kz = xzget(NW * qn22max, 'CC4: blocks of the right-hand side on two pairs')
-    ke22 = xzget(NW * qn22max, 'CC4: blocks of T4 on two pairs')
-    kw13 = xzget(NW * qn13max, 'CC4: blocks of the right-hand side on an index and a triple')
-    ke13 = xzget(NW * qn13max, 'CC4: blocks of T4 on an index and a triple')
-    kla = xzget(NW * 4 * nvcmax * nqmax, 'CC4: stacked operand')
-    kra = xzget(NW * 4 * nvcmax * nqmax, 'CC4: stacked operand')
-    klb = xzget(NW * 4 * nocmax * nqmax, 'CC4: stacked operand')
-    krb = xzget(NW * 4 * nocmax * nqmax, 'CC4: stacked operand')
-    klc = xzget(NW * 6 * nocmax * nvcmax, 'CC4: stacked operand')
-    krc = xzget(12 * nocmax, 'CC4: rows of T3 of a product')
+    ! (the right-hand side and then, in its place, the row of T4)
+    kz = xzget(NW * qn22max, 'CC4: blocks of the row on two pairs')
+    kw13 = xzget(NW * qn13max, 'CC4: blocks of the row on an index and a triple')
+    ! (the stacked operands of all blocks on two pairs of a row: four splits, the summed index of every class once)
+    kla = xzget(NW * 4 * (nv + no) * nqmax, 'CC4: stacked operands')
+    kra = xzget(NW * 4 * (nv + no) * nqmax, 'CC4: stacked operands')
+    klc = xzget(NW * (6 * nocmax + 3 * nvcmax) * nvcmax, 'CC4: stacked operand')
     ! the blocks [c][(ab)] of the term with <cm||ef>: c of class g - q for the pairs of group q
     qy12 = 0
     do g = 0, ntg - 1
@@ -267,10 +269,9 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
       end do
       qy12 = max(qy12, n)
     end do
-    ky = xzget(NW * qy12, 'CC4: blocks [c][(ab)]')
+    ky = xzget(NW * (4 * qy12 + 6 * nqmax), 'CC4: blocks [c][(ab)] of four splits, rows of the doubles term')
+    kl2 = xzget(NW * (4 * nv + 6) * nqmax, 'CC4: stacked operands of the contractions')
     klk = xzget(NW * nrb * nvcmax, 'CC4: operand of the triples terms')
-    kbo = xzget(NW * nrb * natmax, 'CC4: product of the triples terms')
-    ktg = xzget(nrb, 'CC4: rows of the triples terms')
     ! Xv of one pair of occupied indices: the blocks of every class of e; with
     ! a shift the triples of other groups (the largest set of any pair class)
     nxv = qxvmax
@@ -418,55 +419,43 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
                 if (.not. dense .and. eom) then
                   call N(xz4slay)(mt, s, off22, nc22, n22, off13, nc13, n13)
                   if (n22 + n13 > 0) then
-                    call zc_tn_zero(w(kz), 8 * NW * n22)
-                    call zc_tn_zero(w(kw13), 8 * NW * n13)
-                    ! H' with T2, T3; then H~ with r2, R3
-                    call N(xz4sfw)(w, i, j, k, l, s, s, 0_8, w(jotri), w(josgn), w(jopidx), w(jopgrp), w(g4t2p), &
+                    ! H' with T2, T3 (the first products of the blocks); then H~ with r2, R3
+                    call N(xz4sfw)(w, i, j, k, l, s, s, 0_8, .true., w(jotri), w(josgn), w(jopidx), w(jopgrp), w(g4t2p), &
                                    w(g4t2px), w(x4xos), w(x4q1), w(x4q2), kt3, jobase, boff, w(kz), w(kw13), w(kla), &
-                                   w(kra), w(klb), w(krb), w(klc), w(krc), w(krc + 6 * nocmax), w(kxvs), nxv, slot, &
-                                   off22, nc22, off13, nc13, tq)
-                    call N(xz4sfw)(w, i, j, k, l, s, 0_8, s, w(jotri), w(josgn), w(jopidx), w(jopgrp), w(x4r2p), &
+                                   w(kra), w(klc), w(kxvs), nxv, slot, off22, nc22, off13, nc13, tq)
+                    call N(xz4sfw)(w, i, j, k, l, s, 0_8, s, .false., w(jotri), w(josgn), w(jopidx), w(jopgrp), w(x4r2p), &
                                    w(x4r2px), w(g4xo), w(g4q1), w(g4q2), x4r3, jobase_s, boff_s, w(kz), w(kw13), &
-                                   w(kla), w(kra), w(klb), w(krb), w(klc), w(krc), w(krc + 6 * nocmax), w(kxv), nxv, &
-                                   slot, off22, nc22, off13, nc13, tq)
+                                   w(kla), w(kra), w(klc), w(kxv), nxv, slot, off22, nc22, off13, nc13, tq)
                     t0 = omp_get_wtime()
-                    call zc_tn_zero(w(ke22), 8 * NW * n22)
-                    call zc_tn_zero(w(ke13), 8 * NW * n13)
-                    call N(zc_cc4_sector_t4)(int(nv, 4), w(jqkv), 0_4, int(mt + s, 4), w(jeps + no), eo + omega, 0_4, &
-                                             int(ncls, 4), w(jqlid), w(jqlst), w(jqlmem), 0_4, int(npg, 4), off22, &
-                                             nc22, off13, nc13, w(jqposv), w(jqposq), w(jqpos3), w(kz), w(kw13), &
-                                             w(ke22), w(ke13))
+                    call N(zc_cc4_sector_t4i)(int(nv, 4), w(jqkv), 0_4, int(mt + s, 4), w(jeps + no), eo + omega, 0_4, &
+                                              int(ncls, 4), w(jqlid), w(jqlst), w(jqlmem), 0_4, int(npg, 4), off22, &
+                                              nc22, off13, nc13, w(jqposv), w(jqposq), w(jqpos3), w(kz), w(kw13))
                     tq(5) = tq(5) + omp_get_wtime() - t0
-                    call N(xz4sbk)(w, i, j, k, l, s, 0_8, .true., w(jotri), w(josgn), w(jopidx), w(jopgrp), w(ke22), &
-                                   w(ke13), off22, nc22, off13, nc13, w(jqtri), w(ky), w(klk), w(kbo), w(ktg), &
+                    call N(xz4sbk)(w, i, j, k, l, s, 0_8, .true., w(jotri), w(josgn), w(jopidx), w(jopgrp), w(kz), &
+                                   w(kw13), off22, nc22, off13, nc13, w(jqtri), w(ky), w(kl2), w(klk), &
                                    w(g4fov), g4d, w(g4ooov), kr2, kr3, boff_s, tq)
                   end if
                 end if
                 if (.not. dense) then
                   call N(xz4slay)(mt, 0_8, off22, nc22, n22, off13, nc13, n13)
                   if (n22 + n13 > 0) then
-                    call zc_tn_zero(w(kz), 8 * NW * n22)
-                    call zc_tn_zero(w(kw13), 8 * NW * n13)
-                    call N(xz4sfw)(w, i, j, k, l, 0_8, 0_8, 0_8, w(jotri), w(josgn), w(jopidx), w(jopgrp), w(g4t2p), &
+                    call N(xz4sfw)(w, i, j, k, l, 0_8, 0_8, 0_8, .true., w(jotri), w(josgn), w(jopidx), w(jopgrp), w(g4t2p), &
                                    w(g4t2px), w(g4xo), w(g4q1), w(g4q2), kt3, jobase, boff, w(kz), w(kw13), w(kla), &
-                                   w(kra), w(klb), w(krb), w(klc), w(krc), w(krc + 6 * nocmax), w(kxv), nxv, slot, &
-                                   off22, nc22, off13, nc13, tq)
+                                   w(kra), w(klc), w(kxv), nxv, slot, off22, nc22, off13, nc13, tq)
                     t0 = omp_get_wtime()
-                    call zc_tn_zero(w(ke22), 8 * NW * n22)
-                    call zc_tn_zero(w(ke13), 8 * NW * n13)
-                    call N(zc_cc4_sector_t4)(int(nv, 4), w(jqkv), 0_4, int(mt, 4), w(jeps + no), &
-                                             eo + merge(0d0, omega, eom), 0_4, int(ncls, 4), w(jqlid), w(jqlst), &
-                                             w(jqlmem), 0_4, int(npg, 4), off22, nc22, off13, nc13, w(jqposv), &
-                                             w(jqposq), w(jqpos3), w(kz), w(kw13), w(ke22), w(ke13))
+                    call N(zc_cc4_sector_t4i)(int(nv, 4), w(jqkv), 0_4, int(mt, 4), w(jeps + no), &
+                                              eo + merge(0d0, omega, eom), 0_4, int(ncls, 4), w(jqlid), w(jqlst), &
+                                              w(jqlmem), 0_4, int(npg, 4), off22, nc22, off13, nc13, w(jqposv), &
+                                              w(jqposq), w(jqpos3), w(kz), w(kw13))
                     tq(5) = tq(5) + omp_get_wtime() - t0
                     if (eom) then
                       call N(xz4sbk)(w, i, j, k, l, 0_8, s, .false., w(jotri), w(josgn), w(jopidx), w(jopgrp), &
-                                     w(ke22), w(ke13), off22, nc22, off13, nc13, w(jqtri), w(ky), w(klk), w(kbo), &
-                                     w(ktg), w(x4fov), x4d, w(x4ooov), kr2, kr3, boff_s, tq)
+                                     w(kz), w(kw13), off22, nc22, off13, nc13, w(jqtri), w(ky), w(kl2), w(klk), &
+                                     w(x4fov), x4d, w(x4ooov), kr2, kr3, boff_s, tq)
                     else
                       call N(xz4sbk)(w, i, j, k, l, 0_8, 0_8, .true., w(jotri), w(josgn), w(jopidx), w(jopgrp), &
-                                     w(ke22), w(ke13), off22, nc22, off13, nc13, w(jqtri), w(ky), w(klk), w(kbo), &
-                                     w(ktg), w(g4fov), g4d, w(g4ooov), kr2, kr3, boff, tq)
+                                     w(kz), w(kw13), off22, nc22, off13, nc13, w(jqtri), w(ky), w(kl2), w(klk), &
+                                     w(g4fov), g4d, w(g4ooov), kr2, kr3, boff, tq)
                     end if
                   end if
                 end if
@@ -1078,22 +1067,29 @@ end subroutine
 
 ! ---------------------------------------------------------------------------
 ! One occupied quadruple i<j<k<l in the sectors of the labels: the five
-! products of N(xzqsquad) added to the blocks b (two pairs) and c (an index
-! and a triple) of the layout of N(xz4slay) for the row shift st.
+! products of N(xzqsquad) into the blocks b (two pairs) and c (an index and a
+! triple) of the layout of N(xz4slay) for the row shift st.
 !   q1, q2, kt3    the operands of the products with the rank-3 array: q1,
 !                  q2 of shift s3l, the rank-3 array at kt3 of shift
 !                  st - s3l in its layout (kob: obase, bof: its blocks)
 !   t2p, t2px, xo, xv   those of the products of two rank-2 arrays: t2p,
 !                  t2px of shift s2l, xo and xv of shift st - s2l (nxv: the
 !                  elements of a slot of xv)
-subroutine N(xz4sfw)(w, i, j, k, l, st, s3l, s2l, otri, osgn, opidx, opgrp, t2p, t2px, xo, q1, q2, kt3, kob, bof, &
-                     b, c, la, ra, lb, rb, lc, rows, sgs, xv, nxv, slot, off22, nc22, off13, nc13, tq)
+!   fresh          the blocks are set (the first products of the row), not
+!                  added to
+! A block on two pairs is one product: the rows of its two kinds of splits
+! stacked along the summed index.  A block on an index and a triple is one
+! pass over its columns (N(zc_cc4_rowsmm)): the rows of the rank-3 array and
+! those of Xv are read where they are.
+subroutine N(xz4sfw)(w, i, j, k, l, st, s3l, s2l, fresh, otri, osgn, opidx, opgrp, t2p, t2px, xo, q1, q2, kt3, kob, bof, &
+                     b, c, la, ra, lc, xv, nxv, slot, off22, nc22, off13, nc13, tq)
   use xzdata
   use xzkern
   use omp_lib
   implicit none
   real(8) :: w(*)
   integer(8), intent(in) :: i, j, k, l, st, s3l, s2l, kt3, kob, bof(0:*), nxv
+  logical, intent(in) :: fresh
   integer(8), intent(in) :: otri(0:npo-1, 0:no-1), opidx(0:no-1, 0:no-1), opgrp(0:npo-1)
   integer(1), intent(in) :: osgn(0:npo-1, 0:no-1)
   ZT, intent(in) :: t2p(0:nvp-1, 0:no-1, 0:no-1)
@@ -1102,22 +1098,23 @@ subroutine N(xz4sfw)(w, i, j, k, l, st, s3l, s2l, otri, osgn, opidx, opgrp, t2p,
   ZT, intent(in) :: q1(0:nvp-1, 0:nv-1, 0:no-1)                ! [x][e][Q]
   ZT, intent(in) :: q2(0:nv-1, 0:no-1, 0:no-1, 0:no-1)         ! [i][j][m][a]
   ZT :: b(0:*), c(0:*)
-  ZT :: la(0:*), ra(0:*), lb(0:*), rb(0:*), lc(0:*)
-  integer(8) :: rows(0:*)
-  real(8) :: sgs(0:*)
+  ZT :: la(0:*), ra(0:*), lc(0:*)
   ZT, intent(in) :: xv(0:nxv-1, 0:*)
   integer(8), intent(in) :: slot(0:*)
   integer(8), intent(in) :: off22(0:npg-1), nc22(0:npg-1), off13(0:ncls-1), nc13(0:ncls-1)
   real(8), intent(inout) :: tq(6)
-  integer(8) :: q(0:3), s, x, m, mt, qq, r, nr, nc, na, nb, ke, ne, nm, p, km, kxl, n, g3
+  integer(8) :: q(0:3), s, x, m, mt, qq, r, nr, nc, na, ke, ne, nm, p, km, kxl, n, g3, e, xb
   integer(8) :: jt(0:3), p22(0:5), q22(0:5), xfirst(0:5)
-  real(8) :: s13(0:3), s22(0:5), t0
+  integer(8) :: nas(0:npg-1), loff(0:npg-1), roff(0:npg-1), uo(0:7, 0:npg-1), nl, nrr, u
+  integer(c_intptr_t) :: ptr(6 * nocmax + 3 * nvcmax)
+  real(8) :: s13(0:3), s22(0:5), t0, alpha
   integer(8), parameter :: f1(0:5) = [0, 0, 0, 1, 1, 2], f2(0:5) = [1, 2, 3, 2, 3, 3]
   integer(8), parameter :: r1(0:5) = [2, 1, 1, 0, 0, 0], r2(0:5) = [3, 3, 2, 3, 2, 1]
   integer(8), parameter :: last(3) = [0, 1, 3]
   integer(8), external :: N(xz4xvoff)
-  ZT :: one, alpha
+  ZT :: one, zero, beta
   one = 1
+  zero = 0
   q = [i, j, k, l]
   s13 = [1d0, -1d0, 1d0, -1d0]
   s22 = [1d0, -1d0, 1d0, 1d0, -1d0, 1d0]
@@ -1133,36 +1130,71 @@ subroutine N(xz4sfw)(w, i, j, k, l, st, s3l, s2l, otri, osgn, opidx, opgrp, t2p,
     xfirst(s) = q(r1(s))
   end do
 
-  ! ---- the blocks on two pairs
+  ! ---- the blocks on two pairs.  The stacked operands of all blocks first
+  !      (the threads take blocks: gathers and copies), then the products
   t0 = omp_get_wtime()
+  !      (uo: the first row of the stack of a block that a split fills - the splits
+  !      0 to 3 of the first kind, then those of the second)
+  nl = 0
+  nrr = 0
+  do qq = 0, npg - 1
+    nas(qq) = 0
+    if (off22(qq) < 0) cycle
+    do s = 0, 3
+      uo(s, qq) = nas(qq)
+      nas(qq) = nas(qq) + xznvc(qq - ocls(q(s)) - s3l)
+    end do
+    do s = 0, 3
+      uo(4 + s, qq) = nas(qq)
+      nas(qq) = nas(qq) + xznoc(qq - ocls(q(s)) - s2l)
+    end do
+    loff(qq) = nl
+    roff(qq) = nrr
+    nl = nl + nas(qq) * (vpoff(qq + 1) - vpoff(qq))
+    nrr = nrr + nas(qq) * nc22(qq)
+  end do
+  !$omp parallel do collapse(2) schedule(dynamic, 1) private(qq, u, r, nr, nc, na, s, x, ke, ne, km, nm, m)
+  do qq = 0, npg - 1
+    do u = 0, 7
+      if (off22(qq) < 0) cycle
+      r = mt + st - qq
+      nr = vpoff(qq + 1) - vpoff(qq)
+      nc = nc22(qq)
+      na = uo(u, qq)
+      s = mod(u, 4_8)
+      x = q(s)
+      if (u < 4) then
+        ! - ~<ab||ex> t(J; e, cd): e of the class that the shift of the integral leaves
+        ke = qq - ocls(x) - s3l
+        ne = xznvc(ke)
+        if (ne == 0) cycle
+        call N(xzqsab)(nv, nvp, nr, nc, ne, s13(s), .false., vcoff(ke), vpoff(qq), vpoff(r), &
+                       q1(0, 0, x), w(kt3), w(kob + jt(s)), w(jvci), w(jvsgn), la(loff(qq) + na * nr), &
+                       ra(roff(qq) + na * nc))
+      else
+        ! t(x m, ab) Xo(m; J; cd)
+        km = qq - ocls(x) - s2l
+        nm = xznoc(km)
+        do m = 0, nm - 1
+          la(loff(qq) + (na + m) * nr:loff(qq) + (na + m) * nr + nr - 1) = &
+            s13(s) * t2p(vpoff(qq):vpoff(qq) + nr - 1, ocoff(km) + m, x)
+          ra(roff(qq) + (na + m) * nc:roff(qq) + (na + m) * nc + nc - 1) = &
+            xo(vpoff(r):vpoff(r) + nc - 1, ocoff(km) + m, jt(s))
+        end do
+      end if
+    end do
+  end do
   do qq = 0, npg - 1
     if (off22(qq) < 0) cycle
-    r = mt + st - qq
     nr = vpoff(qq + 1) - vpoff(qq)
     nc = nc22(qq)
-    na = 0
-    nb = 0
-    do s = 0, 3
-      x = q(s)
-      ! - ~<ab||ex> t(J; e, cd): e of the class that the shift of the integral leaves
-      ke = qq - ocls(x) - s3l
-      ne = xznvc(ke)
-      if (ne > 0) then
-        call N(xzqsab)(nv, nvp, nr, nc, ne, s13(s), .false., vcoff(ke), vpoff(qq), vpoff(r), &
-                       q1(0, 0, x), w(kt3), w(kob + jt(s)), w(jvci), w(jvsgn), la(na * nr), ra(na * nc))
-        na = na + ne
-      end if
-      ! t(x m, ab) Xo(m; J; cd)
-      km = qq - ocls(x) - s2l
-      nm = xznoc(km)
-      do m = 0, nm - 1
-        lb((nb + m) * nr:(nb + m) * nr + nr - 1) = s13(s) * t2p(vpoff(qq):vpoff(qq) + nr - 1, ocoff(km) + m, x)
-        rb((nb + m) * nc:(nb + m) * nc + nc - 1) = xo(vpoff(r):vpoff(r) + nc - 1, ocoff(km) + m, jt(s))
-      end do
-      nb = nb + nm
-    end do
-    if (na > 0) call N(zc_gemm)(1_4, 0_4, nr, nc, na, one, la, nr, ra, nc, one, b(off22(qq)), nc)
-    if (nb > 0) call N(zc_gemm)(1_4, 0_4, nr, nc, nb, one, lb, nr, rb, nc, one, b(off22(qq)), nc)
+    if (nas(qq) > 0) then
+      beta = one
+      if (fresh) beta = zero
+      call N(zc_gemm)(1_4, 0_4, nr, nc, nas(qq), one, la(loff(qq)), nr, ra(roff(qq)), nc, beta, b(off22(qq)), nc)
+    else if (fresh) then
+      call zc_tn_zero(b(off22(qq)), 8 * NW * nr * nc)
+    end if
   end do
   tq(3) = tq(3) + omp_get_wtime() - t0
 
@@ -1183,14 +1215,12 @@ subroutine N(xz4sfw)(w, i, j, k, l, st, s3l, s2l, otri, osgn, opidx, opgrp, t2p,
         if (km < 0 .or. km >= ncls) cycle
         do m = ocoff(km), ocoff(km + 1) - 1
           if (osgn(q22(s), m) == 0) cycle
-          lc(n * nr:n * nr + nr - 1) = s22(s) * q2(vcoff(p):vcoff(p) + nr - 1, m, q(f2(s)), q(f1(s)))
-          rows(n) = otri(q22(s), m) - otoff(g3)
-          sgs(n) = dble(osgn(q22(s), m))
+          lc(n * nr:n * nr + nr - 1) = (s22(s) * osgn(q22(s), m)) * q2(vcoff(p):vcoff(p) + nr - 1, m, q(f2(s)), q(f1(s)))
+          ptr(n + 1) = loc(w(kt3 + NW * (bof(g3) + (otri(q22(s), m) - otoff(g3)) * nc)))
           n = n + 1
         end do
       end do
     end if
-    if (n > 0) call N(zc_cc4_rows_gemm)(w(kt3 + NW * bof(g3)), nc, rows, sgs, n, nc, lc, nr, 1d0, c(off13(p)))
     ! 2 t(ij, ae) Xv(e; kl; bcd), l in the second pair
     do m = 1, 3
       s = last(m)
@@ -1199,11 +1229,33 @@ subroutine N(xz4sfw)(w, i, j, k, l, st, s3l, s2l, otri, osgn, opidx, opgrp, t2p,
       if (ne == 0) cycle
       kxl = ocls(xfirst(s)) + ocls(l)
       alpha = 2d0 * s22(s)
-      call N(zc_gemm)(1_4, 0_4, nr, nc, ne, alpha, t2px(vcoff(p), vcoff(ke), p22(s)), nv, &
-                      xv(N(xz4xvoff)(kxl, ke, st - s2l), slot(xfirst(s))), nc, one, c(off13(p)), nc)
+      xb = N(xz4xvoff)(kxl, ke, st - s2l)
+      do e = 0, ne - 1
+        lc(n * nr:n * nr + nr - 1) = alpha * t2px(vcoff(p):vcoff(p) + nr - 1, vcoff(ke) + e, p22(s))
+        ptr(n + 1) = loc(xv(xb + e * nc, slot(xfirst(s))))
+        n = n + 1
+      end do
     end do
+    if (n > 0) then
+      call N(zc_cc4_rowsmm)(ptr, lc, n, nr, nc, merge(1_8, 0_8, fresh), c(off13(p)))
+    else if (fresh) then
+      call zc_tn_zero(c(off13(p)), 8 * NW * nr * nc)
+    end if
   end do
   tq(4) = tq(4) + omp_get_wtime() - t0
+end subroutine
+
+! out[r][c] = sg a[r][c], c < nc, for n rows of an array of leading dimension ld
+subroutine N(xz4lrows)(n, nc, sg, a, ld, out)
+  implicit none
+  integer(8), intent(in) :: n, nc, ld
+  real(8), intent(in) :: sg
+  ZT, intent(in) :: a(0:ld-1, 0:*)
+  ZT, intent(out) :: out(0:nc-1, 0:*)
+  integer(8) :: r
+  do r = 0, n - 1
+    out(:, r) = sg * a(0:nc - 1, r)
+  end do
 end subroutine
 
 ! ---------------------------------------------------------------------------
@@ -1211,11 +1263,17 @@ end subroutine
 ! the blocks e22, e13 of its row of T4 (row shift st: N(xz4slay)) with
 ! operators of shift sb into the four sums, which have the shift st + sb -
 ! r2 at kr2 [P][Q], the rank-3 array at kr3 in the layout bofo of that shift.
-!   y          the blocks [c][(ab)] of the term with ~<mc||ef>
-!   lk, bx, tg operand, product and rows of the terms with f and ~<mn||ke>
+!   y          the products of the blocks on two pairs: [c][(ab)] of the four
+!              splits of the term with ~<mc||ef>, rows of the doubles term
+!   l2         their stacked left operand;  lk: that of the terms with f and
+!              ~<mn||ke>
 !   withr2     the doubles term (<mn||ef>: not of H')
+! A block on two pairs is read once: one product with the rows of ~<mc||ef>
+! of the four splits and those of <mn||ef> of the doubles term stacked.  A
+! block on an index and a triple is one pass over its columns
+! (N(zc_cc4_addmm)): the rows of the rank-3 array are added to where they are.
 subroutine N(xz4sbk)(w, i, j, k, l, st, sb, withr2, otri, osgn, opidx, opgrp, e22, e13, off22, nc22, off13, nc13, &
-                     tri, y, lk, bx, tg, fov, kd, ooovd, kr2, kr3, bofo, tq)
+                     tri, y, l2, lk, fov, kd, ooovd, kr2, kr3, bofo, tq)
   use xzdata
   use xzkern
   use omp_lib
@@ -1228,18 +1286,19 @@ subroutine N(xz4sbk)(w, i, j, k, l, st, sb, withr2, otri, osgn, opidx, opgrp, e2
   ZT, intent(in) :: e22(0:*), e13(0:*)
   integer(8), intent(in) :: off22(0:npg-1), nc22(0:npg-1), off13(0:ncls-1), nc13(0:ncls-1)
   integer(4), intent(in) :: tri(0:2, 0:nvt-1)
-  ZT :: y(0:*), lk(0:*), bx(0:*)
-  integer(8) :: tg(0:*)
+  ZT :: y(0:*), l2(0:*), lk(0:*)
   ZT, intent(in) :: fov(0:nv-1, 0:no-1)                        ! [m][e]
   ZT, intent(in) :: ooovd(0:nv-1, 0:no-1, 0:no-1, 0:no-1)      ! [m][n][i][e]
   real(8), intent(inout) :: tq(6)
-  integer(8) :: q(0:3), s, m, mt, qq, r, nr, nc, p, km, n, g3
-  integer(8) :: jt(0:3), p22(0:5), q22(0:5), gj, gv, nt, lcc, nl, nyb, kk, mm, nn
-  integer(8) :: yoff(0:npg-1), ynq(0:npg-1)
+  integer(8) :: q(0:3), s, mt, qq, r, nr, nc, p, km, n, g3
+  integer(8) :: jt(0:3), p22(0:5), q22(0:5), gj, gv, lcc, nl, nyb, kk, mm, nn, mrow
+  integer(8) :: yoff(0:npg-1, 0:3), ynq(0:npg-1, 0:3), gvs(0:3), ntv(0:3), r2row(0:5), r2qq(0:5)
+  integer(8) :: mrows(0:npg-1), loff(0:npg-1), ybase(0:npg-1), nlo
+  integer(c_intptr_t) :: ptr(4 + 6 * nocmax)
   real(8) :: s13(0:3), s22(0:5), t0
   integer(8), parameter :: f1(0:5) = [0, 0, 0, 1, 1, 2], f2(0:5) = [1, 2, 3, 2, 3, 3]
   integer(8), parameter :: r1(0:5) = [2, 1, 1, 0, 0, 0], r2(0:5) = [3, 3, 2, 3, 2, 1]
-  ZT :: one, zero, alpha
+  ZT :: one, zero
   one = 1
   zero = 0
   t0 = omp_get_wtime()
@@ -1255,52 +1314,95 @@ subroutine N(xz4sbk)(w, i, j, k, l, st, sb, withr2, otri, osgn, opidx, opgrp, e2
     p22(s) = opidx(q(f2(s)), q(f1(s)))
     q22(s) = opidx(q(r2(s)), q(r1(s)))
   end do
-  ! r2[P][(ab)] += sgn sum_(cd) X[(ab)][(cd)] <P'||cd>: (cd) of the group of P'
-  if (withr2) then
-    do s = 0, 5
-      r = opgrp(q22(s))
-      qq = mt + st - r
-      if (qq < 0 .or. qq >= npg) cycle
-      if (off22(qq) < 0) cycle
-      nr = vpoff(qq + 1) - vpoff(qq)
-      nc = nc22(qq)
-      alpha = s22(s)
-      call N(zc_gemm)(0_4, 0_4, nr, 1_8, nc, alpha, e22(off22(qq)), nc, w(jgpp + NW * (nvp * q22(s) + vpoff(r))), &
-                      1_8, one, w(kr2 + NW * (nvp * p22(s) + vpoff(qq))), 1_8)
-    end do
-  end if
-  ! R3[J] += the reduction (c | ab) of sgn sum_(ef) ~<mc||ef> X[(ab)][(ef)]
+  ! the virtual triples of the rows R3[J] of the four splits (m | J): group gv (-1: none)
   do s = 0, 3
-    m = q(s)
-    gj = mt - ocls(m)
-    gv = gj + st + sb
+    gv = mt - ocls(q(s)) + st + sb
+    gvs(s) = -1
+    ntv(s) = 0
     if (gv < 0 .or. gv >= ntg) cycle
-    nt = vtoff(gv + 1) - vtoff(gv)
-    if (nt == 0) cycle
-    yoff = -1
-    ynq = 0
-    nyb = 0
-    do qq = 0, npg - 1
-      if (off22(qq) < 0) cycle
-      lcc = gv - qq
-      nl = xznvc(lcc)
-      if (nl == 0) cycle
-      r = mt + st - qq
-      nr = vpoff(qq + 1) - vpoff(qq)
-      nc = nc22(qq)
-      yoff(qq) = nyb
-      ynq(qq) = nr
-      alpha = s13(s)
-      call N(zc_gemm)(0_4, 1_4, nl, nr, nc, alpha, w(kd + NW * (nvp * (vcoff(lcc) + nv * m) + vpoff(r))), nvp, &
-                      e22(off22(qq)), nc, zero, y(nyb), nr)
-      nyb = nyb + nl * nr
-    end do
-    if (nyb > 0) call N(zc_cc4_red12)(w(kr3 + NW * (bofo(gj) + (jt(s) - otoff(gj)) * nt)), tri(0, vtoff(gv)), nt, &
-                                      int(nv, 4), w(jqkv), 0_4, 0_4, int(npg, 4), yoff, ynq, w(jqposv), &
-                                      w(jqposq), y)
+    ntv(s) = vtoff(gv + 1) - vtoff(gv)
+    if (ntv(s) > 0) gvs(s) = gv
   end do
-  ! R3[J] += sgn sum_e f[m][e] X[e][(abc)],  R3[(k, P)] += sgn sgn' sum_e ~<P'||ke> X[e][(abc)]:
-  ! the rows of the occupied triples of group mt - sb - p
+  ! ---- the blocks on two pairs, X[(ab)][(ef)]:
+  !      y[c][(ab)] = sgn sum_(ef) ~<mc||ef> X   for R3[J] += its reduction (c | ab), four splits
+  !      r2[P][(ab)] += sgn sum_(ef) <P'||ef> X  for the splits whose P' is of the group of (ef)
+  !      The rows of the stacked left operands of all blocks first: where they go,
+  !      then the copies (the threads take blocks), then the products
+  yoff = -1
+  ynq = 0
+  r2row = -1
+  r2qq = -1
+  nyb = 0
+  nlo = 0
+  do qq = 0, npg - 1
+    mrows(qq) = 0
+    if (off22(qq) < 0) cycle
+    r = mt + st - qq
+    nr = vpoff(qq + 1) - vpoff(qq)
+    mrow = 0
+    do s = 0, 3
+      if (gvs(s) < 0) cycle
+      nl = xznvc(gvs(s) - qq)
+      if (nl == 0) cycle
+      yoff(qq, s) = nyb + mrow * nr
+      ynq(qq, s) = nr
+      mrow = mrow + nl
+    end do
+    if (withr2) then
+      do s = 0, 5
+        if (opgrp(q22(s)) /= r) cycle
+        r2row(s) = nyb + mrow * nr
+        r2qq(s) = qq
+        mrow = mrow + 1
+      end do
+    end if
+    mrows(qq) = mrow
+    loff(qq) = nlo
+    ybase(qq) = nyb
+    nlo = nlo + mrow * nc22(qq)
+    nyb = nyb + mrow * nr
+  end do
+  !$omp parallel do schedule(dynamic, 1) private(qq, r, nr, nc, mrow, s, lcc, nl)
+  do qq = 0, npg - 1
+    if (mrows(qq) == 0) cycle
+    r = mt + st - qq
+    nr = vpoff(qq + 1) - vpoff(qq)
+    nc = nc22(qq)
+    mrow = 0
+    do s = 0, 3
+      if (yoff(qq, s) < 0) cycle
+      lcc = gvs(s) - qq
+      nl = xznvc(lcc)
+      call N(xz4lrows)(nl, nc, s13(s), w(kd + NW * (nvp * (vcoff(lcc) + nv * q(s)) + vpoff(r))), nvp, &
+                       l2(loff(qq) + mrow * nc))
+      mrow = mrow + nl
+    end do
+    do s = 0, 5
+      if (r2qq(s) /= qq) cycle
+      call N(xz4lrows)(1_8, nc, s22(s), w(jgpp + NW * (nvp * q22(s) + vpoff(r))), nvp, l2(loff(qq) + mrow * nc))
+      mrow = mrow + 1
+    end do
+  end do
+  do qq = 0, npg - 1
+    if (mrows(qq) == 0) cycle
+    nr = vpoff(qq + 1) - vpoff(qq)
+    nc = nc22(qq)
+    call N(zc_gemm)(0_4, 1_4, mrows(qq), nr, nc, one, l2(loff(qq)), nc, e22(off22(qq)), nc, zero, y(ybase(qq)), nr)
+    do s = 0, 5
+      if (r2qq(s) == qq) call N(xzaxpy)(nr, one, y(r2row(s)), w(kr2 + NW * (nvp * p22(s) + vpoff(qq))))
+    end do
+  end do
+  do s = 0, 3
+    if (gvs(s) < 0) cycle
+    if (all(yoff(:, s) < 0)) cycle
+    gj = mt - ocls(q(s))
+    call N(zc_cc4_red12)(w(kr3 + NW * (bofo(gj) + (jt(s) - otoff(gj)) * ntv(s))), tri(0, vtoff(gvs(s))), ntv(s), &
+                         int(nv, 4), w(jqkv), 0_4, 0_4, int(npg, 4), yoff(0, s), ynq(0, s), w(jqposv), &
+                         w(jqposq), y)
+  end do
+  ! ---- the blocks on an index and a triple, X[e][(abc)]:
+  !      R3[J] += sgn sum_e f[m][e] X,  R3[(k, P)] += sgn sgn' sum_e ~<P'||ke> X:
+  !      the rows of the occupied triples of group mt - sb - p
   do p = 0, ncls - 1
     if (off13(p) < 0) cycle
     r = mt + st - p
@@ -1312,7 +1414,7 @@ subroutine N(xz4sbk)(w, i, j, k, l, st, sb, withr2, otri, osgn, opidx, opgrp, e2
     do s = 0, 3
       if (ocls(q(s)) - sb /= p) cycle
       lk(n * nr:n * nr + nr - 1) = s13(s) * fov(vcoff(p):vcoff(p) + nr - 1, q(s))
-      tg(n) = jt(s) - otoff(g3)
+      ptr(n + 1) = loc(w(kr3 + NW * (bofo(g3) + (jt(s) - otoff(g3)) * nc)))
       n = n + 1
     end do
     do s = 0, 5
@@ -1323,13 +1425,11 @@ subroutine N(xz4sbk)(w, i, j, k, l, st, sb, withr2, otri, osgn, opidx, opgrp, e2
       do kk = ocoff(km), ocoff(km + 1) - 1
         if (osgn(p22(s), kk) == 0) cycle
         lk(n * nr:n * nr + nr - 1) = (s22(s) * osgn(p22(s), kk)) * ooovd(vcoff(p):vcoff(p) + nr - 1, kk, nn, mm)
-        tg(n) = otri(p22(s), kk) - otoff(g3)
+        ptr(n + 1) = loc(w(kr3 + NW * (bofo(g3) + (otri(p22(s), kk) - otoff(g3)) * nc)))
         n = n + 1
       end do
     end do
-    if (n == 0) cycle
-    call N(zc_gemm)(0_4, 0_4, n, nc, nr, one, lk, nr, e13(off13(p)), nc, zero, bx, nc)
-    call N(zc_cc4_addrows)(w(kr3 + NW * bofo(g3)), nc, tg, n, nc, bx)
+    if (n > 0) call N(zc_cc4_addmm)(ptr, lk, n, nr, nc, e13(off13(p)))
   end do
   tq(6) = tq(6) + omp_get_wtime() - t0
 end subroutine
