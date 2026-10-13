@@ -296,7 +296,8 @@ def kernel(eris, t1, t2, t3, right, roots=None, conv_tol=None, max_space=None, m
     of eom.kernel for the same integrals and amplitudes; ``roots``: of
     these roots, default all), in the layout of its vectors: with its label
     shift, or ``sector`` = (labels, D) as given there.  ``conv_tol``: the
-    norm of l A - omega l for |l| = 1 (default: 1e-6).  ``ops``: a LeftOps
+    norm of l A - omega l for |l| = 1 (default: the threshold of the
+    right-hand vectors).  ``ops``: a LeftOps
     of an earlier call (same shift) to use again.  ``dense``: with labels in
     use, the product on the packed block in any case (for the tests).
     Returns a Result; its vectors are normalized to L_k R_k = 1 and
@@ -317,7 +318,8 @@ def kernel(eris, t1, t2, t3, right, roots=None, conv_tol=None, max_space=None, m
     if g is None or g.model != 'cc':
         raise NotImplementedError('left-hand vectors: EOM-CCSDT (not CC2 / CC3)')
     shift = right.shift
-    conv_tol = 1e-6 if conv_tol is None else conv_tol
+    if conv_tol is None:        # (that of the right-hand vectors: a density has the errors of both to first order)
+        conv_tol = getattr(right, 'conv_tol', None) or 1e-6
     roots = list(range(len(right.e))) if roots is None else [int(k) for k in roots]
     n = len(roots)
     dtype = g.dtype

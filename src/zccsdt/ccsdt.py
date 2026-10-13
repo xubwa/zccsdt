@@ -1730,7 +1730,9 @@ class GCCSDT(UCCSDT):
         the dict of Results of several shifts - then a dict comes back, the
         shifts without vectors (time-reversed partners) left out.
         ``roots``: of these roots only.  ``conv_tol``: the norm of
-        L A - omega L of a vector of norm one (default 1e-6).  The result
+        L A - omega L of a vector of norm one (default: the threshold of the
+        right-hand vectors; a density has the errors of both vectors to
+        first order).  The result
         (zccsdt.cc.eom_left.Result: l1, l2, l3 per root in the layouts of
         r1, r2, r3; e, the eigenvalues of the left problem; overlap,
         biorthogonality) is kept as ``right.left`` and returned.'''
@@ -1752,6 +1754,155 @@ class GCCSDT(UCCSDT):
                                   verbose=self.verbose >= logger.NOTE, stdout=self.stdout, sector=sector)
         right.left = res
         return res
+
+    def eom_density(self, right=None, roots=None, response=False, transition=False):
+        '''The one-particle densities of EOM-EE-CCSDT states
+        (zccsdt.cc.eom_density; docs/eom.md, section 13): a list of
+        eom_density.State for the roots of ``right`` (the Result of
+        eom_ee(); default self.eom) - d1[p,q] = <0| L_k exp(-T) p+ q exp(T)
+        R_k |0> over the active spinors, the density of the EOM-CC state at
+        fixed amplitudes and spinors.  The left-hand vectors are computed
+        if they are not there (eom_left()).
+
+        response     also d1_response, with the response of the ground-state amplitudes:
+                     its trace with a one-electron operator is the derivative of the
+                     energy of the state at fixed spinors (a Lambda-like equation per
+                     state)
+        transition   also the transition densities with the ground state, State.right
+                     <0~| p+ q |k> and State.left <k~| p+ q |0>
+        Lambda of the ground state is solved for if ``response`` or
+        ``transition`` need it and it is not there.  The states are kept as
+        ``right.states``.  eom_rdm1() gives a density in the convention of
+        make_rdm1(); eom_properties() dipole and transition moments.'''
+        from zccsdt import disk
+        from zccsdt.cc import eom_density
+        right = self.eom if right is None else right
+        if right is None or isinstance(right, dict):
+            raise RuntimeError('%s.eom_density(): the Result of one eom_ee() (of one shift)' % self.__class__.__name__)
+        left = right.left
+        if left is None or (roots is not None and not set(roots) <= set(left.roots)):
+            left = self.eom_left(right, roots)
+        pos = None if roots is None else [left.roots.index(k) for k in roots]
+        lam = None
+        if response or transition:
+            if getattr(self, 'l3', None) is None or getattr(self, '_l_with_q', False):
+                self.solve_lambda()
+            lam = (self.l1, self.l2, self.l3)
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        note = self.verbose >= logger.NOTE
+        if note:
+            print('EOM-EE-CCSDT: densities of %d states%s%s' % (
+                len(left.roots) if pos is None else len(pos), ', with the response of the amplitudes' if response else '',
+                ', transition densities' if transition else ''), file=self.stdout, flush=True)
+        with disk.limit(self.max_disk):
+            states = eom_density.kernel(eris, self.t1, self.t2, self.t3, right, left, roots=pos, lam=lam,
+                                        response=response, transition=transition, opts=self._options(None, None),
+                                        verbose=note, stdout=self.stdout)
+        right.states = states
+        return states
+
+    def _all_spinors(self):
+        '''(C, number of frozen occupied, of active spinors): the spinors
+        [frozen occupied, active occupied, active virtual, dropped virtual]
+        in the AO basis, the active ones in the order of the integrals.'''
+        eris = self._eris if self._eris is not None else self.ao2mo()
+        fo, o, v, fv = self._active()
+        if getattr(eris, 'labels', None) is not None and getattr(self, '_sorted', None) is not None:
+            o, v = self._sorted
+        axial = self._axial()
+        Cs = np.asarray(self.mo_coeff) if axial is None else axial
+        return Cs[:, np.concatenate((fo, o, v, fv)).astype(int)], len(fo), len(o) + len(v)
+
+    def eom_rdm1(self, state, response=False, ao_repr=False):
+        '''The density of an EOM state (a State of eom_density(), or the
+        number of a root of self.eom whose densities are there) in the
+        convention of make_rdm1(relaxed=False): D[p,q] = <q+ p>, made
+        Hermitian, in the basis of all spinors [frozen occupied, active
+        occupied, active virtual, dropped virtual] (``ao_repr``: in the AO
+        basis).  ``response``: the one with the response of the amplitudes.'''
+        from zccsdt.cc import eom_density
+        if isinstance(state, (int, np.integer)):
+            state = [s for s in self.eom.states if s.root == state][0]
+        d1 = state.d1_response if response else state.d1
+        if d1 is None:
+            raise ValueError('this State has no density with the response (eom_density(response=True))')
+        C, nf, na = self._all_spinors()
+        D = np.zeros((C.shape[1],) * 2, dtype=np.result_type(d1, C) if ao_repr else d1.dtype)
+        D[:nf, :nf] = np.eye(nf)
+        D[nf:nf + na, nf:nf + na] = eom_density.hermitian(d1)
+        return C @ D @ C.conj().T if ao_repr else D
+
+    def _dipole_ao(self):
+        '''The dipole operator r[x] in the AO basis of mo_coeff (origin at
+        zero; with the picture change of an X2C Hamiltonian).'''
+        mol = self.mol
+        if self._kind() == 'ghf':
+            import scipy.linalg
+            with mol.with_common_orig((0, 0, 0)):
+                r = mol.intor('int1e_r')
+            return np.array([scipy.linalg.block_diag(x, x) for x in r])
+        from zccsdt.zccsd import rdm
+        return rdm.dipole_integrals(self)
+
+    def eom_properties(self, right=None, roots=None, response=False):
+        '''Dipole moments of EOM-EE-CCSDT states and the transition
+        moments between them and the ground state: an
+        eom_density.Properties (atomic units; .text() for a table) - the
+        dipole of each state from its density (and from the one with the
+        response of the amplitudes with ``response``), <0~| mu |k> and
+        <k~| mu |0>, their product summed over the components (the dipole
+        strength) and the oscillator strength 2/3 omega strength.  The
+        densities are computed if they are not there (eom_density()); the
+        spinors are fixed throughout (no orbital relaxation).'''
+        from zccsdt.cc import eom_density as ED
+        if isinstance(self._scf, _Given):
+            raise RuntimeError('the integrals were given: no molecule to take the dipole operator from')
+        right = self.eom if right is None else right
+        states = getattr(right, 'states', None)
+        if (states is None or any(s.right is None for s in states)
+                or (response and any(s.d1_response is None for s in states))
+                or (roots is not None and [s.root for s in states] != list(roots))):
+            states = self.eom_density(right, roots, response=response, transition=True)
+        C, nf, na = self._all_spinors()
+        r = np.einsum('pi,xpq,qj->xij', C.conj(), self._dipole_ao(), C)
+        ra = r[:, nf:nf + na, nf:nf + na]
+        mol = self.mol
+        nuc = np.einsum('i,ix->x', mol.atom_charges(), mol.atom_coords())
+        core = np.einsum('xii->x', r[:, :nf, :nf]).real
+
+        def dip(d1):
+            return nuc - core - ED.moment(ra, d1).real
+        left = right.left
+        levels = [[i for i, s in enumerate(states) if left.roots.index(s.root) in lv] for lv in left.levels]
+        mr = np.array([-ED.moment(ra, s.right) for s in states])
+        ml = np.array([-ED.moment(ra, s.left) for s in states])
+        strength = np.array([ED.strength(ra, s) for s in states])
+        e = np.array([s.omega for s in states])
+        out = ED.Properties(e=e, states=states, dipole_ground=dip(self._ground_d1()),
+                            dipole=np.array([dip(s.d1) for s in states]),
+                            dipole_response=np.array([dip(s.d1_response) for s in states]) if response else None,
+                            moment_right=mr, moment_left=ml, strength=strength, oscillator=2.0 / 3.0 * e * strength,
+                            levels=[lv for lv in levels if lv])
+        right.properties = out
+        if self.verbose >= logger.NOTE:
+            for line in out.text():
+                print('  ' + line, file=self.stdout, flush=True)
+        return out
+
+    def _ground_d1(self):
+        '''d1[p,q] = <p+ q> of t and Lambda over the active spinors (kept).'''
+        from zccsdt.cc import density_opt, eom_density
+        if getattr(self, 'l3', None) is None or getattr(self, '_l_with_q', False):
+            self.solve_lambda()
+        kept = getattr(self, '_d1_ground', None)
+        if kept is None or kept[0] is not self.l3:
+            eris = self._eris if self._eris is not None else self.ao2mo()
+            view = eom_density.View(eris, np.result_type(self.t1, self.l1, eris.fock, eris.oovv))
+            d1 = density_opt.kernel(view.eris, self.t1, self.t2, view.rank3(self.t3), self.l1, self.l2,
+                                    view.rank3(self.l3), gradient=False, max_memory=self.max_memory,
+                                    blocks=view.blocks).d1
+            kept = self._d1_ground = (self.l3, d1)
+        return kept[1]
 
     def _state_labels(self, eris):
         '''A label per active spinor that adds (occupied, then virtual), by

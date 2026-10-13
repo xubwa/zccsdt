@@ -489,6 +489,9 @@ class Result:
     label_shift: object = None  # the same in units of the labels (set by the front end)
     partner_of: object = None   # these are the time-reversed states of that label shift (no vectors)
     left: object = None         # the eom_left.Result of these states, once computed (GCCSDT.eom_left)
+    states: object = None       # their densities (eom_density.State), once computed (GCCSDT.eom_density)
+    properties: object = None   # eom_density.Properties (GCCSDT.eom_properties)
+    conv_tol: float = None      # the threshold these roots were converged to
 
 
 def denominators(g):
@@ -1008,7 +1011,8 @@ def kernel(eris, t1, t2, t3=None, nroots=3, conv_tol=1e-6, max_space=None, max_c
                      r1=[v[0].reshape(nocc, nvir) for v in vec], r2=[v[1].reshape(g.om.npair, g.vm.npair) for v in vec],
                      r3=[v[2] for v in vec] if with3 else None, weights=wts[order], niter=res.niter,
                      nsigma=res.nsigma, ncollapse=res.ncollapse, guess=first if with3 else None,
-                     history=res.history, plan=plan, ground=g, timings=times, shift=shift, cut_level=cut_level)
+                     history=res.history, plan=plan, ground=g, timings=times, shift=shift, cut_level=cut_level,
+                     conv_tol=conv_tol)
     times['total'] = time.perf_counter() - t_all
     say('  root   omega / Eh       omega / eV   |residual|   %R1   %R2   %R3')
     for k in range(len(out_res.e)):

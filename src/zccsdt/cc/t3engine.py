@@ -86,7 +86,8 @@ def _target(out, shape, dtype, clear):
     if out is None:
         return np.zeros(shape, dtype=dtype)
     R = out.reshape(shape)
-    assert R.dtype == dtype and R.flags.c_contiguous and np.shares_memory(R, out)
+    # (an array without elements - no triples: two electrons - shares no memory with anything)
+    assert R.dtype == dtype and R.flags.c_contiguous and (np.shares_memory(R, out) or not R.size)
     if clear:
         t3kern.zero(R)
     return R
