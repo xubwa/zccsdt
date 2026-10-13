@@ -2,7 +2,10 @@
 
 Excited (EE), ionized (IP) and electron-attached (EA) states on top of a
 converged CCSDT (or CCSD) ground state of spin orbitals or spinors, real or
-complex: excitation energies and right-hand vectors.
+complex: excitation energies and right-hand vectors; for EE-CCSDT also the
+left-hand vectors, the densities of the excited states, transition moments
+and a one-shot quadruples correction of the excitation energies (sections
+12 to 15).
 
 | What | Where |
 |---|---|
@@ -13,18 +16,23 @@ complex: excitation energies and right-hand vectors.
 | IP and EA with short vectors | `eom.ghost_short`, `tests/test_eom_short.py` |
 | front end | `GCCSDT.eom_ee`, `eom_ip`, `eom_ea` (`src/zccsdt/ccsdt.py`; `docs/usage.md`) |
 | double electron attachment (EOM-DEA; section 11): two ghost spinors, label blocks, the 5p3h operators folded, any rank on determinants | `src/zccsdt/cc/dea.py`, `dea5.py`, `dea_strings.py`, `tests/test_dea*.py`, `GCCSDT.eom_dea`, `bench/dea/` |
+| left-hand vectors of EOM-EE-CCSDT (section 12) | `src/zccsdt/cc/eom_left.py`, `lambda_shift.py` (the Lambda passes in the blocks of a label shift), `tests/test_eom_left.py`, `GCCSDT.eom_left` |
+| densities of excited states, transition densities, dipole and transition moments (section 13) | `src/zccsdt/cc/eom_density.py`, `tests/test_eom_density.py`, `GCCSDT.eom_density`, `eom_rdm1`, `eom_properties` |
+| one-shot quadruples correction of the excitation energies (section 14) | `src/zccsdt/cc/eom_q.py`, `tests/test_eom_q.py`, `GCCSDT.eom_quadruples`, `bench/eom_q_bench.py` |
 | reference runs | `bench/refs/reference_energies.json` (`eom_ee`), `bench/dirac/mrcc_eom.sh`, `bench/cfour/eom_ccsd.sh` |
-| timing | `bench/eom_bench.py`, `bench/slurm_eom.sh`; label blocks: `bench/eom2_bench.py`, `bench/slurm_eom2.sh` |
+| timing | `bench/eom_bench.py`, `bench/slurm_eom.sh`; label blocks: `bench/eom2_bench.py`, `bench/slurm_eom2.sh`; left-hand vectors and densities: `bench/eom_left_bench.py`, `bench/slurm_eom_left.sh` |
 | the native program in CFOUR's chain (`xzccsdt eom`, `ccsdt_eom`): the sigma vector of section 3 and the label shifts of section 6 in Fortran, with the solver of section 9 | `cfour/xzccsdt/xzeom.inc`, `xzeoms.inc`, `xzeomd.F90`; docs/native.md, section 16 |
 
 Stage two (sections 4 to 6, 8): states with a label shift in the blocks of
 a linear molecule, IP and EA with short vectors, the threaded solver, the
 choice of the roots.
 
-Not in this document, and not done: left-hand vectors, transition
-properties, excited-state gradients.  The native Fortran program has
-EOM-EE-CCSDT (not IP / EA): docs/native.md, section 16, with its
-validation against this code and against MRCC and CFOUR.
+Not done: the response of the spinors in the properties of excited states
+(relaxed densities, gradients), left-hand vectors of IP / EA / DEA states
+and of the approximate models.  The native Fortran program has
+EOM-EE-CCSDT (not IP / EA, right-hand vectors only): docs/native.md,
+section 16, with its validation against this code and against MRCC and
+CFOUR; what the left-hand vectors would take there: section 15.
 
 Notation as in `docs/factorization.md` and `docs/lambda.md`: `o`, `v`
 occupied and virtual spin orbitals or spinors; i j k l m n occupied, a b c d
@@ -952,8 +960,9 @@ layouts; the subspace is in the work array if it fits and in the files
 
 ## 10. Not done
 
-- Left-hand vectors, r0, transition moments, excited-state densities and
-  gradients.
+- (Left-hand vectors, r0, transition moments and the densities of excited
+  states of EOM-EE-CCSDT: done since, sections 12 to 14; what is not done
+  of them is in 12.5, 13.6 and 14.4.)  Excited-state gradients.
 - The pp ladder of the second residual by stored intermediates (section
   3): a few percent in label blocks, not implemented; the ring term
   cannot be reduced.
@@ -1291,3 +1300,723 @@ It is the reference of the small spaces.
   memory (116 spinors: 2.8e7 numbers, 224 MB, per vector).
 - The guess is unit vectors on the lowest pairs (a<b): a block whose
   lowest states have little weight there needs `nguess`.
+
+## 12. Left-hand eigenvectors (`zccsdt.cc.eom_left`)
+
+    e, res = mycc.eom_ee(nroots=3, conv_tol=1e-8)
+    left = mycc.eom_left()              # eom_left.Result: left.l1[k], l2[k], l3[k], left.e, left.overlap
+
+The Jacobian A of section 1 is not Hermitian; the left-hand eigenvector of
+the state k is the row vector with
+
+    sum_nu l_nu A[nu, mu] = omega_k l_mu,        A[nu, mu] = <nu| [Hbar, tau_mu] |0>,
+
+over the unique elements of the three ranks.  Nothing is conjugated: L =
+sum_mu l_mu <mu|, as Lambda is held (docs/lambda.md, section 1), so that
+`<0| L exp(-T)` is the bra of the state.  `l1[i,a]`, `l2[(i<j),(a<b)]`,
+`l3` have the layouts of `r1`, `r2`, `r3` of the state.
+
+### 12.1 The left product is the Lambda residual without its constant term
+
+The Lambda equations are the derivatives of the Lagrangian with respect to
+the amplitudes (docs/lambda.md, section 1),
+
+    dL/dt_mu = <0| (1 + Lambda) [Hbar, tau_mu] |0> = eta_mu + sum_nu lambda_nu A[nu, mu],
+    eta_mu   = <0| [Hbar, tau_mu] |0>:    eta_1 = f~[i,a],  eta_2 = <ij||ab>,  eta_3 = 0,
+
+**for any amplitudes** - the part that is linear in Lambda is Lambda times
+the Jacobian, with no use of the amplitude equations.  So
+
+    (l A)_1 = r1[lambda := l] - f~[i,a],   (l A)_2 = r2[lambda := l] - <ij||ab>,   (l A)_3 = R3[lambda := l]
+
+with (r1, r2, R3) = `lambda_opt.residuals`: **no term was written for the
+left product**, and both engines of the Lambda equations serve as they are
+- `lambda_opt.DenseL3` on the packed block, `lambda_blk.BlockL3` in the
+blocks of the symmetry labels (for a vector with a shift: its passes with
+shift arguments, 12.2) -, with the intermediates of `make_intermediates`
+made once (`eom_left.LeftOps`).  Its cost is that of a
+Lambda iteration less the Jacobi step and DIIS (section 12.4).
+
+`tests/test_eom_left.py`: for random amplitudes that solve nothing and a
+random l, `l A` equals the vector times the dense Jacobian of `eom_ref`
+(`matrix()`, 424 x 424: LiH / STO-3G, 4 + 8, and H2O with the 1s pair
+frozen, 8 + 4) to 1e-11 of its size, rank by rank, with real and with
+complex spin orbitals.
+
+**No component on the reference.**  In the space with the reference, the
+left eigenvalue equation `<0| L (Hbar - E0) = omega <0| L` has the column
+of the reference `l0 omega = 0` (the residuals `<mu| Hbar |0>` vanish), so
+an excited state has l0 = 0 and there is no inhomogeneous term: the left
+problem is the eigenproblem of the transposed Jacobian, nothing else.  The
+row of the reference gives the other side: `<0| Hbar |mu> = eta_mu` is the
+row of Hbar - E0 from the reference into the excited determinants, so the
+right-hand eigenvector has the component
+
+    r0(k) = eta . r(k) / omega_k = - Lambda . r(k)
+
+on the reference (the second form: the left ground state `<0| (1 +
+Lambda)` is orthogonal to the right vector of an excited state; `Lambda A =
+- eta`).  r0 is zero by symmetry unless the state is totally symmetric; it
+is not needed for the energies, and it enters the densities (section 13).
+This is the whole "projection against the reference": the left vectors
+that the solver returns are orthogonal to the right ground state (1, 0)
+because they have no l0, and the right vectors are made orthogonal to the
+left ground state by r0.
+
+### 12.2 Label shifts and layouts
+
+A left vector of a state with the label shift D (section 6) has its
+elements where those of the right vector are: `l1[i,a]` where l_a - l_i =
+D, the rank-3 part in the blocks of `t3shift.ShiftLayout(D)` - the matrix A
+maps the elements of one shift to themselves from either side.  (As an
+operator, `L = sum l i+ j+ .. b a` lowers the sum of the labels by D: the
+left state carries the shift -D, and `L R` is totally symmetric.)
+
+| where the right-hand vectors are | the left product |
+|---|---|
+| the packed block, no labels | `DenseL3` on the same layout |
+| the packed block, the states of one shift by masks (`sector=`: 2 m_s of spin orbitals, 2 m_j with `symmetry = False`) | the same, the product projected on the shift (`eom.Sector`) |
+| the blocks of the labels, totally symmetric states | `BlockL3` on the layout of T3; the parts of rank one and two masked to the shift, as the sigma vector is |
+| the blocks of the labels, a state with a shift | **in the blocks of that shift** (`lambda_shift.ShiftL3`): the passes of `BlockL3` with the shift of l |
+| labels in use but no engine of the blocks (no C kernels), or `dense=True` | through the packed block (`LeftOps.mode == 'dense'`): the rank-3 part is put on the packed block in lexicographic order, the product is taken there with `DenseL3` and projected on the shift, and what the layout of the shift holds of it is read back - right, at the cost and with the memory of the packed block; the reference of the tests |
+
+**The passes with a shift** (`lambda_shift`; T3 and every operand of the
+ground state have no shift, l1, l2, l3 and the three residuals have the
+shift s of the vector; no kernel was written - the gathers and reductions
+of `csrc/t3pack.c` are driven by the tables of `t3shift.ShiftLayout`):
+
+- the half-expanded `L[P, D_delta, Q]` (delta = class(d) - class(m)) has
+  its pairs Q in the group gP - delta + s;
+- pass 1: the density `Dr[(a i), (g o)]` of l3 with T3 couples the index
+  pairs of delta + s with those of delta (a rectangular block per delta);
+  `D1` (l2 with T3) lives in delta = -s; the two stacked products have
+  operands of different classes - x of class gP - class(d), y of class
+  gQ - class(m), which coincide without a shift;
+- the Gram matrix of l3 and T3 is between the occupied triples of group g
+  and g + s;
+- pass 2: the outer product with l1 goes to the blocks gQ = gP (rows of
+  delta = s), that with l2 to gQ = gP + s (rows of delta = 0); of the four
+  parts of the summed index of the drive products the two whose left
+  operand is made of l (l2 and `Y1`) have the class of the other two plus
+  s; the reduction takes the targets of the shifted layout;
+- the ladder: the pairs of the gathered `Lv[Q, I, c]` are in the group
+  g + s - class(c); `Xq` meets the occupied pairs of group g - class(c),
+  `X2` the occupied index of class class(c) - s;
+- the occupied operator does not change the group: block by block;
+- of the dense residuals of rank one and two only the product of l2 with
+  the diagonal pair blocks of the pp operator knows the labels (the
+  occupied pairs of block h - s; `lambda_opt.residuals`).
+
+`tests/test_eom_left.py`: LiH with X2C spinors (4 + 18, labels -3 .. 3) -
+for every shift (-4 .. 4 classes; 14 to 868 of the 3264 triples) the
+product of a random vector in the blocks of the shift is the one of the
+packed block without labels to 1e-10 and the one that goes through the
+packed block to 1e-11, **`l (A r) = (l A) r` with the sigma vector of the
+shifted blocks** (`t3shift`: code that shares nothing with the Lambda
+engines) to 1e-10, and with a phase on every spinor (complex integrals)
+the product has the conjugate phases to 1e-11.
+
+### 12.3 The solver
+
+`eom.davidson` - the block Davidson solver of section 4, unchanged - on
+the transposed matrix (its `apply` is the left product), **started from
+the complex conjugates of the converged right-hand vectors, which it
+follows** (for a Hermitian matrix they would be the left vectors), with
+the preconditioner of the right-hand side.
+
+*An eigenvalue problem, not a linear equation at the known omega.*  The
+equation `(A^T - omega) l = 0` at the eigenvalue is singular; solving it
+would need the projection against the solution that is being looked for,
+or a shift, and gives nothing that the eigensolver does not: started from
+conj(R), the Rayleigh quotient of the first iteration is omega to second
+order, the preconditioner uses that value from the first correction on,
+and the convergence test is the residual `l A - omega l` with the solver's
+own omega - which is then a check: the eigenvalues of the two sides agree
+to the accuracy of the vectors (below).  Measured (12.4): as many
+iterations as the right-hand side takes from its singles-doubles guess
+(0.97 to 1.15 times the products).
+
+*Normalization.*  The solver returns vectors of norm one.  With
+`M[k,m] = sum_mu l_mu(k) r_mu(m)`:
+
+- between different levels M vanishes by the eigenvalue equations; its
+  largest element there, relative to the diagonal, is reported
+  (`Result.biorthogonality`) and nothing is done about it;
+- inside a degenerate level (roots within `level_tol` = 1e-6 Eh: the
+  components of a multiplet on the packed block) the left vectors are any
+  basis of the left eigenspace; they are replaced by `M_level^-1 L`, the
+  combinations that are biorthogonal to the right vectors as they are;
+- a single root is scaled by 1 / M[k,k].
+
+Then `L_k R_m = delta_km` (`Result.overlap`).  Only the sums over a level
+of anything made of `L_k` and `R_k` are defined inside a degenerate level.
+
+*Accuracy.*  The two eigenvalues differ by the product of the residuals
+over the gap, times the departure from normality: 4e-8 to 1e-7 Eh with
+both sides at 1e-6, 1e-9 to 7e-9 at 1e-7, below 1e-9 at 1e-8 (the tests ask
+for 1e-9 there).  **A density has the errors of both vectors to first
+order**: `eom_left` takes the threshold of the right-hand vectors by
+default (kept in `eom.Result.conv_tol`), and properties to 1e-7 want
+`conv_tol=1e-8` in `eom_ee` (LiH: with the left vectors at 1e-6 the
+dipoles of the components of a triplet differed by 2e-6 between the blocks
+and the packed block; at 1e-8 by 5e-8).
+
+`tests/test_eom_left.py`:
+
+| check | found |
+|---|---|
+| eigenvalues of the left problem against those of the right one, thresholds 1e-8 to 1e-10 (LiH / STO-3G real and complex, LiH / 6-31G X2C: shifts 0 and 2 in blocks, 8 roots of the packed block, 2 m_s sectors) | below 1e-9 (7e-11 for the packed block of LiH) |
+| the left vector of the lowest singlet of LiH / STO-3G against the left eigenvector of the dense matrix (`scipy.linalg.eig(left=True)`) scaled to L R = 1; the projector `sum_k R_k L_k` of the triplet against that of the dense eigenvectors of the level | 1e-6 of the largest element asked (the vectors are at 1e-9) |
+| biorthogonality between different levels before the normalization | 8e-12 to 6e-11 at 1e-8; 9e-7 at 1e-6 and 1e-7 at 1e-7 for HBr with a shift (12.4) |
+| the blocks against the packed block: the weights of the ranks in `L R` of a level that lies in shift 0 with all its roots | 1e-6 asked |
+| vectors in a scratch file: the same roots | 1e-10 |
+
+### 12.4 Memory and cost
+
+**Plan** (`eom_left.plan_for`, before anything is allocated): the plan of
+the Lambda equations for the product (`lambda_opt.LambdaPlan`: T3, which
+is there; l3 and its residual, which are a vector of the subspace and its
+product; the pp operator, the kept operands, the batch buffers, which
+shrink first when memory is short) and the 2 `max_space` vectors of the
+subspace (default 4 + 3 nroots; at least 2 nroots + 2) - in memory if
+`max_memory` holds them, else their rank-3 parts in a scratch file
+(`max_disk`), the subspace lowered one vector at a time to what fits.
+With a shift in the blocks the work array of the shifted passes is
+counted where it is larger; through the packed block ('dense') the packed
+T3 and the two copies of a conversion besides.  `MemoryError` / `DiskFullError` with the
+numbers.  The operands of the right-hand side (`Result.ground`) stay
+allocated and are resident memory that the budget sees.
+`tests/test_eom_left.py`: H2O / cc-pVDZ, 8 + 38 - what numpy allocates
+(tracemalloc) is between half and all of the plan less T3 and the
+allowance for the threads; budgets that give a smaller subspace, the
+scratch file, the error.  HBr / cc-pVDZ-DK, 8 + 28 in blocks: planned
+21.7 MB and allocated 21.2 MB for shift 0, 21.4 and 20.7 MB for shift 2,
+where the route through the packed block plans 66.5 MB.  (The first
+version combined the vectors of a degenerate level in new arrays - one
+more vector per root of the level, not in the plan - and did not count
+the dense l2 of a product: 21.2 MB allocated against 20.9 planned; the
+level is combined in place now and l2 is counted.)
+
+**Measured** (`bench/slurm_eom_left.sh`, job 31939788 - the column of
+shift 2: job 31945925 -, Xeon Gold 6248R, 8 threads, `max_memory` 26 GB,
+both sides converged to 1e-7; the right-hand side from its singles-doubles
+guess, the left from conj(R)):
+
+| | H2O / cc-pVTZ, packed block | HBr / cc-pVTZ-DK, blocks, shift 0 | blocks, shift 2 | HBr, packed block |
+|---|---|---|---|---|
+| occupied + virtual, roots | 10 + 106, 2 | 8 + 78, 2 | 8 + 78, 2 | 8 + 78, 3 |
+| CCSDT iteration | 4.63 s | 0.24 s | 0.24 s | 0.74 s |
+| sigma vector (right) | 9.16 s = 1.98 iterations | 0.45 s = 1.85 | 0.42 s = 1.75 | 1.50 s = 2.01 |
+| **left product** | **6.32 s = 1.36 iterations** | **0.28 s = 1.16** | **0.28 s = 1.15** | **1.05 s = 1.41** |
+| left product / sigma vector | 0.69 | 0.63 | 0.66 | 0.70 |
+| sigma vectors, iterations (right) | 34, 16 | 33, 16 | 33, 16 | 60, 28 |
+| left products, iterations | 38, 19 | 37, 21 | 38, 21 | 58, 24 |
+| right solve in all (guess stage included) | 330.9 s | 18.3 s | 16.9 s | 97.1 s |
+| **left solve in all** | **244.6 s = 0.74** | **10.9 s = 0.59** | **11.0 s = 0.65** | **61.4 s = 0.63** |
+| omega(left) - omega(right), largest | 6.6e-9 | 6.5e-9 | 2.4e-9 | 2.7e-9 |
+| biorthogonality between levels | (one level) | 2.4e-12 | 1.2e-7 | 7e-14 |
+| resident memory above the start of the left solve, peak | 5.87 GB | 0.36 GB | 0.35 GB | 1.98 GB |
+| plan less T3 | 6.54 GB | 1.06 GB | 1.06 GB | 2.69 GB |
+
+A left product costs 1.2 to 1.4 CCSDT iterations - a Lambda iteration -
+against 1.8 to 2.0 for a sigma vector (two residuals of the T3 engine and
+two passes 1), and the left solve as a whole 0.6 to 0.75 of the right one,
+with as many products.  A state with a shift costs what a totally
+symmetric one costs.  Through the packed block - the first version of the
+states with a shift, job 31939788 - the same two roots of shift 2 took
+1.02 s per product (2.4 times the sigma vector of the shifted blocks),
+39.6 s in all and 1.32 GB, with the same eigenvalues to all ten digits
+printed.
+**26 + 120 spinors, 24 threads: the left product is slower than the sigma
+vector.**  HBr / cc-pVQZ-DK, 10 frozen, the lowest 120 virtual spinors,
+label blocks (T3: 8.2e7 elements), two roots, thresholds 1e-6,
+`max_memory` 80 GB (jobs 31946736: shift 2, and 31947000: shift 0):
+
+| | shift 0 (`BlockL3`) | shift 2 (`ShiftL3`) |
+|---|---|---|
+| CCSDT iteration | 6.13 s | 6.08 s |
+| sigma vector | 10.74 s = 1.75 iterations | 10.15 s = 1.67 |
+| **left product** | **13.19 s = 2.15 iterations** | **13.07 s = 2.15** |
+| left product / sigma vector | 1.23 | 1.29 |
+| sigma vectors / left products | 30 / 36 | 31 / 37 |
+| right solve / left solve in all | 401.6 s / 484.4 s = 1.21 | 393.7 s / 493.4 s = 1.25 |
+| omega(left) - omega(right) | -4.5e-8, -3.6e-8 | -3.7e-8, 1.9e-8 |
+| resident memory above the start, peak; plan less T3 | 20.20 GB; 25.45 GB | 19.71 GB; 24.95 GB |
+| of a left product: pass 1 | 5.1 s (stacked products 2.6 s on 4.1 cores, gathers 1.3 s, density 1.1 s) | 5.1 s (2.6 s on 3.9 cores, 1.3 s, 1.0 s) |
+| pass 2 | 3.7 s (drive 1.5 s on 3.7 cores) | 3.7 s (1.5 s on 3.7 cores) |
+| ladder | 1.5 s (`Xq`, `X2` 0.7 s on 3.5 cores) | 1.5 s (0.7 s on 3.4 cores) |
+| residuals of rank one and two | 1.6 s | 1.6 s |
+
+The shifted passes cost what the passes without a shift cost; the plan
+holds at this size.  But a left product is 2.15 CCSDT iterations here,
+where it is 1.15 with 8 occupied spinors and 8 threads: the Lambda passes
+in blocks do their products per class of the indices with the threads of
+the BLAS (`gemm` on blocks that are small with six classes of 26 occupied
+spinors), where the T3 engine hands lists of small products to threads
+(`gemm_tasks`) - 6.4 s of the 13 s run on four to seven of 24 cores.  This is the
+engine of the ground-state Lambda equations as it is (measured before
+with 8 occupied spinors only: docs/lambda.md 9.7), not something of the
+left vectors; what it costs them is in 12.5.
+
+**Under a budget** (job 31942452, H2O / cc-pVTZ, thresholds 1e-6;
+`EB_LEFTMEM`: `max_memory` = the resident memory at the start of the left
+solve + 3600 MB, where the unlimited run takes 5.87 GB more): the plan
+shrinks the buffers of the passes to 329 MB and the subspace to 7
+vectors, in memory; the peak is 3.52 GB above the start; a left product
+takes 6.47 s (6.32 s with the large buffers), the solve 40 products in 20
+iterations.
+
+(The first run of the benchmark compared the peak of the resident memory
+of the process with the plan - 7.7 GB against 6.7 GB for H2O - which
+counts the operands of the right-hand side that were there before; the
+table has the peak above the start.)
+
+### 12.5 Not done
+
+- EOM-CCSD without the T3 machinery (the product runs through the Lambda
+  equations of CCSDT; `zccsdt.zccsd` has its own Lambda of CCSD), the
+  approximate models (CC2, CC3, CC4: their Jacobians are not derivatives
+  of a Lagrangian that is implemented), IP / EA / DEA.
+- The right-hand operands are not released for the left solve.
+- U / R-form integrals.
+- **The threads of the Lambda passes in blocks** (12.4): with 26 occupied
+  spinors and 24 threads the stacked products of pass 1, the drive
+  products of pass 2, the products with `Xq` and `X2` and the dense
+  residuals keep four to seven cores busy - a left product takes 13 s;
+  with these parts on all cores it would be about 8 s (an estimate from
+  their share, not measured).  The remedy is the task lists of the
+  T3 engine (`t3kern.gemm_tasks`, as `ShiftT3.pass1` and `_pass2` use
+  them) in `BlockL3` and `ShiftL3`; it would speed up the ground-state
+  Lambda equations of such molecules by the same amount.
+- Not measured: complex spinors with labels at a production size (tested
+  on LiH with phases).  The densities of a state with a shift still go
+  through the packed block (13.2).
+
+## 13. Densities of excited states and transition moments (`zccsdt.cc.eom_density`)
+
+    states = mycc.eom_density(response=True, transition=True)   # eom_density.State per root
+    D = mycc.eom_rdm1(states[0], ao_repr=True)                  # <q+ p>, Hermitian, as make_rdm1(relaxed=False)
+    pr = mycc.eom_properties(response=True)                     # dipole and transition moments; pr.text()
+
+### 13.1 Definitions
+
+With `Obar[p,q] = exp(-T) p+ q exp(T)`, the right vector `R_k = r0 + R1 +
+R2 + R3` (r0 of 12.1), the left vector `L_k = L1 + L2 + L3`, `L_k R_k = 1`:
+
+    g(k)[p,q]       = <0| L_k Obar[p,q] R_k |0>                         the density of the EOM-CC state
+    <k~| p+ q |0>   = <0| L_k Obar[p,q] |0>                             left transition density
+    <0~| p+ q |k>   = <0| (1 + Lambda) Obar[p,q] R_k |0>                right transition density
+    gr(k)[p,q]      = g(k)[p,q] + <0| Z_k Obar[p,q] |0>,                with the response of the amplitudes
+                      Z_k A = - xi,   xi_kappa = <0| L_k [Hbar, tau_kappa] R_k |0>
+
+- **g(k)** is the unrelaxed EOM-CC density: the expectation value of the
+  biorthogonal states at fixed amplitudes and spinors.  The reference
+  contributes through r0 and through the part of `L R` that is the unit
+  operator: trace g = N; no separate reference term is added.
+- **The transition densities** have trace zero; the transition strength of
+  an operator is the product of its two moments, `<0~| O |k> <k~| O |0>`
+  (for the exact states |<0| O |k>|^2; it does not depend on the scale of
+  R_k, since L_k R_k = 1), the oscillator strength 2/3 omega times the sum
+  over the three components of the dipole.  This is the EOM-CC expression,
+  not the linear-response one (which has the response of the ground-state
+  amplitudes to the operator besides and is size-intensive).
+- **gr(k)** is the derivative of the energy of the state, `E0 + omega_k =
+  <0| L_k Hbar R_k |0>`, with respect to a one-electron perturbation **at
+  fixed spinors**: E is stationary in L and R, and Z makes it stationary in
+  the amplitudes, as Lambda does for the ground state.  It is what a
+  finite field in the Hamiltonian gives, and gr(k) minus the ground-state
+  density of t and Lambda is the derivative of omega_k.  It differs from
+  g(k) at any truncation (the difference vanishes for the exact method:
+  xi = 0 for eigenvectors of the full Hbar): 3e-6 a.u. in the dipole of
+  LiH / STO-3G, 7e-3 for H2O / cc-pVTZ and 3e-3 for HBr / cc-pVTZ-DK (13.5).
+
+**What a relaxed density would need besides** (not implemented): the
+response of the spinors.  The orbital gradient of the state is the
+generalized Fock contraction of its one- and two-particle densities with
+the integrals, as for the ground state (`Gnh[a,i]` of
+`density_opt.kernel(gradient=True)`, docs/lambda.md, section 10), with the
+densities of the state in the place of those of t and Lambda: in the
+notation of 13.2, `Gnh(T; Zt) + d/dx Gnh(T + x R; L)` at x = 0.  The
+gradient is linear in the left vector and of fourth degree in T (a
+two-particle operator: four commutators), so the derivative is a
+five-point formula where 13.2 has a central difference - four more
+evaluations of the gradient code per state - provided that code takes
+amplitudes and left vectors that solve nothing, as the density code does
+(to be checked: the table GRADIENT is written for converged t and lambda).
+Then the Z-vector equations of the SCF and the frozen and dropped spinors
+exactly as in `density_opt.relaxed_rdm1`.
+
+### 13.2 Nothing is contracted that the ground-state codes do not contract
+
+`d1(T; l)[p,q] = <0| (1 + l) exp(-T) p+ q exp(T) |0>` is
+`density_opt.kernel(gradient=False)` for **any** amplitudes T and **any**
+left vector l (the code never uses the equations they solve; in the blocks
+of the labels `density_blk`).  It is linear in l and of second degree in T
+(`Obar` ends at the double commutator), and `d1_ref = d1(T; 0)` is the
+unit matrix of the occupied spinors with t1 in the block [i,a].  With R
+the excitation part of R_k, which commutes with T:
+
+    <0| L [Obar, R] |0>   = d/dx d1(T + x R; L) - (the part of d1_ref: r1 in [i,a])
+                          = [d1(T + R; L) - d1(T - R; L)] / 2 - r1[i,a]            =: F      exact: second degree
+    <0| L R Obar |0>      = d1(T; L'),      L' = the part of L R that still de-excites:
+                            l'1[i,a]  = sum l2[ij,ab] r1[j,b] + 1/4 sum l3[ijk,abc] r2[jk,bc]
+                            l'2[ij,ab] = sum l3[ijk,abc] r1[k,c]
+                            (the fully contracted part of L R is L . R = 1: it gives d1_ref)
+
+    g(k)           = d1(T; L') + r0 (d1(T; L) - d1_ref) + F
+    <k~| p+ q |0>  = d1(T; L) - d1_ref
+    <0~| p+ q |k>  = d1(T; r0 Lambda + Lambda') - d1_ref + [d1(T + R; Lambda) - d1(T - R; Lambda)] / 2
+                     + (r0 + Lambda . R) d1_ref           Lambda' = the same contraction of Lambda with R;
+                                                          the last term is zero for converged vectors
+
+`L'` is one pass of the T3 engine over l3 - its pass 1 with r2 in the place
+of `<mn||ef>` and r1 in that of `f[m,e]`, the outputs that the amplitude
+equations call the T3 terms of the singles and of the doubles equation
+(`eom_density.contract`; with a shift: `ShiftT3.pass1(l3, D; integrals of
+shift -D)`, the output totally symmetric).
+
+For the response, with `xi = r0 omega l + eta + L' A + xi''` (the same
+three pieces of `L [Hbar, tau] R`):
+
+    xi''_kappa = <0| L [[Hbar, tau_kappa], R] |0> = d/dx (L A(T + x R))_kappa at x = 0
+               = [8 (y(1) - y(-1)) - (y(2) - y(-2))] / 12,    y(x) = the left product of 12.1 at the amplitudes T + x R
+
+(A is a polynomial of third degree in T: the five-point formula is exact),
+and `Z = Zt - L' - r0 L` with
+
+    Zt A = - eta - xi'':        the Lambda equations of the ground state with xi'' as a source
+                                (`lambda_opt.kernel(sources=)`, started from Lambda)
+    gr(k) = d1(T; Zt) + F
+
+Zt = Lambda + W, `W A = - xi''`; W is the response vector that section 14
+uses as well.
+
+**Cost per state**, in evaluations of the density code (each 0.8 CCSDT
+iterations for H2O / cc-pVTZ): three for g(k), four more for the two
+transition densities; for the response the left product at four displaced
+amplitudes with their intermediates (6.6 iterations), one solution of the
+Lambda equations (19 cycles: 25 iterations) and one density.  Measured,
+all of it for one state: 38 CCSDT iterations (H2O / cc-pVTZ, packed), 42
+(HBr / cc-pVTZ-DK in blocks), 119 for a state with a shift (through the
+packed block; job 31939788).  An implementation with intermediates of its
+own - the one-particle density needs none of the passes with `<vv||vv>` -
+would take one pass for g(k); this one took no new contraction.
+
+**Layouts.**  Where the engines of the blocks can take the arrays - labels
+in use and a totally symmetric state: T + x R and L have the layout of T3
+- everything runs in the blocks (`eom_density.View`); a state with a shift
+is put on the packed block (T + x R is then not totally symmetric: the
+Lambda and density engines of the blocks cannot take it: the left solve of
+such a state runs in its blocks, 12.2, its densities do not).  Memory: the density code and the Lambda equations
+plan themselves under `max_memory`; the arrays of the size of T3 that are
+made besides (the displaced T3, a rank-3 part of zeros; on the packed
+block the copies of T3, R3, L3, Lambda3) are checked against the budget
+with the plan of the density code before they are allocated.
+
+### 13.3 Front end and conventions
+
+- `eom_density(right=None, roots=None, response=False, transition=False)`:
+  a list of `eom_density.State` (`d1`, `d1_response`, `left`, `right`:
+  [p,q] = <p+ q> over the active spinors, not Hermitian, as
+  `density_opt.Result.d1`; `r0`; `zeta` = Zt), kept as `right.states`.
+  The left vectors and Lambda are solved for if they are not there.
+- `eom_rdm1(state, response=False, ao_repr=False)`: the density of a state
+  in the convention of `make_rdm1(relaxed=False)` - `D[p,q] = <q+ p>`,
+  made Hermitian, over all spinors [frozen occupied, active occupied,
+  active virtual, dropped virtual], the frozen ones occupied -, so that
+  the code that takes a ground-state density takes this one:
+  `dip = -numpy.einsum('xpq,qp->x', mol.intor('int1e_r_spinor'), D_ao)`,
+  and the operators of docs/usage.md in the same way.
+- `eom_properties(right=None, roots=None, response=False)`: an
+  `eom_density.Properties` - the dipole moment of the ground state (t and
+  Lambda at fixed spinors) and of every state (with the picture change of
+  the X2C Hamiltonian, as `zccsd.rdm.dipole_integrals`), the two
+  transition moments, the dipole strength and the oscillator strength;
+  for a degenerate level the sums over the level.
+
+### 13.4 Validation (`tests/test_eom_density.py`)
+
+| check | found |
+|---|---|
+| g(k), both transition densities, L' and xi'' against second-quantized operators in a Fock space (`tests/fockspace.py`): 4 + 5 spin orbitals, random Hermitian integrals, amplitudes, Lambda, L and R that solve nothing (L R = 1), real and complex | 1e-11 of their size asked |
+| **gr(k) against finite fields**: LiH / STO-3G, real and complex spin orbitals; the derivative of E(CCSDT) + omega (all eigenvalues of the dense matrix) with respect to a field z at fixed orbitals, central differences of sixth order with 5e-4 a.u. - the lowest singlet, and the triplet as a level | singlet: finite field 1.3009719076, gr 1.3009719077 (1e-10; 1e-8 asked), g 1.3009684683; the ground state 1e-10 |
+| two electrons (HeH+ / 6-31G, 2 + 6; the code runs without triples): densities of eight excited states against the eigenvectors of H among the determinants, level by level; g = gr; the strengths against `|<0| r |k>|^2`; the ground-state dipole | 2e-7 asked (vectors at 1e-9) |
+| the blocks of the labels against the packed block (LiH X2C, 4 + 18): dipoles with and without the response and strengths of the levels that lie in shift 0; a state of shift 2 (through the packed block) - its density conserves the labels, its transition densities change them by -+2, and with the M = 0 component it adds up to the level of the packed block | 2e-6 asked; the dipoles of the components of the triplet within 5e-8 at 1e-8 |
+| frozen core, dropped virtual spinors, the picture-changed dipole (HBr / cc-pVDZ-DK, 8 + 16 of 64 spinors): blocks against the packed block; `eom_rdm1` over all spinors, its trace and its dipole | 2e-6 / 1e-9 asked |
+
+(The finite-field test first used the fourth-order formula: the fifth
+derivative of the energy of LiH is large, and the ground state alone was
+off by 2e-7 at 1e-3 a.u. and 4e-6 at 2e-3.)
+
+### 13.5 Numbers
+
+Job 31939788 (thresholds 1e-7; dipole moments in atomic units along the
+axis, the spinors of the SCF fixed):
+
+| | omega / Eh | dipole, g(k) | dipole, gr(k) |
+|---|---|---|---|
+| H2O / cc-pVTZ, lowest triplet (two of its components) | 0.27837687 | -0.23807394 | -0.24466639 |
+| HBr / cc-pVTZ-DK, 28 frozen, shift 0, root 1 | 0.24041482 | -0.56305597 | -0.56561215 |
+| shift 0, root 2 | 0.24084651 | -0.56534101 | -0.56788451 |
+| shift 2, root 1 (the same level on the packed block: -0.57071141, -0.57325366) | 0.23374419 | -0.57071153 | -0.57325377 |
+| shift 2, root 2 | 0.25601053 | -0.61366489 | -0.61649011 |
+
+### 13.6 Not done
+
+- The response of the spinors (13.1); excited-state gradients.
+- The linear-response transition moments (with the response of the
+  amplitudes to the operator); transition densities between two excited
+  states (`<0| L_k Obar R_m |0>`: the formulas of 13.2 with L_k and R_m,
+  and r0(m) d1(T; L_k) - small, not wired).
+- One pass per density instead of three to seven evaluations of the
+  ground-state code.
+- A state with a shift in the blocks of the labels (13.2).
+- Two-particle densities of the excited states.
+
+## 14. A one-shot quadruples correction of the excitation energies (`zccsdt.cc.eom_q`)
+
+    q = mycc.eom_quadruples()            # eom_q.Result; q.states[k].estimate, q.text()
+
+The analogue of (Q) for an excitation energy: the first-order change of
+omega_k of EOM-CCSDT under everything that CC4 adds to CCSDT, with both
+eigenvectors,
+
+    d omega_k = L_k dA(omega_k) R_k,        L_k R_k = 1.
+
+### 14.1 What is included
+
+The folded Jacobian of CC4 in the space of singles, doubles and triples
+(docs/ccn.md, sections 4 and 11; `cc4fly.sigma`) differs from the Jacobian
+of CCSDT at the CCSDT amplitudes by three things, all of first order in
+the coupling to the quadruples, and **all three are included**:
+
+| term | is | costs |
+|---|---|---|
+| `fold` | `L A_PQ (omega - D_Q)^-1 A_QP R`: the quadruples of the state, `r4 = ([V', T3] + [V~, R3] + [[V', T2], T2] / 2 + [[V~, R2], T2]) / (omega + e_ijkl - e_abcd)`, V' = [V~, R1], contracted with the integrals of H~ into the doubles and triples rows (`cc4fly.Back`) and then with l2, l3 | a pass over the quadruples with three drives |
+| `t4` | L times the T4 of the ground state, `([V~, T3] + [[V~, T2], T2] / 2) / (e_ijkl - e_abcd)`, contracted with the integrals of H' = [H~, R1]: the derivative along R1 of the T4 terms of the doubles and triples equations | a pass with one drive |
+| `ground` | the change of the Jacobian of CCSDT with the amplitudes, which the T4 terms of the amplitude equations move.  `Res(T) + rho(T) = 0` with rho the sums of T4 in the doubles and triples equations, so `dT = - A^-1 rho` to first order and `L (dA/dT . dT) R = xi'' . dT = W . rho` with `W A = - xi''`: **the response vector of the density of the state** (13.2: W = Zt - Lambda) | one pass for rho, once for all states, and a dot product per state - given the response vector (a Lambda-like equation per state) |
+
+`omega_k + fold + t4 + ground` estimates the excitation energy of CC4.  In
+the same way `Lambda . rho` is the first-order change of the ground-state
+energy (a (Q)-like correction with the denominators and the dressed
+integrals of CC4) and `Zt . rho` that of the energy of the state; the
+correction of omega is their difference plus the two terms of the state.
+Without `ground` (`eom_quadruples(ground=False)`: no response vector, no
+Lambda) the correction belongs to the Jacobian at the amplitudes that were
+given - for the CC4 amplitudes it estimates what the folded terms add to
+the excitation energy "without the T4 terms", (i) of docs/native.md 19.3.
+
+Requirements: canonical (semicanonical) spinors, as CC4.  The quadruples
+are made on the packed block by the passes of `cc4fly` - in the sectors of
+the (Q) code for the ground state and for the totally symmetric states of
+a calculation in the blocks of the labels, without sectors (one process)
+for a state with a shift and for the states of the packed block, whose
+degenerate levels hold components of several shifts (the first version
+used the sectors there and returned a third of the correction of a
+triplet: the sector code keeps the totally symmetric part of its drives).
+
+### 14.2 The table: one shot against converged EOM-CC4
+
+`bench/eom_q_bench.py` (the cases of docs/ccn.md, section 12; converged
+EOM-CC4 by `cc4fly.eom` on the same integrals, all thresholds 1e-8;
+Hartree).  **A**: from CCSDT - omega(EOM-CCSDT) + fold + t4 + ground, all
+at the CCSDT amplitudes.  **B**: from the CC4 ground state - the Jacobian
+of CCSDT at the CC4 amplitudes ((i): the excitation energies without the
+T4 terms), its left and right vectors, + fold + t4.  **Rayleigh**: B with
+conj(R) / |R|^2 in the place of L, the estimate (ii) of docs/native.md
+19.3.
+
+| state | omega(CCSDT) | (i) | converged CC4 | A: fold, t4, ground | error of A | error of B | error of Rayleigh | error of (i) | error of CCSDT |
+|---|---|---|---|---|---|---|---|---|---|
+| H2O / 6-31G (10 + 16), lowest triplet (M_S = 0) | 0.284831364 | 0.285023404 | 0.284907411 | -2.457e-4, +1.124e-4, +1.901e-4 | **-1.9e-5** | **-2.2e-5** | -2.07e-4 | +1.16e-4 | -7.6e-5 |
+| lowest singlet | 0.311687769 | 0.311883821 | 0.311781371 | -2.313e-4, +1.099e-4, +1.941e-4 | **-2.1e-5** | **-2.5e-5** | -2.08e-4 | +1.02e-4 | -9.4e-5 |
+| HBr / cc-pVDZ-DK (8 + 28), shift 0, root 1 | 0.243377127 | 0.243481482 | 0.243411260 | -1.280e-4, +5.30e-5, +1.042e-4 | **-4.9e-6** | **-5.2e-6** | -7.3e-5 | +7.0e-5 | -3.4e-5 |
+| shift 0, root 2 | 0.243830886 | 0.243935303 | 0.243864221 | -1.289e-4, +5.31e-5, +1.043e-4 | **-4.9e-6** | **-5.3e-6** | -7.4e-5 | +7.1e-5 | -3.3e-5 |
+| shift 2, root 1 | 0.236883112 | 0.236987832 | 0.236916891 | -1.288e-4, +5.31e-5, +1.046e-4 | **-4.9e-6** | **-5.2e-6** | -7.3e-5 | +7.1e-5 | -3.4e-5 |
+| shift 2, root 2 | 0.260664345 | 0.260771466 | 0.260672107 | -1.590e-4, +5.45e-5, +1.069e-4 | **-5.3e-6** | **-5.8e-6** | -8.4e-5 | +9.9e-5 | -7.8e-6 |
+| shift 4, root 1 | 0.232875883 | 0.232980520 | 0.232911505 | -1.268e-4, +5.31e-5, +1.045e-4 | **-4.9e-6** | **-5.1e-6** | -7.2e-5 | +6.9e-5 | -3.6e-5 |
+| shift 4, root 2 (doubles) | 0.544490906 | 0.544575972 | 0.544613194 | -3.25e-5, +5.03e-5, +8.51e-5 | **-1.95e-5** | **-1.98e-5** | -2.48e-4 | -3.7e-5 | -1.22e-4 |
+
+What it says:
+
+- **The left-right expression fixes the overshoot of the Rayleigh
+  quotient.**  The effect of the T4 terms beyond (i) is, converged,
+  -1.16e-4 (H2O triplet), -7.0e-5 (HBr, shift 0); the Rayleigh quotient
+  gives -3.23e-4 and -1.43e-4 - 278 % and 204 %, the factor of two to
+  three of docs/native.md -, the left-right expression -1.38e-4 and
+  -7.5e-5: 119 % and 107 % (124 % for the singlet of H2O; 106 to 107 %
+  for the other states of HBr that are dominated by single excitations).
+  For the doubles-dominated root of shift 4 the Rayleigh quotient has the
+  wrong sign (-2.11e-4 against +3.7e-5); the left-right expression has
+  47 % of the effect.
+- **How close**: 5e-6 Eh (0.13 meV, 1.1 cm-1) for the singly excited
+  states of HBr, 2e-5 Eh (0.6 meV, 5 cm-1) for H2O and for the
+  doubles-dominated state - an order of magnitude better than the Rayleigh
+  quotient, 4 to 7 times better than EOM-CCSDT (not for root 2 of shift 2,
+  where CCSDT happens to be within 8e-6), and the same as the estimate
+  (iii) of docs/native.md 19.3 - one evaluation of the T4 terms followed
+  by the relaxation of the vector: its errors there are -2.2e-5, -2.5e-5
+  (H2O) and -5.2e-6 (shift 0), -5.2e-6, -5.8e-6 (shift 2), -5.1e-6,
+  -2.0e-5 (shift 4) for HBr, on the spinors of CFOUR's SCF (other
+  integrals than here: its excitation energies differ in the fourth
+  digit), against B here: -2.2e-5, -2.5e-5, -5.2e-6, -5.2e-6, -5.8e-6,
+  -5.1e-6, -1.98e-5.  One evaluation with the left
+  vector and one evaluation with a relaxed right vector carry the same
+  information; neither is the converged answer to 1e-5.
+- **The term of the ground-state amplitudes is first order and accurate**:
+  `ground` is +1.901e-4 against (i) - omega(CCSDT) = +1.920e-4 for H2O
+  (99 %), +1.0419e-4 against +1.0436e-4 for HBr (99.8 %), and `Lambda .
+  rho` is -4.599e-4 against E(CC4) - E(CCSDT) = -4.650e-4 for H2O (98.9 %),
+  -2.1247e-4 against -2.1268e-4 for HBr (99.9 %).  So A, which needs no
+  CC4 ground state, is as good as B (its errors are slightly smaller in
+  this table).
+- The three terms cancel to a large part (H2O: -2.46e-4 + 1.12e-4 +
+  1.90e-4 = +5.7e-5 for a converged shift of +7.6e-5): what CC4 changes in
+  an excitation energy is small next to its parts, and a part of them
+  alone - the folded term, or the ground-state shift - is worse than
+  nothing.
+- For H2O the reference beyond CC4 exists (docs/ccn.md, section 12):
+  the triplet is at 0.284974 (CCSDTQ, MRCC) and 0.285007 (FCI).  EOM-CCSDT
+  is 1.76e-4 below FCI, converged CC4 1.00e-4, the one-shot estimate
+  1.19e-4: the estimate inherits what CC4 lacks.
+
+Time (H2O / 6-31G, 8 threads, a shared node: for orientation): right
+vectors 2.0 s, left vectors 0.9 s, response vectors and densities 2.0 s,
+the quadruples correction 3.8 s (rho 0.5 s, 1.6 s per state); the CC4
+ground state 11 s and converged EOM-CC4 of the five lowest roots 189 s.
+HBr, shift 0: 4.9, 2.9, 6.2 and 3.4 s against 12 s and 130 s.
+
+### 14.3 Validation (`tests/test_eom_q.py`)
+
+- LiH / STO-3G, real and complex spin orbitals: `fold + t4` is the left
+  vector times (`cc4fly.sigma` - `eom_opt.sigma`) at omega, to 1e-12; the
+  Rayleigh quotient likewise.
+- H2O / STO-3G (10 + 4), the states of M_S = 0: `Lambda . rho` against
+  E(CC4) - E(CCSDT) and `ground` against (i) - omega(CCSDT) within 5 %;
+  the estimate against converged EOM-CC4: 1.1e-7 and 2.6e-8 Eh off, where
+  the Rayleigh quotient is 4.8e-6 and 1.1e-6 off and EOM-CCSDT 2.7e-5 and
+  1.1e-5.
+- LiH with X2C spinors (4 + 18): the three terms in the blocks of the
+  labels with the sectors of the (Q) code (shift 0) and for a state of
+  shift 2 (no sectors) against the packed block, summed over each level
+  of the packed block that the two shifts hold, to 5e-9.
+
+### 14.4 Not done
+
+- The correction is of first order: the relaxation of the vectors in the
+  field of the T4 terms (the second evaluation of the native program:
+  2e-6 or better) is not in it, and no second-order term.
+- Large cases: the passes are those of `cc4fly` on the packed block (the
+  memory plan of the (Q) objects; processes over the quadruples only in
+  the sectors of totally symmetric states); the timing above is of the
+  small cases.  The sectors for a drive with a shift (`run_sectors` with a
+  label shift of the drive) would give the states of a linear molecule
+  what the totally symmetric ones have.
+- A (Q)-like form with the full perturbative triples-quadruples structure
+  of CCSDTQ (the terms that CC4 leaves out of its quadruples equation).
+- The estimate is not size-intensive beyond what CC4 is, and it has the
+  denominators of the canonical spinors only.
+
+## 15. Porting the left vectors to the native program
+
+No native code was written; this is the list of what the port takes,
+against what `xzccsdt` has (docs/native.md, sections 11, 15 and 16).
+
+**What the native Lambda step already provides.**  `xzlamim` and
+`xzlamstep` (`xzlam.inc`, `xzlblk.inc`) are `lambda_opt.make_intermediates`
+and `lambda_opt.residuals` routine by routine - dense and in the blocks of
+the labels, real and complex from the same `.inc` files, with the memory
+plan of the work array and (section 15 there) over MPI ranks.  The left
+product of section 12.1 is that step with three changes:
+
+1. **the residuals before the Jacobi step**: `xzlamstep` ends in `xzlupd`
+   (l += R / D); the left product stops before it and subtracts the
+   constant terms - `f~[i,a]` from the residual of rank one, `<ij||ab>`
+   from that of rank two (they are where `xzlr1` and `xzlr2a` start: two
+   flags);
+2. **vector in, vector out**: l1, l2, l3 and the three residuals are
+   regions of the work array already (the residual of rank three is a DIIS
+   slot or its own region); the solver hands in the offsets of a subspace
+   vector and of its product instead of the regions of Lambda;
+3. **the masks of the shift on the parts of rank one and two** in blocks
+   (the sigma vector has them: `xzeom.inc`).
+
+Nothing of the T3-sized passes changes, and the intermediates are those of
+a Lambda run: a job that has run `xzccsdt lambda` has made them once
+already (they are not kept on file: `xzlamim` is run again, a quarter to a
+third of an iteration).  **One caveat of the memory layout**: the native
+Lambda step makes the pp operator in the place of the bare `<ab||cd>`, and
+the right-hand sigma vector keeps its own operators (W_pp and its
+derivative); a run that does right vectors, then left vectors, reads the
+integrals again between the two, as `ccsdt(q)_l` does after Lambda (0.5 s
+for 10 + 106 spinors).
+
+**What the solver needs** (`xzeoms.inc`, docs/native.md 16.3):
+
+- the routine that applies the matrix as an argument (sigma vector or
+  left product): the solver is CFOUR's algorithm 2 on one orthonormal
+  basis and never looks into the product;
+- **the start from `XZEOMR`**: the right-hand vectors of the roots are on
+  that file (16.1) in the layout of the vectors of the solver; the left
+  solve reads them, conjugates, orthonormalizes and uses them in the place
+  of the singles-doubles guess - no guess stage;
+- **following the roots** instead of taking the lowest: the targets are
+  the eigenvectors of the projected matrix with the largest weight in the
+  space of the start vectors (the rule of `eom.davidson(follow=True)`,
+  section 4; CFOUR's `eompkvec3` recognizes converged roots by overlap in
+  the same way, so the machinery is there, only its use for the targets is
+  new);
+- after convergence: the matrix `M[k,m] = sum l(k) r(m)` (no conjugation:
+  a second dot-product kernel next to `xzevmdot`, or its conjugating flag
+  off), the inverse of its blocks by level, the transformed left vectors
+  written as a file `XZEOML` in the format of `XZEOMR`; the output prints
+  omega of both sides and the largest off-diagonal element of M between
+  levels;
+- memory: the left solve is a Lambda run with a subspace in the place of
+  the DIIS vectors - the plan of section 11 there with `2 x` (subspace)
+  vectors where it has 8 DIIS vectors, their rank-3 parts in the work
+  array or on the DIIS file exactly as now; no new region;
+- over MPI ranks: the Lambda step is distributed already (section 15
+  there); the vector operations of the solver are those of the right-hand
+  side (16.7).
+
+**A state with a shift** needs the Lambda step in blocks with shift
+arguments; the native one takes arrays without a shift (`xzlblk.inc` =
+`lambda_blk`).  The model is `lambda_shift.ShiftL3` (12.2), 400 lines
+that list every place where the shift enters, validated against the route
+through the packed block and against the shifted sigma vector.  The block
+passes that the native Lambda step shares with the T3 equation take the
+shifts of their operands from the module variables of `xzshctx` already
+(docs/native.md 16.2: pass 2, the stacked products of pass 1, the operator
+on occupied triples); the parts that are the Lambda step's own do not -
+the density `Dr` and `D1` of pass 1 (rectangular blocks), the Gram matrix
+between two groups, the ladder with `Xq` and `X2`, the two classes of the
+outer products and of the four parts of the drive index in pass 2, and
+the loop over the pair blocks of the pp operator in the residual of rank
+two.  Totally symmetric states need none of it.
+
+**Then, in this order** (each small once the left vectors are there):
+
+1. *The densities* (section 13): the native density stage (`xzden.inc`:
+   the passes over l3 and T3, the orbital gradient, the files of
+   `xx2czvec`) is the code that 13.2 calls three to seven times per state,
+   with other amplitudes and other left vectors - it has to take both as
+   arguments (now: `XZAMPS`, `XZLAMB`) and must not use the equations
+   they solve.  The contraction L' is pass 1 of the T3 engine with other
+   operands, and the source xi'' is the left product at four displaced
+   amplitudes, i.e. `xzlamim` and the left product four times; the
+   response vector is a Lambda run with a source.  With the orbital
+   gradient of that stage the relaxed density of an excited state would
+   go through `xx2czvec` as the ground state's does (13.1).
+2. *The one-shot quadruples correction* (section 14): `fold` and `t4` are
+   the two passes of a folded sigma vector of the native EOM-CC4
+   (`xze4`: the T4 terms of `xzt4` with three drives, and with the
+   derivative integrals) followed by two dot products with l2 and l3
+   instead of the addition to the sigma vector; `ground` needs the
+   response vector W (a Lambda run with a constant term added to the
+   three residuals: a source argument of `xzlam`, as `lambda_opt.kernel`
+   has it) and one ground-state pass `xz4run` for rho.  Without `ground` - on the
+   CC4 amplitudes that a native CC4 job has anyway, variant B of 14.2 -
+   the correction is the first macro iteration's evaluation contracted
+   with the left vector: no Lambda, no response, and the same accuracy as
+   the relaxed estimate that the program prints now.

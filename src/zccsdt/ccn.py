@@ -34,6 +34,10 @@ class _Model(GCCSDT):
     ccsdt_q_lambda = _not_here('(Q)_Lambda')
     solve_lambda = _not_here('Lambda')
     make_rdm1 = _not_here('the density matrix')
+    eom_left = _not_here('left-hand vectors of the excited states')
+    eom_density = _not_here('densities of the excited states')
+    eom_properties = _not_here('properties of the excited states')
+    eom_quadruples = _not_here('the quadruples correction of the excitation energies')
 
 
 class _Doubles(_Model):

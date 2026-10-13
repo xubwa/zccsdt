@@ -674,7 +674,13 @@ def residuals(im, l1, l2, L3p, T3p, out=None, terms=None):
         r2 += Yab[:, md, ne] - Yab[:, ne, md]
         if nvp and npo:
             if isinstance(im.Wpp, list):    # (the diagonal pair blocks)
-                for (plo, phi), (lo, hi), Wb in zip(om.blocks, vm.blocks, im.Wpp):
+                # (l2 with a label shift - lambda_shift.ShiftL3 - meets the occupied pairs of
+                # the block h - shift)
+                sft = getattr(eng, 'shift', 0)
+                for h, ((lo, hi), Wb) in enumerate(zip(vm.blocks, im.Wpp)):
+                    if not 0 <= h - sft < len(om.blocks):
+                        continue
+                    plo, phi = om.blocks[h - sft]
                     if phi > plo and hi > lo:
                         r2[plo:phi, lo:hi] += gemm(np.ascontiguousarray(l2pp[plo:phi, lo:hi]), Wb)
             else:

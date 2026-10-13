@@ -588,6 +588,45 @@ nroots=..)` with the amplitudes of `zccsdt.cc.solver.kernel(eris, 'ccsd')`;
 on CFOUR's spinors with `zccsdt.cfour.from_cfour` it reproduces
 `xx2ceomcc` (`bench/cfour/eom_ccsd.sh`).
 
+**Left-hand vectors, properties of excited states, a quadruples
+correction** (EOM-EE-CCSDT; docs/eom.md, sections 12 to 14):
+
+```python
+e, res = mycc.eom_ee(nroots=3, conv_tol=1e-8)   # properties to 1e-7 want the vectors at 1e-8
+left = mycc.eom_left()                    # L_k A = omega_k L_k, L_k R_m = delta_km: left.l1[k], l2[k], l3[k]
+pr = mycc.eom_properties()                # dipole moments of the states, transition moments, oscillator strengths
+print('\n'.join(pr.text()))
+states = mycc.eom_density(response=True)  # eom_density.State: d1, d1_response, (transition=True: left, right)
+dm = mycc.eom_rdm1(states[0], ao_repr=True)     # <q+ p>, Hermitian, all spinors: as make_rdm1(relaxed=False)
+q = mycc.eom_quadruples()                 # one-shot quadruples: q.states[k].estimate, q.text()
+```
+
+- `eom_left` solves the eigenproblem of the transposed Jacobian with the
+  machinery of the Lambda equations (a left product costs a Lambda
+  iteration: 0.63 to 0.70 of a sigma vector and the whole left solve 0.6
+  to 0.75 of the right one with 8 to 10 occupied spinors on 8 threads;
+  1.2 to 1.3 of a sigma vector for HBr with 26 + 120 spinors on 24
+  threads, where the Lambda passes in blocks thread badly), from the
+  right-hand vectors, with their threshold.  With the labels of a linear molecule in use it runs in the
+  blocks of the shift of the states (`zccsdt.cc.lambda_shift`), at the
+  same cost for every shift.
+- `eom_density` gives the density of the EOM-CC state, `<0| L_k exp(-T)
+  p+ q exp(T) R_k |0>` (the spinors and the amplitudes fixed), and with
+  `response=True` the one that is the derivative of the energy of the
+  state at fixed spinors (a Lambda-like equation per state); with
+  `transition=True` the two transition densities with the ground state.
+  The spinors do not respond in any of them (no relaxed density of excited
+  states).  All of it for one state costs about 40 CCSDT iterations (120
+  for a state with a shift), the density of the state alone three
+  evaluations of the ground-state density code.
+- `eom_properties` prints dipole moments (atomic units) and the EOM-CC
+  transition strengths - the product of `<0~| mu |k>` and `<k~| mu |0>`;
+  inside a degenerate level only the sums over the level mean something.
+- `eom_quadruples` is the first-order change of each excitation energy
+  under what CC4 adds to CCSDT (canonical spinors): 5e-6 to 2e-5 Eh from
+  converged EOM-CC4 for H2O and HBr, where EOM-CCSDT is 3e-5 to 1.2e-4
+  away, at the cost of a few passes over the quadruples.
+
 ### The hierarchy CC2, CCSD, CC3, CCSDT: approximate models and their excitation energies
 
 ```python
