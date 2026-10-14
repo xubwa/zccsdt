@@ -187,6 +187,12 @@ module xzdata
   real(8) :: ktbig = 0d0, klbig = 0d0, ecckeep = 0d0
   integer(8) :: maxcyc = 50
   integer(8) :: ndiis = 8           ! DIIS vectors asked for
+  ! the Lambda equations: the Krylov solver (xzlkry.inc; option lsolver diis:
+  ! DIIS as the amplitudes), and the pairs of vectors of its subspace asked for
+  ! (option lkry m<n> / f<n>: in the work array / in the file, a test hook; lkplace 1 / 2)
+  logical :: lamkry = .true.
+  integer(8) :: nlkry = 40
+  integer :: lkplace = 0
   real(8) :: escf = 0d0
 
   ! ---- tables of the occupied and of the virtual indices

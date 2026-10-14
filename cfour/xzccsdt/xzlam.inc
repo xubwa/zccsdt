@@ -41,6 +41,8 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   use xzkern
   use xzdist
   use xzdiisd, only: ncnt
+  use xzlkryd, only: km, kp, kkeep, kfile, kbytes, ktime
+  use xzopt
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -49,7 +51,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   logical, intent(out) :: converged
   integer(8), intent(out) :: ncyc
   integer(8) :: kl1n, kl2n, kr3, icyc, m0, ov, kk
-  integer(8), external :: N(xzdiis_target)
+  integer(8), external :: N(xzdiis_target), N(xzlk_target)
   real(8) :: norms(3), normt, t0, t1w, ctl(2), tsg
   real(8) :: emax(3), big, tcsum, twr
   integer(8) :: ksave, lastsave
@@ -68,7 +70,13 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   m0 = xzmark()
   kl1n = xzget(NW * ov, 'new Lambda1')
   kl2n = xzget(NW * ov * ov, 'new Lambda2')
-  if (xzworker() .and. .not. slices) then
+  if (lamkry) then
+    if (xzworker() .and. .not. slices) then
+      call N(xzlk_alloc)(0_8, .false., nch)
+    else
+      call N(xzlk_alloc)(nslot, usefile, nch)
+    end if
+  else if (xzworker() .and. .not. slices) then
     call N(xzdiis_alloc)(0_8, .false., nch)
   else
     call N(xzdiis_alloc)(nslot, usefile, nch)
@@ -117,6 +125,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   if (myrank > 0) then
     call N(xzlamwork)(w, kl1n, kl2n, ncyc)
     call N(xzdiis_close)()
+    call N(xzlk_close)()
     call xzrel(m0)
     converged = .true.
     return
@@ -139,8 +148,17 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     klcyc, ' cycles so far, the largest element of their last step ', klbig
   write(6, '(a,es9.2,a)') '  converged when max|dL|, the largest element of the step over l1, l2, l3, is below ', conv_t, &
     ' (CC_CONV)'
+  if (lamkry) then
+    if (kp < 3) then
+      write(6, '(a)') '  solver: Jacobi steps (no room for a subspace)'
+    else
+      write(6, '(a,i3,a,a,a,i3,a)') '  solver: Krylov subspace (minimal residual), up to ', kp - 2, ' directions ', &
+        merge('in the file XZLKRY  ', 'in the work array   ', kfile), '(compacted to ', kkeep, ' when full)'
+    end if
+  end if
   write(6, '(a)') '  ' // repeat('-', 101)
-  write(6, '(a)') '   cycle    1/4 <ab||ij> l2[ij][ab]      |dL1|      |dL2|      |dL3|   max|dL|   DIIS    time/s'
+  write(6, '(a,a,a)') '   cycle    1/4 <ab||ij> l2[ij][ab]      |dL1|      |dL2|      |dL3|   max|dL|', &
+    merge('  subsp', '   DIIS', lamkry), '    time/s'
   write(6, '(a)') '  ' // repeat('-', 101)
   lamsaved = .false.
   ksave = 0
@@ -163,7 +181,11 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
       call xztoc(2, 'MPI: lambda to the ranks')
       dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
     end if
-    kr3 = N(xzdiis_target)()
+    if (lamkry) then
+      kr3 = N(xzlk_target)()
+    else
+      kr3 = N(xzdiis_target)()
+    end if
     call N(xzlamstep)(w, jl1, jl2, jl3, kl1n, kl2n, kr3, ldbg > 0 .and. icyc == 1)
     call xzrebal(2)
     if (ldbg > 0 .and. icyc == 1) then
@@ -173,8 +195,13 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     end if
     call xztic()
     tsg = omp_get_wtime()
-    call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms, emax)
-    call xztoc(2, 'DIIS')
+    if (lamkry) then
+      call N(xzlk_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms, emax)
+      call xztoc(2, 'Krylov')
+    else
+      call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms, emax)
+      call xztoc(2, 'DIIS')
+    end if
     dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
     if (slices) then
       tsg = omp_get_wtime()
@@ -184,7 +211,8 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     end if
     call N(xzlpseudo)(no, nv, w(jl2), w(joovv), pe)
     big = maxval(emax)
-    write(6, '(i8,f28.14,3es11.3,es10.2,i7,f10.2)') icyc, dble(pe), norms, big, ncnt, omp_get_wtime() - t0
+    write(6, '(i8,f28.14,3es11.3,es10.2,i7,f10.2)') icyc, dble(pe), norms, big, merge(km, ncnt, lamkry), &
+      omp_get_wtime() - t0
     flush(6)
     klcyc = klcyc + 1
     klbig = big
@@ -215,7 +243,18 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     ctl = 0d0
     call xzmpi_bcast(ctl, 16_8)
   end if
+  ! (option lritz n: the softest directions of the subspace)
+  if (lamkry) then
+    call xzoptget('lritz', dbg, ldbg)
+    if (ldbg > 0 .and. .not. slices) then
+      read(dbg(1:ldbg), *) kk
+      call N(xzlk_ritz)(w, kk)
+    end if
+    if (kfile) write(6, '(a,f10.1,a,f8.2,a)') '   Krylov vectors in the file XZLKRY: ', 1d-6 * kbytes, ' MB read and written, ', &
+      ktime, ' s'
+  end if
   call N(xzdiis_close)()
+  call N(xzlk_close)()
   call xzrel(m0)
 end subroutine
 
@@ -232,7 +271,7 @@ subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
   real(8) :: w(*)
   integer(8), intent(in) :: kl1n, kl2n
   integer(8), intent(out) :: icyc
-  integer(8), external :: N(xzdiis_target)
+  integer(8), external :: N(xzdiis_target), N(xzlk_target)
   integer(8) :: kr3, ov
   real(8) :: ctl(2), tsg, t0, norms(3), emax(3)
   ov = no * nv
@@ -254,14 +293,23 @@ subroutine N(xzlamwork)(w, kl1n, kl2n, icyc)
     end if
     call xztoc(2, 'MPI: lambda from rank 0')
     dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
-    kr3 = N(xzdiis_target)()
+    if (lamkry) then
+      kr3 = N(xzlk_target)()
+    else
+      kr3 = N(xzdiis_target)()
+    end if
     call N(xzlamstep)(w, jl1, jl2, jl3, kl1n, kl2n, kr3, .false.)
     call xzrebal(2)
     if (slices) then
       tsg = omp_get_wtime()
       call xztic()
-      call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms, emax)
-      call xztoc(2, 'DIIS')
+      if (lamkry) then
+        call N(xzlk_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms, emax)
+        call xztoc(2, 'Krylov')
+      else
+        call N(xzdiis_upd)(w, w(jl1), w(jl2), jl3, w(kl1n), w(kl2n), kr3, norms, emax)
+        call xztoc(2, 'DIIS')
+      end if
       dsec(8, 2) = dsec(8, 2) + omp_get_wtime() - tsg
       tsg = omp_get_wtime()
       call xzmpi_slices_put(w(jl3), swoff)

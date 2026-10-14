@@ -1885,3 +1885,43 @@ void zc_vprecond_##SFX(T *x, int64_t nI, int64_t nA, const double *eo,         \
 }
 DEFINE_EOMVEC(double, d, fabs)
 DEFINE_EOMVEC(double complex, z, cabs)
+
+/* ---- the Krylov solver of the Lambda equations (cfour/xzccsdt, xzlkry.inc) ----
+ * zc_vgram: res[i * m2 + j] = sum conj(x1[i]) x2[j] (i < m1, j < m2; arrays of
+ *   pointers to vectors of n elements) in one pass: blocks of GB elements of
+ *   all m1 + m2 vectors are read once per block; per-thread partial
+ *   matrices, combined in thread order. */
+#define DEFINE_KRYVEC(T, SFX, CONJ)                                            \
+void zc_vgram_##SFX(int64_t n, int64_t m1, const T **x1, int64_t m2,           \
+                    const T **x2, T *res)                                      \
+{                                                                              \
+    enum { GB = 1024 };                                                        \
+    const int64_t mm = m1 * m2;                                                \
+    const int nt = omp_get_max_threads();                                      \
+    T *part = calloc((size_t)nt * (size_t)(mm > 0 ? mm : 1), sizeof(T));       \
+    _Pragma("omp parallel")                                                    \
+    {                                                                          \
+        T *acc = part + (size_t)omp_get_thread_num() * (size_t)mm;             \
+        _Pragma("omp for schedule(static)")                                    \
+        for (int64_t b0 = 0; b0 < n; b0 += GB) {                               \
+            const int64_t b1 = b0 + GB < n ? b0 + GB : n;                      \
+            for (int64_t i = 0; i < m1; i++) {                                 \
+                const T *a = x1[i];                                            \
+                for (int64_t j = 0; j < m2; j++) {                             \
+                    const T *b = x2[j];                                        \
+                    T s = 0;                                                   \
+                    for (int64_t k = b0; k < b1; k++) s += CONJ(a[k]) * b[k];  \
+                    acc[i * m2 + j] += s;                                      \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+    for (int64_t e = 0; e < mm; e++) {                                         \
+        T s = 0;                                                               \
+        for (int t = 0; t < nt; t++) s += part[(size_t)t * (size_t)mm + e];    \
+        res[e] = s;                                                            \
+    }                                                                          \
+    free(part);                                                                \
+}
+DEFINE_KRYVEC(double, d, NOCONJ)
+DEFINE_KRYVEC(double complex, z, conj)
