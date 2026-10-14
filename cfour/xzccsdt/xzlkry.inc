@@ -54,6 +54,8 @@ subroutine N(xzlk_alloc)(nslot, usefile, nch)
   knres = 0
   kkeep = max(0_8, min(kp - 2, (kp - 1) / 2))
   kfile = usefile .and. kp > 0
+  call xzoptget('lritz', length=ios)
+  kdbg = ios > 0 .and. .not. xzdry
   tmat = 0
   kthr = 0d0
   ktime = 0d0
@@ -378,23 +380,21 @@ subroutine N(xzlk_upd)(w, l1, l2, kt3, l1n, l2n, kr3, norms, emax)
     rqg = res(km + 1, 2)
     nr0 = sqrt(max(dble(rqq), 0d0))
     ct(1:km) = c1(1:km)
-    nr1 = nr0
-    if (km > 0) then
+    ! (the norm after the projection is known before it is done: the
+    ! normalization goes into the same pass)
+    nr1 = sqrt(max(dble(rqq) - sum(dble(c1(1:km) * conjg(c1(1:km)))), 0d0))
+    if (km > 0 .and. nr1 < 0.7d0 * nr0) then
+      ! twice (the first projection took more than half of the norm)
       call N(xzlk_combs)(w, 2_8, q, one, 2_8, km, kcol, -c1, 0_8, ss, sb, c1)
-      nr1 = sqrt(max(dble(rqq) - sum(dble(c1(1:km) * conjg(c1(1:km)))), 0d0))
-      if (nr1 < 0.7d0 * nr0) then
-        ! a second time (the first took more than half of the norm)
-        call N(xzlk_mdot2)(w, km + 1, kcol, .false., res)
-        c2(1:km) = res(1:km, 1)
-        call N(xzlk_combs)(w, 2_8, q, one, 2_8, km, kcol, -c2, 0_8, ss, sb, c2)
-        ct(1:km) = ct(1:km) + c2(1:km)
-        nr1 = sqrt(max(dble(res(km + 1, 1)) - sum(dble(c2(1:km) * conjg(c2(1:km)))), 0d0))
-      end if
+      call N(xzlk_mdot2)(w, km + 1, kcol, .false., res)
+      c1(1:km) = res(1:km, 1)
+      ct(1:km) = ct(1:km) + c1(1:km)
+      nr1 = sqrt(max(dble(res(km + 1, 1)) - sum(dble(c1(1:km) * conjg(c1(1:km)))), 0d0))
     end if
     nrm = nr1
     if (nrm > 1d-12 * max(nr0, 1d-300) .and. nrm > 0d0) then
-      ! normalized; the coefficients of dx_q in T
-      call N(xzlk_combs)(w, 2_8, q, cmplx(1d0 / nrm, 0d0, 8), 2_8, 0_8, kcol, c1, 0_8, ss, sb, c1)
+      ! projected and normalized in one pass; the coefficients of dx_q in T
+      call N(xzlk_combs)(w, 2_8, q, cmplx(1d0 / nrm, 0d0, 8), 2_8, km, kcol, -c1 / nrm, 0_8, ss, sb, c1)
       do j = 1, km
         tmat(j, km + 1) = -sum(tmat(j, 1:km) * ct(1:km)) / nrm
       end do
@@ -429,6 +429,8 @@ subroutine N(xzlk_upd)(w, l1, l2, kt3, l1n, l2n, kr3, norms, emax)
 
   ! ---- 3. the next lambda: x + B y + g + S y with y = -S^H g, B = dX T
   y(1:km) = -dgs(1:km)
+  if (kdbg .and. small) write(6, '(a,es12.4,a,es12.4)') '      |g| ', sqrt(s1 + s2 + s3), '   |g + S y| ', &
+    sqrt(max(s1 + s2 + s3 - sum(dble(dgs(1:km) * conjg(dgs(1:km)))), 0d0))
   do j = 1, km
     a(j) = sum(tmat(j, 1:km) * y(1:km))
   end do
@@ -507,8 +509,8 @@ subroutine N(xzlk_mdot2)(w, n, sl, withg, res)
   integer(8), intent(in) :: n, sl(*)
   logical, intent(in) :: withg
   complex(8), intent(out) :: res(mkmax + 1, 2)
-  integer(c_intptr_t) :: ptr(mkmax + 1)
-  ZT :: part(mkmax + 1)
+  integer(c_intptr_t) :: ptr(mkmax + 1), pa(2)
+  ZT :: part(2 * mkmax + 2)
   integer(8) :: ns, off, nc, step, i, p, pq, pg
   integer(8), external :: N(xzlk_ptr), N(xzlk_target)
   res = 0
@@ -517,12 +519,11 @@ subroutine N(xzlk_mdot2)(w, n, sl, withg, res)
     do i = 1, n
       ptr(i) = loc(w(jss(sl(i))))
     end do
-    call N(zc_vmdot)(ns, n, w(jss(sl(n))), ptr, part)
+    pa(1) = loc(w(jss(sl(n))))
+    pa(2) = loc(w(jgs0))
+    call N(zc_vgram)(ns, merge(2_8, 1_8, withg), pa, n, ptr, part)
     res(1:n, 1) = res(1:n, 1) + CONJ(part(1:n))
-    if (withg) then
-      call N(zc_vmdot)(ns, n, w(jgs0), ptr, part)
-      res(1:n, 2) = res(1:n, 2) + CONJ(part(1:n))
-    end if
+    if (withg) res(1:n, 2) = res(1:n, 2) + CONJ(part(n + 1:2 * n))
   end if
   pg = N(xzlk_target)() + NW * ksoff
   step = max(kslen, 1_8)
@@ -535,12 +536,12 @@ subroutine N(xzlk_mdot2)(w, n, sl, withg, res)
       ptr(i) = loc(w(p))
       pq = p
     end do
-    call N(zc_vmdot)(nc, n, w(pq), ptr, part)
+    ! (one pass over the images for both: zc_vgram reads a block of all of them once)
+    pa(1) = loc(w(pq))
+    pa(2) = loc(w(pg + NW * off))
+    call N(zc_vgram)(nc, merge(2_8, 1_8, withg), pa, n, ptr, part)
     res(1:n, 1) = res(1:n, 1) + CONJ(part(1:n))
-    if (withg) then
-      call N(zc_vmdot)(nc, n, w(pg + NW * off), ptr, part)
-      res(1:n, 2) = res(1:n, 2) + CONJ(part(1:n))
-    end if
+    if (withg) res(1:n, 2) = res(1:n, 2) + CONJ(part(n + 1:2 * n))
   end do
   call N(xzlk_reduce)(2 * (mkmax + 1_8), res)
 end subroutine
@@ -874,3 +875,4 @@ contains
 #endif
   end function
 end subroutine
+

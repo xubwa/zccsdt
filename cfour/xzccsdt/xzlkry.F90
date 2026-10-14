@@ -41,6 +41,7 @@ module xzlkryd
   complex(8) :: dgs(mkmax) = 0              ! <s_i | g> of the present step
   real(8) :: kthr(4) = 0d0                  ! harmonic Ritz values of the last compaction (the smallest |theta|)
   real(8) :: ktime = 0d0, kbytes = 0d0      ! seconds and bytes of the file
+  logical :: kdbg = .false.                 ! (option lritz: a line per iteration)
   integer, parameter :: lukry = 74
   character(len=11) :: fkry = 'XZLKRY'
 end module xzlkryd
