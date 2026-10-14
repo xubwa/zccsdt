@@ -1223,9 +1223,9 @@ about +0.01, the 6p4h step is about -0.015 / +0.01 and T4 about +0.02 /
 | | basis | 3p1h, T of CCSD | 3p1h, T of CCSDT | 4p2h, T of CCSDT |
 |---|---|---|---|---|
 | spin-orbit only | DYVTZ-SOG (valence) | -0.0036 | +0.0009 | -0.0004 |
-| | DYVTZ-SOG + CV | +0.0064 | +0.0264 | AE4SO |
+| | DYVTZ-SOG + CV | +0.0064 | +0.0264 | not finished |
 | X2Ccorr | DYVTZ-SOG (valence) | +0.0016 | -0.0007 | -0.0028 |
-| | DYVTZ-SOG + CV | +0.0585 | +0.0489 | AE4XC |
+| | DYVTZ-SOG + CV | +0.0585 | +0.0489 | not finished |
 
 **DYVDZ-SOG against the CI of the other calculations** (CI up to
 quadruple excitations relative to the CAS, 12 electrons: 2.1662 and
