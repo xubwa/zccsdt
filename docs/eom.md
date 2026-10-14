@@ -1115,10 +1115,25 @@ it is a reference for small spaces only (section 11.7).
 the z axis, Gaussian nuclei; Kramers-restricted HF with the X2CMP
 Hamiltonian (Gaunt and Breit in the mean field, `socutils.somf.x2cmp`) and
 Coulomb two-electron integrals; basis DYVTZ-SOG (Dyall TZ primitives,
-contracted per kappa: 120 spinors) - E(SCF) = -148.313899397728 - and, as
-a complete double-zeta basis, cc-pVDZ-DK (56 spinors; E(SCF) =
--148.242607249637; the directory of the SOG sets has no double zeta for
-O).  The canonical spinors are adapted to m_j (real integrals) and carry a
+contracted per kappa: 120 spinors) - E(SCF) = -148.313899397728 - and two
+complete double-zeta bases: cc-pVDZ-DK (56 spinors; E(SCF) =
+-148.242607249637) and DYVDZ-SOG (the j-adapted Dyall double zeta of the
+other calculations, 56 spinors; E(SCF) = -148.285428295875, theirs
+-148.285428247507).  For the correlation of O 1s: all electrons in
+DYVTZ-SOG (120 correlated spinors; a valence set: no tight s / p, d or f),
+and DYVTZ-SOG plus the core-valence functions of cc-pCVTZ (the shells of
+cc-pCVTZ that cc-pVTZ has not: s 21.032, 7.845; p 57.437, 15.159; d
+15.858, uncontracted), 172 spinors, E(SCF) = -148.314814148623, with 1s
+frozen and with all electrons.  The added primitives are written into the
+shells contracted per kappa (every shell of an l lists them, with zero
+coefficients, and the shell with kappa = 0 gets a contraction for each);
+as shells of their own the X2CMP SCF did not converge.  With them the SCF
+gradient stays at 4e-9 while the energy is stationary to 2e-13
+(conv_tol_grad 1e-8 for this basis).  The frozen-1s runs of an
+all-electron file fold the 1s spinors into h1 and ecore (`common.load(...,
+freeze=4)`; on DYVTZ-SOG it reproduces the roots of the frozen-core file
+to 1e-11).  The X2Ccorr operator with nothing frozen is the bare
+four-component one-electron operator.  The canonical spinors are adapted to m_j (real integrals) and carry a
 parity (computed, not assumed); O 1s frozen: 10 + 106 (10 + 42) correlated
 spinors.  The states: the lowest root of the blocks 2 Omega = 0 and
 2 Omega = 2 of parity g; splitting = E(2) - E(0).
@@ -1153,33 +1168,33 @@ Thresholds: ground state |dT| < 1e-11; EOM residual norm < 1e-9 (folded:
 
 *Spin-orbit only*
 
-| R | T of | 26 | 30 | 32 | DZ (52) | TZ (116) |
-|---|---|---|---|---|---|---|
-| 3p1h | CCSD | 2.6150 | 2.9682 | 2.9942 | 2.2098 | 2.5618 |
-| 3p1h | CCSDT | 2.6235 | 2.9898 | 3.0190 | 2.3928 | 2.7787 |
-| 3p1h, row at lowest order | CC3 | 3.6557 | 4.2506 | 4.3181 |  |  |
-| 4p2h | CCSDT | 2.1260 | 2.3324 | 2.3538 | 1.9537 | 2.3269 |
-| 4p2h | CCSDTQ | 2.1414 | 2.3526 | 2.3753 | 1.9772 |  |
-| 4p2h, row at lowest order | CC4 | 2.0107 |  |  |  |  |
-| 5p3h at lowest order, folded | CCSDT | 2.0807 | 2.2657 | 2.2822 | 1.8273 |  |
-| 5p3h at lowest order, folded | CCSDTQ | 2.0953 |  |  |  |  |
-| 5p3h | CCSDT | 2.0698 | 2.2540 | 2.2718 |  |  |
-| 5p3h | CCSDTQ | 2.0825 | 2.2700 | 2.2888 |  |  |
-| 6p4h | CCSDTQ | 2.0677 | 2.2525 |  |  |  |
+| R | T of | 26 | 30 | 32 | cc-pVDZ-DK (52) | DYVDZ-SOG (52) | DYVTZ-SOG (116) | DYVTZ-SOG, all el. (120) | + CV, 1s frozen (168) | + CV, all el. (172) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 3p1h | CCSD | 2.6150 | 2.9682 | 2.9942 | 2.2098 | 2.6159 | 2.5618 | 2.5582 | 2.5861 | 2.5925 |
+| 3p1h | CCSDT | 2.6235 | 2.9898 | 3.0190 | 2.3928 | 2.8031 | 2.7787 | 2.7796 | 2.8093 | 2.8357 |
+| 3p1h, row at lowest order | CC3 | 3.6557 | 4.2506 | 4.3181 |  |  |  |  |  |  |
+| 4p2h | CCSDT | 2.1260 | 2.3324 | 2.3538 | 1.9537 | 2.2637 | 2.3269 | 2.3265 | 2.3553 |  |
+| 4p2h | CCSDTQ | 2.1414 | 2.3526 | 2.3753 | 1.9772 | 2.2897 |  |  |  |  |
+| 4p2h, row at lowest order | CC4 | 2.0107 |  |  |  |  |  |  |  |  |
+| 5p3h at lowest order, folded | CCSDT | 2.0807 | 2.2657 | 2.2822 | 1.8273 | 2.1500 | 2.1829 |  |  |  |
+| 5p3h at lowest order, folded | CCSDTQ | 2.0953 |  |  |  |  |  |  |  |  |
+| 5p3h | CCSDT | 2.0698 | 2.2540 | 2.2718 |  |  |  |  |  |  |
+| 5p3h | CCSDTQ | 2.0825 | 2.2700 | 2.2888 |  |  |  |  |  |  |
+| 6p4h | CCSDTQ | 2.0677 | 2.2525 |  |  |  |  |  |  |  |
 
 *X2Ccorr*
 
-| R | T of | 26 | 30 | 32 | DZ (52) | TZ (116) |
-|---|---|---|---|---|---|---|
-| 3p1h | CCSD | 3.1639 | 3.2682 | 3.2933 | 2.8872 | 3.3575 |
-| 3p1h | CCSDT | 3.1088 | 3.2207 | 3.2462 | 2.6530 | 3.1421 |
-| 4p2h | CCSDT | 3.4605 | 3.4396 | 3.4540 | 3.1699 | 3.6026 |
-| 4p2h | CCSDTQ | 3.4415 | 3.4219 | 3.4362 | 3.1442 |  |
-| 5p3h at lowest order, folded | CCSDT | 3.5439 | 3.5261 | 3.5455 | 3.4354 |  |
-| 5p3h | CCSDT | 3.5410 | 3.5180 | 3.5357 |  |  |
-| 5p3h | CCSDTQ | 3.5239 | 3.5006 | 3.5180 |  |  |
-| 6p4h | CCSDT | 3.5376 |  |  |  |  |
-| 6p4h | CCSDTQ | 3.5369 | 3.5107 |  |  |  |
+| R | T of | 26 | 30 | 32 | cc-pVDZ-DK (52) | DYVDZ-SOG (52) | DYVTZ-SOG (116) | DYVTZ-SOG, all el. (120) | + CV, 1s frozen (168) | + CV, all el. (172) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 3p1h | CCSD | 3.1639 | 3.2682 | 3.2933 | 2.8872 | 3.2203 | 3.3575 | 3.3591 | 3.3732 | 3.4317 |
+| 3p1h | CCSDT | 3.1088 | 3.2207 | 3.2462 | 2.6530 | 3.0389 | 3.1421 | 3.1414 | 3.1606 | 3.2095 |
+| 4p2h | CCSDT | 3.4605 | 3.4396 | 3.4540 | 3.1699 | 3.4865 | 3.6026 | 3.5998 | 3.6101 |  |
+| 4p2h | CCSDTQ | 3.4415 | 3.4219 | 3.4362 | 3.1442 | 3.4664 |  |  |  |  |
+| 5p3h at lowest order, folded | CCSDT | 3.5439 | 3.5261 | 3.5455 | 3.4354 | 3.6886 | 3.8445 |  |  |  |
+| 5p3h | CCSDT | 3.5410 | 3.5180 | 3.5357 |  |  |  |  |  |  |
+| 5p3h | CCSDTQ | 3.5239 | 3.5006 | 3.5180 |  |  |  |  |  |  |
+| 6p4h | CCSDT | 3.5376 |  |  |  |  |  |  |  |  |
+| 6p4h | CCSDTQ | 3.5369 | 3.5107 |  |  |  |  |  |  |  |
 
 Total energies of the 116-spinor space (Eh):
 
@@ -1194,6 +1209,27 @@ Total energies of the 116-spinor space (Eh):
 
 (The energies of every space and level are in the json files of the runs;
 `bench/dea/tables.py` prints them.)
+
+**The full space at the 5p3h level** (folded lowest-order 5p3h on
+complete 4p2h, T of CCSDT): spin-orbit only E(0) = -150.21774021155,
+E(2) = -150.21773026555, splitting 9.9460e-06 Eh = 2.1829 cm-1; X2Ccorr
+-150.22601117439, -150.22599365737, 1.7517e-05 Eh = 3.8445 cm-1
+(experiment 3.96).  From the truncated spaces the folded row errs by
+about +0.01, the 6p4h step is about -0.015 / +0.01 and T4 about +0.02 /
+-0.02 cm-1.
+
+**Correlation of O 1s** (all electrons minus 1s frozen, cm-1):
+
+| | basis | 3p1h, T of CCSD | 3p1h, T of CCSDT | 4p2h, T of CCSDT |
+|---|---|---|---|---|
+| spin-orbit only | DYVTZ-SOG (valence) | -0.0036 | +0.0009 | -0.0004 |
+| | DYVTZ-SOG + CV | +0.0064 | +0.0264 | AE4SO |
+| X2Ccorr | DYVTZ-SOG (valence) | +0.0016 | -0.0007 | -0.0028 |
+| | DYVTZ-SOG + CV | +0.0585 | +0.0489 | AE4XC |
+
+**DYVDZ-SOG against the CI of the other calculations** (CI up to
+quadruple excitations relative to the CAS, 12 electrons: 2.1662 and
+3.6570 cm-1): the folded 5p3h level gives 2.1500 and 3.6886.
 
 **What the numbers say.**
 
