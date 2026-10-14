@@ -119,6 +119,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     if (myrank > 0) dwords(2) = dwords(2) + dble(NW * n3)
   end if
   call N(xzlamim)(w)
+  if (lamkry) call N(xzlk_p1build)(w)
   tlamim = omp_get_wtime() - t0
   write(6, '(/,a,f10.2,a)') '   intermediates of the Lambda equations: ', tlamim, ' s'
   if (ldbg > 0) call N(xzlamdump)(w, dbg(1:ldbg))

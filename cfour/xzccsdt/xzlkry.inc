@@ -31,8 +31,9 @@ subroutine N(xzlk_alloc)(nslot, usefile, nch)
   implicit none
   integer(8), intent(in) :: nslot, nch
   logical, intent(in) :: usefile
-  integer(8) :: k, ns, nal
+  integer(8) :: k, ns, nal, i, a
   integer :: ios
+  character(len=16) :: arg
   ns = no * nv + npo * nvp
   ksplit = slices
   ksoff = 0
@@ -56,6 +57,10 @@ subroutine N(xzlk_alloc)(nslot, usefile, nch)
   kfile = usefile .and. kp > 0
   call xzoptget('lritz', length=ios)
   kdbg = ios > 0 .and. .not. xzdry
+  ! (option lprec 0: the denominators for the singles too)
+  call xzoptget('lprec', arg, ios)
+  kprec1 = .true.
+  if (ios > 0) kprec1 = arg(1:1) /= '0'
   tmat = 0
   kthr = 0d0
   ktime = 0d0
@@ -72,6 +77,26 @@ subroutine N(xzlk_alloc)(nslot, usefile, nch)
       jxs(k) = xzget(NW * ns, 'Krylov: l1, l2 of a direction')
       jss(k) = xzget(NW * ns, 'Krylov: l1, l2 of its image')
     end do
+  end if
+  if (kprec1 .and. myrank == 0) then
+    ! (the singles that the labels allow: class of a = class of i)
+    n1a = 0
+    do i = 0, no - 1
+      do a = 0, nv - 1
+        if (ncls == 1) then
+          n1a = n1a + 1
+        else if (vcls(a) == ocls(i)) then
+          n1a = n1a + 1
+        end if
+      end do
+    end do
+    ! (at most 6000 singles: 288 MB of real numbers; more - the denominators)
+    if (n1a > 6000) kprec1 = .false.
+  end if
+  if (kprec1 .and. myrank == 0) then
+    jp1 = xzget(NW * n1a * n1a, 'Krylov: the singles block')
+    jp1piv = xzget(n1a, 'Krylov: its pivots')
+    jp1idx = xzget(n1a, 'Krylov: its singles')
   end if
   if (.not. kfile) then
     do k = 1, kp
@@ -335,6 +360,8 @@ subroutine N(xzlk_upd)(w, l1, l2, kt3, l1n, l2n, kr3, norms, emax)
     s2 = dble(dz)
     call N(xzamax)(n1, w(jgs0), emax(1))
     call N(xzamax)(n2, w(jgs0 + NW * n1), emax(2))
+    ! (the singles of the step through the singles block; the test stays on the Jacobi step)
+    if (kprec1) call N(xzlk_p1apply)(w, w(jgs0))
   end if
   call N(zc_vsub)(m3, w(pg), w(px), w(pg))
   call N(zc_vdot)(m3, w(pg), w(pg), dz)
@@ -876,3 +903,93 @@ contains
   end function
 end subroutine
 
+
+! ---------------------------------------------------------------------------
+! The singles block of the Jacobian (the l1 terms of the l1 residual,
+! N(xzlr1)): r1[a,i] gets sum_{e,m} l1[e,m] (delta_mi F_vv[a,e] - delta_ae
+! F_oo[m,i] + W_ovvo[m,a,e,i]).  K[(a,i),(e,m)] is that coefficient on the
+! singles that the labels allow, LU factorized once after the intermediates
+! (rank 0; option lprec 1).  The step of the singles is then delta with
+! K delta = -r1 instead of r1 / D: the same fixed point, the soft directions
+! of the open shells (excitations within them) taken out of the Jacobi step.
+subroutine N(xzlk_p1build)(w)
+  use xzdata
+  use xzmem
+  use xzlkryd
+  use xzdist, only: myrank
+  implicit none
+  real(8) :: w(*)
+  integer(8) :: info, i, a, k
+  if (.not. kprec1 .or. myrank /= 0 .or. xzdry) return
+  k = 0
+  do i = 0, no - 1
+    do a = 0, nv - 1
+      if (ncls > 1) then
+        if (vcls(a) /= ocls(i)) cycle
+      end if
+      w(jp1idx + k) = transfer(a + nv * i, 1d0)
+      k = k + 1
+    end do
+  end do
+  call N(xzlk_p1fill)(no, nv, n1a, w(jp1idx), w(lfvv), w(lfoo), w(lwov), w(jp1))
+#ifdef XZ_REAL
+  call dgetrf(n1a, n1a, w(jp1), n1a, w(jp1piv), info)
+#else
+  call zgetrf(n1a, n1a, w(jp1), n1a, w(jp1piv), info)
+#endif
+  if (info /= 0) then
+    write(6, '(a,i8,a)') ' @XZCCSDT-W, the singles block of the Lambda equations is singular (', info, &
+      '): the denominators instead'
+    kprec1 = .false.
+  else
+    write(6, '(a,i8,a)') '   Krylov: the singles of the step from the singles block of the Jacobian (', n1a, ' singles)'
+  end if
+end subroutine
+
+subroutine N(xzlk_p1fill)(no, nv, n, idx, fvv, foo, wov, k)
+  implicit none
+  integer(8), intent(in) :: no, nv, n, idx(0:n-1)
+  ZT, intent(in) :: fvv(0:nv-1, 0:nv-1), foo(0:no-1, 0:no-1), wov(0:no-1, 0:nv-1, 0:nv-1, 0:no-1)
+  ZT, intent(out) :: k(0:n-1, 0:n-1)                         ! K[(a, i)][(e, m)]: k(r, c)
+  integer(8) :: r, c, a, i, e, m
+  ZT :: v
+  !$omp parallel do private(r, a, i, e, m, v)
+  do c = 0, n - 1
+    e = mod(idx(c), nv)
+    m = idx(c) / nv
+    do r = 0, n - 1
+      a = mod(idx(r), nv)
+      i = idx(r) / nv
+      v = wov(m, a, e, i)
+      if (m == i) v = v + fvv(a, e)
+      if (a == e) v = v - foo(m, i)
+      k(r, c) = v
+    end do
+  end do
+end subroutine
+
+! g1 (the singles of the Jacobi step, r1 / D) becomes delta with K delta = -r1
+subroutine N(xzlk_p1apply)(w, g1)
+  use xzdata
+  use xzlkryd
+  implicit none
+  real(8) :: w(*)
+  ZT, intent(inout) :: g1(0:no*nv-1)
+  ZT :: x(n1a)
+  integer(8) :: k, a, i, info, p
+  do k = 1, n1a
+    p = transfer(w(jp1idx + k - 1), 1_8)
+    a = mod(p, nv)
+    i = p / nv
+    x(k) = (w(jeps + no + a) - w(jeps + i)) * g1(p)
+  end do
+#ifdef XZ_REAL
+  call dgetrs('N', n1a, 1_8, w(jp1), n1a, w(jp1piv), x, n1a, info)
+#else
+  call zgetrs('N', n1a, 1_8, w(jp1), n1a, w(jp1piv), x, n1a, info)
+#endif
+  do k = 1, n1a
+    p = transfer(w(jp1idx + k - 1), 1_8)
+    g1(p) = x(k)
+  end do
+end subroutine

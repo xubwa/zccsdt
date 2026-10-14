@@ -42,6 +42,12 @@ module xzlkryd
   real(8) :: kthr(4) = 0d0                  ! harmonic Ritz values of the last compaction (the smallest |theta|)
   real(8) :: ktime = 0d0, kbytes = 0d0      ! seconds and bytes of the file
   logical :: kdbg = .false.                 ! (option lritz: a line per iteration)
+  ! the singles of the step from the singles block of the Jacobian (CCSD-like:
+  ! F_vv, F_oo, W_ovvo of the intermediates) instead of the denominators, on
+  ! the n1a singles that the labels allow: its LU factors, the singles
+  ! (rank 0; option lprec)
+  logical :: kprec1 = .false.
+  integer(8) :: n1a = 0, jp1 = 0, jp1piv = 0, jp1idx = 0
   integer, parameter :: lukry = 74
   character(len=11) :: fkry = 'XZLKRY'
 end module xzlkryd

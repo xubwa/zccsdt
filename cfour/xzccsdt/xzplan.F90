@@ -423,7 +423,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   write(6, '(a,i8,a,i8)') '     first indices of a batch of W_vvvo terms:    ', nba, '  of ', nv
   if (cc3mode == 2) write(6, '(a,i14,a,f10.1,a,i12,a)') '     CC3: the work of a batch of occupied triples: ', nc3w, &
     ' elements (', 8d-6 * nwe * nc3w, ' MB; one triple: ', plo(9), ')'
-  if (.not. (with_cc .or. with_lam)) then
+  if (.not. (with_cc .or. (with_lam .and. .not. lamkry))) then
   else if (pslot < 2) then
     write(6, '(a)') '     DIIS: none'
   else if (pfile) then
