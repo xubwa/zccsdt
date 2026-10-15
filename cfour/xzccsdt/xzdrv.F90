@@ -124,13 +124,6 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a)') '   XZ_LABELS=0: the labels are not used'
     uselab = .false.
   end if
-  ! (labels with a modulus: the blocks of the CCSDT iterations and of (Q)
-  ! take the sums of classes modulo mgrp; Lambda, the density and EOM do not
-  ! yet, and run in one block)
-  if (uselab .and. modulus /= 0 .and. (with_lam .or. with_den .or. with_eom)) then
-    write(6, '(a)') ' @XZCCSDT-W, labels with a modulus are not used for Lambda, the density or EOM yet: one block.'
-    uselab = .false.
-  end if
   tryreal = .true.
   call get_environment_variable('XZ_REAL', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0') then

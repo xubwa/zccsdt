@@ -493,7 +493,7 @@ subroutine N(xzdbpassc)(w, kl3, kt3, t2pp, vvo, kg, nn, held, gam)
     do i0 = otoff(g), otoff(g + 1) - 1, nbt
       nb = min(nbt, otoff(g + 1) - i0)
       do sc = 0, ncls - 1
-        h = g - sc
+        h = xzw(g - sc)
         if (h < 0 .or. h >= npg) cycle
         nc = vcoff(sc + 1) - vcoff(sc)
         qlo = vpoff(h)
@@ -521,7 +521,7 @@ subroutine N(xzdbpassc)(w, kl3, kt3, t2pp, vvo, kg, nn, held, gam)
           end if
         end if
         do se = 0, ncls - 1
-          si = h - se
+          si = xzw(h - se)
           if (si < 0 .or. si >= ncls) cycle
           ne = vcoff(se + 1) - vcoff(se)
           nj = ocoff(si + 1) - ocoff(si)

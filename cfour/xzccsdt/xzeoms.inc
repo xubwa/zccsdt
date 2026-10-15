@@ -438,7 +438,7 @@ subroutine N(xzeprec)(w, kx, omega, sd)
       na = xzna(eshift, g)
       if (ni == 0 .or. na == 0) cycle
       call N(zc_vprecond)(w(kx + NW * (nsd + boff_s(g))), ni, na, w(jeo3 + otoff(g)), &
-                          w(jev3 + vtoff(g + eshift)), omega, floor)
+                          w(jev3 + vtoff(xzw(g + eshift))), omega, floor)
     end do
   end if
 end subroutine
@@ -1161,11 +1161,13 @@ contains
     end if
     nr = enr(ip)
     sc = eshl(ip) / labstep
-    if (mod(eshl(ip), labstep) /= 0 .or. abs(sc) > ntg - 1) then
+    ! (with a modulus every multiple of the step is a shift: modulo mgrp)
+    if (mod(eshl(ip), labstep) /= 0 .or. (mgrp == 0 .and. abs(sc) > ntg - 1)) then
       good = .false.
       if (.not. xzdry) write(6, '(/,a,i6,a,i4,a)') ' @XZCCSDT-W, EOM: the shift ', eshl(ip), &
         ' is not a difference of sums of the labels of this run (their step: ', labstep, '); it is left out.'
     end if
+    sc = xzw(sc)
   end subroutine
 
   integer(8) function subspace(nr)

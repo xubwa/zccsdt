@@ -158,7 +158,7 @@ contains
     integer(8), intent(in) :: s
     integer(8) :: g
     external :: xzeomfill
-    eshift = s
+    eshift = xzw(s)
     if (ncls == 1) then
       eshift = 0
       n3s = nto * nvt
@@ -210,7 +210,7 @@ contains
     do i = 0, no - 1
       do a = 0, nv - 1
         if (ncls > 1) then
-          if (vcls(a) - ocls(i) /= s) cycle
+          if (.not. xzeq(vcls(a) - ocls(i), s)) cycle
         end if
         n = n + 1
         x = eps(no + a) - eps(i)

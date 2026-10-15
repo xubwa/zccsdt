@@ -529,7 +529,7 @@ subroutine N(xzesig)(w, kv, ks, sd)
   do h = 0, npg - 1
     lo = vpoff(h)
     nqh = vpoff(h + 1) - lo
-    hr = h + s
+    hr = xzw(h + s)
     if (nqh == 0 .or. hr < 0 .or. hr >= npg) cycle
     lo2 = vpoff(hr)
     nqr = vpoff(hr + 1) - lo2
@@ -1297,6 +1297,7 @@ end subroutine
 ! sigma_1 and sigma_2 on the elements of the label shift s (classes):
 ! s(a) - s(i) = s, the group of (a<b) less that of (i<j) = s.
 subroutine N(xzemask)(no, nv, npo, nvp, s, ocls, vcls, opgrp, vpgrp, s1, s2)
+  use xzdata, only: xzeq
   implicit none
   integer(8), intent(in) :: no, nv, npo, nvp, s
   integer(8), intent(in) :: ocls(0:no-1), vcls(0:nv-1), opgrp(0:npo-1), vpgrp(0:nvp-1)
@@ -1304,13 +1305,13 @@ subroutine N(xzemask)(no, nv, npo, nvp, s, ocls, vcls, opgrp, vpgrp, s1, s2)
   integer(8) :: i, a, p, q
   do i = 0, no - 1
     do a = 0, nv - 1
-      if (vcls(a) - ocls(i) /= s) s1(a, i) = 0
+      if (.not. xzeq(vcls(a) - ocls(i), s)) s1(a, i) = 0
     end do
   end do
   !$omp parallel do private(p, q)
   do p = 0, npo - 1
     do q = 0, nvp - 1
-      if (vpgrp(q) - opgrp(p) /= s) s2(q, p) = 0
+      if (.not. xzeq(vpgrp(q) - opgrp(p), s)) s2(q, p) = 0
     end do
   end do
 end subroutine
