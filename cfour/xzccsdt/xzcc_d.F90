@@ -5,6 +5,7 @@
 #include "xzstep.inc"
 #include "xzblk.inc"
 #include "xzdiisg.inc"
+#include "xzlkry.inc"
 #include "xzcc.inc"
 #include "xzlam.inc"
 #include "xzlblk.inc"

@@ -243,6 +243,15 @@
       ZT :: q(*)
     end subroutine
 
+    ! ---- the Krylov solver of the Lambda equations (xzlkry.inc):
+    !      res[i][j] = sum conj(x1[i]) x2[j] for the vectors (addresses) x1, x2
+    subroutine N(zc_vgram)(n, m1, x1, m2, x2, res) bind(C)
+      import
+      integer(c_int64_t), value :: n, m1, m2
+      integer(c_intptr_t) :: x1(*), x2(*)
+      ZT :: res(*)
+    end subroutine
+
     subroutine N(zc_vprecond)(x, ni, na, eo, ev, omega, floor) bind(C)
       import
       integer(c_int64_t), value :: ni, na

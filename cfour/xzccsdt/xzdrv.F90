@@ -22,7 +22,7 @@ subroutine xzdrv(w, maxcor)
   use xzkern
   use xzpar
   use xzdist
-  use xzpland, only: planq, pneedq, pneedw
+  use xzpland, only: planq, pneedq, pneedw, lslot, lfile, lchunk
   use xzeomd
   use omp_lib
   implicit none
@@ -226,6 +226,7 @@ subroutine xzdrv(w, maxcor)
     rplan(13:15) = dble([ncls, nwe, n3])
     rplan(16) = dble(nc3w)
     rplan(17) = dble(epw)
+    rplan(18:20) = dble([lslot, merge(1_8, 0_8, lfile), lchunk])
     call xzmpi_bcast(rplan, 8_8 * size(rplan))
   end if
   ! (a test hook: option wfail, an error on a rank other than 0)
@@ -349,7 +350,13 @@ subroutine xzdrv(w, maxcor)
   if (with_lam) then
     t0 = omp_get_wtime()
     ecckeep = ecorr
-    if (nwe == 2) then
+    if (lamkry) then
+      if (nwe == 2) then
+        call xzlam_z(w, lslot, lfile, lchunk, converged, ncyc)
+      else
+        call xzlam_d(w, lslot, lfile, lchunk, converged, ncyc)
+      end if
+    else if (nwe == 2) then
       call xzlam_z(w, nslot, usefile, nch, converged, ncyc)
     else
       call xzlam_d(w, nslot, usefile, nch, converged, ncyc)
@@ -702,6 +709,30 @@ subroutine xzjob()
     timing_run = .true.
   end if
   ndiis = 8
+  ! the solver of the Lambda equations: option lsolver diis | krylov (default);
+  ! option lkry n: the pairs of vectors of the Krylov subspace (3 .. 63)
+  call xzoptget('lsolver', arg, larg)
+  lamkry = .true.
+  if (larg > 0) then
+    if (arg(1:1) == 'd' .or. arg(1:1) == 'D') then
+      lamkry = .false.
+    else if (.not. (arg(1:1) == 'k' .or. arg(1:1) == 'K')) then
+      write(6, '(/,a,a,a)') ' @XZCCSDT-F, option lsolver: "', arg(1:larg), '"; krylov or diis.'
+      call xzerrex
+    end if
+  end if
+  nlkry = 40
+  lkplace = 0
+  call xzoptget('lkry', arg, larg)
+  if (larg > 0) then
+    if (arg(1:1) == 'm' .or. arg(1:1) == 'M' .or. arg(1:1) == 'f' .or. arg(1:1) == 'F') then
+      lkplace = merge(2, 1, arg(1:1) == 'f' .or. arg(1:1) == 'F')
+      if (larg > 1) read(arg(2:larg), *) nlkry
+    else
+      read(arg(1:larg), *) nlkry
+    end if
+    nlkry = max(3_8, min(63_8, nlkry))
+  end if
 end subroutine xzjob
 
 ! ---------------------------------------------------------------------------

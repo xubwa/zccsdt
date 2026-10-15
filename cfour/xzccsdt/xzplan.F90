@@ -51,7 +51,13 @@ integer(8) function xzpeak_cc(w)
     k = xzget(nwe * no * no * nv * nv, 'T2')
     k = xzget(nwe * n3, 'T3')
   end if
-  if (with_lam) then
+  if (with_lam .and. lamkry) then
+    if (nwe == 2) then
+      call xzlam_z(w, lslot, lfile, lchunk, c, n)
+    else
+      call xzlam_d(w, lslot, lfile, lchunk, c, n)
+    end if
+  else if (with_lam) then
     if (nwe == 2) then
       call xzlam_z(w, pslot, pfile, pchunk, c, n)
     else
@@ -200,6 +206,9 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   pfile = .true.
   pslot = ndiis
   pchunk = min(max(n3, 1_8), 1048576_8)
+  lfile = .true.
+  lslot = 3
+  lchunk = pchunk
   acc4 = .false.
   if (myrank > 0 .and. flooronly) return
   floor_cc = 0
@@ -237,11 +246,17 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     pfile = .false.
     ! (EOM: its rows of the vectors of the subspace, as rank 0 planned them)
     epw = int(rplan(17), 8)
+    lslot = 0
+    lfile = .false.
     if (slices) then
-      ! (its slices of the DIIS vectors, where rank 0 has its own)
+      ! (its slices of the DIIS vectors, where rank 0 has its own; the same of
+      ! the Krylov vectors of the Lambda equations)
       pslot = int(rplan(10), 8)
       pfile = rplan(11) == 1d0
       pchunk = int(rplan(12), 8)
+      lslot = int(rplan(18), 8)
+      lfile = rplan(19) == 1d0
+      lchunk = int(rplan(20), 8)
     end if
     need_cc = 0
     if (.not. planq) need_cc = xzpeak_cc(w)
@@ -337,6 +352,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       end if
     end if
   end if
+  ! ---- the Krylov subspace of the Lambda equations
+  if (with_lam .and. lamkry .and. .not. planq) call placelk()
   need_cc = 0
   if (.not. planq) need_cc = xzpeak_cc(w)
   ! ---- (Q)
@@ -406,7 +423,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   write(6, '(a,i8,a,i8)') '     first indices of a batch of W_vvvo terms:    ', nba, '  of ', nv
   if (cc3mode == 2) write(6, '(a,i14,a,f10.1,a,i12,a)') '     CC3: the work of a batch of occupied triples: ', nc3w, &
     ' elements (', 8d-6 * nwe * nc3w, ' MB; one triple: ', plo(9), ')'
-  if (.not. (with_cc .or. with_lam)) then
+  if (.not. (with_cc .or. (with_lam .and. .not. lamkry))) then
   else if (pslot < 2) then
     write(6, '(a)') '     DIIS: none'
   else if (pfile) then
@@ -416,6 +433,18 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   else
     write(6, '(a,i3,a)') '     DIIS: ', pslot, ' vectors in the work array'
     if (slices) write(6, '(a)') '       (every rank the slice of its rows, in its own work array)'
+  end if
+  if (with_lam .and. lamkry) then
+    if (lfile) then
+      write(6, '(a,i3,a,f10.1,a)') '     Lambda, Krylov subspace: ', lslot, ' pairs of vectors, T3 parts in the file XZLKRY (', &
+        16d-6 * nwe * n3 * lslot, ' MB)'
+    else
+      write(6, '(a,i3,a,f10.1,a)') '     Lambda, Krylov subspace: ', lslot, ' pairs of vectors in the work array (', &
+        16d-6 * nwe * n3 * lslot, ' MB)'
+    end if
+    if (slices) write(6, '(a)') '       (every rank the slice of its rows)'
+  else if (with_lam) then
+    write(6, '(a)') '     Lambda: DIIS as the amplitudes (option lsolver diis)'
   end if
   end if
   if (with_q) then
@@ -453,6 +482,56 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   flush(6)
 
 contains
+
+  ! The pairs of vectors of the Krylov subspace of the Lambda equations: as
+  ! many in the work array as fit, up to nlkry (option lkry); if fewer than
+  ! 10 (or nlkry) fit, the file XZLKRY with nlkry pairs - as many as the disk
+  ! holds - through records that fit the work array.
+  subroutine placelk()
+    integer(8) :: lo, hi, mid, nfit, per, fb
+    lfile = .false.
+    lchunk = pchunk
+    lslot = nlkry
+    if (lkplace == 2) then
+      lfile = .true.
+    else if (xzpeak_cc(w) > xzsize) then
+      lslot = 2
+      lo = 0
+      if (xzpeak_cc(w) <= xzsize) lo = 2
+      hi = nlkry
+      do while (hi - lo > 1)
+        mid = (lo + hi) / 2
+        lslot = mid
+        if (xzpeak_cc(w) <= xzsize) then
+          lo = mid
+        else
+          hi = mid
+        end if
+      end do
+      lslot = lo
+      if (lo < min(nlkry, 10_8) .and. lkplace /= 1) then
+        lfile = .true.
+        lslot = nlkry
+      end if
+    end if
+    if (.not. lfile) return
+    per = 2 * 8 * nwe * n3
+    if (slices) per = 2 * 8 * nwe * smax
+    fb = xz_free_disk('.' // c_null_char)
+    if (fb >= 0 .and. per * lslot > fb - 1073741824_8) then
+      nfit = max(0_8, (fb - 1073741824_8) / max(per, 1_8))
+      write(6, '(a,i4,a,f10.1,a)') ' @XZCCSDT-W, the disk of the run directory holds ', nfit, &
+        ' pairs of Krylov vectors of the Lambda equations (', 1d-6 * per, ' MB each).'
+      lslot = max(2_8, min(lslot, nfit))
+    end if
+    ! records that fit the work array
+    do while (xzpeak_cc(w) > xzsize .and. lchunk > 1024)
+      lchunk = max(1024_8, lchunk / 2)
+    end do
+    do while (xzpeak_cc(w) > xzsize .and. lslot > 2)
+      lslot = lslot - 1
+    end do
+  end subroutine
 
   ! parameter k as large as fits, between its floor and its target
   subroutine raise(k, cc)
