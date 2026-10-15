@@ -68,7 +68,7 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
       ntask = 0
       do sd = 0, ncls - 1
         do sm = 0, ncls - 1
-          gq = gp + sm - sd + sh_t
+          gq = xzw(gp + sm - sd + sh_t)
           if (gq < 0 .or. gq >= npg) cycle
           nd = vcoff(sd + 1) - vcoff(sd)
           nm = ocoff(sm + 1) - ocoff(sm)
@@ -76,15 +76,15 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
           if (nd == 0 .or. nm == 0 .or. nq == 0) cycle
           ! (no block of T for the triples of m and P: nothing to gather)
           if (xzna(sh_t, gp + sm) == 0) cycle
-          sx = gp - sd - sh_w
-          sy = gp - sd + sh_t + sh_w
+          sx = xzw(gp - sd - sh_w)
+          sy = xzw(gp - sd + sh_t + sh_w)
           ne = xznvc(sx)
           if (p1_noe) ne = 0
           nj = xznoc(sx)
           ney = xznvc(sy)
           njy = xznoc(sy)
-          dor1 = sd - sm - sh_t == sh_w
-          dora = sm - sd == sh_w
+          dor1 = xzeq(sd - sm - sh_t, sh_w)
+          dora = xzeq(sm - sd, sh_w)
           if (ne + nj + ney + njy == 0 .and. .not. (dor1 .or. dora)) cycle
           ntask = ntask + 1
           tsd(ntask) = sd
@@ -108,9 +108,9 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
         call xztoc(tcur, 'pass 1: other')
         ! (the large tasks first, with threaded kernels: xzbig)
         do it = 1, ntask
-          sx = gp - tsd(it) - sh_w
-          sy = gp - tsd(it) + sh_t + sh_w
-          gq = gp + tsm(it) - tsd(it) + sh_t
+          sx = xzw(gp - tsd(it) - sh_w)
+          sy = xzw(gp - tsd(it) + sh_t + sh_w)
+          gq = xzw(gp + tsm(it) - tsd(it) + sh_t)
           cost(it) = 8
           if (tkg(it) >= 0) cost(it) = 8 + (xznvc(sx) + xznoc(sx) + xznvc(sy) + xznoc(sy)) / 2
           cost(it) = cost(it) * (vcoff(tsd(it) + 1) - vcoff(tsd(it))) * (ocoff(tsm(it) + 1) - ocoff(tsm(it))) &
@@ -124,7 +124,7 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
           if (big(it) .neqv. (phase == 1)) cycle
           sd = tsd(it)
           sm = tsm(it)
-          gq = gp + sm - sd + sh_t
+          gq = xzw(gp + sm - sd + sh_t)
           nd = vcoff(sd + 1) - vcoff(sd)
           nm = ocoff(sm + 1) - ocoff(sm)
           qlo = vpoff(gq)
@@ -133,8 +133,8 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
             w(jvci), w(jvsgn), nvp, nb, w(jrows + p0), nd, w(jrows + vcoff(sd)), nm, &
             w(jrows + ocoff(sm)), qlo, nq, nd * nm * nq, w(tkt(it)))
           if (tkg(it) >= 0) then
-            sx = gp - sd - sh_w
-            sy = gp - sd + sh_t + sh_w
+            sx = xzw(gp - sd - sh_w)
+            sy = xzw(gp - sd + sh_t + sh_w)
             ne = xznvc(sx)
             if (p1_noe) ne = 0
             nj = xznoc(sx)
@@ -147,25 +147,26 @@ subroutine N(xzbpass1)(w, kt3, gpd, gmq, gpp, fov, xacc, yall, r1c, ra)
               gpd, gmq, w(tkt(it)), w(tkg(it)), w(tkx(it)), w(tkgy(it)), w(tky(it)), xacc)
           end if
           if (tkacc(it) >= 0) call N(xzbp1r)(no, nv, nvp, nb, nd, nm, nq, vcoff(sd), ocoff(sm), &
-            sd - sm - sh_t == sh_w, sm - sd == sh_w, w(tkt(it)), gpp(qlo, p0), fov, w(tkacc(it)), r1c, w(tkra(it)))
+            xzeq(sd - sm - sh_t, sh_w), xzeq(sm - sd, sh_w), w(tkt(it)), gpp(qlo, p0), fov, w(tkacc(it)), r1c, &
+            w(tkra(it)))
         end do
         end do
         ! what the tasks share
         do it = 1, ntask
           sd = tsd(it)
           sm = tsm(it)
-          gq = gp + sm - sd + sh_t
+          gq = xzw(gp + sm - sd + sh_t)
           nd = vcoff(sd + 1) - vcoff(sd)
           qlo = vpoff(gq)
           nq = vpoff(gq + 1) - qlo
           if (tkg(it) >= 0) then
-            sy = gp - sd + sh_t + sh_w
+            sy = xzw(gp - sd + sh_t + sh_w)
             ney = xznvc(sy)
             njy = xznoc(sy)
             if (ney + njy > 0) call N(xzbp1yadd)(no, nv, npo, nb, nd, ney, njy, p0, vcoff(sd), vcoff(sy), &
                                                  ocoff(sy), w(tky(it)), yall)
           end if
-          if (tkacc(it) >= 0 .and. sm - sd == sh_w) call N(xzbp1radd)(nvp, nb, nq, w(tkra(it)), ra(qlo, p0))
+          if (tkacc(it) >= 0 .and. xzeq(sm - sd, sh_w)) call N(xzbp1radd)(nvp, nb, nq, w(tkra(it)), ra(qlo, p0))
         end do
         call xztoc(tcur, 'pass 1: gather, products')
         call xzbtoc(p0)
@@ -311,8 +312,8 @@ subroutine N(xzbbd)(wv, t2p, bd)
   do gq = 0, npg - 1
     do si = 0, ncls - 1
       if (bdoff(gq, si) < 0) cycle
-      se = gq - si - sh_b
-      sm = gq - si - sh_a
+      se = xzw(gq - si - sh_b)
+      sm = xzw(gq - si - sh_a)
       ni = ocoff(si + 1) - ocoff(si)
       ne = xznvc(se)
       nm = xznoc(sm)
@@ -351,14 +352,14 @@ subroutine N(xzbwd)(delta, wring, wd)
   implicit none
   integer(8), intent(in) :: delta
   ZT, intent(in) :: wring(0:no*nv-1, 0:no*nv-1)                ! [(a, i)][(d, m)]
-  ZT, intent(out) :: wd(0:ndel(delta)-1, 0:ndel(delta+sh_w)-1)
-  integer(8) :: idx(0:ndel(delta)-1), idr(0:ndel(delta+sh_w)-1), sa, si, a, i, n, nr, r, c, pass, dl
+  ZT, intent(out) :: wd(0:ndel(delta)-1, 0:xzndel(delta+sh_w)-1)
+  integer(8) :: idx(0:ndel(delta)-1), idr(0:xzndel(delta+sh_w)-1), sa, si, a, i, n, nr, r, c, pass, dl
   do pass = 1, 2
     dl = delta
-    if (pass == 2) dl = delta + sh_w
+    if (pass == 2) dl = xzw(delta + sh_w)
     n = 0
     do sa = 0, ncls - 1
-      si = sa - dl
+      si = xzw(sa - dl)
       if (si < 0 .or. si >= ncls) cycle
       do a = vcoff(sa), vcoff(sa + 1) - 1
         do i = ocoff(si), ocoff(si + 1) - 1
@@ -419,7 +420,7 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
   kwd = xzget(NW * nwd, 'ring operators of pass 2')
   ku0 = xzget(NW * ndel(0) * max(nu, 1_8), 'outer products of pass 2')
   if (.not. xzdry) then
-    do d = 1 - ncls, ncls - 1
+    do d = dlo, dhi
       if (ndel(d) > 0 .and. xzndel(d + sh_w) > 0) call N(xzbwd)(d, wring, w(kwd + NW * wdoff(d)))
     end do
     if (nu > 0) call N(xzbu0)(nu, u, w(ku0))
@@ -433,8 +434,8 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
       off = 0
       tmax = 0
       do gq = 0, npg - 1
-        if (abs(gp - gq + sh_o) >= ncls .or. nqg(gq) == 0) cycle
-        off = off + nb * ndel(gp - gq + sh_o) * nqg(gq)
+        if (.not. xzdok(gp - gq + sh_o) .or. nqg(gq) == 0) cycle
+        off = off + nb * ndel(xzw(gp - gq + sh_o)) * nqg(gq)
         tmax = max(tmax, nb * xzndel(gp - gq + sh_t) * nqg(gq))
       end do
       if (off == 0) cycle
@@ -487,8 +488,8 @@ subroutine N(xzbbdk)(npart, bdrv, bd)
   do gq = 0, npg - 1
     do si = 0, ncls - 1
       if (bdoff(gq, si) < 0) cycle
-      se = gq - si - sh_b
-      sm = gq - si - sh_a
+      se = xzw(gq - si - sh_b)
+      sm = xzw(gq - si - sh_a)
       ni = ocoff(si + 1) - ocoff(si)
       ne = xznvc(se)
       nm = xznoc(sm)
@@ -541,15 +542,15 @@ subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, 
   off = 0
   do k = 0, nb - 1
     do gq = 0, npg - 1
-      if (abs(gp - gq + sh_o) >= ncls .or. nqg(gq) == 0) cycle
+      if (.not. xzdok(gp - gq + sh_o) .or. nqg(gq) == 0) cycle
       zoff(gq, k) = off
-      off = off + ndel(gp - gq + sh_o) * nqg(gq)
+      off = off + ndel(xzw(gp - gq + sh_o)) * nqg(gq)
     end do
   end do
   ngq = 0
   do gq = 0, npg - 1
-    if (abs(gp - gq + sh_o) >= ncls .or. nqg(gq) == 0) cycle
-    if (ndel(gp - gq + sh_o) == 0) cycle
+    if (.not. xzdok(gp - gq + sh_o) .or. nqg(gq) == 0) cycle
+    if (ndel(xzw(gp - gq + sh_o)) == 0) cycle
     lst(ngq) = gq
     ngq = ngq + 1
   end do
@@ -557,7 +558,7 @@ subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, 
   ! large tasks first, with threaded kernels (xzbig)
   do ig = 0, ngq - 1
     gq = lst(ig)
-    cost(ig * nb + 1:ig * nb + nb) = dble(ndel(gp - gq + sh_o)) * nqg(gq) * (xzndel(gp - gq + sh_t) + 64)
+    cost(ig * nb + 1:ig * nb + nb) = dble(ndel(xzw(gp - gq + sh_o))) * nqg(gq) * (xzndel(gp - gq + sh_t) + 64)
   end do
   call xzbig(ngq * nb, cost, big)
   do phase = 1, 2
@@ -582,8 +583,8 @@ subroutine N(xzbp2batch)(w, kt3, kr3, gp, p0, nb, nqg, wd, adrv, bd, npart, nu, 
                          p0, nb, merge(-1d0, 1d0, r == 1), nt, tg(0, 0), tg(0, 1), tg(0, 2), tg(0, 3))
     end do
     if (nt == 0) cycle
-    call N(zc_breduce2)(w(kr3), w(jvcol), nt, tg(0, 0), tg(0, 1), tg(0, 2), tg(0, 3), vtoff(g + sh_o), &
-                        vtoff(g + sh_o + 1), nvt, w(jvfree), w(jvpair), w(jvpgrp), zoff, npg, nqg, vpoff, &
+    call N(zc_breduce2)(w(kr3), w(jvcol), nt, tg(0, 0), tg(0, 1), tg(0, 2), tg(0, 3), vtoff(xzw(g + sh_o)), &
+                        vtoff(xzw(g + sh_o) + 1), nvt, w(jvfree), w(jvpair), w(jvpgrp), zoff, npg, nqg, vpoff, &
                         w(jrowpos), no, z)
   end do
   call xztoc(tcur, 'pass 2: reduction')
@@ -608,8 +609,8 @@ subroutine N(xzbp2task)(w, kt3, gp, gq, p, nq, wd, adrv, bd, npart, nu, u0, vp, 
   one = 1
   zero = 0
   mone = -1
-  delta = gp - gq + sh_o
-  din = gp - gq + sh_t
+  delta = xzw(gp - gq + sh_o)
+  din = xzw(gp - gq + sh_t)
   nr = ndel(delta)
   nri = xzndel(din)
   qlo = vpoff(gq)
@@ -618,7 +619,7 @@ subroutine N(xzbp2task)(w, kt3, gp, gq, p, nq, wd, adrv, bd, npart, nu, u0, vp, 
     ! the triples of m and P have no block in the layout of T)
     r0 = 0
     do sa = 0, ncls - 1
-      si = sa - din
+      si = xzw(sa - din)
       if (si < 0 .or. si >= ncls) cycle
       nd = vcoff(sa + 1) - vcoff(sa)
       nm = ocoff(si + 1) - ocoff(si)
@@ -643,12 +644,12 @@ subroutine N(xzbp2task)(w, kt3, gp, gq, p, nq, wd, adrv, bd, npart, nu, u0, vp, 
   ! the drive terms on the classes (sc, si) of the pairs (c, i)
   r0 = 0
   do sc = 0, ncls - 1
-    si = sc - delta
+    si = xzw(sc - delta)
     if (si < 0 .or. si >= ncls) cycle
     nc = vcoff(sc + 1) - vcoff(sc)
     ni = ocoff(si + 1) - ocoff(si)
-    se = gp - sc + sh_a
-    sm = gp - sc + sh_b
+    se = xzw(gp - sc + sh_a)
+    sm = xzw(gp - sc + sh_b)
     if (nc > 0 .and. ni > 0) then
       if (bdoff(gq, si) >= 0) then
         ne = xznvc(se)
@@ -719,7 +720,7 @@ subroutine N(xzbppl)(w, kt3, kr3, h, q0, nq, slab)
   zero = 0
   nqh = vpoff(h + 1) - vpoff(h)
   do g = 0, ntg - 1
-    sc = g + sh_t - h
+    sc = xzw(g + sh_t - h)
     if (sc < 0 .or. sc >= ncls) cycle
     nc = vcoff(sc + 1) - vcoff(sc)
     if (nc == 0 .or. xzna(sh_t, g) == 0 .or. xzna(sh_o, g) == 0) cycle
@@ -741,8 +742,9 @@ subroutine N(xzbppl)(w, kt3, kr3, h, q0, nq, slab)
         call N(zc_gemm)(0_4, 0_4, nq, nb * nc, nqh, one, slab, nqh, w(ktv), nb * nc, zero, w(kxp), nb * nc)
         call xztoc(tcur, 'pp ladder: GEMM')
         call xztic()
-        call N(zc_breduce_ppl_rows)(w(kr3), w(kob_out), w(jvcol), nb, w(jrows + i0), nvt, vtoff(g + sh_o), &
-                                    vtoff(g + sh_o + 1), w(jvfree), w(jvpair), vcls, sc, vpoff(h + sh_w), q0, q0 + nq, &
+        call N(zc_breduce_ppl_rows)(w(kr3), w(kob_out), w(jvcol), nb, w(jrows + i0), nvt, vtoff(xzw(g + sh_o)), &
+                                    vtoff(xzw(g + sh_o) + 1), w(jvfree), w(jvpair), vcls, sc, vpoff(xzw(h + sh_w)), &
+                                    q0, q0 + nq, &
                                     nc, vcoff(sc), w(kxp))
         call xztoc(tcur, 'pp ladder: reduction')
         call xzbtoc(i0)
@@ -767,7 +769,7 @@ subroutine N(xzbocc)(w, kt3, kr3, o6)
   ZT :: one
   one = 1
   do g = 0, ntg - 1
-    h = g + sh_w
+    h = xzw(g + sh_w)
     if (h < 0 .or. h >= ntg) cycle
     ni = otoff(g + 1) - otoff(g)
     nj = otoff(h + 1) - otoff(h)

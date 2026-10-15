@@ -491,7 +491,8 @@ end subroutine xzrdvvvv
 
 ! ---------------------------------------------------------------------------
 ! The largest element of the small blocks and of <ov||vv> that the labels
-! forbid: an element <pq||rs> with class(p) + class(q) /= class(r) + class(s).
+! forbid: an element <pq||rs> with class(p) + class(q) /= class(r) + class(s)
+! (modulo mgrp with a modulus: xzeq).
 subroutine xzchklab(oooo, ooov, oovv, ovvo, ovvq, vpgrp, vmax, what)
   use xzdata
   implicit none
@@ -510,28 +511,28 @@ subroutine xzchklab(oooo, ooov, oovv, ovvo, ovvq, vpgrp, vmax, what)
     do n = 0, no - 1
       do i = 0, no - 1
         do j = 0, no - 1
-          if (ocls(m) + ocls(n) /= ocls(i) + ocls(j)) x(1) = max(x(1), abs(oooo(j, i, n, m)))
+          if (.not. xzeq(ocls(m) + ocls(n), ocls(i) + ocls(j))) x(1) = max(x(1), abs(oooo(j, i, n, m)))
         end do
         do e = 0, nv - 1
-          if (ocls(m) + ocls(n) /= ocls(i) + vcls(e)) x(2) = max(x(2), abs(ooov(e, i, n, m)))
+          if (.not. xzeq(ocls(m) + ocls(n), ocls(i) + vcls(e))) x(2) = max(x(2), abs(ooov(e, i, n, m)))
         end do
       end do
       do e = 0, nv - 1
         do f = 0, nv - 1
-          if (ocls(m) + ocls(n) /= vcls(e) + vcls(f)) x(3) = max(x(3), abs(oovv(f, e, n, m)))
+          if (.not. xzeq(ocls(m) + ocls(n), vcls(e) + vcls(f))) x(3) = max(x(3), abs(oovv(f, e, n, m)))
         end do
       end do
     end do
     do b = 0, nv - 1
       do e = 0, nv - 1
         do j = 0, no - 1
-          if (ocls(m) + vcls(b) /= vcls(e) + ocls(j)) x(4) = max(x(4), abs(ovvo(j, e, b, m)))
+          if (.not. xzeq(ocls(m) + vcls(b), vcls(e) + ocls(j))) x(4) = max(x(4), abs(ovvo(j, e, b, m)))
         end do
       end do
     end do
     do y = 0, nv - 1
       do q = 0, nvp - 1
-        if (ocls(m) + vcls(y) /= vpgrp(q)) x(5) = max(x(5), abs(ovvq(q, y, m)))
+        if (.not. xzeq(ocls(m) + vcls(y), vpgrp(q))) x(5) = max(x(5), abs(ovvq(q, y, m)))
       end do
     end do
   end do

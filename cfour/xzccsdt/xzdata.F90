@@ -31,12 +31,20 @@ module xzdata
 
   ! ---- symmetry labels (the file xzlabels, else dgcosym of CFOUR's SCF) and
   !      their classes.  A label is an integer that adds, modulo modulus if
-  !      that is not 0; the block code below is for modulus 0 only (the
-  !      classes are (label - smallest) / step, a group is a sum of classes)
+  !      that is not 0.  The classes are (label - smallest) / step, a group is
+  !      a sum of classes.  With a modulus the labels are first reduced to
+  !      0 .. modulus - 1, and the sums of classes are taken modulo mgrp =
+  !      modulus / step (xzw): groups, differences (delta) and label shifts
+  !      are then residues 0 .. mgrp - 1 (e.g. the C2* labels 2 m_j = +-1,
+  !      modulus 4, of a double group D2h, D2 or C2v: mgrp = 2).  mgrp = 0:
+  !      no modulus, the sums as they are.
   integer, parameter :: maxcls = 64, maxgrp = 3 * maxcls
   logical :: have_labels = .false.  ! labels were found and can be used
   character(len=8) :: labfile = ' ' ! the file they came from: xzlabels, dgcosym
   integer(8) :: modulus = 0
+  integer(8) :: mgrp = 0            ! the sums of classes modulo mgrp (0: not modular)
+  integer(8) :: dlo = 0, dhi = 0    ! the range of a difference of two classes (delta)
+  integer(8) :: q4hi = 0, q2hi = 0  ! the largest sum of 4, of 2 classes ((Q) sectors)
   integer(8) :: ncls = 1            ! classes of the labels: (label - smallest) / step
   integer(8) :: npg = 1, ntg = 1    ! groups of pairs (2 ncls - 1) and of triples (3 ncls - 2)
   integer(8) :: ocoff(0:maxcls) = 0, vcoff(0:maxcls) = 0    ! first spinor of a class
@@ -217,35 +225,65 @@ module xzdata
 
 contains
 
+  ! a sum or difference of classes, groups or shifts as an index: modulo
+  ! mgrp with a modulus (0 .. mgrp - 1), itself without one
+  integer(8) elemental function xzw(x)
+    integer(8), intent(in) :: x
+    if (mgrp > 0) then
+      xzw = modulo(x, mgrp)
+    else
+      xzw = x
+    end if
+  end function xzw
+
+  ! two sums of classes are the same label (modulo mgrp with a modulus)
+  logical elemental function xzeq(a, b)
+    integer(8), intent(in) :: a, b
+    xzeq = xzw(a - b) == 0
+  end function xzeq
+
   ! virtual triples of the block of the group g of occupied triples in the
   ! layout of a rank-3 array of shift s (0: no such block)
-  integer(8) function xzna(s, g)
+  integer(8) pure function xzna(s, g)
     integer(8), intent(in) :: s, g
-    integer(8) :: h
-    h = g + s
+    integer(8) :: h, gg
+    gg = xzw(g)
+    h = xzw(g + s)
     xzna = 0
-    if (g < 0 .or. g >= ntg .or. h < 0 .or. h >= ntg) return
+    if (gg < 0 .or. gg >= ntg .or. h < 0 .or. h >= ntg) return
     xzna = vtoff(h + 1) - vtoff(h)
   end function xzna
 
   ! spinors of a class (0 outside the classes): virtual, occupied
-  integer(8) function xznvc(s)
+  integer(8) pure function xznvc(s)
     integer(8), intent(in) :: s
+    integer(8) :: c
+    c = xzw(s)
     xznvc = 0
-    if (s >= 0 .and. s < ncls) xznvc = vcoff(s + 1) - vcoff(s)
+    if (c >= 0 .and. c < ncls) xznvc = vcoff(c + 1) - vcoff(c)
   end function xznvc
 
-  integer(8) function xznoc(s)
+  integer(8) pure function xznoc(s)
     integer(8), intent(in) :: s
+    integer(8) :: c
+    c = xzw(s)
     xznoc = 0
-    if (s >= 0 .and. s < ncls) xznoc = ocoff(s + 1) - ocoff(s)
+    if (c >= 0 .and. c < ncls) xznoc = ocoff(c + 1) - ocoff(c)
   end function xznoc
 
-  ! pairs (a, i) with s(a) - s(i) = d (0 outside the range of d)
-  integer(8) function xzndel(d)
+  ! d is a possible difference of two classes (always, with a modulus)
+  logical elemental function xzdok(d)
     integer(8), intent(in) :: d
+    xzdok = mgrp > 0 .or. abs(d) < ncls
+  end function xzdok
+
+  ! pairs (a, i) with s(a) - s(i) = d (0 outside the range of d)
+  integer(8) pure function xzndel(d)
+    integer(8), intent(in) :: d
+    integer(8) :: dd
+    dd = xzw(d)
     xzndel = 0
-    if (abs(d) < ncls) xzndel = ndel(d)
+    if (dd >= dlo .and. dd <= dhi) xzndel = ndel(dd)
   end function xzndel
 
   ! The shifts of a pass in blocks (see sh_t ..): the layouts of operand and
@@ -257,13 +295,14 @@ contains
   subroutine xzshctx(st, sw, sa)
     integer(8), intent(in) :: st, sw, sa
     integer(8) :: d, g, si, n
-    sh_t = st
-    sh_w = sw
-    sh_a = sa
-    sh_o = st + sw
-    sh_b = sh_o - sa
+    ! (with a modulus every shift is a residue, xzw)
+    sh_t = xzw(st)
+    sh_w = xzw(sw)
+    sh_a = xzw(sa)
+    sh_o = xzw(st + sw)
+    sh_b = xzw(sh_o - sa)
     if (ncls == 1) return
-    if (st == 0) then
+    if (sh_t == 0) then
       kob_in = jobase
       bof_in = boff
     else
@@ -279,9 +318,9 @@ contains
     end if
     wdoff = 0
     nwd = 0
-    do d = 1 - ncls, ncls - 1
+    do d = dlo, dhi
       wdoff(d) = nwd
-      nwd = nwd + xzndel(d + sw) * ndel(d)
+      nwd = nwd + xzndel(d + sh_w) * ndel(d)
     end do
     bdoff = -1
     nbd = 0

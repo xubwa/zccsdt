@@ -119,15 +119,16 @@ subroutine xzdrv(w, maxcor)
   end if
   have_labels = there
   uselab = there
-  ! (labels of either file with a modulus: the blocks of this program are
-  ! for labels that add without one)
-  if (there .and. modulus /= 0) then
-    write(6, '(a)') ' @XZCCSDT-W, labels with a modulus are not used by this program: one block.'
-    uselab = .false.
-  end if
   call get_environment_variable('XZ_LABELS', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0' .and. uselab) then
     write(6, '(a)') '   XZ_LABELS=0: the labels are not used'
+    uselab = .false.
+  end if
+  ! (labels with a modulus: the blocks of the CCSDT iterations and of (Q)
+  ! take the sums of classes modulo mgrp; Lambda, the density and EOM do not
+  ! yet, and run in one block)
+  if (uselab .and. modulus /= 0 .and. (with_lam .or. with_den .or. with_eom)) then
+    write(6, '(a)') ' @XZCCSDT-W, labels with a modulus are not used for Lambda, the density or EOM yet: one block.'
     uselab = .false.
   end if
   tryreal = .true.
@@ -764,16 +765,42 @@ subroutine xzsetmode(uselab)
   use xzdata
   implicit none
   logical, intent(in) :: uselab
-  integer(8) :: p, i, j, k, g, n, d, sa, si, m
+  integer(8) :: p, i, j, k, g, n, d, sa, si, m, h, t, step, a, b, r
 
   ncls = 1
+  mgrp = 0
   if (uselab) then
+    ! (with a modulus: the labels as residues 0 .. modulus - 1)
+    if (modulus > 0) lab = modulo(lab, modulus)
     call xzclasses(no, nv, lab(nfrozen), maxcls, ncls, operm, vperm, ocls, vcls, ocoff, vcoff)
     if (ncls == 0) then
       write(6, '(a,i4,a)') ' @XZCCSDT-W, more than ', maxcls, ' classes of labels: the labels are not used.'
       ncls = 1
+    else if (modulus > 0 .and. ncls > 1) then
+      ! the step of the classes (as in xzclasses): the sums of classes are
+      ! taken modulo modulus / step
+      step = 0
+      do p = nfrozen, nfrozen + no + nv - 1
+        a = lab(p) - minval(lab(nfrozen:nfrozen + no + nv - 1))
+        b = step
+        do while (b /= 0)
+          r = mod(a, b)
+          a = b
+          b = r
+        end do
+        step = a
+      end do
+      if (step == 0) step = 1
+      if (modulo(modulus, step) /= 0) then
+        write(6, '(a,i6,a,i6,a)') ' @XZCCSDT-W, the labels have the step ', step, ', which does not divide the modulus ', &
+          modulus, ': the labels are not used.'
+        ncls = 1
+      else
+        mgrp = modulus / step
+      end if
     end if
   end if
+  if (ncls == 1) mgrp = 0
   if (ncls == 1) then
     do p = 0, no - 1
       operm(p) = p
@@ -788,8 +815,22 @@ subroutine xzsetmode(uselab)
     ocoff(1) = no
     vcoff(1) = nv
   end if
-  npg = 2 * ncls - 1
-  ntg = 3 * ncls - 2
+  if (mgrp > 0) then
+    ! groups, differences and the sums of (Q) are residues modulo mgrp
+    npg = mgrp
+    ntg = mgrp
+    dlo = 0
+    dhi = mgrp - 1
+    q4hi = mgrp - 1
+    q2hi = mgrp - 1
+  else
+    npg = 2 * ncls - 1
+    ntg = 3 * ncls - 2
+    dlo = 1 - ncls
+    dhi = ncls - 1
+    q4hi = 4 * (ncls - 1)
+    q2hi = 2 * (ncls - 1)
+  end if
   ! the sizes of the groups
   opoff = 0
   vpoff = 0
@@ -797,19 +838,21 @@ subroutine xzsetmode(uselab)
   vtoff = 0
   do i = 0, no - 1
     do j = i + 1, no - 1
-      g = ocls(i) + ocls(j)
+      g = xzw(ocls(i) + ocls(j))
       opoff(g + 1) = opoff(g + 1) + 1
       do k = j + 1, no - 1
-        otoff(g + ocls(k) + 1) = otoff(g + ocls(k) + 1) + 1
+        t = xzw(g + ocls(k))
+        otoff(t + 1) = otoff(t + 1) + 1
       end do
     end do
   end do
   do i = 0, nv - 1
     do j = i + 1, nv - 1
-      g = vcls(i) + vcls(j)
+      g = xzw(vcls(i) + vcls(j))
       vpoff(g + 1) = vpoff(g + 1) + 1
       do k = j + 1, nv - 1
-        vtoff(g + vcls(k) + 1) = vtoff(g + vcls(k) + 1) + 1
+        t = xzw(g + vcls(k))
+        vtoff(t + 1) = vtoff(t + 1) + 1
       end do
     end do
   end do
@@ -840,9 +883,9 @@ subroutine xzsetmode(uselab)
   ndel = 0
   wdoff = 0
   nwd = 0
-  do d = 1 - ncls, ncls - 1
+  do d = dlo, dhi
     do sa = 0, ncls - 1
-      si = sa - d
+      si = xzw(sa - d)
       if (si < 0 .or. si >= ncls) cycle
       ndel(d) = ndel(d) + (vcoff(sa + 1) - vcoff(sa)) * (ocoff(si + 1) - ocoff(si))
     end do
@@ -853,7 +896,7 @@ subroutine xzsetmode(uselab)
   nbd = 0
   do g = 0, npg - 1
     do si = 0, ncls - 1
-      sa = g - si
+      sa = xzw(g - si)
       if (sa < 0 .or. sa >= ncls) cycle
       n = (vcoff(sa + 1) - vcoff(sa) + ocoff(sa + 1) - ocoff(sa)) * (ocoff(si + 1) - ocoff(si)) &
           * (vpoff(g + 1) - vpoff(g))
@@ -876,35 +919,39 @@ subroutine xzsetmode(uselab)
   end do
   qn22max = 0
   qn13max = 0
-  do m = 0, 4 * (ncls - 1)
+  do m = 0, q4hi
     n = 0
     do g = 0, npg - 1
-      if (m - g < 0 .or. m - g >= npg) cycle
-      n = n + (vpoff(g + 1) - vpoff(g)) * (vpoff(m - g + 1) - vpoff(m - g))
+      h = xzw(m - g)
+      if (h < 0 .or. h >= npg) cycle
+      n = n + (vpoff(g + 1) - vpoff(g)) * (vpoff(h + 1) - vpoff(h))
     end do
     qn22max = max(qn22max, n)
     n = 0
     do sa = 0, ncls - 1
-      if (m - sa < 0 .or. m - sa >= ntg) cycle
-      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(m - sa + 1) - vtoff(m - sa))
+      h = xzw(m - sa)
+      if (h < 0 .or. h >= ntg) cycle
+      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(h + 1) - vtoff(h))
     end do
     qn13max = max(qn13max, n)
   end do
   qxvmax = 0
   qm3max = 0
   qwbmax = 0
-  do k = 0, 2 * (ncls - 1)
+  do k = 0, q2hi
     n = 0
     do sa = 0, ncls - 1
-      if (sa + k >= ntg) cycle
-      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(sa + k + 1) - vtoff(sa + k))
+      t = xzw(sa + k)
+      if (t >= ntg) cycle
+      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(t + 1) - vtoff(t))
       ! the products of this block: pairs (bc) of group g, f of class g - sa, d of class k - (g - sa)
       d = 0
       do g = 0, npg - 1
-        si = g - sa
+        si = xzw(g - sa)
         if (si < 0 .or. si >= ncls) cycle
-        if (k - si < 0 .or. k - si >= ncls) cycle
-        d = d + (vpoff(g + 1) - vpoff(g)) * (vcoff(sa + 1) - vcoff(sa)) * (vcoff(k - si + 1) - vcoff(k - si))
+        h = xzw(k - si)
+        if (h < 0 .or. h >= ncls) cycle
+        d = d + (vpoff(g + 1) - vpoff(g)) * (vcoff(sa + 1) - vcoff(sa)) * (vcoff(h + 1) - vcoff(h))
         qwbmax = max(qwbmax, (vpoff(g + 1) - vpoff(g)) * (vcoff(sa + 1) - vcoff(sa)) &
                              * (vcoff(si + 1) - vcoff(si)))
       end do
