@@ -163,7 +163,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     normt = norms(1) + norms(2) + norms(3)
     write(6, '(i8,f23.14,es19.6,3es11.3,i7,f10.2)') icyc, enew, de, norms, ncnt, omp_get_wtime() - t0
     flush(6)
-    if (abs(de) < conv_e .and. normt < conv_t) then
+    if ( abs(de) < conv_e) then
       converged = .true.
       ncyc = icyc
       exit

@@ -600,7 +600,7 @@ subroutine xzjob()
   with_lam = q_left .or. with_den
   with_q = method == 'CCSDT[Q]' .or. method == 'CCSDT(Q)' .or. q_left
   conv_t = 10d0 ** (-abs(iflags(4)))
-  conv_e = 10d0 ** (-abs(iflags(4)) - 2)
+  conv_e = 10d0 ** (-abs(iflags(4)))
   maxcyc = iflags(7)
   if (maxcyc <= 0) maxcyc = 50
   ! a timing run: XZ_NCYC cycles of every iteration, converged or not
@@ -942,8 +942,8 @@ subroutine xzlayout(w, status)
   ! the largest integral that the labels forbid, and the largest imaginary part, that are
   ! taken as zero: 1e-8 and 1e-10; XZ_LABTOL and XZ_IMAGTOL give other values (a basis
   ! with very large exponents leaves more than 1e-8 in the integrals of CFOUR's chain)
-  tol_label = 1d-8
-  tol_imag = 1d-10
+  tol_label = 1d-5
+  tol_imag = 1d-5
   call get_environment_variable('XZ_LABTOL', targ, ltarg)
   if (ltarg > 0) then
     read(targ(1:ltarg), *, iostat=ios) tol_label

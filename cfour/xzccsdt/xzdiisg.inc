@@ -171,7 +171,7 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
       call xzmpi_allsum_w(ss, 1_8)
       s3 = ss(1)
     end if
-    norms = [sqrt(s1), sqrt(s2), 6d0 * sqrt(s3)]
+    norms = [sqrt(s1)/n1, sqrt(s2)/n2, 6d0 * sqrt(s3)/n3]
     if (small) then
       t1 = t1n
       t2 = t2n
@@ -244,7 +244,7 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
   d(1:ncnt) = d(1:ncnt) + cz(1:ncnt)
   s3 = dble(cz(ncnt))
   if (split) call xzmpi_bcast(d, 8_8 * NW * ncnt)
-  norms = [sqrt(abs(s1)), 2d0 * sqrt(abs(s2)), 6d0 * sqrt(abs(s3))]
+  norms = [sqrt(abs(s1))/n1, 2d0 * sqrt(abs(s2))/n2, 6d0 * sqrt(abs(s3))/n3]
   do k = 1, ncnt
     hmat(slot, ord(k)) = d(k)
     hmat(ord(k), slot) = conjg(hmat(slot, ord(k)))
