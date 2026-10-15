@@ -41,6 +41,7 @@ module xzdata
   integer, parameter :: maxcls = 64, maxgrp = 3 * maxcls
   logical :: have_labels = .false.  ! labels were found and can be used
   character(len=8) :: labfile = ' ' ! the file they came from: xzlabels, dgcosym
+  logical :: blkin = .false.        ! the integrals from the blocked real files of xx2cvtran (%vtranblk)
   integer(8) :: modulus = 0
   integer(8) :: mgrp = 0            ! the sums of classes modulo mgrp (0: not modular)
   integer(8) :: dlo = 0, dhi = 0    ! the range of a difference of two classes (delta)

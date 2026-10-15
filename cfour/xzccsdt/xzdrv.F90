@@ -1113,6 +1113,27 @@ subroutine xzlayout(w, status)
   jgpp = jold(6)
   jovvq = jold(7)
 
+  ! ---- <ab||cd> from the blocked real file: straight into its blocks
+  if (blkin) then
+    jvvvv = xzget(nwe * nvv, '<vv||vv> on a<b, c<d')
+    m = xzmark()
+    krow = xzget(nvp, 'row of <vv||vv>')
+    ksrc = xzget(2 * nvp, 'permutation of the pairs')
+    ksg = xzget(nvp, 'signs of the pairs')
+    if (.not. xzdry) then
+      call xzrbvvvv(w(jvvvv), w(jvpa), w(jvpb), w(ksrc), w(ksrc + nvp), w(ksg), w(krow), offmax)
+      if (offmax > tol_label) then
+        write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
+        write(6, '(a,es10.2,a)') '             an element of <vv||vv> that they forbid is ', offmax, &
+          '.  The labels are not used.'
+        status = 1
+        return
+      end if
+    end if
+    call xzrel(m)
+    return
+  end if
+
   ! ---- <ab||cd>: the record of the file is read where the blocks stay
   m = xzmark()
   jvvvv = xzget(2 * pv * pv, 'record of moinpppp')

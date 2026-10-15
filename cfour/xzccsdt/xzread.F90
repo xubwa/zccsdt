@@ -18,6 +18,14 @@
 !              with %dglin in the ZMAT): the labels if there is no xzlabels
 !              (xzrddgc)
 !
+! With a section %vtranblk in the ZMAT xx2cvtran writes instead the files
+! mobkhhhh, mobkhhhp, mobkhhpp, mobkphhp, PPBK0001.. and mobkpppp: the same
+! integrals as real numbers, only the elements that the labels of xzlabels
+! allow and only strict pairs (xzbwrite.f90 of x2cvtran: the format, a
+! header and the labels of the file first).  They are used if mobkhhhh is
+! there (xzrint, xzrbvvvv): the labels of the files decide which elements
+! are there, the labels of this program (or none) how they are stored.
+!
 ! Each integral file is one record of an unformatted sequential file,
 ! complex(8), the first index fastest; a pair p<=q has the number
 ! p + q (q + 1) / 2 (from 0), its diagonal is there and is zero.  The
@@ -86,8 +94,12 @@ subroutine xzsizes()
   integer(8), external :: xzrecbytes
   real(8) :: rb(1)
   logical :: there
-  character(len=8), parameter :: need(6) = &
-    [character(len=8) :: 'nmototal', 'scf2ceig', 'moinhhhh', 'moinhhhp', 'moinhhpp', 'moinphhp']
+  integer(8) :: hdr(8)
+  integer :: ios
+  character(len=8) :: need(6)
+  need = [character(len=8) :: 'nmototal', 'scf2ceig', 'moinhhhh', 'moinhhhp', 'moinhhpp', 'moinphhp']
+  inquire(file='mobkhhhh', exist=blkin)
+  if (blkin) need(3:6) = [character(len=8) :: 'mobkhhhh', 'mobkhhhp', 'mobkhhpp', 'mobkphhp']
   do k = 1, 6
     inquire(file=trim(need(k)), exist=there)
     if (.not. there) then
@@ -96,20 +108,33 @@ subroutine xzsizes()
       call xzerrex
     end if
   end do
-  inquire(file='moinhhhh', size=nb)
-  nel = xzrecbytes(nb) / 16
-  po = nint(sqrt(dble(nel)), 8)
-  no = nint((sqrt(8d0 * dble(po) + 1d0) - 1d0) / 2d0, 8)
-  if (no < 1 .or. (no * (no + 1) / 2) ** 2 /= nel) then
-    write(6, '(/,a)') ' @XZCCSDT-F, moinhhhh is not a block on pairs of occupied spinors.'
-    call xzerrex
-  end if
-  inquire(file='moinhhpp', size=nb)
-  nel = xzrecbytes(nb) / 16
-  nv = nint(sqrt(dble(nel)) / dble(no), 8)
-  if (nv < 1 .or. (no * nv) ** 2 /= nel) then
-    write(6, '(/,a)') ' @XZCCSDT-F, moinhhhh and moinhhpp do not belong together.'
-    call xzerrex
+  if (blkin) then
+    open(unit=71, file='mobkhhhh', form='unformatted', access='sequential', status='old', &
+         action='read', iostat=ios)
+    if (ios == 0) read(71, iostat=ios) hdr
+    close(71)
+    if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) /= 1) then
+      write(6, '(/,a)') ' @XZCCSDT-F, mobkhhhh is not a file of xx2cvtran with %vtranblk.'
+      call xzerrex
+    end if
+    no = hdr(7)
+    nv = hdr(8)
+  else
+    inquire(file='moinhhhh', size=nb)
+    nel = xzrecbytes(nb) / 16
+    po = nint(sqrt(dble(nel)), 8)
+    no = nint((sqrt(8d0 * dble(po) + 1d0) - 1d0) / 2d0, 8)
+    if (no < 1 .or. (no * (no + 1) / 2) ** 2 /= nel) then
+      write(6, '(/,a)') ' @XZCCSDT-F, moinhhhh is not a block on pairs of occupied spinors.'
+      call xzerrex
+    end if
+    inquire(file='moinhhpp', size=nb)
+    nel = xzrecbytes(nb) / 16
+    nv = nint(sqrt(dble(nel)) / dble(no), 8)
+    if (nv < 1 .or. (no * nv) ** 2 /= nel) then
+      write(6, '(/,a)') ' @XZCCSDT-F, moinhhhh and moinhhpp do not belong together.'
+      call xzerrex
+    end if
   end if
   open(unit=71, file='nmototal', form='unformatted', access='sequential', status='old', action='read')
   read(71) ntot
@@ -131,6 +156,14 @@ subroutine xzsizes()
     write(6, '(/,a,4i7)') ' @XZCCSDT-F, the integral files are not those of this SCF: ' // &
       'spinors, frozen, occupied, virtual', ntot, nfrozen, no, nv
     call xzerrex
+  end if
+  if (blkin) then
+    if (hdr(4) /= ntot .or. hdr(6) /= nfrozen) then
+      write(6, '(/,a,4i7)') ' @XZCCSDT-F, the files mobk.. are not those of this SCF: spinors, frozen ' // &
+        '(files, here)', hdr(4), hdr(6), ntot, nfrozen
+      call xzerrex
+    end if
+    if (myrank == 0) write(6, '(a)') '   integrals: the blocked real files of xx2cvtran (%vtranblk)'
   end if
   ny = no + nv
   npo = no * (no - 1) / 2
@@ -286,7 +319,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
   real(8) :: smn, sij
 
   po = no * (no + 1) / 2
-  call xzrfile('moinhhhh', buf, 2 * po * po)
+  call xzrint(1_8, 'moinhhhh', buf, 2 * po * po)
   do m = 0, no - 1
     do n = 0, no - 1
       fm = operm(m)
@@ -306,7 +339,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
       end do
     end do
   end do
-  call xzrfile('moinhhhp', buf, 2 * po * no * nv)
+  call xzrint(2_8, 'moinhhhp', buf, 2 * po * no * nv)
   do m = 0, no - 1
     do n = 0, no - 1
       fm = operm(m)
@@ -322,7 +355,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
     end do
   end do
   ! <mn||ef> = file[e, m, f, n]
-  call xzrfile('moinhhpp', buf, 2 * no * nv * no * nv)
+  call xzrint(3_8, 'moinhhpp', buf, 2 * no * nv * no * nv)
   do m = 0, no - 1
     do n = 0, no - 1
       fm = operm(m)
@@ -337,7 +370,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
     end do
   end do
   ! <mb||ej> = file[e, m, b, j]
-  call xzrfile('moinphhp', buf, 2 * no * nv * no * nv)
+  call xzrint(4_8, 'moinphhp', buf, 2 * no * nv * no * nv)
   do m = 0, no - 1
     fm = operm(m)
     do b = 0, nv - 1
@@ -376,7 +409,7 @@ subroutine xzrdovvq(ovvq, vpa, vpb, buf)
   pv = nv * (nv + 1) / 2
   do m = 0, no - 1
     write(fname, '(a4,i4.4)') 'PPPH', operm(m) + 1
-    call xzrfile(fname, buf, 2 * pv * nv)
+    call xzrint(5_8, fname, buf, 2 * pv * nv)
     !$omp parallel do private(y, q, fd, fe, fy)
     do y = 0, nv - 1
       fy = vperm(y)
@@ -572,3 +605,255 @@ subroutine xztoreal(n, src, dst)
     dst(i) = src(2 * i - 1)
   end do
 end subroutine xztoreal
+
+! ---------------------------------------------------------------------------
+! The blocked real files of xx2cvtran (%vtranblk): opens fname on unit 71,
+! reads and checks the header, returns the labels of the file and their
+! modulus; the elements follow on the unit.
+subroutine xzbhead(fname, kind, flab, fmod)
+  use xzdata
+  implicit none
+  character(len=*), intent(in) :: fname
+  integer(8), intent(in) :: kind
+  integer(8), intent(out) :: flab(0:ntot-1), fmod
+  integer(8) :: hdr(8)
+  integer :: ios
+  open(unit=71, file=fname, form='unformatted', access='sequential', status='old', &
+       action='read', iostat=ios)
+  if (ios /= 0) then
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, no file ', trim(fname), ' (xx2cvtran with %vtranblk)'
+    call xzerrex
+  end if
+  read(71, iostat=ios) hdr
+  if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) /= 1 .or. hdr(3) /= kind) then
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', trim(fname), ' is not a blocked file of xx2cvtran of its kind.'
+    call xzerrex
+  end if
+  if (hdr(4) /= ntot .or. hdr(6) /= nfrozen .or. hdr(7) /= no .or. hdr(8) /= nv) then
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', trim(fname), ' is not one of this run (sizes).'
+    call xzerrex
+  end if
+  read(71, iostat=ios) flab
+  if (ios /= 0) then
+    write(6, '(/,a,a)') ' @XZCCSDT-F, reading the labels of the file ', trim(fname)
+    call xzerrex
+  end if
+  fmod = hdr(5)
+end subroutine xzbhead
+
+! ---------------------------------------------------------------------------
+! The places in the dense file of the elements of a blocked file, in the
+! order of the blocked file (xzbwrite of xx2cvtran): kind 1 to 5 as in the
+! header, iocc the occupied spinor of a file PPBK (kind 5, from 0).  With
+! fill = .false. only their number cnt.
+subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
+  use xzdata
+  implicit none
+  integer(8), intent(in) :: kind, iocc, flab(0:ntot-1), fmod
+  integer(8) :: pos(*)
+  integer(8), intent(out) :: cnt
+  logical, intent(in) :: fill
+  integer(8) :: i, j, k, l, a, b, c, po, pv, ol(0:no-1), vl(0:nv-1)
+  po = no * (no + 1) / 2
+  pv = nv * (nv + 1) / 2
+  ol = flab(nfrozen:nfrozen + no - 1)
+  vl = flab(nfrozen + no:nfrozen + no + nv - 1)
+  cnt = 0
+  select case (kind)
+  case (1)
+    do l = 1, no - 1
+      do k = 0, l - 1
+        do j = 1, no - 1
+          do i = 0, j - 1
+            if (ok(ol(i) + ol(j) - ol(k) - ol(l))) call put(i + j * (j + 1) / 2 + po * (k + l * (l + 1) / 2))
+          end do
+        end do
+      end do
+    end do
+  case (2)
+    do a = 0, nv - 1
+      do k = 0, no - 1
+        do j = 1, no - 1
+          do i = 0, j - 1
+            if (ok(ol(i) + ol(j) - ol(k) - vl(a))) call put(i + j * (j + 1) / 2 + po * (k + no * a))
+          end do
+        end do
+      end do
+    end do
+  case (3)
+    do j = 0, no - 1
+      do b = 0, nv - 1
+        do i = 0, no - 1
+          do a = 0, nv - 1
+            if (ok(ol(i) + ol(j) - vl(a) - vl(b))) call put(a + nv * (i + no * (b + nv * j)))
+          end do
+        end do
+      end do
+    end do
+  case (4)
+    do j = 0, no - 1
+      do a = 0, nv - 1
+        do i = 0, no - 1
+          do b = 0, nv - 1
+            if (ok(ol(i) + vl(a) - vl(b) - ol(j))) call put(b + nv * (i + no * (a + nv * j)))
+          end do
+        end do
+      end do
+    end do
+  case (5)
+    do c = 0, nv - 1
+      do b = 1, nv - 1
+        do a = 0, b - 1
+          if (ok(vl(a) + vl(b) - vl(c) - ol(iocc))) call put(a + b * (b + 1) / 2 + pv * c)
+        end do
+      end do
+    end do
+  end select
+contains
+  logical function ok(s)
+    integer(8), intent(in) :: s
+    if (fmod > 0) then
+      ok = modulo(s, fmod) == 0
+    else
+      ok = s == 0
+    end if
+  end function ok
+  subroutine put(p)
+    integer(8), intent(in) :: p
+    cnt = cnt + 1
+    if (fill) pos(cnt) = p
+  end subroutine put
+end subroutine xzbidx
+
+! ---------------------------------------------------------------------------
+! An integral file of the small blocks or a file PPPH as a dense record of
+! complex numbers (n double words, as xzrfile reads it): the file itself,
+! or with the blocked files (blkin) the blocked file of the same integrals
+! (moinxxxx -> mobkxxxx, PPPHnnnn -> PPBKnnnn), its elements put in their
+! places and zero elsewhere.
+subroutine xzrint(kind, fname, buf, n)
+  use xzdata
+  implicit none
+  integer(8), intent(in) :: kind, n
+  character(len=*), intent(in) :: fname
+  complex(8), intent(out) :: buf(0:n/2-1)
+  character(len=8) :: bname
+  integer(8) :: flab(0:ntot-1), fmod, cnt, k, iocc, pos0(1)
+  integer(8), allocatable :: pos(:)
+  real(8), allocatable :: d(:)
+  integer :: ios
+  if (.not. blkin) then
+    call xzrfile(fname, buf, n)
+    return
+  end if
+  iocc = 0
+  if (kind == 5) then
+    bname = 'PPBK' // fname(5:8)
+    read(fname(5:8), *) iocc
+    iocc = iocc - 1
+  else
+    bname = 'mobk' // fname(5:8)
+  end if
+  call xzbhead(bname, kind, flab, fmod)
+  call xzbidx(kind, iocc, flab, fmod, pos0, cnt, .false.)
+  allocate(pos(max(cnt, 1_8)), d(max(cnt, 1_8)))
+  call xzbidx(kind, iocc, flab, fmod, pos, cnt, .true.)
+  read(71, iostat=ios) d(1:cnt)
+  close(71)
+  if (ios /= 0) then
+    write(6, '(/,a,a)') ' @XZCCSDT-F, reading the elements of the file ', trim(bname)
+    call xzerrex
+  end if
+  buf = (0d0, 0d0)
+  do k = 1, cnt
+    buf(pos(k)) = cmplx(d(k), 0d0, 8)
+  end do
+  deallocate(pos, d)
+end subroutine xzrint
+
+! ---------------------------------------------------------------------------
+! <ab||cd> for a<b, c<d from the blocked file mobkpppp, straight into the
+! blocks [Q][Q'] of the groups of pairs (the layout of xzrdvvvv at its end),
+! nwe words an element; nothing of the size of the dense record.  Its
+! columns c<d one record each, the rows a<b that the labels of the file
+! allow.  offmax: the largest element outside of the blocks of the groups
+! of this program.  inv, ig: nvp integers, sgf, col: nvp reals.
+subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax)
+  use xzdata
+  implicit none
+  real(8) :: v(0:*)
+  integer(8), intent(in) :: vpa(0:nvp-1), vpb(0:nvp-1)
+  integer(8) :: inv(0:nvp-1), ig(0:nvp-1)
+  real(8) :: sgf(0:nvp-1), col(0:nvp-1)
+  real(8), intent(out) :: offmax
+  integer(8) :: flab(0:ntot-1), fmod, vl(0:nv-1), q, a, b, c, d, f, g, qr, qc, n, lo, k, cnt, idx
+  integer(8) :: bb(0:maxgrp)
+  real(8) :: x
+  integer :: ios
+
+  call xzbhead('mobkpppp', 6_8, flab, fmod)
+  vl = flab(nfrozen + no:nfrozen + no + nv - 1)
+  ! the pair of the program and its sign for each strict pair of the file
+  do q = 0, nvp - 1
+    a = vperm(vpa(q))
+    b = vperm(vpb(q))
+    f = min(a, b) + max(a, b) * (max(a, b) - 1) / 2
+    inv(f) = q
+    sgf(f) = merge(1d0, -1d0, a < b)
+  end do
+  bb(0) = 0
+  do g = 0, npg - 1
+    do q = vpoff(g), vpoff(g + 1) - 1
+      ig(q) = g
+    end do
+    bb(g + 1) = bb(g) + (vpoff(g + 1) - vpoff(g)) ** 2
+  end do
+  v(0:nwe * nvv - 1) = 0d0
+  offmax = 0d0
+  do d = 1, nv - 1
+    do c = 0, d - 1
+      cnt = 0
+      do b = 1, nv - 1
+        do a = 0, b - 1
+          if (ok(vl(a) + vl(b) - vl(c) - vl(d))) cnt = cnt + 1
+        end do
+      end do
+      read(71, iostat=ios) col(0:cnt - 1)
+      if (ios /= 0) then
+        write(6, '(/,a)') ' @XZCCSDT-F, reading the file mobkpppp failed.'
+        call xzerrex
+      end if
+      f = c + d * (d - 1) / 2
+      qc = inv(f)
+      g = ig(qc)
+      lo = vpoff(g)
+      n = vpoff(g + 1) - lo
+      k = 0
+      do b = 1, nv - 1
+        do a = 0, b - 1
+          if (.not. ok(vl(a) + vl(b) - vl(c) - vl(d))) cycle
+          q = a + b * (b - 1) / 2
+          x = sgf(q) * sgf(f) * col(k)
+          k = k + 1
+          qr = inv(q)
+          if (ig(qr) /= g) then
+            offmax = max(offmax, abs(x))
+            cycle
+          end if
+          idx = bb(g) + (qr - lo) + n * (qc - lo)
+          v(nwe * idx) = x
+        end do
+      end do
+    end do
+  end do
+  close(71)
+contains
+  logical function ok(s)
+    integer(8), intent(in) :: s
+    if (fmod > 0) then
+      ok = modulo(s, fmod) == 0
+    else
+      ok = s == 0
+    end if
+  end function ok
+end subroutine xzrbvvvv
