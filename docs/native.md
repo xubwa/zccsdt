@@ -1203,6 +1203,10 @@ other ranks call `MCHPRM` and `GETMEM` of `liblibr.a` only.
   equations with constant terms (lambda of CCSDT(Q), the equations of the
   first derivatives of (Q)_Lambda: docs/lambda.md 11, 12); the densities of
   (Q) and (Q)_Lambda (the density of CCSDT is there: section 13).
+- The amplitude iterations with the Krylov solver of the Lambda equations
+  (Newton-Krylov / Anderson with the full history; section 11: Sc 49
+  instead of 77 cycles in an experiment); the Krylov vectors of Lambda in
+  the file in fewer passes (each cycle reads the subspace about six times).
 - The iterations over ranks: section 15.10 (what is not distributed - in
   blocks of the labels the small intermediates, a quarter of an iteration,
   are made by every rank with its own threads -; T3 shared between the
@@ -1566,10 +1570,13 @@ The equations and their factorization are those of `zccsdt.cc.lambda_opt`
 (docs/lambda.md, section 9; in blocks `lambda_blk`, 9.7): T1-dressed
 integrals, nothing conjugated, l1 and l2 dense, l3 and its residual stored
 as T3 is (the packed block, or the blocks of the labels).  Start from
-conj(t), Jacobi steps with DIIS (`xzdiis.F90`, the code of the amplitudes: 8
-vectors in the work array or their l3 parts in `XZDIIS`), converged when
-the largest element of the step over l1, l2, l3 is below 10^-`CC_CONV`
-(section 1; until 2026-10-13: |dL1| + |dL2| + |dL3| of the full tensors).
+conj(t), Jacobi steps accelerated by a Krylov subspace (since 2026-10-14,
+below: `xzlkry.inc`, up to 40 pairs of vectors in the work array or their l3
+parts in `XZLKRY`; with option `lsolver diis` DIIS as before, `xzdiis.F90`,
+the code of the amplitudes: 8 vectors in the work array or their l3 parts in
+`XZDIIS`), converged when the largest element of the Jacobi step over l1,
+l2, l3 is below 10^-`CC_CONV` (section 1; until 2026-10-13: |dL1| + |dL2| +
+|dL3| of the full tensors).
 The output has, per cycle, `1/4 sum <ab||ij> l2[ij][ab]` (the pseudo-energy
 that the Python tests compare), the three norms, the largest element and
 the time.  Lambda that is not converged is saved and continued as the
@@ -1602,7 +1609,8 @@ Nothing of this is written per element type: the `.inc` files are compiled
 for real and complex elements as the rest (section 3).
 
 **Memory.**  The regions, bottom to top: tables and integrals (section 4),
-T1, T2, T3 (from `XZAMPS`), l1, l2, l3, new l1 and l2, the DIIS vectors,
+T1, T2, T3 (from `XZAMPS`), l1, l2, l3, new l1 and l2, the vectors of the
+solver (the Krylov pairs, or the DIIS vectors),
 then what is kept for the iterations - `GmQ` and `GPd` (the operands of pass
 1: t2 with W_vvvo, t2 with W_vooo), `Bdrv` and `Adrv` (2 (o + v) rows and
 columns of the drive products), `~<ej||bg>` (o v^3, both orders of the pair),
@@ -1611,13 +1619,14 @@ setup or of an iteration, taken and released stage by stage: the batch
 buffers of pass 1 (two), of pass 2 (two), of the ladder (two and a batch of
 `X2`), and after the passes `Y2` on both orders of its pair (o v^3) with
 three (o v)^2 arrays for the residuals of rank 1 and 2.  T3, l3 and the
-residual are three regions of the size of T3 (the residual is a DIIS slot
-when the vectors are in the work array).  The plan is that of section 4: a
+residual are three regions of the size of T3 (the residual is a DIIS slot,
+or the image of the free Krylov pair, when the vectors are in the work
+array).  The plan is that of section 4: a
 dry run of `xzlam` after the layout (and after the dry run of the
 amplitude iterations in a run that does both), the floor checked before the
 large files are read, then `nbt`, `nbp`, `nba` raised one after the other,
-then the place of the DIIS vectors.  A run prints "the least that Lambda
-takes"; below it:
+then the place of the DIIS vectors, then the Krylov pairs (below).  A run
+prints "the least that Lambda takes"; below it:
 
     @XZCCSDT-F, the work array is too short for this calculation.
       words needed:          2861968   words there:          2800000
@@ -1635,6 +1644,168 @@ takes"; below it:
 (the cc-pVTZ cases: under Timings below.)  In blocks the floor is the dense operands,
 not l3: for the labelled HBr case 18.6 MB where the three T3-sized regions
 are 0.8 MB.
+
+### The solver: a Krylov subspace (`xzlkry.F90`, `xzlkry.inc`; 2026-10-14)
+
+**Why.**  The Lambda equations are linear in lambda, `R(L) = eta + L A`
+with A the Jacobian of CCSDT, and the Jacobi step `g(x) = R(x) / D` is
+affine: `g(x) = c + M x`, M = A / D.  A direction with an eigenvalue theta
+of M is contracted by `1 + theta` per Jacobi step; the eigenvalues of A are
+the excitation energies of EOM-CCSDT of the totally symmetric shift, so an
+open shell whose determinant has low excited states of the same m_j (a
+fine-structure partner, d-d and s-d excitations) has |theta| of 1e-3 to
+1e-1 against denominators of 0.3 to 0.6 Eh.  DIIS with 8 vectors loses
+these directions while it extrapolates over nearly parallel errors, and
+stalls; each restart from `XZLAMB` gains a factor and stalls again (the U
+atom of 2026-10-14: 234 cycles in chunks of 15 to 1e-8).
+
+**The reproducer**: the Sc atom, 2D (`%dglin` 8 8 / 3 2 / 0 0: the 3d
+electron in m_j = 3/2), cc-pVDZ-DK, X2C-1e, `DROPMO=1>5` (11 + 65 active
+spinors), real, 8 classes, CC_CONV=10; 0.14 s per Lambda cycle on 8 threads.
+DIIS: 14 cycles to 1.5e-5, then 1e-6 .. 1.3e-7 for cycles 30 to 200
+(`did not converge`); in chunks of 15 cycles with a new DIIS sequence each
+(as the U runs): 1.3e-8 after 900 cycles.  The orbital Hessian of the
+determinant (active spinors, m_j-conserving rotations) has its lowest
+eigenvalues at -0.0049, 0.0026 (real) and -0.0005, 0.0017 (imaginary)
+Eh - a saddle point in the parity-breaking rotations, 0.0031 / 0.0017 for
+the parity-conserving ones.  The softest direction of M that the solver
+finds (option `lritz`): theta = -0.00315 (contraction 0.99685; A eigenvalue
+about 0.0017 Eh, the 2D3/2 -> 2D5/2 splitting at this level), its largest
+l1 elements the singly occupied 3d (spinor 11, eps -0.343) -> virtuals of
+m_j 3/2 at 0.195 and 0.096 Eh; then a cluster at theta = -0.078, -0.084,
+-0.088, -0.097, -0.116 (contraction 0.92 .. 0.88).
+
+**The method** (Anderson's form of GMRES with the full history; one
+Jacobi step - one residual of the Lambda equations - per cycle, as DIIS):
+
+1. g = (x + g) - x, the step of the present lambda x; its largest element is
+   the test (CC_CONV) and the three norms are printed, as before;
+2. the difference to the previous cycle, (dx, dg) = (x - x', g - g'), is a
+   new pair: dg orthogonalized against the images s_i of the subspace
+   (classical Gram-Schmidt; a second time if the first took more than half
+   of its norm) and normalized, in the same pass; dx kept raw, the
+   directions b = dX T through a small triangular T;
+3. y = -S^H g minimizes |g + S y| (S orthonormal), and the next lambda is
+   `x + B y + (g + S y)`: the point of the subspace with the smallest step,
+   plus that step;
+4. when the subspace is full it is compacted (thick restart) to the
+   harmonic Ritz directions of M with the smallest |theta| -
+   (S^H B) y = y / theta - half of it: the soft directions stay, which a
+   short history loses.  The kept directions are orthonormalized in the
+   small space, so the images stay orthonormal; both sets are transformed
+   in place (`zc_vtransform`).
+
+**The singles of the step** are not r1 / D but delta with K delta = -r1, K
+the singles block of the Jacobian as the l1 residual has it (`xzlr1`:
+`delta_mi F_vv[a,e] - delta_ae F_oo[m,i] + W_ovvo[m,a,e,i]`, the dressed
+intermediates of the Lambda equations) on the singles that the labels allow
+(691 of 4424 for the U atom), LU-factorized once after the intermediates
+(rank 0; at most 6000 singles, else the denominators; option `lprec 0`:
+the denominators).  The fixed point is the same; the step is a better one
+for the excitations within the open shells (`-<ia||ia>`, the particle-hole
+attraction of a compact shell, is most of the difference between eps_a -
+eps_i and the excitation energy): the largest l1 element of the step of the
+U atom at a given cycle 5 to 8 times smaller, 101 instead of 126 cycles.
+
+The overlaps of a cycle are one pass over the images (`zc_vgram`, added to
+`csrc/t3pack.c`: blocks of all vectors in cache once).  The convergence
+measure is that of DIIS: the largest element of the Jacobi step at the
+present lambda (a residual, not an extrapolated estimate).
+
+**Storage and plan.**  A vector is (l1, l2 on pairs) - rank 0's, always in
+the work array - and l3 as stored.  Slots: the columns of the subspace, the
+previous iterate with its step, and a free slot into whose image region the
+next cycle writes its new l3 (no separate residual region in the work
+array).  The memory plan (section 4) places, after the DIIS vectors of the
+amplitudes, as many pairs as fit up to 40 (option `lkry`); if fewer than 10
+fit, the l3 parts go to the file `XZLKRY` of the run directory (40 pairs,
+as many as the disk holds, records that fit the work array), read and
+written in chunks, deleted at the end.  Over MPI ranks the solver is called
+where DIIS was: with slices (section 15) every rank holds the slice of its
+rows of every vector (its own `XZLKRY.<rank>` with files) and the overlaps
+are summed over the ranks, the small numbers broadcast from rank 0; without
+slices rank 0 alone.  A run that continues from `XZLAMB` starts a new
+subspace.  Option `lsolver diis`: DIIS as before.
+
+**Measured** (job 31994523, node c428, 8 threads; Lambda only, from
+`XZAMPS`; Lambda cycles):
+
+| case | DIIS | Krylov, default (40 pairs, singles block) | Krylov, `lprec 0` | Krylov stage / all |
+|---|---|---|---|---|
+| Sc 2D (11 + 65), CC_CONV=10 | not converged in 200 (1e-6 .. 1.3e-7); 900 in chunks of 15: 1.3e-8 | **73**; 97 with `lkry f12` (12 pairs, files) | 79; 77 with 63 pairs, 103 with 12 (work array or files), 81 at the floor of the work array (files, 28 pairs) | 3.1 of 12.8 s |
+| h2o_631g, CC_CONV=9 | 13 | 13 | 13 | |
+| hbr_fc, CC_CONV=10 | 16 | 14 | 15 | |
+| hbr_lab, hbr_ph, hbr_dglin_fc | 16 | 15 | 15 | |
+| hbr_dglin_fc_vc | 15 | 14 | 15 | |
+| hbrp_dglin_fc (HBr+) | 16 | 16 | 16 | |
+
+Sc: E(Q)_L -0.000395048222 in every Krylov run (12, 40, 63 pairs, in the
+file, 2 ranks with and without slices - their cycles those of the serial
+run in every printed digit -, at the floor of the work array, with and
+without the singles block); -0.000395048199 from the DIIS lambda of 900
+cycles (1.3e-8).  The regression cases: `regress.sh --tol --eom` serial and
+`--np 2` OK, every energy and density element within 1e-10, serial and 2
+ranks identical in every printed number.
+
+**The U atom** (CFOUR `%dg2lin` determinant, U:ADYVTZ-SO, 14 + 316 active
+spinors, real, 12 classes, T3 1370 MB; the production directory of
+2026-10-14 with its `XZAMPS`; lambda from conj(t), CC_CONV=8, one run each;
+bigmem nodes, 24 threads, `MEMORY=330GB`):
+
+| | DIIS (the production log: 16 threads, bigmem15) | Krylov, `lprec 0` (job 31996609, bigmem17, shared) | Krylov, default (job 31997464, bigmem19) |
+|---|---|---|---|
+| Lambda cycles to max\|dL\| < 1e-8 | 234, in 6 runs (104 + 71 + 4 x 15; each run a new DIIS) | **126**, one run | **101**, one run |
+| seconds per cycle | 31 | 32.6 (Krylov stage 3.6) | 24.2 (Krylov stage 2.6) |
+| Lambda wall | about 7300 s in the 6 runs (+ 6 x 70 s integrals, intermediates) | 4125 s | 2455 s |
+| Lambda plan / peak resident | 47.8 GB (8 DIIS vectors) / 50.4 GB | 137.9 GB (40 pairs: 109.6 GB) / 138.8 GB | 137.9 GB / 138.8 GB |
+| E[Q]_L | 0.000195642398 | 0.000195642416 | 0.000195642421 |
+| E(Q)_L | -0.001280128680 | -0.001280128534 | -0.001280128688 |
+
+The energies agree within the convergence of lambda (1e-8 in the largest
+element; DIIS 9.9e-9, Krylov 9.6e-9 and 9.9e-9).  The softest directions
+(`lritz 6` at the end): theta = -0.0251, -0.0301, -0.0460, -0.0607, -0.0735
++- 0.0021i (`lprec 0`; with the singles block -0.0276, -0.0310, -0.0540,
+...): contractions 0.975, 0.970 - the 0.97 of the stall; the first is in
+l1 the occupied spinor 9 (eps -0.355) -> virtual 180 (0.344) and the singly
+occupied 6d (spinor 13, eps -0.232) -> virtual 219 (0.118), the element the
+DIIS runs showed.  Late in the iterations the step of a cycle is often
+larger than the minimal residual of the cycle before (|g(x_k+1)| about 1.08
+|g + S y|): the Jacobi step expands some directions (theta below -2 or a
+non-normal transient), which DIIS cannot follow and the subspace can.
+
+**The anions U-** (15 + 315 spinors, T3 1698 MB, two determinants `Um1`,
+`Um2` of the production directory; Krylov default, one run each, jobs
+31999735 / 31999736, bigmem19 / bigmem17, 24 threads):
+
+| | DIIS (production log, 16 threads) | Krylov, default |
+|---|---|---|
+| Um1: Lambda cycles | 150 in 5 runs, then stopped at 4.0e-8 | **117**, one run, to 1e-8 (32.3 s per cycle, Krylov stage 3.1 s; 3789 s) |
+| Um1: E[Q]_L, E(Q)_L | 0.000196249706, -0.001367110959 (lambda at 4.0e-8, `CC_CONV=7`) | 0.000196249651, -0.001367111296 |
+| Um2: Lambda cycles | 207 in 8 runs, then stopped at 8.1e-8 | **92**, one run, to 1e-8 (37.4 s per cycle on a shared node, Krylov stage 4.2 s; 3460 s) |
+| Um2: E[Q]_L, E(Q)_L | 0.000146694203, -0.001712301114 (lambda at 8.1e-8, `CC_CONV=7`) | 0.000146693652, -0.001712310933 |
+| Lambda plan / peak resident | | 167.2 GB (40 pairs: 135.8 GB) / 168.1 GB |
+
+Softest directions theta = -0.0286 (Um1), -0.0268 (Um2), the singly occupied
+open shells (spinors 9, 14 of Um1; 9, 10 of Um2) to virtuals of the same
+m_j.  The difference of E(Q)_L of Um2 (1e-8 Eh) is that of the DIIS lambda
+at 8.1e-8: in a direction with theta = -0.027 the error of lambda is the
+residual divided by |theta|, 37 times the residual.  An independent Krylov run of Um2
+(`lprec 0`, job 32003950: 100 cycles, 3774 s) gives E(Q)_L -0.001712310932,
+E[Q]_L 0.000146693652: the two Krylov solutions agree to 1e-12 Eh.
+
+**The amplitude equations.**  The CCSDT iterations of the same cases are
+slow late for the same reason: near convergence their step is that of the
+same Jacobian (its right action; the same eigenvalues), so the soft
+directions of the Lambda equations are those of the T equations.  Measured
+on Sc (an experimental build that drives the T iterations through the same
+update; not in the program): CCSDT in 49 instead of 77 cycles, E(CCSDT)
+the same to 1e-12, and the harmonic Ritz value of the softest direction
+-0.00314 (Lambda: -0.00315).  What would fix it: the same subspace solver
+as a Newton-Krylov / Anderson method with the full history for the
+nonlinear equations (the T2 and T3 of a cycle change the Jacobian a little:
+compaction keeps the soft directions, refreshed by new differences), or
+DIIS with the soft directions of the Lambda (or EOM) subspace as a
+deflating preconditioner.  Not done (section 9).
 
 ### (Q)_Lambda (`xzq.inc`, `xzqs.inc`)
 
@@ -4275,6 +4446,7 @@ needs no option.
 | `mpichunk n` | 2^23 | words of an MPI message |
 | `qtasks n`, `qranks n` | from the ranks | tasks of (Q), ranks it is planned for (section 5) |
 | `diis m8` / `f8` / `m0` | planned | with `plan`: the DIIS vectors in memory / in the file, their number |
+| `lsolver diis` | krylov | the Lambda equations with the DIIS of the amplitudes instead of the Krylov solver (section 11) |
 | `plan 8 numbers` | planned | the batch sizes nqs nbt nbp nba qxv qc22 qc13 qrows (0: as planned) |
 | `cc3w n` | planned | CC3: elements of the work of a batch of occupied triples (at least one triple) |
 
@@ -4320,6 +4492,9 @@ package):
 | `cc4stop n` | CC4: the run stops after its n-th evaluation of the T4 terms (restart test, 19.5) |
 | `qcost file`, `bcost file` | the seconds of the tasks of (Q) / of the batches of the iterations |
 | `r0load a b` | a load of rank 0 by hand in the deal of the batches |
+| `lkry n`, `lkry m<n>`, `lkry f<n>` | the Krylov solver of the Lambda equations with up to n pairs of vectors (3 .. 63; default 40, as many as fit), in the work array / in the file `XZLKRY` (section 11) |
+| `lprec 0` | the Krylov solver: the singles of the step from the denominators instead of the singles block of the Jacobian (section 11) |
+| `lritz n` | the Krylov solver: per cycle the norm of the step and of the minimal residual, at the end the n harmonic Ritz values of the smallest \|theta\| and the largest l1 elements of the softest direction (section 11) |
 
 Checked (HBr / cc-pVDZ-DK with `%dglin`, `CALC=CC3`): no section - real, 6
 classes, E(CC3) -2604.989088528367; `cc3 stored` - ..366; `imagtol 1e-12`

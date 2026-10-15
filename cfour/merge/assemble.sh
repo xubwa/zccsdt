@@ -426,8 +426,8 @@ last step).  The program still stops with CFOUR's error, and says that the
 amplitudes are saved.  Run it again with the same ZMAT in the same
 directory - after a stop at CC_MAXCYC, a time limit or a crash: it says
 "the iterations CONTINUE from them" and goes on from the saved amplitudes
-(the DIIS vectors start anew: one or two cycles more in all than a run
-without the stop).  CCSDT continues CCSDT, CC3 continues CC3, never one the
+(the DIIS vectors - of lambda the Krylov subspace - start anew: one or two
+cycles more in all than a run without the stop).  CCSDT continues CCSDT, CC3 continues CC3, never one the
 other.  A write needs the space of the file a second time for a moment
 (XZAMPS.new, which then takes the name).
 
@@ -485,6 +485,10 @@ ordinary run needs none of them:
     hh pair          the hh ladder of dense T3 through occupied pairs
     qmap 0           (Q): T3 in the work array of every rank, not mapped
     eomvec f         EOM: the vectors of the subspace in files
+    lsolver diis     the Lambda equations with DIIS (8 vectors) instead of the
+                     Krylov solver (minimal residual over up to 40 directions,
+                     the default; it converges where DIIS stalls - open shells
+                     with low excited states of the same symmetry)
     slices 0, bpr n, rebal x, dist digits, mpichunk n, qtasks n, qranks n
                      the iterations and (Q) over MPI ranks (docs/native.md)
     diis m8|f8, plan <8 numbers>, cc3w n
