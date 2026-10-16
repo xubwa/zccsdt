@@ -41,10 +41,10 @@ module xzdist
   real(8), allocatable :: bsec(:, :)          ! seconds that this rank spent in it (all iterations)
   integer :: dkind = 0                        ! the kind of the loop that runs; 0: every batch is done
   logical :: asworker = .false.               ! a dry run for the memory of a rank other than 0
-  logical :: distk(ndk) = .true.              ! XZ_DIST: which kinds are dealt out (else all to rank 0)
+  logical :: distk(ndk) = .true.              ! dist: which kinds are dealt out (else all to rank 0)
   real(8) :: rplan(16) = 0d0                  ! the plan of rank 0: words of a worker, the 8 batch sizes
   integer(8) :: maxthr = 0                    ! the largest number of threads of a rank
-  ! ---- slices (more than one rank; XZ_SLICES=0: off): every rank owns a range of
+  ! ---- slices (more than one rank; slices=0: off): every rank owns a range of
   !      rows of T3 - the elements soff(r) <= e < soff(r + 1) of the stored
   !      array, cut at rows -, gets the residual of its rows from all ranks,
   !      does the operator on occupied triples, the Jacobi step and DIIS on
@@ -56,7 +56,7 @@ module xzdist
   integer(8) :: smax = 0                      ! elements of the longest slice
   real(8), allocatable :: rnode(:, :)         ! (2, rank) on rank 0: a number that names the node of the rank,
                                               ! the MB that the node could give when the program started
-  real(8) :: r0extra(2) = 0d0                 ! XZ_R0LOAD: what rank 0 does alone, as a fraction of the
+  real(8) :: r0extra(2) = 0d0                 ! r0load: what rank 0 does alone, as a fraction of the
                                               ! distributed work of an iteration (T3 equation, Lambda)
   ! seconds of this rank, (stage, 1 T3 equation / 2 Lambda): 1 pass 1, 2 the
   ! sweep with the pp ladder, 3 pass 2, 4 sums of pass 1, 5 sum of the
@@ -219,20 +219,20 @@ contains
     rload = 0d0
     ksec = 0d0
     nrebal = 0
-    ! XZ_DIST: the kinds that are dealt out, as digits ("123456": all, the default; "0": none)
+    ! dist: the kinds that are dealt out, as digits ("123456": all, the default; "0": none)
     distk = .true.
-    call get_environment_variable('XZ_DIST', arg, larg)
+    call x2c_getopt('xzccsdt', 'dist', arg, larg)
     if (larg > 0) then
       do kind = 1, ndk
         distk(kind) = index(arg(1:larg), achar(48 + kind)) > 0
       end do
     end if
     r0extra = 0d0
-    call get_environment_variable('XZ_R0LOAD', arg, larg)
+    call x2c_getopt('xzccsdt', 'r0load', arg, larg)
     if (larg > 0) read(arg(1:larg), *, end=10, err=10) r0extra
 10  continue
-    ! XZ_REBAL=x: deal again when the slowest rank is the fraction x above the mean (0: never)
-    call get_environment_variable('XZ_REBAL', arg, larg)
+    ! rebal=x: deal again when the slowest rank is the fraction x above the mean (0: never)
+    call x2c_getopt('xzccsdt', 'rebal', arg, larg)
     if (larg > 0) read(arg(1:larg), *, end=11, err=11) rebtol
 11  continue
     end if
@@ -289,7 +289,7 @@ contains
         lst(r + 1) = s
       end do
       load = 0d0
-      ! (XZ_R0LOAD: a load of rank 0 by hand, a fraction of the loop)
+      ! (r0load: a load of rank 0 by hand, a fraction of the loop)
       if (nrank > 1) load(0) = r0extra(merge(1, 2, kind <= 3)) * tot
       ! each batch to the rank that is done with it first: the seconds before
       ! its batches (pass 2: with those of its ladder), then its batches at
@@ -327,10 +327,10 @@ contains
     integer :: larg
     slices = .false.
     if (nrank == 1) return
-    ! (the default with more than one rank; XZ_SLICES=0: rank 0 sends T3,
+    ! (the default with more than one rank; slices=0: rank 0 sends T3,
     ! takes the sum of the residual and holds the DIIS vectors alone)
     slices = .true.
-    call get_environment_variable('XZ_SLICES', arg, larg)
+    call x2c_getopt('xzccsdt', 'slices', arg, larg)
     if (larg > 0) slices = arg(1:1) /= '0'
     if (.not. slices) return
     ! (the rows of a rank take the operator on occupied triples: not its pair form)
@@ -489,7 +489,7 @@ contains
     nrebal(set) = nrebal(set) + 1
   end subroutine
 
-  ! XZ_BCOST=file: the batches of this rank, their model cost and their
+  ! bcost=file: the batches of this rank, their model cost and their
   ! seconds, to file.<rank> (what the cost model is checked against)
   subroutine xzbdump()
     integer :: kind, larg
@@ -497,7 +497,7 @@ contains
     character(len=256) :: arg
     character(len=4) :: tag
     if (.not. allocated(bown)) return
-    call get_environment_variable('XZ_BCOST', arg, larg)
+    call x2c_getopt('xzccsdt', 'bcost', arg, larg)
     if (larg == 0) return
     write(tag, '(i4.4)') myrank
     open(unit=76, file=arg(1:larg) // '.' // tag, form='formatted', status='replace')

@@ -1,6 +1,6 @@
 !
 ! Amplitudes in CFOUR's order of the spinors, for tests between runs with
-! other labels or arithmetic (XZ_AMPOUT, XZ_AMPIN of xzcc.inc).  A stream
+! other labels or arithmetic (ampout, ampin of xzcc.inc).  A stream
 ! file:
 !
 !   no, nv, nto, nvt                       4 integers(8)
@@ -154,12 +154,12 @@ subroutine xzampr(w, kt1, kt2, kt3, fname, imag, forb)
   integer :: ios
   open(unit=75, file=fname, form='unformatted', access='stream', status='old', iostat=ios)
   if (ios /= 0) then
-    write(6, '(/,a,a)') ' @XZCCSDT-F, XZ_AMPIN: no file ', trim(fname)
+    write(6, '(/,a,a)') ' @XZCCSDT-F, ampin: no file ', trim(fname)
     call xzerrex
   end if
   read(75) h
   if (h(1) /= no .or. h(2) /= nv .or. h(3) /= nto .or. h(4) /= nvt) then
-    write(6, '(/,a,4i8)') ' @XZCCSDT-F, XZ_AMPIN: the file has other sizes: ', h
+    write(6, '(/,a,4i8)') ' @XZCCSDT-F, ampin: the file has other sizes: ', h
     call xzerrex
   end if
   allocate(c1(0:nv-1, 0:no-1), c2(0:nv-1, 0:nv-1, 0:no-1, 0:no-1), c3(0:nto*nvt-1))

@@ -97,7 +97,7 @@ integer(8) function xzpeak_q(w)
   call xzlayout(w, status)
   k = xzget(nwe * no * nv, 'T1')
   k = xzget(nwe * no * no * nv * nv, 'T2')
-  ! (T3 and Lambda3 of (Q): mapped files, not in the work array, unless XZ_QMAP=0)
+  ! (T3 and Lambda3 of (Q): mapped files, not in the work array, unless qmap=0)
   if (method /= 'MP2' .and. .not. t3shared) k = xzget(nwe * n3, 'T3')
   if (with_q .and. q_left) then
     k = xzget(nwe * no * no * nv * nv, 'Lambda2')
@@ -160,10 +160,10 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   plo(3) = 1
   phi(3) = max(1_8, min(npo, int(2d9 / (3d0 * 8 * nwe * f * frac), 8)))
   ! (with more than one rank the batches are what is dealt out: at least
-  ! bpr of them per rank, XZ_BPR, so that the cost model can balance the ranks)
+  ! bpr of them per rank, bpr, so that the cost model can balance the ranks)
   if (nrank > 1) then
     bpr = 8
-    call get_environment_variable('XZ_BPR', arg, larg)
+    call x2c_getopt('xzccsdt', 'bpr', arg, larg)
     if (larg > 0) read(arg(1:larg), *) bpr
     phi(2) = max(1_8, min(phi(2), nto / (max(bpr, 1_8) * nrank)))
     phi(3) = max(1_8, min(phi(3), npo / (max(bpr, 1_8) * nrank)))
@@ -302,8 +302,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     end do
   end if
   need_q = xzpeak_q(w)
-  ! a test hook: batch sizes given explicitly, XZ_PLAN="nqs nbt nbp nba qxv qc22 qc13 qrows"
-  call get_environment_variable('XZ_PLAN', length=larg)
+  ! a test hook: batch sizes given explicitly, plan="nqs nbt nbp nba qxv qc22 qc13 qrows"
+  call x2c_hasopt('xzccsdt', 'plan', larg)
   if (larg > 0) call explicit()
 
   nslot = pslot
@@ -347,7 +347,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       write(6, '(a,f10.1,a)') '        one copy in the page cache of a node for all its ranks: ', 8d-6 * nwe * n3, ' MB)'
     end if
   else if (with_q) then
-    write(6, '(a)') '       (private to a rank, T3 included: XZ_QMAP=0)'
+    write(6, '(a)') '       (private to a rank, T3 included: qmap=0)'
   end if
   if (.not. planq) then
   write(6, '(a,i8,a,i8)') '     rows of a slab of the dressed <ab||cd>:      ', nqs, '  of ', nqmax
@@ -373,7 +373,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     write(6, '(a,i8,a,i8)') '     (Q): rows (bc) of a step of Xv:              ', qrows, '  of ', nvp
   end if
   if (max(need_cc, need_q) > xzsize) then
-    write(6, '(/,a)') ' @XZCCSDT-F, the plan does not fit the work array (XZ_PLAN?).'
+    write(6, '(/,a)') ' @XZCCSDT-F, the plan does not fit the work array (plan?).'
     call xzerrex
   end if
   flush(6)
@@ -407,22 +407,22 @@ contains
     character(len=256) :: text
     integer(8) :: v(npar)
     integer :: kk, ios
-    call get_environment_variable('XZ_PLAN', text)
+    call x2c_getopt('xzccsdt', 'plan', text, kk)
     read(text, *, iostat=ios) v
     if (ios /= 0) then
-      write(6, '(a)') ' @XZCCSDT-F, XZ_PLAN: eight numbers expected.'
+      write(6, '(a)') ' @XZCCSDT-F, plan: eight numbers expected.'
       call xzerrex
     end if
     do kk = 1, npar
       if (v(kk) > 0) call setpar(kk, max(1_8, v(kk)))
     end do
-    call get_environment_variable('XZ_DIIS', arg, larg)
+    call x2c_getopt('xzccsdt', 'diis', arg, larg)
     if (larg > 0) then
       pfile = arg(1:1) == 'f' .or. arg(1:1) == 'F'
       if (larg > 1) read(arg(2:larg), *) pslot
     end if
     need_cc = xzpeak_cc(w)
     need_q = xzpeak_q(w)
-    write(6, '(a)') '     (batch sizes from XZ_PLAN)'
+    write(6, '(a)') '     (batch sizes from plan)'
   end subroutine
 end subroutine xzplan

@@ -154,8 +154,8 @@ contains
     do a = 1, enshift
       if (enr(a) <= 0) enr(a) = max(nroot0, 1_8)
     end do
-    ! a test hook: XZ_EOMCYC=n iterations at most (ESTATE_MAXCYC is in JOBARC, from xjoda)
-    call get_environment_variable('XZ_EOMCYC', line, ios)
+    ! a test hook: eomcyc=n iterations at most (ESTATE_MAXCYC is in JOBARC, from xjoda)
+    call x2c_getopt('xzccsdt', 'eomcyc', line, ios)
     if (ios > 0) read(line(1:ios), *, iostat=ios2) emaxcyc
   end subroutine xzeominp
 

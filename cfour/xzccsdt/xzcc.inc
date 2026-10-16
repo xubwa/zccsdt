@@ -58,9 +58,9 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   else
     call N(xzdiis_alloc)(nslot, usefile, nch)
   end if
-  ! XZ_START=ccsd: T1 and T2 of CFOUR's xx2cccsd as the start (its files
+  ! start=ccsd: T1 and T2 of CFOUR's xx2cccsd as the start (its files
   ! t1guess, t2guess of the run directory)
-  call get_environment_variable('XZ_START', dbg, ldbg)
+  call x2c_getopt('xzccsdt', 'start', dbg, ldbg)
   fromccsd = ldbg > 0 .and. (dbg(1:1) == 'c' .or. dbg(1:1) == 'C')
   if (fromccsd) then
     n = xzmark()
@@ -80,19 +80,19 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   call zc_vzero_d(NW * n3, w(jt3))
   call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
   eold = dble(e)
-  ! XZ_AMPIN=file: one step on the amplitudes of the file (CFOUR's order,
-  ! xzampio.f90; written by XZ_AMPOUT), the new ones to file.out, and the
+  ! ampin=file: one step on the amplitudes of the file (CFOUR's order,
+  ! xzampio.f90; written by ampout), the new ones to file.out, and the
   ! largest change of T1, T2, T3: a test of the step between runs with other
   ! labels or arithmetic (converged amplitudes: no change)
-  call get_environment_variable('XZ_AMPIN', dbg, ldbg)
+  call x2c_getopt('xzccsdt', 'ampin', dbg, ldbg)
   if (ldbg > 0) then
     if (nrank > 1) then
-      write(6, '(/,a)') ' @XZCCSDT-F, XZ_AMPIN runs with one rank only.'
+      write(6, '(/,a)') ' @XZCCSDT-F, ampin runs with one rank only.'
       call xzerrex
     end if
     if (.not. xzdry) then
       call xzampr(w, jt1, jt2, jt3, dbg(1:ldbg), ctl(1), ctl(2))
-      write(6, '(/,a,a,a,es10.2,a,es10.2)') '   XZ_AMPIN: ', dbg(1:ldbg), ': imaginary parts dropped ', ctl(1), &
+      write(6, '(/,a,a,a,es10.2,a,es10.2)') '   ampin: ', dbg(1:ldbg), ': imaginary parts dropped ', ctl(1), &
         ', elements of T3 that the labels forbid ', ctl(2)
     end if
     kr3 = N(xzdiis_target)()
@@ -101,7 +101,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
       norms(1) = xzmaxd(NW * no * nv, w(jt1), w(kt1n))
       norms(2) = xzmaxd(NW * no * no * nv * nv, w(jt2), w(kt2n))
       norms(3) = xzmaxd(NW * n3, w(jt3), w(kr3))
-      write(6, '(a,3es12.3)') '   XZ_AMPIN: largest change of T1, T2, T3 in one step:', norms
+      write(6, '(a,3es12.3)') '   ampin: largest change of T1, T2, T3 in one step:', norms
       call xzampw(w, kt1n, kt2n, kr3, dbg(1:ldbg) // '.out')
     end if
     call N(xzdiis_close)()
@@ -111,9 +111,9 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     ncyc = 0
     return
   end if
-  call get_environment_variable('XZ_DEBUG', dbg, ldbg)
+  call x2c_getopt('xzccsdt', 'debug', dbg, ldbg)
   if (ldbg > 0 .and. nrank > 1) then
-    write(6, '(/,a)') ' @XZCCSDT-F, XZ_DEBUG (one step from a file) runs with one rank only.'
+    write(6, '(/,a)') ' @XZCCSDT-F, debug (one step from a file) runs with one rank only.'
     call xzerrex
   end if
   if (ldbg > 0) then
@@ -129,7 +129,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     write(74) w(kt1n:kt1n + NW * no * nv - 1), w(kt2n:kt2n + NW * no * no * nv * nv - 1), &
               w(kr3:kr3 + NW * n3 - 1)
     close(74)
-    write(6, '(a,a)') ' XZ_DEBUG: one step written to ', dbg(1:ldbg) // '.out'
+    write(6, '(a,a)') ' debug: one step written to ', dbg(1:ldbg) // '.out'
     call N(xzdiis_close)()
     call xzrel(m0)
     ecorr = eold
@@ -208,8 +208,8 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     call xzmpi_bcast(ctl, 16_8)
   end if
   ecorr = eold
-  ! XZ_AMPOUT=file: the amplitudes in CFOUR's order (xzampio.f90)
-  call get_environment_variable('XZ_AMPOUT', dbg, ldbg)
+  ! ampout=file: the amplitudes in CFOUR's order (xzampio.f90)
+  call x2c_getopt('xzccsdt', 'ampout', dbg, ldbg)
   if (ldbg > 0 .and. .not. xzdry .and. myrank == 0) call xzampw(w, jt1, jt2, jt3, dbg(1:ldbg))
   call N(xzdiis_close)()
   call xzrel(m0)
@@ -301,11 +301,11 @@ subroutine N(xzccsdstart)(no, nv, b1, b2, t1, t2)
   inquire(file='t1guess', exist=e1, size=s1)
   inquire(file='t2guess', exist=e2, size=s2)
   if (.not. (e1 .and. e2)) then
-    write(6, '(/,a)') ' @XZCCSDT-W, XZ_START=ccsd: no files t1guess, t2guess (xx2cccsd writes them); second-order start.'
+    write(6, '(/,a)') ' @XZCCSDT-W, start=ccsd: no files t1guess, t2guess (xx2cccsd writes them); second-order start.'
     return
   end if
   if (xzrecbytes(s1) /= 8 * n1 .or. xzrecbytes(s2) /= 8 * n2) then
-    write(6, '(/,a)') ' @XZCCSDT-W, XZ_START=ccsd: t1guess, t2guess are not of this calculation (sizes); second-order start.'
+    write(6, '(/,a)') ' @XZCCSDT-W, start=ccsd: t1guess, t2guess are not of this calculation (sizes); second-order start.'
     return
   end if
   call xzrfile('t1guess', b1, n1)
@@ -313,7 +313,7 @@ subroutine N(xzccsdstart)(no, nv, b1, b2, t1, t2)
 #ifdef XZ_REAL
   big = max(maxval(abs(aimag(b1))), maxval(abs(aimag(b2))))
   if (big > 1d-8) then
-    write(6, '(/,a,es10.2,a)') ' @XZCCSDT-W, XZ_START=ccsd: the amplitudes of t1guess, t2guess are not real (', big, &
+    write(6, '(/,a,es10.2,a)') ' @XZCCSDT-W, start=ccsd: the amplitudes of t1guess, t2guess are not real (', big, &
       '); second-order start.'
     return
   end if
@@ -402,7 +402,7 @@ subroutine N(xzamps)(w, rw, ecorr)
     write(6, '(a,5i12)') '   occupied, virtual, words per element, classes, T3 in the file: ', head
     write(6, '(a,5i12)') '   and here:                                                      ', no, nv, &
       int(NW, 8), ncls, n3
-    write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: XZ_LABELS, XZ_REAL)'
+    write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: labels, real)'
     call xzerrex
   end if
   read(77, iostat=ios) w(jt1:jt1 + n1 - 1)

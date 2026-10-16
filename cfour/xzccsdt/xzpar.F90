@@ -22,9 +22,9 @@
 !
 ! Restart: every rank appends a line per finished task to its file
 ! XZQCHK.<rank> (task, its two energies, seconds).  A later run with the
-! same task list (the same number of ranks, or the same XZ_QTASKS) takes
+! same task list (the same number of ranks, or the same qtasks) takes
 ! the finished tasks of all such files as done.  The same lines give the
-! progress report; XZ_QSAMPLE=f does the fraction f of the quadruples of
+! progress report; qsample=f does the fraction f of the quadruples of
 ! every task, evenly spread, and extrapolates the time.
 !
 module xzpar
@@ -145,7 +145,7 @@ module xzpar
   real(8), allocatable :: te(:, :)                   ! (2, task): its parts of E[Q] and E(Q) - E[Q]
   real(8), allocatable :: tsec(:)                    ! seconds it took
   logical, allocatable :: tdone(:)
-  real(8) :: qsample = 0d0                           ! XZ_QSAMPLE: fraction of the quadruples (0: all)
+  real(8) :: qsample = 0d0                           ! qsample: fraction of the quadruples (0: all)
   character(len=8) :: qkind = '(Q)'                  ! what is on the left: '(Q)' or '(Q)_L'
   real(8), allocatable :: qcli(:, :)                 ! (i, l): cost of the quadruples i<j<k<l of one i and l
   real(8), allocatable :: xcl(:, :)                  ! (x, l): cost of Xv(x, l)
@@ -274,7 +274,7 @@ contains
   !              they need (x from their smallest i on): that repeat is
   !              accepted, it is a small part of a piece (section 14).
   !   want > 0   about that many tasks of equal numbers of quadruples
-  !              (XZ_QTASKS: tests of the list and of restart)
+  !              (qtasks: tests of the list and of restart)
   subroutine xzq_build(no, want)
     integer(8), intent(in) :: no, want
     integer(8) :: npc(0:no-1), best(0:no-1), l, n, it, big, total, nql, step

@@ -119,10 +119,10 @@ module xzdata
   logical :: with_eom = .false.     ! excited states are: EOM-EE-CCSDT (xzeom.inc)
   ! (Q) reads T3 (and Lambda3) where the files XZAMPS (XZLAMB) are mapped,
   ! read-only: one copy in the page cache of a node for all its ranks, not
-  ! in the work array (XZ_QMAP=0: a private copy in the work array)
+  ! in the work array (qmap=0: a private copy in the work array)
   logical :: t3shared = .false.
   logical :: sizes_set = .false.    ! xzsizes was called (a rank other than 0, before its work array)
-  logical :: den_active = .false.   ! XZ_DEN_ACTIVE: the files of the active spinors alone (a test hook)
+  logical :: den_active = .false.   ! den_active: the files of the active spinors alone (a test hook)
   real(8) :: conv_e = 1d-9, conv_t = 1d-7
   integer(8) :: maxcyc = 50
   integer(8) :: ndiis = 8           ! DIIS vectors asked for
@@ -218,10 +218,10 @@ module xzdata
   integer(8) :: natmax = 0          ! virtual triples of the largest group
   integer(8) :: jqkv = 0, jqlid = 0, jqlst = 0, jqlmem = 0, jqposv = 0, jqposq = 0, jqpos3 = 0, jqtri = 0
 
-  logical :: qdebug = .false.       ! print the parts of (Q) (XZ_QDEBUG)
+  logical :: qdebug = .false.       ! print the parts of (Q) (qdebug)
   real(8) :: qparts(4) = 0d0
   logical :: qsampled = .false.     ! (Q) ran in sample mode: its energies are not (Q)
-  logical :: timing_run = .false.   ! XZ_NCYC: a fixed number of cycles, nothing is converged
+  logical :: timing_run = .false.   ! ncyc: a fixed number of cycles, nothing is converged
 
   ! ---- wall and CPU times of the stages, by name, in the order of their
   !      first use.  Sets: 1 the CCSDT iterations, 2 the iterations of the
@@ -365,12 +365,12 @@ contains
 
   ! The hh ladder and F_oo of dense T3 with the operator on occupied triples
   ! (xzo6, one GEMM: the default) or through occupied pairs (xzwpair,
-  ! xzhhapply: XZ_HH=pair).  The pair form has (o-2)**2 / (9 o) times fewer
+  ! xzhhapply: hh=pair).  The pair form has (o-2)**2 / (9 o) times fewer
   ! operations, but its gather and reduction are bound by the memory: measured
   ! for 26 occupied spinors it is faster on 8 threads and slower on 16 and
   ! more (docs/native.md), so it is an option.  In blocks of the labels the
   ! operator on triples is used in any case.
-  ! a test hook: XZ_TERMS=digits leaves out parts of the T3 equation in a step
+  ! a test hook: terms=digits leaves out parts of the T3 equation in a step
   ! (dense and blocked alike): 1 the pp ladder, 2 pass 2 (ring and drive
   ! terms), 3 the operator on the occupied triples (hh ladder, F_oo); 4 the
   ! ring terms of pass 2, 5 its drive terms
@@ -379,7 +379,7 @@ contains
     character(len=16), save :: terms = '?'
     integer :: larg
     if (terms == '?') then
-      call get_environment_variable('XZ_TERMS', terms, larg)
+      call x2c_getopt('xzccsdt', 'terms', terms, larg)
       if (larg == 0) terms = ' '
     end if
     xzskip = index(terms, char(ichar('0') + k)) > 0
@@ -390,7 +390,7 @@ contains
     integer :: larg
     if (hhset == 0) then
       hhset = 1
-      call get_environment_variable('XZ_HH', arg, larg)
+      call x2c_getopt('xzccsdt', 'hh', arg, larg)
       if (larg > 0) then
         if (arg(1:1) == 'p') hhset = 2
         if (arg(1:1) == 'o') hhset = 1

@@ -7,10 +7,10 @@
 !            the file dgcosym of CFOUR's SCF if that was done in more than
 !            one block (%dglin: 2 m_j), are used - the spinors in the order
 !            of their classes, T3 and <ab||cd> on the allowed blocks only -
-!            provided no integral that they forbid is larger than 1e-8 (XZ_LABTOL);
+!            provided no integral that they forbid is larger than 1e-5 (labtol);
 !            otherwise the labels are dropped with a warning (one class: the
 !            dense case of the same code)
-!   real     if no integral has an imaginary part above 1e-10, the real
+!   real     if no integral has an imaginary part above 1e-5, the real
 !            instance of the code runs (half the memory, real kernels)
 ! The integrals are read for the most favourable case first (labels, real);
 ! what does not hold shows in the small blocks, which are read first, and the
@@ -40,8 +40,8 @@ subroutine xzdrv(w, maxcor)
 
   twall = omp_get_wtime()
   call xzinit(loc(w(1)), maxcor)
-  ! (a test hook: XZ_MAXCOR words of the work array are used)
-  call get_environment_variable('XZ_MAXCOR', arg, larg)
+  ! (a test hook: maxcor words of the work array are used)
+  call x2c_getopt('xzccsdt', 'maxcor', arg, larg)
   if (larg > 0 .and. myrank == 0) then
     read(arg, *) nmax
     xzsize = min(xzsize, nmax)
@@ -70,15 +70,15 @@ subroutine xzdrv(w, maxcor)
       xzmpi_chunk(), ' words)'
   end if
   call xzreuse()
-  ! (Q) reads T3 (and Lambda3) where the files are mapped unless XZ_QMAP=0
+  ! (Q) reads T3 (and Lambda3) where the files are mapped unless qmap=0
   t3shared = with_q
-  call get_environment_variable('XZ_QMAP', arg, larg)
+  call x2c_getopt('xzccsdt', 'qmap', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0') t3shared = .false.
-  if (with_q .and. .not. t3shared) write(6, '(a)') '   XZ_QMAP=0: (Q) with a private copy of T3 in the work array of every rank'
+  if (with_q .and. .not. t3shared) write(6, '(a)') '   qmap=0: (Q) with a private copy of T3 in the work array of every rank'
   if (t3shared .and. xz_fs_local('.' // c_null_char) == 0) then
     write(6, '(a)') ' @XZCCSDT-W, the run directory is on a network file system: (Q) maps the file XZAMPS there'
     write(6, '(a)') '             (one copy of T3 in the page cache of every node; pages are read over the network'
-    write(6, '(a)') '             when they are first needed or after the system has dropped them).  XZ_QMAP=0 reads'
+    write(6, '(a)') '             when they are first needed or after the system has dropped them).  qmap=0 reads'
     write(6, '(a)') '             T3 into the work array of every rank instead.'
   end if
   if (ilp64 /= 1) then
@@ -122,15 +122,15 @@ subroutine xzdrv(w, maxcor)
   end if
   have_labels = there
   uselab = there
-  call get_environment_variable('XZ_LABELS', arg, larg)
+  call x2c_getopt('xzccsdt', 'labels', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0' .and. uselab) then
-    write(6, '(a)') '   XZ_LABELS=0: the labels are not used'
+    write(6, '(a)') '   labels=0: the labels are not used'
     uselab = .false.
   end if
   tryreal = .true.
-  call get_environment_variable('XZ_REAL', arg, larg)
+  call x2c_getopt('xzccsdt', 'real', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0') then
-    write(6, '(a)') '   XZ_REAL=0: complex arithmetic whatever the integrals'
+    write(6, '(a)') '   real=0: complex arithmetic whatever the integrals'
     tryreal = .false.
   end if
 
@@ -141,8 +141,8 @@ subroutine xzdrv(w, maxcor)
   docc = with_cc
   planq = .not. (with_cc .or. with_lam .or. with_den .or. with_eom)
   if (with_den .and. .not. (with_cc .or. with_lam) .and. myrank > 0) return
-  ! (a test hook: XZ_DEN_ACTIVE=1 writes the files of the active spinors alone)
-  call get_environment_variable('XZ_DEN_ACTIVE', arg, larg)
+  ! (a test hook: den_active=1 writes the files of the active spinors alone)
+  call x2c_getopt('xzccsdt', 'den_active', arg, larg)
   den_active = larg > 0
   if (method == 'MP2' .and. myrank > 0) return
   sync = 0d0
@@ -217,10 +217,10 @@ subroutine xzdrv(w, maxcor)
     rplan(13:15) = dble([ncls, nwe, n3])
     call xzmpi_bcast(rplan, 128_8)
   end if
-  ! (a test hook: XZ_WFAIL, an error on a rank other than 0)
-  call get_environment_variable('XZ_WFAIL', length=larg)
+  ! (a test hook: wfail, an error on a rank other than 0)
+  call x2c_hasopt('xzccsdt', 'wfail', larg)
   if (larg > 0 .and. myrank > 0) then
-    write(6, '(a)') ' @XZCCSDT-F, XZ_WFAIL: a test of the exit of a rank other than 0.'
+    write(6, '(a)') ' @XZCCSDT-F, wfail: a test of the exit of a rank other than 0.'
     call xzerrex
   end if
   ! the batches of the iterations, dealt to the ranks
@@ -245,12 +245,12 @@ subroutine xzdrv(w, maxcor)
   end if
   if (docc .and. myrank == 0) then
     if (.not. converged .and. timing_run) then
-      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, XZ_NCYC: CCSDT stopped after ', maxcyc, &
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, ncyc: CCSDT stopped after ', maxcyc, &
         ' cycles; the amplitudes and what follows are NOT converged.'
       converged = .true.
     end if
     if (.not. converged) then
-      call get_environment_variable('XZ_DEBUG', length=larg)
+      call x2c_hasopt('xzccsdt', 'debug', larg)
       if (larg == 0) write(6, '(/,a,i5,a)') ' @XZCCSDT-F, CCSDT did not converge in ', maxcyc, &
         ' cycles (CC_MAXCYC).'
       call xzmpi_bcast(sync, 16_8)
@@ -323,7 +323,7 @@ subroutine xzdrv(w, maxcor)
   end if
   if (with_lam .and. myrank == 0) then
     if (.not. converged .and. timing_run) then
-      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, XZ_NCYC: the Lambda equations stopped after ', maxcyc, &
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, ncyc: the Lambda equations stopped after ', maxcyc, &
         ' cycles; lambda and what follows are NOT converged.'
       converged = .true.
     end if
@@ -390,9 +390,9 @@ subroutine xzdrv(w, maxcor)
       call xzeom_d(w, ecorr)
     end if
     teom = omp_get_wtime() - t0
-    call get_environment_variable('XZ_EOMTEST', length=larg)
+    call x2c_hasopt('xzccsdt', 'eomtest', larg)
     if (larg > 0) return
-    call get_environment_variable('XZ_EOMSIG', length=larg)
+    call x2c_hasopt('xzccsdt', 'eomsig', larg)
     if (larg > 0) return
     call xztable(5, 'EOM: the intermediates and the sigma vectors', teomim + teomsig + teomsd, neomsig)
   end if
@@ -610,8 +610,8 @@ subroutine xzjob()
   conv_e = 10d0 ** (-abs(iflags(4)))
   maxcyc = iflags(7)
   if (maxcyc <= 0) maxcyc = 50
-  ! a timing run: XZ_NCYC cycles of every iteration, converged or not
-  call get_environment_variable('XZ_NCYC', arg, larg)
+  ! a timing run: ncyc cycles of every iteration, converged or not
+  call x2c_getopt('xzccsdt', 'ncyc', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *) maxcyc
     timing_run = .true.
@@ -636,7 +636,7 @@ end subroutine xzjob
 ! XZAMPS is taken, XZLAMB is lambda of these amplitudes (its header, the
 ! CCSDT energy) and its CC_CONV is not smaller.  The labels and the
 ! arithmetic (real or complex) are decided again from the same files; a
-! file of another mode (XZ_LABELS, XZ_REAL changed) stops the run when it is
+! file of another mode (labels, real changed) stops the run when it is
 ! read.  Rank 0 decides, the other ranks are told.
 subroutine xzreuse()
   use xzdata
@@ -1036,23 +1036,22 @@ subroutine xzlayout(w, status)
 
   status = 0
   ! the largest integral that the labels forbid, and the largest imaginary part, that are
-  ! taken as zero: 1e-8 and 1e-10; XZ_LABTOL and XZ_IMAGTOL give other values (a basis
-  ! with very large exponents leaves more than 1e-8 in the integrals of CFOUR's chain)
+  ! taken as zero: 1e-5 both; labtol and imagtol of %xzccsdt give other values
   tol_label = 1d-5
   tol_imag = 1d-5
-  call get_environment_variable('XZ_LABTOL', targ, ltarg)
+  call x2c_getopt('xzccsdt', 'labtol', targ, ltarg)
   if (ltarg > 0) then
     read(targ(1:ltarg), *, iostat=ios) tol_label
-    if (ios /= 0 .or. tol_label <= 0d0) tol_label = 1d-8
+    if (ios /= 0 .or. tol_label <= 0d0) tol_label = 1d-5
   end if
-  call get_environment_variable('XZ_IMAGTOL', targ, ltarg)
+  call x2c_getopt('xzccsdt', 'imagtol', targ, ltarg)
   if (ltarg > 0) then
     read(targ(1:ltarg), *, iostat=ios) tol_imag
-    if (ios /= 0 .or. tol_imag <= 0d0) tol_imag = 1d-10
+    if (ios /= 0 .or. tol_imag <= 0d0) tol_imag = 1d-5
   end if
-  if ((tol_label /= 1d-8 .or. tol_imag /= 1d-10) .and. .not. xzdry .and. .not. told) write(6, '(a,es9.2,a,es9.2,a)') &
-    '   tolerances of the integrals: ', tol_label, ' for what the labels forbid (XZ_LABTOL), ', tol_imag, &
-    ' for imaginary parts (XZ_IMAGTOL)'
+  if ((tol_label /= 1d-5 .or. tol_imag /= 1d-5) .and. .not. xzdry .and. .not. told) write(6, '(a,es9.2,a,es9.2,a)') &
+    '   tolerances of the integrals: ', tol_label, ' for what the labels forbid (labtol), ', tol_imag, &
+    ' for imaginary parts (imagtol)'
   if (.not. xzdry) told = .true.
   po = no * (no + 1) / 2
   pv = nv * (nv + 1) / 2
@@ -1143,7 +1142,7 @@ subroutine xzlayout(w, status)
       end do
       if (ximag > tol_imag) then
         write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of the integrals: ', ximag, &
-          ' (above the tolerance ', tol_imag, ', XZ_IMAGTOL: complex arithmetic)'
+          ' (above the tolerance ', tol_imag, ', imagtol: complex arithmetic)'
         status = 2
         return
       end if
@@ -1180,7 +1179,7 @@ subroutine xzlayout(w, status)
       call xzrbvvvv(w(jvvvv), w(jvpa), w(jvpb), w(ksrc), w(ksrc + nvp), w(ksg), w(krow), offmax, ximag)
       if (nwe == 1 .and. ximag > tol_imag) then
         write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', ximag, &
-          ' (above the tolerance ', tol_imag, ', XZ_IMAGTOL: complex arithmetic)'
+          ' (above the tolerance ', tol_imag, ', imagtol: complex arithmetic)'
         status = 2
         return
       end if
@@ -1217,7 +1216,7 @@ subroutine xzlayout(w, status)
       ximag = xzimag(nvv, w(jvvvv))
       if (ximag > tol_imag) then
         write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', ximag, &
-          ' (above the tolerance ', tol_imag, ', XZ_IMAGTOL: complex arithmetic)'
+          ' (above the tolerance ', tol_imag, ', imagtol: complex arithmetic)'
         status = 2
         return
       end if
@@ -1393,8 +1392,8 @@ end subroutine xzrankmem
 ! The start of the ranks (called by every rank after the flags of joda went
 ! round): the largest number of threads of a rank - the memory plan of a
 ! rank has buffers per thread, and rank 0 plans for all -, and the test of
-! the chunked transfers (XZ_MPITEST=n: arrays of n words through every
-! routine, with the chunk of XZ_MPICHUNK).
+! the chunked transfers (mpitest=n: arrays of n words through every
+! routine, with the chunk of mpichunk).
 subroutine xzmpistart()
   use xzpar
   use xzdist
@@ -1413,13 +1412,13 @@ subroutine xzmpistart()
   call xznodes()
   if (myrank == 0 .and. b(1) /= -b(2)) write(6, '(a,i4,a,i4,a)') ' @XZCCSDT-W, the ranks have between ', &
     nint(-b(2)), ' and ', nint(b(1)), ' threads: the memory of every rank is planned for the largest number.'
-  call get_environment_variable('XZ_MPITEST', arg, larg)
+  call x2c_getopt('xzccsdt', 'mpitest', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *) n
     a = [dble(xzmpi_selftest(n)), 0d0]
     b = a
     call xzmpi_max(a, b, 1_8)
-    if (myrank == 0) write(6, '(a,i12,a,i10,a,i4,a,i12)') ' XZ_MPITEST: arrays of ', n, ' words in messages of ', &
+    if (myrank == 0) write(6, '(a,i12,a,i10,a,i4,a,i12)') ' mpitest: arrays of ', n, ' words in messages of ', &
       xzmpi_chunk(), ' words over ', nrank, ' ranks; wrong words (largest count of a rank): ', nint(b(1), 8)
     if (myrank == 0 .and. b(1) /= 0d0) call xzerrex
   end if
@@ -1443,12 +1442,12 @@ subroutine xzmapt3(w, name, nskip, n3w, j3)
   if (addr == 0 .or. nbytes /= 56 + 8 * (nskip + n3w)) then
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', name, ' could not be mapped (or has another length than its header says).'
     write(6, '(a,i16,a,i16)') '   bytes mapped: ', nbytes, '   expected: ', 56 + 8 * (nskip + n3w)
-    write(6, '(a)') '   XZ_QMAP=0 reads T3 into the work array of every rank instead.'
+    write(6, '(a)') '   qmap=0 reads T3 into the work array of every rank instead.'
     call xzerrex
   end if
   diff = addr + 56 + 8 * nskip - loc(w(1))
   if (mod(diff, 8_8) /= 0) then
-    write(6, '(/,a,a,a)') ' @XZCCSDT-F, the map of the file ', name, ' is not aligned with the work array; use XZ_QMAP=0.'
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, the map of the file ', name, ' is not aligned with the work array; use qmap=0.'
     call xzerrex
   end if
   j3 = diff / 8 + 1

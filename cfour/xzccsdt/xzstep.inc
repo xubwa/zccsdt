@@ -381,7 +381,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   end if
   kbd = kd
   tsg = omp_get_wtime()
-  ! (the test hook XZ_TERMS: 4 the ring terms of pass 2 left out, 5 its
+  ! (the test hook terms: 4 the ring terms of pass 2 left out, 5 its
   ! drive terms; their operands set to zero, dense and blocked alike)
   if (.not. xzdry) then
     if (xzskip(4)) call zc_vzero_d(NW * ov2, w(kwring))
