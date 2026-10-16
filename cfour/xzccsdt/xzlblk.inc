@@ -46,6 +46,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   nth = omp_get_max_threads()
   nrmax = 0
   do delta = dlo, dhi
+    if (.not. xzcan(delta)) cycle
     nrmax = max(nrmax, ndel(delta))
   end do
   m0 = xzmark()
@@ -252,6 +253,7 @@ subroutine N(xzlbdr)(dd, d0, dr, d1)
   ZT :: dr(0:no*nv-1, 0:no*nv-1), d1(0:no*nv-1)
   integer(8) :: idx(0:no*nv-1), delta, sa, si, a, i, n, r, c
   do delta = dlo, dhi
+    if (.not. xzcan(delta)) cycle
     n = 0
     do sa = 0, ncls - 1
       si = xzw(sa - delta)

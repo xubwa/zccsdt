@@ -137,7 +137,7 @@ end subroutine xzmaps
 subroutine xzt3lay(no, nv, npo, nvp, nto, nvt, nc, ocls, vcls, otoff, vtoff, vtri, vsgn, ocoff, vcoff, &
                    boff, n3, obase, vcol, osig, vsig, vci, rowpos)
   ! (the groups as in xzsetmode: ntg of them; the differences dlo .. dhi, xzw)
-  use xzdata, only: xzw, ntg, dlo, dhi
+  use xzdata, only: xzw, xzcan, ntg, dlo, dhi
   implicit none
   integer(8), intent(in) :: no, nv, npo, nvp, nto, nvt, nc
   integer(8), intent(in) :: ocls(0:no-1), vcls(0:nv-1)
@@ -174,6 +174,7 @@ subroutine xzt3lay(no, nv, npo, nvp, nto, nvt, nc, ocls, vcls, otoff, vtoff, vtr
   end do
   rowpos = -1
   do delta = dlo, dhi
+    if (.not. xzcan(delta)) cycle
     pos = 0
     do sa = 0, nc - 1
       si = xzw(sa - delta)

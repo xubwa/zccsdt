@@ -54,10 +54,6 @@ module xzdata
   integer(8) :: mgrp = 0            ! the sums of classes modulo mgrp (0: not modular)
   integer(8) :: modulus2 = 0        ! the modulus of the second label (0: none)
   integer(8) :: gB = 0, gm2 = 0     ! the second digit of a class: gB, its modulus (0: one label)
-  ! the second label only in real arithmetic: with complex integrals (C2h) the
-  ! two digits together give a wrong CCSDT energy (each label alone is right;
-  ! not understood yet), so it is left out there
-  logical :: use2nd = .true.
   integer(8) :: dlo = 0, dhi = 0    ! the range of a difference of two classes (delta)
   integer(8) :: q4hi = 0, q2hi = 0  ! the largest sum of 4, of 2 classes ((Q) sectors)
   integer(8) :: ncls = 1            ! classes of the labels: (label - smallest) / step
@@ -257,6 +253,15 @@ contains
     end if
   end function xzw
 
+  ! x is a value of a sum or difference itself (with a second label not
+  ! every number below ncls is: the first digit of a sum has |x1| < gB / 2,
+  ! and a loop over 0 .. ncls - 1 or dlo .. dhi has to leave out the others,
+  ! whose two digits xzw cannot tell apart)
+  logical elemental function xzcan(x)
+    integer(8), intent(in) :: x
+    xzcan = gB == 0 .or. xzw(x) == x
+  end function xzcan
+
   ! two sums of classes are the same label (modulo mgrp with a modulus)
   logical elemental function xzeq(a, b)
     integer(8), intent(in) :: a, b
@@ -340,6 +345,7 @@ contains
     wdoff = 0
     nwd = 0
     do d = dlo, dhi
+      if (.not. xzcan(d)) cycle
       wdoff(d) = nwd
       nwd = nwd + xzndel(d + sh_w) * ndel(d)
     end do

@@ -152,7 +152,6 @@ subroutine xzdrv(w, maxcor)
   isreal = tryreal
   t0 = omp_get_wtime()
   do
-    use2nd = isreal
     call xzsetmode(uselab)
     nwe = merge(1_8, 2_8, isreal)
     call xzslices()
@@ -802,9 +801,7 @@ subroutine xzsetmode(uselab)
   ! the second label (xzlabels: second): the classes c1 + gB c2
   gB = 0
   gm2 = 0
-  if (uselab .and. modulus2 > 1 .and. .not. use2nd) then
-    write(6, '(a)') '   (the second label is not used with complex arithmetic: only the first one blocks)'
-  else if (uselab .and. modulus2 > 1) then
+  if (uselab .and. modulus2 > 1) then
     if (mgrp == 0) then
       write(6, '(a)') '   (the second label needs a first one with a modulus and two classes or more: it is not used)'
     else
@@ -918,6 +915,7 @@ subroutine xzsetmode(uselab)
   wdoff = 0
   nwd = 0
   do d = dlo, dhi
+    if (.not. xzcan(d)) cycle
     do sa = 0, ncls - 1
       si = xzw(sa - d)
       if (si < 0 .or. si >= ncls) cycle
@@ -954,6 +952,7 @@ subroutine xzsetmode(uselab)
   qn22max = 0
   qn13max = 0
   do m = 0, q4hi
+    if (.not. xzcan(m)) cycle
     n = 0
     do g = 0, npg - 1
       h = xzw(m - g)
@@ -973,6 +972,7 @@ subroutine xzsetmode(uselab)
   qm3max = 0
   qwbmax = 0
   do k = 0, q2hi
+    if (.not. xzcan(k)) cycle
     n = 0
     do sa = 0, ncls - 1
       t = xzw(sa + k)

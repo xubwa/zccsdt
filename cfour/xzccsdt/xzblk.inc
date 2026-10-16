@@ -421,6 +421,7 @@ subroutine N(xzbpass2)(w, kt3, kr3, wring, adrv, bd, npart, nu, u, vp)
   ku0 = xzget(NW * ndel(0) * max(nu, 1_8), 'outer products of pass 2')
   if (.not. xzdry) then
     do d = dlo, dhi
+      if (.not. xzcan(d)) cycle
       if (ndel(d) > 0 .and. xzndel(d + sh_w) > 0) call N(xzbwd)(d, wring, w(kwd + NW * wdoff(d)))
     end do
     if (nu > 0) call N(xzbu0)(nu, u, w(ku0))
