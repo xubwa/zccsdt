@@ -13,7 +13,7 @@
 !   %eomnroot            roots (next line; default 1) - of every shift that
 !                        the section %xzeom gives without a number of its own
 !   %eomndav0            vectors of the subspace at most (next line; default
-!                        20 + roots + 2, CFOUR's; at most 64)
+!                        max(20 + roots + 2, 2 roots + 2); at least roots + 3)
 !   %xzeom               a section of this program: lines "shift [roots]"
 !                        until a line that is not two integers - the label
 !                        shifts of the states, in the labels of the run (2 m_j
@@ -98,7 +98,7 @@ module xzeomd
   ! one rank: every rank its rows of them, as of the vectors of the subspace
   ! (the kinds 3 and 4 of N(xzevput), N(xzevmdot), N(xzevcomb), N(xzevget))
   integer(8) :: e4nq = 0, e4kq = 0, e4kf = 0
-  real(8) :: eritz0(64) = 0d0
+  real(8), allocatable :: eritz0(:)   ! the Ritz values of the first iteration (EOM-CC4: printed)
   ! the files XZE4R.nnn, XZE4Q.nnn of an earlier run (N(xz4er), N(xz4eq)): the
   ! roots of the problem came from there, e4kdone of them done with the T4
   ! terms; of the last cluster in hand: its energies, its Rayleigh quotients
@@ -151,7 +151,7 @@ contains
   integer function xzevunit(kind, j)
     integer, intent(in) :: kind
     integer(8), intent(in) :: j
-    xzevunit = 200 + (kind - 1) * 64 + int(j)
+    xzevunit = 10000 * (kind + 1) + int(j)   ! (EOMCnnnn: 20001.., EOMHnnnn: 30001..)
   end function xzevunit
 
   ! The input: the flags of joda and the sections of the ZMAT.

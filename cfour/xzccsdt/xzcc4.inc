@@ -2172,6 +2172,11 @@ subroutine N(xzeom4f)(w, ip, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, 
     end if
     ncmax = max(ncmax, nc)
   end do
+  ! (the records of a cluster - XZE4R.nnn - hold 64 roots)
+  if (ncmax > 64) then
+    write(6, '(/,a,i6,a)') ' @XZCCSDT-F, EOM-CC4: a cluster of ', ncmax, ' nearly degenerate roots; at most 64.'
+    call xzerrex
+  end if
   msf = max(12_8, (8 + 4 * nroot) / 2)
   m0 = xzmark()
   kq = 0

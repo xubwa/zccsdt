@@ -700,7 +700,7 @@ subroutine N(xzeom3)(w, ecorr)
   end do
   nkmax = nrmax + 2
   nkeep = nkmax
-  msd = min(64_8, 8 + 4 * nkeep)
+  msd = 8 + 4 * nkeep
   msf = max(12_8, (8 + 4 * nrmax) / 2)
   if (xzdry) then
     call N(xzeomim)(w)
@@ -708,7 +708,7 @@ subroutine N(xzeom3)(w, ecorr)
     kx = xzget(NW * nkeep * nsd, 'EOM: the vectors of a cluster of roots')
     kxa = xzget(NW * nsd, 'EOM: a vector')
     kxb = xzget(NW * nsd, 'EOM: its sigma vector')
-    k = xzget(2 * min(64_8, max(msd, msf, 3 * nkeep + 4)) * (NW * nsd + xzalign), 'EOM: the subspace')
+    k = xzget(2 * max(msd, min(64_8, max(msf, 3 * nkeep + 4))) * (NW * nsd + xzalign), 'EOM: the subspace')
     efold = .true.
     call N(xzesig)(w, kxa, kxb, .true.)
     efold = .false.

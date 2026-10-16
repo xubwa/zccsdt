@@ -200,7 +200,8 @@ void zc_vlincomb_##SFX(int64_t n, int64_t nk, const T **x, const T *c, T *out) \
 /* res[k] = sum conj(a) x[k] for k < nk <= 64 in one pass over a (blocks of    \
  * VB elements of a stay in cache while the x[k] stream by); per-thread        \
  * partial sums, combined in thread order. */                                  \
-void zc_vmdot_##SFX(int64_t n, int64_t nk, const T *a, const T **x, T *res)    \
+static void zc_vmdot64_##SFX(int64_t n, int64_t nk, const T *a, const T **x,   \
+                             T *res)                                           \
 {                                                                              \
     enum { VB = 2048, MK = 64, MT = 256 };                                     \
     T (*part)[MK] = calloc(MT, sizeof(*part));                                 \
@@ -230,6 +231,12 @@ void zc_vmdot_##SFX(int64_t n, int64_t nk, const T *a, const T **x, T *res)    \
         res[k] = sk;                                                           \
     }                                                                          \
     free(part);                                                                \
+}                                                                              \
+/* any nk: one pass over a per 64 of the x[k] */                               \
+void zc_vmdot_##SFX(int64_t n, int64_t nk, const T *a, const T **x, T *res)    \
+{                                                                              \
+    for (int64_t k0 = 0; k0 < nk; k0 += 64)                                    \
+        zc_vmdot64_##SFX(n, nk - k0 < 64 ? nk - k0 : 64, a, x + k0, res + k0); \
 }
 
 #include <omp.h>

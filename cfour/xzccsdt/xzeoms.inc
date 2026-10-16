@@ -682,6 +682,9 @@ subroutine N(xzeserve)(w, nsig)
       evnch = nint(ctl(4), 8)
       mv = xzmark()
       call N(xzevopenw)(msub)
+      ! (the coefficients that rank 0 sends: up to msub, msub x msub for a compaction)
+      deallocate(c, d)
+      allocate(c(msub * msub), d(msub))
       if (evfile) then
         write(6, '(a,i4,a,f10.1,a)') '   subspace: its rows of at most ', msub, ' vectors and their sigma vectors, in files (', &
           16d-6 * NW * evlen * msub, ' MB)'
@@ -955,7 +958,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   ZT, intent(out) :: vlead(nlead, nroot)
   integer, intent(in) :: iures
   integer(8) :: nsd, nlen, n, n0, nconv, it, k, j, g, c, ntarget, nun, mkeep, nadded, icv, mv, jbest, nkeep, i, nloc
-  integer(8) :: nin, nout
+  integer(8) :: nin, nout, mkeep0, nblk
   ZT, allocatable :: gm(:, :), ym(:, :), cr(:, :), coef(:), dots(:), qm(:, :), qr(:), gq(:, :)
   complex(8), allocatable :: ev(:)
   logical, allocatable :: flag(:)
@@ -988,7 +991,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     ekx = [kxa, kxb]
   end if
   evoff = 0
-  call N(xzevopen)(nloc, msub, min(msub, 2 * nroot + 2), min(msub, 3 * nroot + 4), avail, .not. sd)
+  call N(xzevopen)(nloc, msub, min(msub, nroot + 3), min(msub, 3 * nroot + 4), avail, .not. sd)
   if (.not. quiet) then
     if (ecmd) write(6, '(a,i4,a,f10.1,a,f10.1,a)') '   over ', nrank, &
       ' ranks: every rank holds its rows of R3 of every vector (rank 0 with the singles and doubles: ', &
@@ -1007,6 +1010,11 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
            keep(msub), ccyc(nroot), qm(msub, msub), qr(msub * msub), gq(msub, msub))
   gm = 0
   n = 0
+  ! a compaction keeps mkeep0 Ritz vectors (the roots and two more); an
+  ! iteration adds at most nblk corrections, to the lowest roots that are
+  ! not converged, so that what is kept and what is added always fit
+  mkeep0 = max(1_8, min(nroot + 2, msub - 1))
+  nblk = max(1_8, msub - mkeep0)
   ! ---- the vectors to start from
   do g = 1, nstart
     if (n >= msub) exit
@@ -1043,7 +1051,11 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     nit = it
     call N(xzesmall)(n, gm, msub, ev, ym)
     if (nfollow > 0) call follow()
-    if (it == 1) eritz0(1:min(n, 64_8)) = dble(ev(1:min(n, 64_8)))
+    if (it == 1) then
+      if (allocated(eritz0)) deallocate(eritz0)
+      allocate(eritz0(n))
+      eritz0 = dble(ev(1:n))
+    end if
     needdiag = .false.
     ! the converged roots among the eigenvectors, by their overlap
     call mark_converged()
@@ -1051,8 +1063,8 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
     nun = count(.not. flag(1:ntarget))
     if (nun == 0) exit
     ! compaction: the Ritz vectors of the converged roots and the lowest others
-    if (n + nun > msub) then
-      mkeep = min(n, max(nroot + 2, 1_8), msub - nun)
+    if (n + min(nun, nblk) > msub) then
+      mkeep = min(n, mkeep0)
       call compact()
       call N(xzesmall)(n, gm, msub, ev, ym)
       if (nfollow > 0) call follow()
@@ -1088,7 +1100,7 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
         if (.not. quiet) write(6, '(a,i4,a,i4,a)') '   root ', k, ' converged in ', it, ' cycles'
         cycle
       end if
-      if (n >= msub) cycle
+      if (n >= msub .or. nadded >= nblk) cycle
       ! the correction: r / (omega - D), orthogonal to the basis
       call N(xzeprec)(w, kxa, om, sd)
       call N(xzeorth)(w, n, kxa, rel)
@@ -1462,7 +1474,7 @@ subroutine N(xzeom)(w, ecorr)
       if (dist) call xzeslices()
       nlen = nsd + n3s
       nkeep = nroot + 2
-      msd = min(64_8, 8 + 4 * nkeep)
+      msd = 8 + 4 * nkeep
       msub = subspace(nroot)
       ms = xzmark()
       efold = cc4
@@ -1727,7 +1739,7 @@ subroutine N(xzeom)(w, ecorr)
     if (eguess == 1) then
       ! ---- the singles-doubles block of the matrix, from unit vectors
       t1 = omp_get_wtime()
-      msd = min(64_8, 8 + 4 * nkeep)
+      msd = 8 + 4 * nkeep
       call xzdry_begin()
       call N(xzesig)(w, kxa, kxb, .true.)
       call xzdry_end(peak)
@@ -1863,10 +1875,11 @@ contains
 
   integer(8) function subspace(nr)
     integer(8), intent(in) :: nr
+    ! (CFOUR's 20 + roots + 2, and room for a correction of every root; given
+    ! by %eomndav0: as given, but the roots and two more must stay and one be added)
     subspace = emaxsub
-    if (subspace <= 0) subspace = 20 + nr + 2
-    subspace = max(min(subspace, 64_8), 2 * nr + 2)
-    subspace = min(subspace, 64_8)
+    if (subspace <= 0) subspace = max(20 + nr + 2, 2 * nr + 2)
+    subspace = max(subspace, nr + 3)
   end function
 end subroutine
 
