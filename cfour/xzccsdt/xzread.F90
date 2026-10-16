@@ -113,7 +113,7 @@ subroutine xzsizes()
          action='read', iostat=ios)
     if (ios == 0) read(71, iostat=ios) hdr
     close(71)
-    if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) < 1 .or. hdr(2) > 2) then
+    if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) < 1 .or. hdr(2) > 3) then
       write(6, '(/,a)') ' @XZCCSDT-F, mobkhhhh is not a file of xx2cvtran with %vtranblk.'
       call xzerrex
     end if
@@ -636,7 +636,7 @@ subroutine xzbhead(fname, kind, flab, fmod)
   implicit none
   character(len=*), intent(in) :: fname
   integer(8), intent(in) :: kind
-  integer(8), intent(out) :: flab(0:ntot-1), fmod(3)
+  integer(8), intent(out) :: flab(0:ntot-1), fmod(4)
   integer(8) :: hdr(10)
   integer :: ios
   open(unit=71, file=fname, form='unformatted', access='sequential', status='old', &
@@ -653,7 +653,7 @@ subroutine xzbhead(fname, kind, flab, fmod)
     hdr = 0
     read(71, iostat=ios) hdr(1:8)
   end if
-  if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) < 1 .or. hdr(2) > 2 .or. hdr(3) /= kind) then
+  if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) < 1 .or. hdr(2) > 3 .or. hdr(3) /= kind) then
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', trim(fname), ' is not a blocked file of xx2cvtran of its kind.'
     call xzerrex
   end if
@@ -668,7 +668,8 @@ subroutine xzbhead(fname, kind, flab, fmod)
   end if
   ! the modulus, and with a second label its modulus and the base of its
   ! digit in the labels of the file (l1 + base l2)
-  fmod = [hdr(5), hdr(9), hdr(10)]
+  ! and the words of an element (version 3: complex)
+  fmod = [hdr(5), hdr(9), hdr(10), merge(2_8, 1_8, hdr(2) == 3)]
 end subroutine xzbhead
 
 ! ---------------------------------------------------------------------------
@@ -679,7 +680,7 @@ end subroutine xzbhead
 subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
   use xzdata
   implicit none
-  integer(8), intent(in) :: kind, iocc, flab(0:ntot-1), fmod(3)
+  integer(8), intent(in) :: kind, iocc, flab(0:ntot-1), fmod(4)
   integer(8) :: pos(*)
   integer(8), intent(out) :: cnt
   logical, intent(in) :: fill
@@ -772,7 +773,7 @@ subroutine xzrint(kind, fname, buf, n)
   character(len=*), intent(in) :: fname
   complex(8), intent(out) :: buf(0:n/2-1)
   character(len=8) :: bname
-  integer(8) :: flab(0:ntot-1), fmod(3), cnt, k, iocc, pos0(1)
+  integer(8) :: flab(0:ntot-1), fmod(4), cnt, k, iocc, pos0(1)
   integer(8), allocatable :: pos(:)
   real(8), allocatable :: d(:)
   integer :: ios
@@ -790,18 +791,24 @@ subroutine xzrint(kind, fname, buf, n)
   end if
   call xzbhead(bname, kind, flab, fmod)
   call xzbidx(kind, iocc, flab, fmod, pos0, cnt, .false.)
-  allocate(pos(max(cnt, 1_8)), d(max(cnt, 1_8)))
+  allocate(pos(max(cnt, 1_8)), d(max(fmod(4) * cnt, 1_8)))
   call xzbidx(kind, iocc, flab, fmod, pos, cnt, .true.)
-  read(71, iostat=ios) d(1:cnt)
+  read(71, iostat=ios) d(1:fmod(4) * cnt)
   close(71)
   if (ios /= 0) then
     write(6, '(/,a,a)') ' @XZCCSDT-F, reading the elements of the file ', trim(bname)
     call xzerrex
   end if
   buf = (0d0, 0d0)
-  do k = 1, cnt
-    buf(pos(k)) = cmplx(d(k), 0d0, 8)
-  end do
+  if (fmod(4) == 2) then
+    do k = 1, cnt
+      buf(pos(k)) = cmplx(d(2 * k - 1), d(2 * k), 8)
+    end do
+  else
+    do k = 1, cnt
+      buf(pos(k)) = cmplx(d(k), 0d0, 8)
+    end do
+  end if
   deallocate(pos, d)
 end subroutine xzrint
 
@@ -811,18 +818,20 @@ end subroutine xzrint
 ! nwe words an element; nothing of the size of the dense record.  Its
 ! columns c<d one record each, the rows a<b that the labels of the file
 ! allow.  offmax: the largest element outside of the blocks of the groups
-! of this program.  inv, ig: nvp integers, sgf, col: nvp reals.
-subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax)
+! of this program; ximag: in real arithmetic, the largest imaginary part
+! (complex files, version 3).  inv, ig: nvp integers, sgf: nvp reals,
+! col: 2 nvp reals.
+subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax, ximag)
   use xzdata
   implicit none
   real(8) :: v(0:*)
   integer(8), intent(in) :: vpa(0:nvp-1), vpb(0:nvp-1)
   integer(8) :: inv(0:nvp-1), ig(0:nvp-1)
-  real(8) :: sgf(0:nvp-1), col(0:nvp-1)
-  real(8), intent(out) :: offmax
-  integer(8) :: flab(0:ntot-1), fmod(3), vl(0:nv-1), q, a, b, c, d, f, g, qr, qc, n, lo, k, cnt, idx
+  real(8) :: sgf(0:nvp-1), col(0:2*nvp-1)
+  real(8), intent(out) :: offmax, ximag
+  integer(8) :: flab(0:ntot-1), fmod(4), vl(0:nv-1), q, a, b, c, d, f, g, qr, qc, n, lo, k, cnt, idx, fw
   integer(8) :: bb(0:maxgrp)
-  real(8) :: x
+  complex(8) :: x
   integer :: ios
 
   call xzbhead('mobkpppp', 6_8, flab, fmod)
@@ -844,6 +853,8 @@ subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax)
   end do
   v(0:nwe * nvv - 1) = 0d0
   offmax = 0d0
+  ximag = 0d0
+  fw = fmod(4)
   do d = 1, nv - 1
     do c = 0, d - 1
       cnt = 0
@@ -852,7 +863,7 @@ subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax)
           if (ok(vl(a) + vl(b) - vl(c) - vl(d))) cnt = cnt + 1
         end do
       end do
-      read(71, iostat=ios) col(0:cnt - 1)
+      read(71, iostat=ios) col(0:fw * cnt - 1)
       if (ios /= 0) then
         write(6, '(/,a)') ' @XZCCSDT-F, reading the file mobkpppp failed.'
         call xzerrex
@@ -867,7 +878,13 @@ subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax)
         do a = 0, b - 1
           if (.not. ok(vl(a) + vl(b) - vl(c) - vl(d))) cycle
           q = a + b * (b - 1) / 2
-          x = sgf(q) * sgf(f) * col(k)
+          ! (the element of row (ab), column (cd) is <ab||cd> = <cd||ab>*; the
+          ! place of (cd) here is the row: conjugate, as xzrdvvvv does)
+          if (fw == 2) then
+            x = sgf(q) * sgf(f) * conjg(cmplx(col(2 * k), col(2 * k + 1), 8))
+          else
+            x = sgf(q) * sgf(f) * col(k)
+          end if
           k = k + 1
           qr = inv(q)
           if (ig(qr) /= g) then
@@ -875,7 +892,13 @@ subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax)
             cycle
           end if
           idx = bb(g) + (qr - lo) + n * (qc - lo)
-          v(nwe * idx) = x
+          if (nwe == 2) then
+            v(2 * idx) = dble(x)
+            v(2 * idx + 1) = aimag(x)
+          else
+            v(idx) = dble(x)
+            ximag = max(ximag, abs(aimag(x)))
+          end if
         end do
       end do
     end do

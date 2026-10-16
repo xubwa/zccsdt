@@ -1158,11 +1158,17 @@ subroutine xzlayout(w, status)
   if (blkin) then
     jvvvv = xzget(nwe * nvv, '<vv||vv> on a<b, c<d')
     m = xzmark()
-    krow = xzget(nvp, 'row of <vv||vv>')
+    krow = xzget(2 * nvp, 'row of <vv||vv>')
     ksrc = xzget(2 * nvp, 'permutation of the pairs')
     ksg = xzget(nvp, 'signs of the pairs')
     if (.not. xzdry) then
-      call xzrbvvvv(w(jvvvv), w(jvpa), w(jvpb), w(ksrc), w(ksrc + nvp), w(ksg), w(krow), offmax)
+      call xzrbvvvv(w(jvvvv), w(jvpa), w(jvpb), w(ksrc), w(ksrc + nvp), w(ksg), w(krow), offmax, ximag)
+      if (nwe == 1 .and. ximag > tol_imag) then
+        write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', ximag, &
+          ' (above the tolerance ', tol_imag, ', XZ_IMAGTOL: complex arithmetic)'
+        status = 2
+        return
+      end if
       if (offmax > tol_label) then
         write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
         write(6, '(a,es10.2,a)') '             an element of <vv||vv> that they forbid is ', offmax, &
