@@ -257,7 +257,7 @@ subroutine xzdrv(w, maxcor)
       if (larg > 0) return
       call xzerrex
     end if
-    write(6, '(a,i4,a)') '   CCSDT converged in ', ncyc, ' cycles.'
+    write(6, '(a,a,a,i4,a)') '   ', trim(ccname), ' converged in ', ncyc, ' cycles.'
     call xztable(1, 'the CCSDT iterations', tcc, ncyc)
     ! the amplitudes for the steps that follow, here or in a later run
     t0 = omp_get_wtime()
@@ -446,8 +446,8 @@ subroutine xzdrv(w, maxcor)
   ! ---- energies
   write(6, '(/,a)') '  ' // repeat('-', 62)
   write(6, '(a,f25.12)') '   E(SCF)                        ', escf
-  write(6, '(a,f25.12)') '   CCSDT correlation energy      ', ecorr
-  write(6, '(a,f25.12)') '   E(CCSDT)                      ', escf + ecorr
+  write(6, '(a,a5,a,f25.12)') '   ', ccname, ' correlation energy      ', ecorr
+  write(6, '(a,a,a,f25.12)') '   E(', trim(ccname), ')' // repeat(' ', 27 - len_trim(ccname)), escf + ecorr
   etot = escf + ecorr
   if (with_q .and. .not. q_left) then
     write(6, '(a,f25.12)') '   E[Q] (fifth order)            ', eq5
@@ -567,6 +567,7 @@ subroutine xzjob()
   den = .not. eom .and. (iprop > 0 .or. ideriv > 0)
   method = ' '
   if (level == 18 .or. (level == 49 .and. nexc == 3)) method = 'CCSDT'
+  if (level == 10) method = 'CCSD'
   if (level == 30) method = 'CCSDT[Q]'
   if (level == 54 .or. (level == 53 .and. nexc == 4)) method = 'CCSDT(Q)'
   if (level == 68 .or. (level == 69 .and. nexc == 4)) method = 'CCSDT(Q)_L'
@@ -578,7 +579,13 @@ subroutine xzjob()
   end if
   if (method == ' ') then
     write(6, '(/,a,i4,a,i3,a)') ' @XZCCSDT-F, CALC of the ZMAT (level ', level, ', EXCITATION ', nexc, &
-      ') is not one of CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2.'
+      ') is not one of CCSD, CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2.'
+    call xzerrex
+  end if
+  ccsdonly = method == 'CCSD'
+  if (ccsdonly) ccname = 'CCSD'
+  if ((eom .or. den) .and. ccsdonly) then
+    write(6, '(/,a)') ' @XZCCSDT-F, EXCITE=EOMEE and PROPS go with CALC=CCSDT only in this version (not CCSD).'
     call xzerrex
   end if
   if (eom .or. den) then
@@ -901,6 +908,11 @@ subroutine xzsetmode(uselab)
     n3 = n3 + (otoff(g + 1) - otoff(g)) * (vtoff(g + 1) - vtoff(g))
   end do
   boff(ntg) = n3
+  ! CCSD: no T3
+  if (ccsdonly) then
+    n3 = 0
+    boff = 0
+  end if
   nvv = 0
   nqmax = 0
   do g = 0, npg - 1

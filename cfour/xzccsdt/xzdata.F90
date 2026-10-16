@@ -111,6 +111,8 @@ module xzdata
   character(len=16) :: method = ' '
   logical :: with_q = .false.
   logical :: with_cc = .false.      ! the CCSDT iterations are part of the job
+  logical :: ccsdonly = .false.     ! CALC=CCSD: T1 and T2 only, no T3 (xzstep leaves out the T3 parts)
+  character(len=5) :: ccname = 'CCSDT'  ! the name of the method in the output
   logical :: with_lam = .false.     ! the Lambda equations are
   logical :: q_left = .false.       ! (Q) with lambda on the left: (Q)_Lambda
   logical :: with_den = .false.     ! the density and the orbital gradient of CCSDT are (xzden.inc)
