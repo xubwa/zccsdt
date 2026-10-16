@@ -13,7 +13,7 @@
 !   %eomnroot            roots (next line; default 1) - of every shift that
 !                        the section %xzeom gives without a number of its own
 !   %eomndav0            vectors of the subspace at most (next line; default
-!                        max(20 + roots + 2, 2 roots + 2); at least roots + 3)
+!                        max(20 + roots + 2, 4 roots + 8); at least 2 roots + 2)
 !   %xzeom               a section of this program: lines "shift [roots]"
 !                        until a line that is not two integers - the label
 !                        shifts of the states, in the labels of the run (2 m_j

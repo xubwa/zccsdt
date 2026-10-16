@@ -1875,11 +1875,16 @@ contains
 
   integer(8) function subspace(nr)
     integer(8), intent(in) :: nr
-    ! (CFOUR's 20 + roots + 2, and room for a correction of every root; given
-    ! by %eomndav0: as given, but the roots and two more must stay and one be added)
+    ! (CFOUR's 20 + roots + 2, and - every root that is not converged adds a
+    ! vector per iteration - four vectors per root, as the Python solver: with
+    ! two per root the subspace is compacted every iteration (40 roots of H2O:
+    ! 2107 sigma vectors, 12 roots not converged in 120 iterations, against 923
+    ! with 4 roots + 4); given by %eomndav0: at least 2 roots + 2, so that
+    ! every root keeps its vector and adds one (40 roots in 50 vectors: 21
+    ! converged in 200 iterations))
     subspace = emaxsub
-    if (subspace <= 0) subspace = max(20 + nr + 2, 2 * nr + 2)
-    subspace = max(subspace, nr + 3)
+    if (subspace <= 0) subspace = max(20 + nr + 2, 4 * nr + 8)
+    subspace = max(subspace, 2 * nr + 2)
   end function
 end subroutine
 

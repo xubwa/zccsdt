@@ -3360,7 +3360,7 @@ with the tag, the value on the next line; `xzeomd.F90`: `xzeominp`).
 | threshold | `ESTATE_CONV=N`: the largest element of the residual of a normalized vector at most 10^-N; the section `%eomthrs` (a real number) overrides | 10^-5 |
 | iterations at most | `ESTATE_MAXCYC` | 40 |
 | roots | `%eomnroot` - of every shift that `%xzeom` gives without a number | 1 |
-| vectors of the subspace at most | `%eomndav0` | 20 + roots + 2 (CFOUR's `eomene2`); at most 64 |
+| vectors of the subspace at most | `%eomndav0` (in CFOUR the size of its arrays only: `eomene2` compacts at a hard-wired 20 + roots + 2) | max(20 + roots + 2, 4 roots + 8); a given value at least 2 roots + 2 (40 roots in 50 vectors: 21 converged after 200 iterations) |
 | the label shifts | `%xzeom` (ours): lines `shift [roots]` until a line that is not one or two integers; shifts in the labels of the run, as the output lists them, no sign convention beyond that | shift 0 |
 | the start | `%xzeomguess` (ours): 0 unit vectors on the lowest single excitations of the shift (CFOUR's guess without CIS); 1 the roots of the singles-doubles block from these unit vectors first | 1 |
 | the vectors of the roots | `%xzeomvec` (ours): 0 no file `XZEOMR` | 1 |
@@ -3498,7 +3498,19 @@ algorithm 2 (`eomene2`; docs/eom.md 9):
    compacted to the Ritz vectors of the converged roots and the lowest
    others, roots + 2 in all, C and H C transformed alike (`eomcompact`;
    here: the coefficients are orthonormalized in the subspace and both sets
-   are transformed in one pass, in place).
+   are transformed in one pass, in place).  CFOUR adds one vector per
+   iteration, so 20 free places last 20 iterations; here every root that is
+   not converged adds one, so an iteration adds at most subspace - (roots +
+   2) of them (to the lowest roots; the compaction always keeps every root)
+   and the default subspace has four places per root (40 roots of H2O /
+   6-31G, CCSDT, threshold 1e-7: subspace 82 = 2 roots + 2, compacted every
+   iteration, 2107 sigma vectors and 12 roots not converged after 120
+   iterations; 164: 923 sigma vectors, 110 iterations; 202: 815, 65; 400,
+   never compacted: 678, 40; the roots of 164 and 202 agree with those of
+   400 to 5e-9 and 1.3e-8 Eh; the default 168: all 40 in 76 iterations,
+   883 sigma vectors, 5e-9 Eh from 400).  Before this, the subspace was
+   capped at 64 and a compaction kept fewer than roots + 2 vectors: the same
+   40 roots came out wrong from the 25th on (0.790 Eh for 0.760).
 
 What is CFOUR's code and what is written here:
 
