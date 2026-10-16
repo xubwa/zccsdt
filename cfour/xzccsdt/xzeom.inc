@@ -59,7 +59,8 @@ subroutine N(xzeomkeep)()
   et2pp = xzget(NW * npo * nvp, 'T2 [P][Q]')
   ewkl = xzget(NW * npo * npo, 'W_oooo')
   ekk = xzget(NW * no * no * npo, '<mn||Q> t2[P][Q]')
-  eo6 = xzget(NW * nto * nto, 'occupied operator')
+  ! (EOM-EE-CCSD: no triples, no operator on them)
+  eo6 = xzget(NW * merge(1_8, nto * nto, ccsdonly), 'occupied operator')
   ewo = xzget(NW * ov * npo, 'W_vooo')
   egpd = xzget(NW * ny * npo * nv, 'pass-1 operand')
   egmq = xzget(NW * no * nvp * ny, 'pass-1 operand G')
@@ -122,9 +123,16 @@ subroutine N(xzeomim)(w)
     call xztoc(5, 'once: T1 dressing, operands')
   end if
 
-  ! ---- pass 1 over T3: the T3 parts of W_vvvo and W_vooo
+  ! ---- pass 1 over T3: the T3 parts of W_vvvo and W_vooo (CCSD: none)
   m1 = xzmark()
-  if (dense) then
+  if (ccsdonly) then
+    if (.not. xzdry) then
+      call zc_vzero_d(NW * ny * no * nvp, w(kxacc))
+      call zc_vzero_d(NW * ov, w(kr1c))
+      call zc_vzero_d(NW * npo * nv * ny, w(kyall))
+      call zc_vzero_d(NW * npo * nvp, w(kra))
+    end if
+  else if (dense) then
     kbuf = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
     if (.not. xzdry) then
       call zc_vzero_d(NW * ny * no * nvp, w(kxacc))
@@ -161,7 +169,7 @@ subroutine N(xzeomim)(w)
     call N(xzewkl)(no, npo, nvp, w(eooood), w(jgpp), w(et2pp), w(jopa), w(jopb), w(ewkl))
     if (npo > 0) call N(zc_gemm)(0_4, 1_4, no * no, npo, nvp, one, w(joovvp), nvp, w(et2pp), nvp, zero, &
                                  w(ekk), npo)
-    call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(ewkl), w(efeoo), w(eo6))
+    if (.not. ccsdonly) call N(xzo6)(no, npo, nto, w(jofree), w(jopair), w(ewkl), w(efeoo), w(eo6))
     call xztoc(5, 'once: W_vooo, W_ovvo, F, O')
   end if
 
@@ -202,10 +210,13 @@ end subroutine
 !   ks     sigma, the same layout (out)
 !   sd     the singles-doubles block only: no R3, none of the terms of T3 in
 !          sigma_2, no sigma_3 (the guess stage)
+!   essonly (xzeomd) the singles block alone: sigma_1 of r1, r2 = 0, sigma_2 = 0
+!          (the CIS-type guess)
 subroutine N(xzesig)(w, kv, ks, sd)
   use xzdata
   use xzmem
   use xzkern
+  use xzeomd, only: essonly
   use omp_lib
   implicit none
   real(8) :: w(*)
@@ -228,7 +239,8 @@ subroutine N(xzesig)(w, kv, ks, sd)
   ov2 = ov * ov
   nsd = ov + npo * nvp
   dense = ncls == 1
-  with3 = .not. sd
+  ! (EOM-EE-CCSD: the singles and doubles only, whatever sd)
+  with3 = .not. sd .and. .not. ccsdonly
   s = eshift
   if (dense) s = 0
   kr1 = kv
@@ -274,30 +286,45 @@ subroutine N(xzesig)(w, kv, ks, sd)
                   w(jvpa), w(jvpb), w(kdfov), w(kdfoo), w(kdfvv), w(kdfvo), w(kdft))
     call N(xzehs)(no, nv, nvp, w(kr1), w(joovv), w(eooovd), w(eooood), w(eovvod), w(ed), w(jvpidx), &
                   w(kdooov), w(kdoooo), w(kdovvo), w(kdovoo))
-    ! the intermediates that are linear in r2: W'_ovvo, F'_vv, F'_oo, W'_oooo
-    call N(xzweff)(no, nv, nvp, w(kr2), w(kr2p), w(joovv), w(joovvp), w(kdovvo), w(kdfoo), w(kdfvv), &
-                   w(kdweff), w(kdfevv), w(kdfeoo), w(ka2), w(kb2), w(kx2))
-    call N(xzewkl)(no, npo, nvp, w(kdoooo), w(jgpp), w(kr2pp), w(jopa), w(jopb), w(kdwkl))
-    ! sigma_1
-    call N(zc_gemm)(0_4, 0_4, no, ny, no * nvp, one, w(kr2p), no * nvp, w(egmq), ny, zero, w(kr1v), ny)
-    call N(xzes1)(no, nv, w(kr1), w(kr2), w(jt2), w(kdfvo), w(kdfov), w(efov), w(efoo), w(efeoo), &
-                  w(kdooov), w(eooovd), w(kr1v), w(ks1))
-    ! sigma_2: <ab||ij>', the terms of the CCSD equations with r2 and with the derivatives
-    call zc_vzero_d(NW * npo * nvp, w(ks2))
-    call N(xzes2g)(no, nv, npo, nvp, w(kr1), w(eovood), w(ebv), w(jopa), w(jopb), w(jvpa), w(jvpb), w(ks2))
-    call N(xzetau)(no, nv, npo, nvp, w(jt1), w(kr1), w(kr2pp), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kxp))
-    ! P(ab) (F_bc r_ijac + F'_bc t_ijac); half of the first is in the ladder operator
-    call N(xzefvv)(no, nv, npo, nvp, w(kr2), 0.5d0, -0.5d0, w(jt1), w(kr1), w(efevv), w(jopa), w(jopb), &
-                   w(jvpa), w(jvpb), w(ks2), w(kzz), w(kyy))
-    call N(xzefvv)(no, nv, npo, nvp, w(jt2), 1d0, 0d0, w(jt1), w(kr1), w(kdfevv), w(jopa), w(jopb), &
-                   w(jvpa), w(jvpb), w(ks2), w(kzz), w(kyy))
-    call N(xzeb2)(no, nv, npo, nvp, w(kr2), w(kr2p), w(kr2pp), w(ewkl), w(efeoo), w(eovvod), w(eweff), &
-                  w(jopa), w(jopb), w(jvpa), w(jvpb), w(ks2), w(ka2), w(kb2), w(kx2))
-    call N(xzeb2)(no, nv, npo, nvp, w(jt2), w(et2p), w(et2pp), w(kdwkl), w(kdfeoo), w(kdovvo), w(kdweff), &
-                  w(jopa), w(jopb), w(jvpa), w(jvpb), w(ks2), w(ka2), w(kb2), w(kx2))
+    if (essonly) then
+      ! the singles block alone (the CIS-type guess, %xzeomguess 2): sigma_1 of
+      ! r1 with r2 = 0, sigma_2 = 0 (no ladder, nothing of the size of R2 x W)
+      call zc_vzero_d(NW * no * ny, w(kr1v))
+      call N(xzes1)(no, nv, w(kr1), w(kr2), w(jt2), w(kdfvo), w(kdfov), w(efov), w(efoo), w(efeoo), &
+                    w(kdooov), w(eooovd), w(kr1v), w(ks1))
+      call zc_vzero_d(NW * npo * nvp, w(ks2))
+    else
+      ! the intermediates that are linear in r2: W'_ovvo, F'_vv, F'_oo, W'_oooo
+      call N(xzweff)(no, nv, nvp, w(kr2), w(kr2p), w(joovv), w(joovvp), w(kdovvo), w(kdfoo), w(kdfvv), &
+                     w(kdweff), w(kdfevv), w(kdfeoo), w(ka2), w(kb2), w(kx2))
+      call N(xzewkl)(no, npo, nvp, w(kdoooo), w(jgpp), w(kr2pp), w(jopa), w(jopb), w(kdwkl))
+      ! sigma_1
+      call N(zc_gemm)(0_4, 0_4, no, ny, no * nvp, one, w(kr2p), no * nvp, w(egmq), ny, zero, w(kr1v), ny)
+      call N(xzes1)(no, nv, w(kr1), w(kr2), w(jt2), w(kdfvo), w(kdfov), w(efov), w(efoo), w(efeoo), &
+                    w(kdooov), w(eooovd), w(kr1v), w(ks1))
+      ! sigma_2: <ab||ij>', the terms of the CCSD equations with r2 and with the derivatives
+      call zc_vzero_d(NW * npo * nvp, w(ks2))
+      call N(xzes2g)(no, nv, npo, nvp, w(kr1), w(eovood), w(ebv), w(jopa), w(jopb), w(jvpa), w(jvpb), w(ks2))
+      call N(xzetau)(no, nv, npo, nvp, w(jt1), w(kr1), w(kr2pp), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kxp))
+      ! P(ab) (F_bc r_ijac + F'_bc t_ijac); half of the first is in the ladder operator
+      call N(xzefvv)(no, nv, npo, nvp, w(kr2), 0.5d0, -0.5d0, w(jt1), w(kr1), w(efevv), w(jopa), w(jopb), &
+                     w(jvpa), w(jvpb), w(ks2), w(kzz), w(kyy))
+      call N(xzefvv)(no, nv, npo, nvp, w(jt2), 1d0, 0d0, w(jt1), w(kr1), w(kdfevv), w(jopa), w(jopb), &
+                     w(jvpa), w(jvpb), w(ks2), w(kzz), w(kyy))
+      call N(xzeb2)(no, nv, npo, nvp, w(kr2), w(kr2p), w(kr2pp), w(ewkl), w(efeoo), w(eovvod), w(eweff), &
+                    w(jopa), w(jopb), w(jvpa), w(jvpb), w(ks2), w(ka2), w(kb2), w(kx2))
+      call N(xzeb2)(no, nv, npo, nvp, w(jt2), w(et2p), w(et2pp), w(kdwkl), w(kdfeoo), w(kdovvo), w(kdweff), &
+                    w(jopa), w(jopb), w(jvpa), w(jvpb), w(ks2), w(ka2), w(kb2), w(kx2))
+    end if
     call xztoc(5, 'small terms')
   end if
   call xzrel(m1)
+  if (essonly) then
+    if (.not. dense .and. .not. xzdry) &
+      call N(xzemask)(no, nv, npo, nvp, s, ocls, vcls, w(jopgrp), w(jvpgrp), w(ks1), w(ks2))
+    call xzrel(m0)
+    return
+  end if
 
   kdwo = 0
   kdwv = 0

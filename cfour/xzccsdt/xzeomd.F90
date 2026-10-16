@@ -37,6 +37,8 @@ module xzeomd
   integer(8) :: emaxsub = 0                 ! 0: 20 + roots + 2
   real(8) :: ethr = 1d-5
   integer(8) :: eguess = 1
+  integer(8) :: ekeep = 2                   ! Ritz vectors kept at a compaction: roots + ekeep
+  logical :: essonly = .false.              ! xzesig: the singles alone, r2 = 0 (the CIS-type guess)
   integer(8) :: ewvec = 1                   ! the vectors of the roots go to the file XZEOMR
   integer(8) :: labstep = 1                 ! the step of the labels: a class is (label - smallest) / step
 
@@ -169,6 +171,13 @@ contains
     integer(8) :: g
     external :: xzeomfill
     eshift = xzw(s)
+    if (ccsdonly) then
+      ! EOM-EE-CCSD: no triples in a vector
+      if (ncls == 1) eshift = 0
+      n3s = 0
+      boff_s = 0
+      return
+    end if
     if (ncls == 1) then
       eshift = 0
       n3s = nto * nvt

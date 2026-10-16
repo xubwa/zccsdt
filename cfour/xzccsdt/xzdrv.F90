@@ -469,11 +469,11 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f25.12)') '   TOTENERG written to JOBARC:   ', etot
   if (with_eom) then
     ! the excited states: the table, the file XZEOM, the lowest state to JOBARC (TOTENER2, as xx2ceomcc)
-    write(6, '(/,a)') '   EOM-EE-CCSDT: the states'
+    write(6, '(/,a)') '   EOM-EE-' // trim(ccname) // ': the states'
     write(6, '(a)') '  ' // repeat('-', 98)
     write(6, '(a)') '   shift  root        omega / Eh            eV            cm-1          total energy / Eh    max |r|'
     open(unit=79, file='XZEOM', form='formatted', status='replace')
-    write(79, '(a)') '# EOM-EE-CCSDT of xzccsdt: label shift, root, omega / Eh, total energy / Eh, ' // &
+    write(79, '(a)') '# EOM-EE-' // trim(ccname) // ' of xzccsdt: label shift, root, omega / Eh, total energy / Eh, ' // &
                      'largest element and norm of the residual, weights of R1, R2, R3, converged'
     write(79, '(a,f25.12,a,f25.12)') '# E(SCF) ', escf, '   E(CCSDT) ', escf + ecorr
     elow = huge(1d0)
@@ -504,7 +504,7 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,f10.1,a)') '   peak resident memory of the process: ', 1d-3 * kb(1), ' MB'
   write(6, '(a,f10.2,a)') '   XZCCSDT total wall time: ', omp_get_wtime() - twall, ' s'
   if (with_eom) then
-    write(6, '(a)') '   XZCCSDT finished: EOM-EE-CCSDT done.'
+    write(6, '(a)') '   XZCCSDT finished: EOM-EE-' // trim(ccname) // ' done.'
   else if (with_den) then
     write(6, '(a)') '   XZCCSDT finished: density of CCSDT done.'
   else
@@ -584,11 +584,14 @@ subroutine xzjob()
   end if
   ccsdonly = method == 'CCSD'
   if (ccsdonly) ccname = 'CCSD'
-  if ((eom .or. den) .and. ccsdonly) then
-    write(6, '(/,a)') ' @XZCCSDT-F, EXCITE=EOMEE and PROPS go with CALC=CCSDT only in this version (not CCSD).'
+  if (den .and. ccsdonly) then
+    write(6, '(/,a)') ' @XZCCSDT-F, PROPS (the density) goes with CALC=CCSDT only in this version (not CCSD).'
     call xzerrex
   end if
-  if (eom .or. den) then
+  if (eom .and. ccsdonly) then
+    ! EOM-EE-CCSD: the singles and doubles of the Jacobian of CCSD (xzesig without R3)
+    method = 'CCSD_EOM'
+  else if (eom .or. den) then
     if (method /= 'CCSDT') then
       write(6, '(/,a,a,a)') ' @XZCCSDT-F, ', trim(merge('EXCITE=EOMEE          ', 'PROPS or DERIV_LEV > 0', eom)), &
         ' goes with CALC=CCSDT only (here CALC=' // trim(method) // ').'
