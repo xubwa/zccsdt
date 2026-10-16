@@ -32,6 +32,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "zcred.h"
+
+/* the second digit of the classes with a second label (zcred.h), from
+ * xzsetmode through xzsetred */
+int zc_gB = 0, zc_gm2 = 0;
+void zc_set_red(int b, int m2) { zc_gB = b; zc_gm2 = m2; }
 
 #define KMAX 6
 #define NSPLIT_MAX 20           /* C(6, 3) */
@@ -676,7 +682,7 @@ void zc_q_sector_energy_##SFX(int n, const int *kv, int modulus, int M,        \
     for (int b = a + 1; b < n - 2; b++)                                        \
     for (int c = b + 1; c < n - 1; c++) {                                      \
         int kd = M - kv[a] - kv[b] - kv[c];                                    \
-        if (modulus) kd = ((kd % modulus) + modulus) % modulus;                \
+        if (modulus) kd = zc_red(kd, modulus);                                 \
         if (kd < kmin || kd >= kmin + nk || lid_of[kd - kmin] < 0) continue;   \
         const int l = lid_of[kd - kmin];                                       \
         int lo = lstart[l], hi = lstart[l + 1];                                \
@@ -694,7 +700,7 @@ void zc_q_sector_energy_##SFX(int n, const int *kv, int modulus, int M,        \
                 const int p = v[g22[s][0]], q = v[g22[s][1]];                  \
                 const int r = v[g22[s][2]], u = v[g22[s][3]];                  \
                 int kq = kv[p] + kv[q];                                        \
-                if (modulus) kq = ((kq % modulus) + modulus) % modulus;        \
+                if (modulus) kq = zc_red(kq, modulus);                         \
                 if (kq < qmin || kq >= qmin + nq || off22[kq - qmin] < 0)      \
                     continue;                                                  \
                 const int64_t rk1 = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q); \
@@ -778,7 +784,7 @@ void zc_xv_sector_##SFX(int n, const int *kv, int modulus, const int32_t *tri, \
         for (int s = 0; s < 3; s++) {                                          \
             const int p = v[g[s][0]], q = v[g[s][1]], r = v[g[s][2]];          \
             int kq = kv[p] + kv[q];                                            \
-            if (modulus) kq = ((kq % modulus) + modulus) % modulus;            \
+            if (modulus) kq = zc_red(kq, modulus);                             \
             if (kq < qmin || kq >= qmin + nq || off[kq - qmin] < 0) continue;  \
             const int64_t rk = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q);      \
             const int64_t d = nd[kq - qmin];                                   \
@@ -836,7 +842,7 @@ void zc_qg_sector_vectors_##SFX(int n, const int *kv, int modulus, int M,      \
     for (int b = a + 1; b < n - 2; b++)                                        \
     for (int c = b + 1; c < n - 1; c++) {                                      \
         int kd = M - kv[a] - kv[b] - kv[c];                                    \
-        if (modulus) kd = ((kd % modulus) + modulus) % modulus;                \
+        if (modulus) kd = zc_red(kd, modulus);                                 \
         if (kd < kmin || kd >= kmin + nk || lid_of[kd - kmin] < 0) continue;   \
         const int l = lid_of[kd - kmin];                                       \
         int lo = lstart[l], hi = lstart[l + 1];                                \
@@ -856,7 +862,7 @@ void zc_qg_sector_vectors_##SFX(int n, const int *kv, int modulus, int M,      \
                 const int r = v[g22[s][2]], u = v[g22[s][3]];                  \
                 int kq = kv[p] + kv[q];                                        \
                 x22[s] = -1;                                                   \
-                if (modulus) kq = ((kq % modulus) + modulus) % modulus;        \
+                if (modulus) kq = zc_red(kq, modulus);                         \
                 if (kq < qmin || kq >= qmin + nq || off22[kq - qmin] < 0)      \
                     continue;                                                  \
                 const int64_t rk1 = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q); \
@@ -958,7 +964,7 @@ void zc_xv_sector_adj_##SFX(int n, const int *kv, int modulus,                 \
         for (int s = 0; s < 3; s++) {                                          \
             const int p = v[g[s][0]], q = v[g[s][1]], r = v[g[s][2]];          \
             int kq = kv[p] + kv[q];                                            \
-            if (modulus) kq = ((kq % modulus) + modulus) % modulus;            \
+            if (modulus) kq = zc_red(kq, modulus);                             \
             if (kq < qmin || kq >= qmin + nq || off[kq - qmin] < 0) continue;  \
             const int64_t rk = nQ - 1 - (int64_t)(n - 1 - p) * (n - 2 - p) / 2 - (n - 1 - q);      \
             const int64_t d = nd[kq - qmin];                                   \

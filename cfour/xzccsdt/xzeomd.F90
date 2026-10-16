@@ -31,6 +31,7 @@ module xzeomd
   integer, parameter :: maxsh = 64, maxres = 512, nlead = 6
   integer(8) :: enshift = 0                 ! shifts asked for
   integer(8) :: eshl(maxsh) = 0             ! in labels
+  integer(8) :: eshl2(maxsh) = 0            ! the shift of the second label (xzlabels: second)
   integer(8) :: enr(maxsh) = 1              ! roots of each
   integer(8) :: emaxcyc = 40
   integer(8) :: emaxsub = 0                 ! 0: 20 + roots + 2
@@ -83,7 +84,7 @@ contains
     common /flags/ iflags(100)
     character(len=256) :: line
     integer :: ios, ios2
-    integer(8) :: nroot0, a, b
+    integer(8) :: nroot0, a, b, c
     logical :: there
     emaxcyc = iflags(97)
     if (emaxcyc <= 0) emaxcyc = 40
@@ -117,17 +118,26 @@ contains
         do
           read(30, '(a)', iostat=ios) line
           if (ios /= 0) exit
+          ! shift [second shift] roots: 'a b' or 'a' as before; three
+          ! integers 'a c b' with a second label (c: its shift)
           a = 0
           b = -1
-          read(line, *, iostat=ios2) a, b
+          c = 0
+          read(line, *, iostat=ios2) a, c, b
           if (ios2 /= 0) then
+            c = 0
             b = -1
-            read(line, *, iostat=ios2) a
-            if (ios2 /= 0) exit
+            read(line, *, iostat=ios2) a, b
+            if (ios2 /= 0) then
+              b = -1
+              read(line, *, iostat=ios2) a
+              if (ios2 /= 0) exit
+            end if
           end if
           if (enshift < maxsh) then
             enshift = enshift + 1
             eshl(enshift) = a
+            eshl2(enshift) = c
             enr(enshift) = b
           end if
         end do

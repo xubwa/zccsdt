@@ -97,14 +97,17 @@ subroutine xzdrv(w, maxcor)
   end if
 
   ! ---- the symmetry labels
-  allocate(lab(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
+  allocate(lab(0:ntot-1), lab2(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
+  lab2 = 0
+  modulus2 = 0
   !      (every rank reads them from the files of its run directory, by the
   !      same rule: 1. xzlabels, 2. dgcosym with more than one block, 3. none)
   nblk = 0
-  call xzrdlab(ntot, lab, modulus, there)
+  call xzrdlab(ntot, lab, modulus, lab2, modulus2, there)
   if (there) then
     labfile = 'xzlabels'
     write(6, '(a,i4)') '   symmetry labels: the file xzlabels, modulus ', modulus
+    if (modulus2 > 0) write(6, '(a,i4)') '   a second label (xzlabels: second), modulus ', modulus2
   else
     call xzrddgc(ntot, lab, modulus, there, nblk)
     if (there) then
@@ -149,6 +152,7 @@ subroutine xzdrv(w, maxcor)
   isreal = tryreal
   t0 = omp_get_wtime()
   do
+    use2nd = isreal
     call xzsetmode(uselab)
     nwe = merge(1_8, 2_8, isreal)
     call xzslices()
@@ -758,7 +762,8 @@ subroutine xzsetmode(uselab)
   use xzdata
   implicit none
   logical, intent(in) :: uselab
-  integer(8) :: p, i, j, k, g, n, d, sa, si, m, h, t, step, a, b, r
+  integer(8) :: p, i, j, k, g, n, d, sa, si, m, h, t, step, a, b, r, lmin
+  integer(8) :: cc(0:no+nv-1)
 
   ncls = 1
   mgrp = 0
@@ -794,6 +799,34 @@ subroutine xzsetmode(uselab)
     end if
   end if
   if (ncls == 1) mgrp = 0
+  ! the second label (xzlabels: second): the classes c1 + gB c2
+  gB = 0
+  gm2 = 0
+  if (uselab .and. modulus2 > 1 .and. .not. use2nd) then
+    write(6, '(a)') '   (the second label is not used with complex arithmetic: only the first one blocks)'
+  else if (uselab .and. modulus2 > 1) then
+    if (mgrp == 0) then
+      write(6, '(a)') '   (the second label needs a first one with a modulus and two classes or more: it is not used)'
+    else
+      lmin = minval(lab(nfrozen:nfrozen + no + nv - 1))
+      do p = nfrozen, nfrozen + no + nv - 1
+        cc(p - nfrozen) = (lab(p) - lmin) / step + 12 * mgrp * lab2(p)
+      end do
+      gB = 12 * mgrp
+      gm2 = modulus2
+      ncls = mgrp + gB * (gm2 - 1)
+      if (ncls > maxcls) then
+        write(6, '(a)') '   (the second label: too many classes for maxcls; it is not used)'
+        gB = 0
+        gm2 = 0
+        ncls = 0
+        call xzclasses(no, nv, lab(nfrozen), maxcls, ncls, operm, vperm, ocls, vcls, ocoff, vcoff)
+      else
+        call xzclasses0(no, nv, cc, ncls, maxcls, operm, vperm, ocls, vcls, ocoff, vcoff)
+      end if
+    end if
+  end if
+  call xzsetred(gB, gm2)
   if (ncls == 1) then
     do p = 0, no - 1
       operm(p) = p
@@ -808,7 +841,15 @@ subroutine xzsetmode(uselab)
     ocoff(1) = no
     vcoff(1) = nv
   end if
-  if (mgrp > 0) then
+  if (gB > 0) then
+    ! two digits: every group is a number 0 .. ncls - 1 (xzw)
+    npg = ncls
+    ntg = ncls
+    dlo = 0
+    dhi = ncls - 1
+    q4hi = ncls - 1
+    q2hi = ncls - 1
+  else if (mgrp > 0) then
     ! groups, differences and the sums of (Q) are residues modulo mgrp
     npg = mgrp
     ntg = mgrp

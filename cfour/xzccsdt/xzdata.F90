@@ -38,12 +38,26 @@ module xzdata
   !      are then residues 0 .. mgrp - 1 (e.g. the C2* labels 2 m_j = +-1,
   !      modulus 4, of a double group D2h, D2 or C2v: mgrp = 2).  mgrp = 0:
   !      no modulus, the sums as they are.
+  !      A second label (xzlabels: 'second' and its modulus; the g/u parity
+  !      of D2h, modulus 2) needs the first one with a modulus: the class is
+  !      c1 + gB c2, c1 the class of the first label, c2 the second label
+  !      (0 .. gm2 - 1), gB = 12 mgrp; xzw reduces the two digits of a sum
+  !      apart (c1 modulo mgrp, c2 modulo gm2; no sum of the program comes
+  !      near gB / 2 in its first digit).  The groups are then the numbers
+  !      0 .. mgrp + gB (gm2 - 1) - 1, not all of them sums of classes (those
+  !      are empty); C2h* = Z4 x Z2 of D2h.
   integer, parameter :: maxcls = 64, maxgrp = 3 * maxcls
   logical :: have_labels = .false.  ! labels were found and can be used
   character(len=8) :: labfile = ' ' ! the file they came from: xzlabels, dgcosym
   logical :: blkin = .false.        ! the integrals from the blocked real files of xx2cvtran (%vtranblk)
   integer(8) :: modulus = 0
   integer(8) :: mgrp = 0            ! the sums of classes modulo mgrp (0: not modular)
+  integer(8) :: modulus2 = 0        ! the modulus of the second label (0: none)
+  integer(8) :: gB = 0, gm2 = 0     ! the second digit of a class: gB, its modulus (0: one label)
+  ! the second label only in real arithmetic: with complex integrals (C2h) the
+  ! two digits together give a wrong CCSDT energy (each label alone is right;
+  ! not understood yet), so it is left out there
+  logical :: use2nd = .true.
   integer(8) :: dlo = 0, dhi = 0    ! the range of a difference of two classes (delta)
   integer(8) :: q4hi = 0, q2hi = 0  ! the largest sum of 4, of 2 classes ((Q) sectors)
   integer(8) :: ncls = 1            ! classes of the labels: (label - smallest) / step
@@ -65,6 +79,7 @@ module xzdata
   ! (small integer arrays, not in the work array: the plan needs them before
   ! anything is placed)
   integer(8), allocatable :: lab(:)         ! labels of all spinors, CFOUR's order (0:ntot-1)
+  integer(8), allocatable :: lab2(:)        ! the second label (modulus2 > 0), CFOUR's order
   integer(8), allocatable :: operm(:), vperm(:)     ! CFOUR's number (from 0, among the active
                                             ! occupied or virtual ones) of the spinors in the order here
   integer(8), allocatable :: ocls(:), vcls(:)       ! their classes
@@ -227,10 +242,15 @@ module xzdata
 contains
 
   ! a sum or difference of classes, groups or shifts as an index: modulo
-  ! mgrp with a modulus (0 .. mgrp - 1), itself without one
+  ! mgrp with a modulus (0 .. mgrp - 1), itself without one; with a second
+  ! label the two digits x1 + gB x2 (|x1| < gB / 2) apart
   integer(8) elemental function xzw(x)
     integer(8), intent(in) :: x
-    if (mgrp > 0) then
+    integer(8) :: x2
+    if (gB > 0) then
+      x2 = nint(dble(x) / dble(gB), 8)
+      xzw = modulo(x - gB * x2, mgrp) + gB * modulo(x2, gm2)
+    else if (mgrp > 0) then
       xzw = modulo(x, mgrp)
     else
       xzw = x

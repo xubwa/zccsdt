@@ -1031,7 +1031,12 @@ subroutine N(xzeom)(w, ecorr)
     if (dense) then
       write(6, '(a,i5,a)') '   EOM-EE-CCSDT on the packed block: ', nroot, ' roots'
     else
-      write(6, '(a,i5,a,i4,a,i5,a)') '   EOM-EE-CCSDT, label shift ', eshl(ish), ' (', s, ' classes): ', nroot, ' roots'
+      if (gB > 0) then
+        write(6, '(a,i5,a,i2,a,i4,a,i5,a)') '   EOM-EE-CCSDT, label shift ', eshl(ish), ', second label ', &
+          modulo(eshl2(ish), gm2), ' (', s, ' classes): ', nroot, ' roots'
+      else
+        write(6, '(a,i5,a,i4,a,i5,a)') '   EOM-EE-CCSDT, label shift ', eshl(ish), ' (', s, ' classes): ', nroot, ' roots'
+      end if
     end if
     write(6, '(a,i14,a,i12,a,i14,a,f10.1,a)') '   a vector: ', nlen, ' elements (singles and doubles ', nsd, ', triples ', n3s, &
       ') = ', 8d-6 * NW * nlen, ' MB'
@@ -1166,6 +1171,14 @@ contains
       good = .false.
       if (.not. xzdry) write(6, '(/,a,i6,a,i4,a)') ' @XZCCSDT-W, EOM: the shift ', eshl(ip), &
         ' is not a difference of sums of the labels of this run (their step: ', labstep, '); it is left out.'
+    end if
+    ! the shift of the second label: the second digit of the class shift
+    if (gB > 0) then
+      sc = sc + gB * modulo(eshl2(ip), gm2)
+    else if (eshl2(ip) /= 0) then
+      good = .false.
+      if (.not. xzdry) write(6, '(/,a,i6,a)') ' @XZCCSDT-W, EOM: the shift ', eshl2(ip), &
+        ' of a second label, but this run has none; it is left out.'
     end if
     sc = xzw(sc)
   end subroutine

@@ -277,6 +277,60 @@ subroutine xzclasses(no, nv, lab, maxcls, nc, operm, vperm, ocls, vcls, ocoff, v
 end subroutine xzclasses
 
 ! ---------------------------------------------------------------------------
+! The same with the classes given (0 .. nc - 1, some of them empty): the
+! classes c1 + gB c2 of two labels (xzsetmode).
+subroutine xzclasses0(no, nv, cc, nc, maxcls, operm, vperm, ocls, vcls, ocoff, vcoff)
+  implicit none
+  integer(8), intent(in) :: no, nv, nc
+  integer(8), intent(in) :: cc(0:no+nv-1)
+  integer, intent(in) :: maxcls
+  integer(8), intent(out) :: operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1)
+  integer(8), intent(out) :: ocoff(0:maxcls), vcoff(0:maxcls)
+  integer(8) :: p, s, k
+  k = 0
+  ocoff = 0
+  do s = 0, nc - 1
+    ocoff(s) = k
+    do p = 0, no - 1
+      if (cc(p) == s) then
+        operm(k) = p
+        ocls(k) = s
+        k = k + 1
+      end if
+    end do
+  end do
+  ocoff(nc) = k
+  k = 0
+  vcoff = 0
+  do s = 0, nc - 1
+    vcoff(s) = k
+    do p = 0, nv - 1
+      if (cc(no + p) == s) then
+        vperm(k) = p
+        vcls(k) = s
+        k = k + 1
+      end if
+    end do
+  end do
+  vcoff(nc) = k
+end subroutine xzclasses0
+
+! ---------------------------------------------------------------------------
+! The two digits of the classes for the C kernels (zc_set_red of tnpack.c).
+subroutine xzsetred(b, m2)
+  use iso_c_binding
+  implicit none
+  integer(8), intent(in) :: b, m2
+  interface
+    subroutine zc_set_red(bb, mm) bind(C, name='zc_set_red')
+      import :: c_int
+      integer(c_int), value :: bb, mm
+    end subroutine zc_set_red
+  end interface
+  call zc_set_red(int(b, c_int), int(m2, c_int))
+end subroutine xzsetred
+
+! ---------------------------------------------------------------------------
 ! The tables of the sector kernels of (Q) (csrc/tnpack.c: zc_q_sector_energy,
 ! zc_xv_sector), 32-bit integers; the classes of the virtual spinors are
 ! their labels there.

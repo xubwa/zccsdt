@@ -113,7 +113,7 @@ subroutine xzsizes()
          action='read', iostat=ios)
     if (ios == 0) read(71, iostat=ios) hdr
     close(71)
-    if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) /= 1) then
+    if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) < 1 .or. hdr(2) > 2) then
       write(6, '(/,a)') ' @XZCCSDT-F, mobkhhhh is not a file of xx2cvtran with %vtranblk.'
       call xzerrex
     end if
@@ -178,23 +178,29 @@ end subroutine xzsizes
 ! and the modulus, then one integer label per spinor of the SCF in the order
 ! of scf2ceig (frozen, active occupied, active virtual, dropped).  A label
 ! adds: <pq||rs> is zero unless l_p + l_q = l_r + l_s (modulo the modulus if
-! that is not 0) - 2 m_j of a linear molecule (no modulus).
-!   lab(0:nlab-1); there = .false.: no file
-subroutine xzrdlab(nlab, lab, modul, there)
+! that is not 0) - 2 m_j of a linear molecule (no modulus).  Optionally a
+! second label: a line 'second m2', then one more integer per spinor, which
+! adds modulo m2 as well (the g/u parity of D2h: 0 and 1, m2 = 2).
+!   lab(0:nlab-1), lab2 (modul2 = 0: no second label); there = .false.: no file
+subroutine xzrdlab(nlab, lab, modul, lab2, modul2, there)
   implicit none
   integer(8), intent(in) :: nlab
-  integer(8), intent(out) :: lab(0:nlab-1), modul
+  integer(8), intent(out) :: lab(0:nlab-1), modul, lab2(0:nlab-1), modul2
   logical, intent(out) :: there
   character(len=1024) :: line
-  integer(8) :: n, k, v(64), have
+  integer(8) :: n, k, v(64), have, have2
   integer :: ios, i, nw, c1
-  logical :: first
+  logical :: first, sec
   modul = 0
+  modul2 = 0
+  lab2 = 0
   inquire(file='xzlabels', exist=there)
   if (.not. there) return
   open(unit=71, file='xzlabels', form='formatted', status='old', action='read')
   first = .true.
+  sec = .false.
   have = 0
+  have2 = 0
   n = -1
   do
     read(71, '(a)', iostat=ios) line
@@ -202,6 +208,15 @@ subroutine xzrdlab(nlab, lab, modul, there)
     c1 = verify(line, ' ')
     if (c1 == 0) cycle
     if (line(c1:c1) == '#') cycle
+    if (line(c1:min(c1 + 5, len(line))) == 'second') then
+      read(line(c1 + 6:), *, iostat=ios) modul2
+      if (ios /= 0 .or. modul2 < 1) then
+        write(6, '(/,a)') ' @XZCCSDT-F, the file xzlabels: the line ''second'' needs the modulus of the second label.'
+        call xzerrex
+      end if
+      sec = .true.
+      cycle
+    end if
     ! the integers of the line
     nw = 0
     do i = 1, 64
@@ -217,16 +232,22 @@ subroutine xzrdlab(nlab, lab, modul, there)
       k = 3
     end if
     do i = int(k), nw
-      if (have < nlab) lab(have) = v(i)
-      have = have + 1
+      if (sec) then
+        if (have2 < nlab) lab2(have2) = v(i)
+        have2 = have2 + 1
+      else
+        if (have < nlab) lab(have) = v(i)
+        have = have + 1
+      end if
     end do
   end do
   close(71)
-  if (n /= nlab .or. have /= nlab) then
-    write(6, '(/,a,i6,a,i6,a,i6,a)') ' @XZCCSDT-F, the file xzlabels: ', n, ' spinors announced, ', have, &
-      ' labels found; the SCF has ', nlab, ' spinors.'
+  if (n /= nlab .or. have /= nlab .or. (sec .and. have2 /= nlab)) then
+    write(6, '(/,a,i6,a,i6,a,i6,a,i6,a)') ' @XZCCSDT-F, the file xzlabels: ', n, ' spinors announced, ', have, &
+      ' labels (', have2, ' second labels) found; the SCF has ', nlab, ' spinors.'
     call xzerrex
   end if
+  if (sec) lab2 = modulo(lab2, modul2)
 end subroutine xzrdlab
 
 ! ---------------------------------------------------------------------------
@@ -615,8 +636,8 @@ subroutine xzbhead(fname, kind, flab, fmod)
   implicit none
   character(len=*), intent(in) :: fname
   integer(8), intent(in) :: kind
-  integer(8), intent(out) :: flab(0:ntot-1), fmod
-  integer(8) :: hdr(8)
+  integer(8), intent(out) :: flab(0:ntot-1), fmod(3)
+  integer(8) :: hdr(10)
   integer :: ios
   open(unit=71, file=fname, form='unformatted', access='sequential', status='old', &
        action='read', iostat=ios)
@@ -624,8 +645,15 @@ subroutine xzbhead(fname, kind, flab, fmod)
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, no file ', trim(fname), ' (xx2cvtran with %vtranblk)'
     call xzerrex
   end if
+  ! version 2: ten numbers, the second label in hdr(9:10); version 1: eight
+  hdr = 0
   read(71, iostat=ios) hdr
-  if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) /= 1 .or. hdr(3) /= kind) then
+  if (ios /= 0) then
+    rewind(71)
+    hdr = 0
+    read(71, iostat=ios) hdr(1:8)
+  end if
+  if (ios /= 0 .or. hdr(1) /= 20261015_8 .or. hdr(2) < 1 .or. hdr(2) > 2 .or. hdr(3) /= kind) then
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', trim(fname), ' is not a blocked file of xx2cvtran of its kind.'
     call xzerrex
   end if
@@ -638,7 +666,9 @@ subroutine xzbhead(fname, kind, flab, fmod)
     write(6, '(/,a,a)') ' @XZCCSDT-F, reading the labels of the file ', trim(fname)
     call xzerrex
   end if
-  fmod = hdr(5)
+  ! the modulus, and with a second label its modulus and the base of its
+  ! digit in the labels of the file (l1 + base l2)
+  fmod = [hdr(5), hdr(9), hdr(10)]
 end subroutine xzbhead
 
 ! ---------------------------------------------------------------------------
@@ -649,7 +679,7 @@ end subroutine xzbhead
 subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
   use xzdata
   implicit none
-  integer(8), intent(in) :: kind, iocc, flab(0:ntot-1), fmod
+  integer(8), intent(in) :: kind, iocc, flab(0:ntot-1), fmod(3)
   integer(8) :: pos(*)
   integer(8), intent(out) :: cnt
   logical, intent(in) :: fill
@@ -712,8 +742,12 @@ subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
 contains
   logical function ok(s)
     integer(8), intent(in) :: s
-    if (fmod > 0) then
-      ok = modulo(s, fmod) == 0
+    integer(8) :: x2
+    if (fmod(3) > 0) then
+      x2 = nint(dble(s) / dble(fmod(3)), 8)
+      ok = modulo(s - fmod(3) * x2, fmod(1)) == 0 .and. modulo(x2, fmod(2)) == 0
+    else if (fmod(1) > 0) then
+      ok = modulo(s, fmod(1)) == 0
     else
       ok = s == 0
     end if
@@ -738,7 +772,7 @@ subroutine xzrint(kind, fname, buf, n)
   character(len=*), intent(in) :: fname
   complex(8), intent(out) :: buf(0:n/2-1)
   character(len=8) :: bname
-  integer(8) :: flab(0:ntot-1), fmod, cnt, k, iocc, pos0(1)
+  integer(8) :: flab(0:ntot-1), fmod(3), cnt, k, iocc, pos0(1)
   integer(8), allocatable :: pos(:)
   real(8), allocatable :: d(:)
   integer :: ios
@@ -786,7 +820,7 @@ subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax)
   integer(8) :: inv(0:nvp-1), ig(0:nvp-1)
   real(8) :: sgf(0:nvp-1), col(0:nvp-1)
   real(8), intent(out) :: offmax
-  integer(8) :: flab(0:ntot-1), fmod, vl(0:nv-1), q, a, b, c, d, f, g, qr, qc, n, lo, k, cnt, idx
+  integer(8) :: flab(0:ntot-1), fmod(3), vl(0:nv-1), q, a, b, c, d, f, g, qr, qc, n, lo, k, cnt, idx
   integer(8) :: bb(0:maxgrp)
   real(8) :: x
   integer :: ios
@@ -850,8 +884,12 @@ subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax)
 contains
   logical function ok(s)
     integer(8), intent(in) :: s
-    if (fmod > 0) then
-      ok = modulo(s, fmod) == 0
+    integer(8) :: x2
+    if (fmod(3) > 0) then
+      x2 = nint(dble(s) / dble(fmod(3)), 8)
+      ok = modulo(s - fmod(3) * x2, fmod(1)) == 0 .and. modulo(x2, fmod(2)) == 0
+    else if (fmod(1) > 0) then
+      ok = modulo(s, fmod(1)) == 0
     else
       ok = s == 0
     end if
