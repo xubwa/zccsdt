@@ -27,6 +27,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   integer(8) :: kt1n, kt2n, kr3, icyc, m0, n, kb1, kb2
   logical :: fromccsd
   integer(8), external :: N(xzdiis_target)
+  real(8), external :: xzmaxd
   real(8) :: norms(3), eold, enew, de, normt, t0, t1w, ctl(2), tsg
   ZT :: e
   character(len=256) :: dbg
@@ -79,6 +80,37 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   call zc_vzero_d(NW * n3, w(jt3))
   call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
   eold = dble(e)
+  ! XZ_AMPIN=file: one step on the amplitudes of the file (CFOUR's order,
+  ! xzampio.f90; written by XZ_AMPOUT), the new ones to file.out, and the
+  ! largest change of T1, T2, T3: a test of the step between runs with other
+  ! labels or arithmetic (converged amplitudes: no change)
+  call get_environment_variable('XZ_AMPIN', dbg, ldbg)
+  if (ldbg > 0) then
+    if (nrank > 1) then
+      write(6, '(/,a)') ' @XZCCSDT-F, XZ_AMPIN runs with one rank only.'
+      call xzerrex
+    end if
+    if (.not. xzdry) then
+      call xzampr(w, jt1, jt2, jt3, dbg(1:ldbg), ctl(1), ctl(2))
+      write(6, '(/,a,a,a,es10.2,a,es10.2)') '   XZ_AMPIN: ', dbg(1:ldbg), ': imaginary parts dropped ', ctl(1), &
+        ', elements of T3 that the labels forbid ', ctl(2)
+    end if
+    kr3 = N(xzdiis_target)()
+    call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    if (.not. xzdry) then
+      norms(1) = xzmaxd(NW * no * nv, w(jt1), w(kt1n))
+      norms(2) = xzmaxd(NW * no * no * nv * nv, w(jt2), w(kt2n))
+      norms(3) = xzmaxd(NW * n3, w(jt3), w(kr3))
+      write(6, '(a,3es12.3)') '   XZ_AMPIN: largest change of T1, T2, T3 in one step:', norms
+      call xzampw(w, kt1n, kt2n, kr3, dbg(1:ldbg) // '.out')
+    end if
+    call N(xzdiis_close)()
+    call xzrel(m0)
+    ecorr = 0d0
+    converged = .false.
+    ncyc = 0
+    return
+  end if
   call get_environment_variable('XZ_DEBUG', dbg, ldbg)
   if (ldbg > 0 .and. nrank > 1) then
     write(6, '(/,a)') ' @XZCCSDT-F, XZ_DEBUG (one step from a file) runs with one rank only.'
@@ -176,6 +208,9 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     call xzmpi_bcast(ctl, 16_8)
   end if
   ecorr = eold
+  ! XZ_AMPOUT=file: the amplitudes in CFOUR's order (xzampio.f90)
+  call get_environment_variable('XZ_AMPOUT', dbg, ldbg)
+  if (ldbg > 0 .and. .not. xzdry .and. myrank == 0) call xzampw(w, jt1, jt2, jt3, dbg(1:ldbg))
   call N(xzdiis_close)()
   call xzrel(m0)
 end subroutine

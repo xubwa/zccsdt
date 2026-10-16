@@ -280,7 +280,9 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
                                      w(kfevv), nv, half)
         call xztoc(1, 'dressed <ab||cd> rows')
       end if
-      if (dense) then
+      if (xzskip(1)) then
+        continue
+      else if (dense) then
         if (xzdry) cycle
         do i0 = 0, nto - 1, nbt
           nb = min(nbt, nto - i0)
@@ -349,8 +351,16 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   end if
   kbd = kd
   tsg = omp_get_wtime()
+  ! (the test hook XZ_TERMS: 4 the ring terms of pass 2 left out, 5 its
+  ! drive terms; their operands set to zero, dense and blocked alike)
+  if (.not. xzdry) then
+    if (xzskip(4)) call zc_vzero_d(NW * ov2, w(kwring))
+    if (xzskip(5)) call zc_vzero_d(NW * npo * nv * ny, w(kadrv))
+  end if
   dkind = 2
-  if (dense) then
+  if (xzskip(2)) then
+    continue
+  else if (dense) then
     ktb = xzget(NW * nbp * ov * nvp, 'pass-2 batch of T3')
     kz = xzget(NW * nbp * ov * nvp, 'pass-2 product')
     if (.not. xzdry) then
@@ -415,7 +425,9 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   else if (.not. xzdry .and. myrank == 0) then
     tsg = omp_get_wtime()
     call xztic()
-    if (pairhh) then
+    if (xzskip(3)) then
+      continue
+    else if (pairhh) then
       call N(xzhhapply)(1_4, no, npo, nto, nvt, xzhhcols(), w(jotri), w(josgn), w(jofree), w(jopair), w(ko6), &
                         w(kt3), w(kr3), w(khg), w(khx))
     else if (dense) then

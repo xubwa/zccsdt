@@ -368,6 +368,21 @@ contains
   ! for 26 occupied spinors it is faster on 8 threads and slower on 16 and
   ! more (docs/native.md), so it is an option.  In blocks of the labels the
   ! operator on triples is used in any case.
+  ! a test hook: XZ_TERMS=digits leaves out parts of the T3 equation in a step
+  ! (dense and blocked alike): 1 the pp ladder, 2 pass 2 (ring and drive
+  ! terms), 3 the operator on the occupied triples (hh ladder, F_oo); 4 the
+  ! ring terms of pass 2, 5 its drive terms
+  logical function xzskip(k)
+    integer, intent(in) :: k
+    character(len=16), save :: terms = '?'
+    integer :: larg
+    if (terms == '?') then
+      call get_environment_variable('XZ_TERMS', terms, larg)
+      if (larg == 0) terms = ' '
+    end if
+    xzskip = index(terms, char(ichar('0') + k)) > 0
+  end function xzskip
+
   logical function xzhhpair()
     character(len=8) :: arg
     integer :: larg
