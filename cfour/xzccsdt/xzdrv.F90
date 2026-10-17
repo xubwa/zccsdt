@@ -155,7 +155,9 @@ subroutine xzdrv(w, maxcor)
     call xzsetmode(uselab)
     nwe = merge(1_8, 2_8, isreal)
     call xzslices()
+    call xztic()
     call xzplan(w, nslot, usefile, nch, .true.)
+    call xztoc(6, 'memory plan')
     call xzrel(0_8)
     call xzlayout(w, status)
     if (status == 0) exit
@@ -175,6 +177,7 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,a)') '   hh ladder and F_oo of T3: ', merge('through occupied pairs (as in CCSD)   ', &
     'one operator on the occupied triples  ', xzhhpair())
   write(6, '(a,f10.2,a)') '   integrals read and sorted: ', tread, ' s'
+  if (tread > 10d0) call xztable(6, 'the integrals read and sorted', tread, 0_8)
   flush(6)
   ! (a rank other than 0 has decided from its own files: the labels, their
   ! check against the integrals, real or complex - as rank 0, or not at all)
@@ -1116,21 +1119,26 @@ subroutine xzlayout(w, status)
   nbuf = max(2 * po * po, 2 * po * no * nv, 2 * no * no * nv * nv, 2 * ntot)
   kbuf = xzget(nbuf, 'record of an integral file')
   if (.not. xzdry) then
+    call xztic()
     call xzrdeps(w(jeps), w(kbuf))
     call xzsum3(no, nto, w(jofree), w(jeps), w(jeo3))
     call xzsum3(nv, nvt, w(jvfree), w(jeps + no), w(jev3))
     call xzrdsmall(w(jold(1)), w(jold(2)), w(jold(3)), w(jold(4)), w(jold(5)), w(jold(6)), w(jvpa), &
                    w(jvpb), w(jopa), w(jopb), w(kbuf))
+    call xztoc(6, 'the small blocks')
   end if
   call xzrel(m)
   jold(7) = xzget(2 * nel(7), names(7))
   m = xzmark()
   kbuf = xzget(2 * pv * nv, 'record of a file PPPH')
   if (.not. xzdry) then
+    call xztic()
     call xzrdovvq(w(jold(7)), w(jvpa), w(jvpb), w(kbuf))
+    call xztoc(6, '<ov||vv>')
     if (ncls > 1) then
       call xzchklab(w(jold(1)), w(jold(2)), w(jold(3)), w(jold(4)), w(jold(7)), w(jvpgrp), &
                     vmax, what)
+      call xztoc(6, 'check of the labels')
       if (vmax > tol_label) then
         write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
         write(6, '(a,a,a,es10.2,a)') '             an element of ', trim(what), ' that they forbid is ', &
@@ -1165,6 +1173,7 @@ subroutine xzlayout(w, status)
       if (.not. xzdry) call xztoreal(nel(k), w(jold(k)), w(m))
       jold(k) = m
     end do
+    if (.not. xzdry) call xztoc(6, 'imaginary and real parts')
   end if
   joooo = jold(1)
   jooov = jold(2)
@@ -1182,7 +1191,9 @@ subroutine xzlayout(w, status)
     ksrc = xzget(2 * nvp, 'permutation of the pairs')
     ksg = xzget(nvp, 'signs of the pairs')
     if (.not. xzdry) then
+      call xztic()
       call xzrbvvvv(w(jvvvv), w(jvpa), w(jvpb), w(ksrc), w(ksrc + nvp), w(ksg), w(krow), offmax, ximag)
+      call xztoc(6, '<vv||vv>')
       if (nwe == 1 .and. ximag > tol_imag) then
         write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', ximag, &
           ' (above the tolerance ', tol_imag, ', imagtol: complex arithmetic)'
@@ -1208,7 +1219,9 @@ subroutine xzlayout(w, status)
   ksrc = xzget(2 * nvp, 'permutation of the pairs')
   ksg = xzget(nvp, 'signs of the pairs')
   if (.not. xzdry) then
+    call xztic()
     call xzrdvvvv(w(jvvvv), w(jvpa), w(jvpb), w(krow), w(ksrc), w(ksg), offmax)
+    call xztoc(6, '<vv||vv>')
     if (offmax > tol_label) then
       write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
       write(6, '(a,es10.2,a)') '             an element of <vv||vv> that they forbid is ', offmax, &

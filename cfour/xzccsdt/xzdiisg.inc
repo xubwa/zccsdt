@@ -307,6 +307,7 @@ subroutine N(xzdiis_small)(no, nv, npo, nvp, opa, opb, vpa, vpb, t1, t2, t1n, t2
   integer(8) :: p, q
   x1 = t1n
   e1 = t1n - t1
+  !$omp parallel do private(p, q)
   do p = 0, npo - 1
     do q = 0, nvp - 1
       x2(q, p) = t2n(vpb(q), vpa(q), opb(p), opa(p))
@@ -323,7 +324,11 @@ subroutine N(xzunpack2)(no, nv, npo, nvp, opa, opb, vpa, vpb, x2, t2)
   ZT, intent(in) :: x2(0:nvp-1, 0:npo-1)
   ZT, intent(out) :: t2(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)
   integer(8) :: p, q, i, j, a, b
-  t2 = 0
+  !$omp parallel do private(i)
+  do i = 0, no - 1
+    t2(:, :, :, i) = 0
+  end do
+  !$omp parallel do private(p, q, i, j, a, b)
   do p = 0, npo - 1
     i = opa(p)
     j = opb(p)

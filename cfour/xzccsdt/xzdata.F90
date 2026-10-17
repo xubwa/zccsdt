@@ -227,8 +227,8 @@ module xzdata
   !      first use.  Sets: 1 the CCSDT iterations, 2 the iterations of the
   !      Lambda equations, 3 the intermediates of the Lambda equations (once),
   !      4 the density and the orbital gradient, 5 EOM (the intermediates
-  !      once, the sigma vectors)
-  integer, parameter :: ntset = 5, ntmax = 64
+  !      once, the sigma vectors), 6 the integrals read and sorted
+  integer, parameter :: ntset = 6, ntmax = 64
   character(len=28) :: tnam(ntmax, ntset) = ' '
   real(8) :: twal(ntmax, ntset) = 0d0, tcpu(ntmax, ntset) = 0d0
   logical :: tpart(ntmax, ntset) = .false.      ! a part of another entry: wall only, not summed
@@ -313,6 +313,37 @@ contains
     xzndel = 0
     if (dd >= dlo .and. dd <= dhi) xzndel = ndel(dd)
   end function xzndel
+
+  ! The pairs (i, a) of an occupied and a virtual spinor by their delta
+  ! s(a) - s(i) (xzw): those of delta d are lx(k), ly(k) for k = loff(d) ..
+  ! loff(d + 1) - 1, by the classes of a, then a, then i (one class: all
+  ! pairs, d = 0).  The blocked products of the CCSD step (xzsd.inc) couple
+  ! the pairs of one delta with those of another.
+  subroutine xzovlist(lx, ly, loff)
+    integer(8), intent(out) :: lx(0:no*nv-1), ly(0:no*nv-1), loff(dlo:dhi+1)
+    integer(8) :: d, sa, si, a, i, n
+    n = 0
+    do d = dlo, dhi
+      loff(d) = n
+      if (.not. xzcan(d)) cycle
+      do sa = 0, ncls - 1
+        si = xzw(sa - d)
+        if (si < 0 .or. si >= ncls) cycle
+        do a = vcoff(sa), vcoff(sa + 1) - 1
+          do i = ocoff(si), ocoff(si + 1) - 1
+            lx(n) = i
+            ly(n) = a
+            n = n + 1
+          end do
+        end do
+      end do
+    end do
+    loff(dhi + 1) = n
+    if (n /= no * nv) then
+      write(6, '(a,2i12)') ' @XZCCSDT-F, xzovlist: the pairs (i, a) by delta are not all pairs: ', n, no * nv
+      call xzerrex
+    end if
+  end subroutine xzovlist
 
   ! The shifts of a pass in blocks (see sh_t ..): the layouts of operand and
   ! result, the ring operators - for the pairs (d, m) of delta the block

@@ -196,6 +196,14 @@
       type(*), dimension(*) :: out, bare, pa, pb, ta, ga, tb, gb, ct, h
     end subroutine
 
+    ! the same with the sums over m limited to [mlo(a), mhi(a)) (t3pack.c)
+    subroutine N(zc_vvvv_dress_cls)(out, bare, nrow, ncol, pa, pb, ta, lda, ga, nxa, &
+                                    tb, ldb, gb, nxb, mlo, mhi) bind(C)
+      import
+      integer(c_int64_t), value :: nrow, ncol, lda, nxa, ldb, nxb
+      type(*), dimension(*) :: out, bare, pa, pb, ta, ga, tb, gb, mlo, mhi
+    end subroutine
+
     subroutine N(zc_pair_one_body_add)(w, nq, ncol, pa, pb, pidx, n, f, ldf, scale) bind(C)
       import
       integer(c_int64_t), value :: nq, ncol, n, ldf

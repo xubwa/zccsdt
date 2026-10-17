@@ -514,6 +514,57 @@ void zc_vvvv_dress_##SFX(T *out, const T *bare, int64_t nrow, int64_t ncol,    \
 DEFINE_VVVV_DRESS(double, d)
 DEFINE_VVVV_DRESS(double complex, z)
 
+/* The two t1 terms of zc_vvvv_dress with the sums over m limited to a range
+ * per virtual index (the occupied spinors of its class: t1 conserves the
+ * symmetry labels), without the CT x H term:
+ *   out[q, c] = bare[q, c] + sum_{m in [mlo[a], mhi[a])}  tA[m, a]  GA[m, b, c]
+ *                          + sum_{m in [mlo[b], mhi[b])}  tB[m, b]  GB[m, a, c]
+ * (a, b) = (pa[q], pb[q]).  The terms that are left out are those with a
+ * zero t1, the others are added in the same order as zc_vvvv_dress: the
+ * same numbers.  Rows (m, y) of GA and GB that no range reaches are not
+ * read. */
+#define DEFINE_VVVV_DRESS_CLS(T, SFX)                                          \
+void zc_vvvv_dress_cls_##SFX(T *out, const T *bare, int64_t nrow,              \
+                             int64_t ncol, const int64_t *pa,                  \
+                             const int64_t *pb, const T *tA, int64_t ldA,      \
+                             const T *GA, int64_t nxA, const T *tB,            \
+                             int64_t ldB, const T *GB, int64_t nxB,            \
+                             const int64_t *mlo, const int64_t *mhi)           \
+{                                                                              \
+    const int64_t nct = (ncol + DRESS_TB - 1) / DRESS_TB;                      \
+    const int64_t nrc = (nrow + DRESS_RB - 1) / DRESS_RB;                      \
+    _Pragma("omp parallel for collapse(2) schedule(dynamic, 1)")               \
+    for (int64_t ct = 0; ct < nct; ct++)                                       \
+    for (int64_t rc = 0; rc < nrc; rc++) {                                     \
+        const int64_t c0 = ct * DRESS_TB;                                      \
+        const int64_t nc = (c0 + DRESS_TB < ncol ? c0 + DRESS_TB : ncol) - c0; \
+        const int64_t q0 = rc * DRESS_RB;                                      \
+        const int64_t q1 = q0 + DRESS_RB < nrow ? q0 + DRESS_RB : nrow;        \
+        T acc[DRESS_TB];                                                       \
+        for (int64_t q = q0; q < q1; q++) {                                    \
+            const T *b = bare + q * ncol + c0;                                 \
+            for (int64_t c = 0; c < nc; c++) acc[c] = b[c];                    \
+            const int64_t a = pa[q], bb = pb[q];                               \
+            for (int64_t m = mlo[a]; m < mhi[a]; m++) {                        \
+                const T x = tA[m * ldA + a];                                   \
+                const T *g = GA + (m * nxA + bb) * ncol + c0;                  \
+                _Pragma("omp simd")                                            \
+                for (int64_t c = 0; c < nc; c++) acc[c] += x * g[c];           \
+            }                                                                  \
+            for (int64_t m = mlo[bb]; m < mhi[bb]; m++) {                      \
+                const T x = tB[m * ldB + bb];                                  \
+                const T *g = GB + (m * nxB + a) * ncol + c0;                   \
+                _Pragma("omp simd")                                            \
+                for (int64_t c = 0; c < nc; c++) acc[c] += x * g[c];           \
+            }                                                                  \
+            T *o = out + q * ncol + c0;                                        \
+            for (int64_t c = 0; c < nc; c++) o[c] = acc[c];                    \
+        }                                                                      \
+    }                                                                          \
+}
+DEFINE_VVVV_DRESS_CLS(double, d)
+DEFINE_VVVV_DRESS_CLS(double complex, z)
+
 /* One-body operator on both indices of packed pairs:
  *   W[(a<b), (d<e)] += scale * (F_ad d_be - F_bd d_ae - F_ae d_bd + F_be d_ad)
  * for the row pairs (pa[q], pb[q]) of one pair block; pidx (n, n) is the

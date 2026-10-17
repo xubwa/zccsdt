@@ -341,6 +341,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
 
   po = no * (no + 1) / 2
   call xzrint(1_8, 'moinhhhh', buf, 2 * po * po)
+  !$omp parallel do private(m, n, i, j, fm, fn, fi, fj, pmn, pij, smn, sij)
   do m = 0, no - 1
     do n = 0, no - 1
       fm = operm(m)
@@ -361,6 +362,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
     end do
   end do
   call xzrint(2_8, 'moinhhhp', buf, 2 * po * no * nv)
+  !$omp parallel do private(m, n, i, e, fm, fn, pmn, smn)
   do m = 0, no - 1
     do n = 0, no - 1
       fm = operm(m)
@@ -377,6 +379,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
   end do
   ! <mn||ef> = file[e, m, f, n]
   call xzrint(3_8, 'moinhhpp', buf, 2 * no * nv * no * nv)
+  !$omp parallel do collapse(2) private(m, n, e, f, fm, fn, fe, ff)
   do m = 0, no - 1
     do n = 0, no - 1
       fm = operm(m)
@@ -392,6 +395,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
   end do
   ! <mb||ej> = file[e, m, b, j]
   call xzrint(4_8, 'moinphhp', buf, 2 * no * nv * no * nv)
+  !$omp parallel do private(m, b, e, j, fm, fb, fe)
   do m = 0, no - 1
     fm = operm(m)
     do b = 0, nv - 1
@@ -404,6 +408,7 @@ subroutine xzrdsmall(oooo, ooov, oovv, ovvo, oovvp, gpp, vpa, vpb, opa, opb, buf
       end do
     end do
   end do
+  !$omp parallel do collapse(2) private(m, n, q)
   do m = 0, no - 1
     do n = 0, no - 1
       do q = 0, nvp - 1
@@ -427,6 +432,10 @@ subroutine xzrdovvq(ovvq, vpa, vpb, buf)
   complex(8) :: buf(0:nv*(nv+1)/2-1, 0:nv-1)
   integer(8) :: m, y, q, pv, fd, fe, fy
   character(len=8) :: fname
+  if (blkin) then
+    call xzrbovvq(ovvq, vpa, vpb)
+    return
+  end if
   pv = nv * (nv + 1) / 2
   do m = 0, no - 1
     write(fname, '(a4,i4.4)') 'PPPH', operm(m) + 1
@@ -446,6 +455,113 @@ subroutine xzrdovvq(ovvq, vpa, vpb, buf)
     end do
   end do
 end subroutine xzrdovvq
+
+! ---------------------------------------------------------------------------
+! <my||de> for d<e as [m][y][Q] (xzrdovvq) from the blocked files PPBK of
+! xx2cvtran, their elements put straight into their places: the file of the
+! occupied m has <de||ym> on its strict pairs (de) (CFOUR's order), by
+! columns y, the rows that the labels allow in the order of the pairs
+! (xzbidx, kind 5).  <my||de> = - <de||ym>*; the pair of the program has the
+! two spinors in the other order if sgf = -1.
+subroutine xzrbovvq(ovvq, vpa, vpb)
+  use xzdata
+  implicit none
+  complex(8), intent(out) :: ovvq(0:nvp-1, 0:nv-1, 0:no-1)     ! [m][y][Q]
+  integer(8), intent(in) :: vpa(0:nvp-1), vpb(0:nvp-1)
+  integer(8) :: flab(0:ntot-1), flab0(0:ntot-1), fmod(4), fmod0(4), vl(0:nv-1), ol
+  integer(8) :: m, y, q, a, b, c, f, k, kk, cl, cnt, ncl, iocc
+  integer(8), allocatable :: inv(:), vinv(:), fid(:), rows(:), roff(:), rep(:), ccl(:)
+  real(8), allocatable :: sgf(:), d(:)
+  integer(8), external :: xzpclass
+  logical, external :: xzbok
+  logical :: walk
+  integer :: ios
+  character(len=8) :: bname
+  allocate(inv(0:nvp-1), vinv(0:nv-1), sgf(0:nvp-1), fid(0:nvp-1), rows(0:nvp-1), roff(0:nvp), &
+           rep(0:nvp-1), ccl(0:nv-1))
+  do q = 0, nvp - 1
+    a = vperm(vpa(q))
+    b = vperm(vpb(q))
+    f = min(a, b) + max(a, b) * (max(a, b) - 1) / 2
+    inv(f) = q
+    sgf(f) = merge(1d0, -1d0, a < b)
+  end do
+  do y = 0, nv - 1
+    vinv(vperm(y)) = y
+  end do
+  !$omp parallel do private(m, y)
+  do m = 0, no - 1
+    do y = 0, nv - 1
+      ovvq(:, y, m) = 0
+    end do
+  end do
+  do m = 0, no - 1
+    iocc = operm(m)
+    write(bname, '(a4,i4.4)') 'PPBK', iocc + 1
+    call xzbhead(bname, 5_8, flab, fmod)
+    if (m == 0 .or. any(flab /= flab0) .or. any(fmod /= fmod0)) then
+      ! (the labels of the files: the same in all of them)
+      vl = flab(nfrozen + no:nfrozen + no + nv - 1)
+      call xzpcls(nv, vl, fmod, fid, rows, roff, rep, ncl, walk)
+      flab0 = flab
+      fmod0 = fmod
+    end if
+    ol = flab(nfrozen + iocc)
+    ! the class of the rows of each column c (walk), and their number
+    cnt = 0
+    do c = 0, nv - 1
+      if (walk) then
+        ccl(c) = xzpclass(vl(c) + ol, rep, ncl, fmod)
+        if (ccl(c) >= 0) cnt = cnt + roff(ccl(c) + 1) - roff(ccl(c))
+      else
+        do b = 1, nv - 1
+          do a = 0, b - 1
+            if (xzbok(vl(a) + vl(b) - vl(c) - ol, fmod)) cnt = cnt + 1
+          end do
+        end do
+      end if
+    end do
+    allocate(d(max(fmod(4) * cnt, 1_8)))
+    read(71, iostat=ios) d(1:fmod(4) * cnt)
+    close(71)
+    if (ios /= 0) then
+      write(6, '(/,a,a)') ' @XZCCSDT-F, reading the elements of the file ', trim(bname)
+      call xzerrex
+    end if
+    k = 0
+    do c = 0, nv - 1
+      y = vinv(c)
+      if (walk) then
+        cl = ccl(c)
+        if (cl < 0) cycle
+        do kk = roff(cl), roff(cl + 1) - 1
+          call put(rows(kk))
+        end do
+      else
+        do b = 1, nv - 1
+          do a = 0, b - 1
+            if (xzbok(vl(a) + vl(b) - vl(c) - ol, fmod)) call put(a + b * (b - 1) / 2)
+          end do
+        end do
+      end if
+    end do
+    deallocate(d)
+  end do
+  deallocate(inv, vinv, sgf, fid, rows, roff, rep, ccl)
+contains
+  ! the next element of the file, of the strict pair f and the column y
+  subroutine put(f)
+    integer(8), intent(in) :: f
+    complex(8) :: x
+    k = k + 1
+    if (fmod(4) == 2) then
+      x = cmplx(d(2 * k - 1), d(2 * k), 8)
+    else
+      x = cmplx(d(k), 0d0, 8)
+    end if
+    ovvq(inv(f), y, m) = -sgf(f) * conjg(x)
+  end subroutine put
+end subroutine xzrbovvq
 
 ! ---------------------------------------------------------------------------
 ! <ab||cd> for a<b, c<d from moinpppp, read into the place where it stays: v
@@ -558,9 +674,12 @@ subroutine xzchklab(oooo, ooov, oovv, ovvo, ovvq, vpgrp, vmax, what)
   integer(8), intent(in) :: vpgrp(0:nvp-1)
   real(8), intent(out) :: vmax
   character(len=*), intent(out) :: what
-  integer(8) :: m, n, i, j, e, f, b, y, q
+  integer(8) :: m, n, i, j, e, f, b, y, q, g
   real(8) :: x(5)
   x = 0d0
+  ! (<ov||vv>: the pairs Q of the group s(m) + s(y) are allowed, the others
+  ! not; the pairs are in the order of their groups)
+  !$omp parallel do private(m, n, i, j, e, f, b, y, q, g) reduction(max:x)
   do m = 0, no - 1
     do n = 0, no - 1
       do i = 0, no - 1
@@ -585,8 +704,12 @@ subroutine xzchklab(oooo, ooov, oovv, ovvo, ovvq, vpgrp, vmax, what)
       end do
     end do
     do y = 0, nv - 1
-      do q = 0, nvp - 1
-        if (.not. xzeq(ocls(m) + vcls(y), vpgrp(q))) x(5) = max(x(5), abs(ovvq(q, y, m)))
+      g = xzw(ocls(m) + vcls(y))
+      do q = 0, vpoff(g) - 1
+        x(5) = max(x(5), abs(ovvq(q, y, m)))
+      end do
+      do q = vpoff(g + 1), nvp - 1
+        x(5) = max(x(5), abs(ovvq(q, y, m)))
       end do
     end do
   end do
@@ -673,6 +796,113 @@ subroutine xzbhead(fname, kind, flab, fmod)
 end subroutine xzbhead
 
 ! ---------------------------------------------------------------------------
+! An element of a blocked file of xx2cvtran whose labels add up to s (the
+! labels of its bra minus those of its ket, as the file has them) is
+! allowed: s = 0, modulo the modulus fmod(1), and with a second label (base
+! fmod(3)) its digit modulo fmod(2).
+logical function xzbok(s, fmod)
+  implicit none
+  integer(8), intent(in) :: s, fmod(4)
+  integer(8) :: x2
+  if (fmod(3) > 0) then
+    x2 = nint(dble(s) / dble(fmod(3)), 8)
+    xzbok = modulo(s - fmod(3) * x2, fmod(1)) == 0 .and. modulo(x2, fmod(2)) == 0
+  else if (fmod(1) > 0) then
+    xzbok = modulo(s, fmod(1)) == 0
+  else
+    xzbok = s == 0
+  end if
+end function xzbok
+
+! ---------------------------------------------------------------------------
+! The strict pairs a<b of n indices with the labels vl (the pair number
+! f = a + b (b - 1) / 2, the order of the blocked files) by the classes of
+! the sums vl(a) + vl(b) under xzbok: fid(f) the class of the pair, the
+! pairs of class k rows(roff(k) .. roff(k + 1) - 1) in the order of f,
+! rep(k) the sum of one of them.  A blocked file has the rows (ab) of a
+! column whose labels add up to t, in the order of f: those of the class k
+! with xzbok(rep(k) - t) (xzpclass), or none.  The sums take few values:
+! this replaces a test per element by one per column.  walk = .false.: the
+! test is not an equivalence on these sums (not a file of xx2cvtran), and
+! the callers test every element.
+subroutine xzpcls(n, vl, fmod, fid, rows, roff, rep, ncl, walk)
+  implicit none
+  integer(8), intent(in) :: n, vl(0:n-1), fmod(4)
+  integer(8), intent(out) :: fid(0:*), rows(0:*), roff(0:*), rep(0:*), ncl
+  logical, intent(out) :: walk
+  logical, external :: xzbok
+  integer(8) :: a, b, f, i, j, s, ns, np
+  integer(8), allocatable :: ssum(:), sid(:)
+  np = n * (n - 1) / 2
+  allocate(ssum(0:max(np, 1_8) - 1), sid(0:max(np, 1_8) - 1))
+  ! the distinct sums, then their classes
+  ns = 0
+  do b = 1, n - 1
+    do a = 0, b - 1
+      s = vl(a) + vl(b)
+      do j = 0, ns - 1
+        if (ssum(j) == s) exit
+      end do
+      if (j == ns) then
+        ssum(ns) = s
+        ns = ns + 1
+      end if
+      fid(a + b * (b - 1) / 2) = j
+    end do
+  end do
+  ncl = 0
+  do j = 0, ns - 1
+    sid(j) = -1
+    do i = 0, j - 1
+      if (xzbok(ssum(j) - ssum(i), fmod)) then
+        sid(j) = sid(i)
+        exit
+      end if
+    end do
+    if (sid(j) < 0) then
+      sid(j) = ncl
+      rep(ncl) = ssum(j)
+      ncl = ncl + 1
+    end if
+  end do
+  walk = .true.
+  do j = 0, ns - 1
+    do i = 0, ns - 1
+      if (xzbok(ssum(j) - ssum(i), fmod) .neqv. (sid(i) == sid(j))) walk = .false.
+    end do
+  end do
+  roff(0:ncl) = 0
+  do f = 0, np - 1
+    fid(f) = sid(fid(f))
+    roff(fid(f) + 1) = roff(fid(f) + 1) + 1
+  end do
+  do j = 1, ncl
+    roff(j) = roff(j) + roff(j - 1)
+  end do
+  sid(0:ncl - 1) = roff(0:ncl - 1)
+  do f = 0, np - 1
+    rows(sid(fid(f))) = f
+    sid(fid(f)) = sid(fid(f)) + 1
+  end do
+  deallocate(ssum, sid)
+end subroutine xzpcls
+
+! the class of xzpcls that a column whose labels add up to t takes (-1: none)
+integer(8) function xzpclass(t, rep, ncl, fmod)
+  implicit none
+  integer(8), intent(in) :: t, ncl, rep(0:*), fmod(4)
+  logical, external :: xzbok
+  integer(8) :: k
+  xzpclass = -1
+  do k = 0, ncl - 1
+    if (xzbok(rep(k) - t, fmod)) then
+      xzpclass = k
+      return
+    end if
+  end do
+end function xzpclass
+
+! ---------------------------------------------------------------------------
 ! The places in the dense file of the elements of a blocked file, in the
 ! order of the blocked file (xzbwrite of xx2cvtran): kind 1 to 5 as in the
 ! header, iocc the occupied spinor of a file PPBK (kind 5, from 0).  With
@@ -684,6 +914,7 @@ subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
   integer(8) :: pos(*)
   integer(8), intent(out) :: cnt
   logical, intent(in) :: fill
+  logical, external :: xzbok
   integer(8) :: i, j, k, l, a, b, c, po, pv, ol(0:no-1), vl(0:nv-1)
   po = no * (no + 1) / 2
   pv = nv * (nv + 1) / 2
@@ -696,7 +927,7 @@ subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
       do k = 0, l - 1
         do j = 1, no - 1
           do i = 0, j - 1
-            if (ok(ol(i) + ol(j) - ol(k) - ol(l))) call put(i + j * (j + 1) / 2 + po * (k + l * (l + 1) / 2))
+            if (xzbok(ol(i) + ol(j) - ol(k) - ol(l), fmod)) call put(i + j * (j + 1) / 2 + po * (k + l * (l + 1) / 2))
           end do
         end do
       end do
@@ -706,7 +937,7 @@ subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
       do k = 0, no - 1
         do j = 1, no - 1
           do i = 0, j - 1
-            if (ok(ol(i) + ol(j) - ol(k) - vl(a))) call put(i + j * (j + 1) / 2 + po * (k + no * a))
+            if (xzbok(ol(i) + ol(j) - ol(k) - vl(a), fmod)) call put(i + j * (j + 1) / 2 + po * (k + no * a))
           end do
         end do
       end do
@@ -716,7 +947,7 @@ subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
       do b = 0, nv - 1
         do i = 0, no - 1
           do a = 0, nv - 1
-            if (ok(ol(i) + ol(j) - vl(a) - vl(b))) call put(a + nv * (i + no * (b + nv * j)))
+            if (xzbok(ol(i) + ol(j) - vl(a) - vl(b), fmod)) call put(a + nv * (i + no * (b + nv * j)))
           end do
         end do
       end do
@@ -726,7 +957,7 @@ subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
       do a = 0, nv - 1
         do i = 0, no - 1
           do b = 0, nv - 1
-            if (ok(ol(i) + vl(a) - vl(b) - ol(j))) call put(b + nv * (i + no * (a + nv * j)))
+            if (xzbok(ol(i) + vl(a) - vl(b) - ol(j), fmod)) call put(b + nv * (i + no * (a + nv * j)))
           end do
         end do
       end do
@@ -735,24 +966,12 @@ subroutine xzbidx(kind, iocc, flab, fmod, pos, cnt, fill)
     do c = 0, nv - 1
       do b = 1, nv - 1
         do a = 0, b - 1
-          if (ok(vl(a) + vl(b) - vl(c) - ol(iocc))) call put(a + b * (b + 1) / 2 + pv * c)
+          if (xzbok(vl(a) + vl(b) - vl(c) - ol(iocc), fmod)) call put(a + b * (b + 1) / 2 + pv * c)
         end do
       end do
     end do
   end select
 contains
-  logical function ok(s)
-    integer(8), intent(in) :: s
-    integer(8) :: x2
-    if (fmod(3) > 0) then
-      x2 = nint(dble(s) / dble(fmod(3)), 8)
-      ok = modulo(s - fmod(3) * x2, fmod(1)) == 0 .and. modulo(x2, fmod(2)) == 0
-    else if (fmod(1) > 0) then
-      ok = modulo(s, fmod(1)) == 0
-    else
-      ok = s == 0
-    end if
-  end function ok
   subroutine put(p)
     integer(8), intent(in) :: p
     cnt = cnt + 1
@@ -799,7 +1018,10 @@ subroutine xzrint(kind, fname, buf, n)
     write(6, '(/,a,a)') ' @XZCCSDT-F, reading the elements of the file ', trim(bname)
     call xzerrex
   end if
-  buf = (0d0, 0d0)
+  !$omp parallel do
+  do k = 0, n / 2 - 1
+    buf(k) = (0d0, 0d0)
+  end do
   if (fmod(4) == 2) then
     do k = 1, cnt
       buf(pos(k)) = cmplx(d(2 * k - 1), d(2 * k), 8)
@@ -829,9 +1051,11 @@ subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax, ximag)
   integer(8) :: inv(0:nvp-1), ig(0:nvp-1)
   real(8) :: sgf(0:nvp-1), col(0:2*nvp-1)
   real(8), intent(out) :: offmax, ximag
-  integer(8) :: flab(0:ntot-1), fmod(4), vl(0:nv-1), q, a, b, c, d, f, g, qr, qc, n, lo, k, cnt, idx, fw
-  integer(8) :: bb(0:maxgrp)
-  complex(8) :: x
+  integer(8) :: flab(0:ntot-1), fmod(4), vl(0:nv-1), q, a, b, c, d, f, g, qc, n, lo, k, cnt, fw
+  integer(8) :: bb(0:maxgrp), ncl, kk
+  integer(8), allocatable :: fid(:), rows(:), roff(:), rep(:)
+  logical, external :: xzbok
+  logical :: walk
   integer :: ios
 
   call xzbhead('mobkpppp', 6_8, flab, fmod)
@@ -851,70 +1075,78 @@ subroutine xzrbvvvv(v, vpa, vpb, inv, ig, sgf, col, offmax, ximag)
     end do
     bb(g + 1) = bb(g) + (vpoff(g + 1) - vpoff(g)) ** 2
   end do
+  ! the rows of the columns by the classes of the sums of their labels (xzpcls)
+  allocate(fid(0:nvp-1), rows(0:nvp-1), roff(0:nvp), rep(0:nvp-1))
+  call xzpcls(nv, vl, fmod, fid, rows, roff, rep, ncl, walk)
   v(0:nwe * nvv - 1) = 0d0
   offmax = 0d0
   ximag = 0d0
   fw = fmod(4)
   do d = 1, nv - 1
     do c = 0, d - 1
-      cnt = 0
-      do b = 1, nv - 1
-        do a = 0, b - 1
-          if (ok(vl(a) + vl(b) - vl(c) - vl(d))) cnt = cnt + 1
+      f = c + d * (d - 1) / 2
+      if (walk) then
+        cnt = roff(fid(f) + 1) - roff(fid(f))
+      else
+        cnt = 0
+        do b = 1, nv - 1
+          do a = 0, b - 1
+            if (xzbok(vl(a) + vl(b) - vl(c) - vl(d), fmod)) cnt = cnt + 1
+          end do
         end do
-      end do
+      end if
       read(71, iostat=ios) col(0:fw * cnt - 1)
       if (ios /= 0) then
         write(6, '(/,a)') ' @XZCCSDT-F, reading the file mobkpppp failed.'
         call xzerrex
       end if
-      f = c + d * (d - 1) / 2
       qc = inv(f)
       g = ig(qc)
       lo = vpoff(g)
       n = vpoff(g + 1) - lo
-      k = 0
-      do b = 1, nv - 1
-        do a = 0, b - 1
-          if (.not. ok(vl(a) + vl(b) - vl(c) - vl(d))) cycle
-          q = a + b * (b - 1) / 2
-          ! (the element of row (ab), column (cd) is <ab||cd> = <cd||ab>*; the
-          ! place of (cd) here is the row: conjugate, as xzrdvvvv does)
-          if (fw == 2) then
-            x = sgf(q) * sgf(f) * conjg(cmplx(col(2 * k), col(2 * k + 1), 8))
-          else
-            x = sgf(q) * sgf(f) * col(k)
-          end if
-          k = k + 1
-          qr = inv(q)
-          if (ig(qr) /= g) then
-            offmax = max(offmax, abs(x))
-            cycle
-          end if
-          idx = bb(g) + (qr - lo) + n * (qc - lo)
-          if (nwe == 2) then
-            v(2 * idx) = dble(x)
-            v(2 * idx + 1) = aimag(x)
-          else
-            v(idx) = dble(x)
-            ximag = max(ximag, abs(aimag(x)))
-          end if
+      if (walk) then
+        do kk = roff(fid(f)), roff(fid(f) + 1) - 1
+          call put(rows(kk), kk - roff(fid(f)))
         end do
-      end do
+      else
+        k = 0
+        do b = 1, nv - 1
+          do a = 0, b - 1
+            if (.not. xzbok(vl(a) + vl(b) - vl(c) - vl(d), fmod)) cycle
+            call put(a + b * (b - 1) / 2, k)
+            k = k + 1
+          end do
+        end do
+      end if
     end do
   end do
   close(71)
+  deallocate(fid, rows, roff, rep)
 contains
-  logical function ok(s)
-    integer(8), intent(in) :: s
-    integer(8) :: x2
-    if (fmod(3) > 0) then
-      x2 = nint(dble(s) / dble(fmod(3)), 8)
-      ok = modulo(s - fmod(3) * x2, fmod(1)) == 0 .and. modulo(x2, fmod(2)) == 0
-    else if (fmod(1) > 0) then
-      ok = modulo(s, fmod(1)) == 0
+  ! the k-th element of the column (cd) = f, the row (ab) = q of the file
+  subroutine put(q, k)
+    integer(8), intent(in) :: q, k
+    integer(8) :: qr, idx
+    complex(8) :: x
+    ! (the element of row (ab), column (cd) is <ab||cd> = <cd||ab>*; the
+    ! place of (cd) here is the row: conjugate, as xzrdvvvv does)
+    if (fw == 2) then
+      x = sgf(q) * sgf(f) * conjg(cmplx(col(2 * k), col(2 * k + 1), 8))
     else
-      ok = s == 0
+      x = sgf(q) * sgf(f) * col(k)
     end if
-  end function ok
+    qr = inv(q)
+    if (ig(qr) /= g) then
+      offmax = max(offmax, abs(x))
+      return
+    end if
+    idx = bb(g) + (qr - lo) + n * (qc - lo)
+    if (nwe == 2) then
+      v(2 * idx) = dble(x)
+      v(2 * idx + 1) = aimag(x)
+    else
+      v(idx) = dble(x)
+      ximag = max(ximag, abs(aimag(x)))
+    end if
+  end subroutine put
 end subroutine xzrbvvvv

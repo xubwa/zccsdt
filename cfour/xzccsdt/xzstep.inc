@@ -48,6 +48,7 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   integer(8) :: kslab, ktv, kxp, kbd, ktb, kz, kgq, kpib, kgh, nbdw
   integer(8) :: q0, nq, i0, nb, h, lo, nqh
   integer(8) :: khg, khx
+  integer(8) :: kml, kmh, plo, nph, kwk, khh, kee, kzl, kyl
   logical :: dense, pairhh
   real(8) :: stats(4), t0
   ZT :: one, zero, half
@@ -69,29 +70,29 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   kpvv = xzget(NW * nv * nv, 'F_vv work')
   kfevv = xzget(NW * nv * nv, 'F_vv of T3')
   kfeoo = xzget(NW * no * no, 'F_oo of T3')
-  kft = xzget(NW * ov, 'F_ov transposed')
+  kft = xzget(NW * merge(1_8, ov, ccsdonly), 'F_ov transposed')
   kooovd = xzget(NW * no * no * ov, 'dressed <oo||ov>')
   kooood = xzget(NW * no ** 4, 'dressed <oo||oo>')
   kovvod = xzget(NW * ov2, 'dressed <ov||vo>')
-  kovood = xzget(NW * no * no * ov, 'dressed <ov||oo>')
-  kk = xzget(NW * ov2, 'work of the dressing')
-  ktmp = xzget(NW * no * no * ov, 'work of W_vooo')
-  ktmp2 = xzget(NW * no * no * ov, 'work of W_vooo 2')
+  kovood = xzget(NW * merge(1_8, no * no * ov, ccsdonly), 'dressed <ov||oo>')
+  kk = xzget(NW * merge(1_8, ov2, ccsdonly), 'work of the dressing')
+  ktmp = xzget(NW * merge(1_8, no * no * ov, ccsdonly), 'work of W_vooo')
+  ktmp2 = xzget(NW * merge(1_8, no * no * ov, ccsdonly), 'work of W_vooo 2')
   kt2p = xzget(NW * no * no * nvp, 'T2 [i][j][Q]')
   kt2pp = xzget(NW * npo * nvp, 'T2 [P][Q]')
   ktau = xzget(NW * npo * nvp, 'tau1')
   ktt = xzget(NW * npo * nvp, 'T2 + tau1')
-  kgpd = xzget(NW * ny * npo * nv, 'pass-1 operand')
-  kyall = xzget(NW * npo * nv * ny, 'pass-1 result Y')
-  kr1c = xzget(NW * ov, 'T3 part of R1')
+  kgpd = xzget(NW * merge(1_8, ny * npo * nv, ccsdonly), 'pass-1 operand')
+  kyall = xzget(NW * merge(1_8, npo * nv * ny, ccsdonly), 'pass-1 result Y')
+  kr1c = xzget(NW * merge(1_8, ov, ccsdonly), 'T3 part of R1')
   kr1v = xzget(NW * no * ny, 'vovv part of R1')
-  kra = xzget(NW * npo * nvp, 'T3 part of R2')
+  kra = xzget(NW * merge(1_8, npo * nvp, ccsdonly), 'T3 part of R2')
   kr2 = xzget(NW * npo * nvp, 'R2')
   klad = xzget(NW * npo * nvp, 'CCSD ladder')
   kwkl = xzget(NW * npo * npo, 'W_oooo')
   kweff = xzget(NW * ov2, 'W_ovvo')
-  kwo = xzget(NW * ov * npo, 'W_vooo')
-  kadrv = xzget(NW * npo * nv * ny, 'pass-2 operand A')
+  kwo = xzget(NW * merge(1_8, ov * npo, ccsdonly), 'W_vooo')
+  kadrv = xzget(NW * merge(1_8, npo * nv * ny, ccsdonly), 'pass-2 operand A')
   pairhh = xzhhpair()
   ko6 = xzget(NW * merge(npo * npo, nto * nto, pairhh), 'occupied operator')
   if (ccsdonly) then
@@ -114,21 +115,29 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     call xztoc(1, 'dressing: Fock')
     call N(xzdroo)(no, nv, w(kt1), w(jooov), w(joovv), w(joooo), w(kooovd), w(kooood))
     call xztoc(1, 'dressing: <oo||ov>, <oo||oo>')
-    call N(xzdrovvq)(no, nv, nvp, w(kt1), w(jovvq), w(joovvp), w(kd))
-    call xztoc(1, 'dressing: <ov||vv>')
-    call N(xzdrov)(no, nv, nvp, w(kt1), w(jooov), w(jovvo), w(jovvq), w(kd), w(kooood), &
-                   w(jvpidx), w(kovvod), w(kovood), w(kk))
-    call xztoc(1, 'dressing: <ov||vo>, <ov||oo>')
+    if (ccsdonly) then
+      ! (CCSD, xzsd.inc: in the blocks of the labels; no dressed <mb||ij>)
+      call N(xzsdrovvq)(no, nv, nvp, w(kt1), w(jovvq), w(joovvp), w(kd))
+      call xztoc(1, 'dressing: <ov||vv>')
+      call N(xzsdrov)(no, nv, nvp, w(kt1), w(jooov), w(jovvo), w(kd), w(jvpa), w(jvpb), w(kovvod))
+      call xztoc(1, 'dressing: <ov||vo>, <ov||oo>')
+    else
+      call N(xzdrovvq)(no, nv, nvp, w(kt1), w(jovvq), w(joovvp), w(kd))
+      call xztoc(1, 'dressing: <ov||vv>')
+      call N(xzdrov)(no, nv, nvp, w(kt1), w(jooov), w(jovvo), w(jovvq), w(kd), w(kooood), &
+                     w(jvpidx), w(kovvod), w(kovood), w(kk))
+      call xztoc(1, 'dressing: <ov||vo>, <ov||oo>')
+    end if
     call N(xzt2forms)(no, nv, npo, nvp, w(kt1), w(kt2), w(jopa), w(jopb), w(jvpa), w(jvpb), &
                       w(kt2p), w(kt2pp), w(ktau), w(ktt))
     call xztoc(1, 'T2 on pairs, tau')
   end if
 
   ! ---- pass 1
-  kxacc = xzget(NW * ny * no * nvp, 'pass-1 result X')
+  kxacc = xzget(NW * merge(1_8, ny * no * nvp, ccsdonly), 'pass-1 result X')
   m1 = xzmark()
-  kgmq = xzget(NW * no * nvp * ny, 'pass-1 operand G')
-  if (.not. xzdry) then
+  kgmq = xzget(NW * merge(1_8, no * nvp * ny, ccsdonly), 'pass-1 operand G')
+  if (.not. xzdry .and. .not. ccsdonly) then
     call xztic()
     call N(xzp1ops)(no, nv, npo, nvp, w(joovv), w(kooovd), w(joovvp), w(kd), w(kfov), &
                     w(jopa), w(jopb), w(kgpd), w(kgmq), w(kft))
@@ -138,13 +147,8 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   tsg = omp_get_wtime()
   dkind = 1
   if (ccsdonly) then
-    ! CCSD: no T3, its parts of R1, R2, W_vvvo and W_vooo are zero
-    if (.not. xzdry) then
-      call zc_vzero_d(NW * ny * no * nvp, w(kxacc))
-      call zc_vzero_d(NW * ov, w(kr1c))
-      call zc_vzero_d(NW * npo * nv * ny, w(kyall))
-      call zc_vzero_d(NW * npo * nvp, w(kra))
-    end if
+    ! CCSD: no T3 (xzsd.inc has no T3 parts; these arrays are not made)
+    continue
   else if (dense) then
     kbuf = xzget(NW * nbp * ov * nvp, 'pass-1 batch of T3')
     if (.not. xzdry) then
@@ -172,8 +176,8 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   if (.not. xzdry) then
     call xztoc(1, 'pass 1')
     dsec(1, 1) = dsec(1, 1) + omp_get_wtime() - tsg
-    if (nrank > 1) then
-      ! what the batches of all ranks made, on every rank
+    if (nrank > 1 .and. .not. ccsdonly) then
+      ! what the batches of all ranks made, on every rank (CCSD: no batches)
       tsg = omp_get_wtime()
       tint(1) = tint(1) + tsg - tst
       call xzmpi_barrier()
@@ -189,12 +193,35 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
       tsync = omp_get_wtime()
     end if
     ! sum_{k,Q} ~<ak||Q> t2[i][k][Q], at the columns no + a
-    call N(zc_gemm)(0_4, 0_4, no, ny, no * nvp, one, w(kt2p), no * nvp, w(kgmq), ny, zero, w(kr1v), ny)
+    if (ccsdonly) then
+      call N(xzsdr1v)(no, nv, nvp, w(kt2p), w(kd), w(kr1v))
+    else
+      call N(zc_gemm)(0_4, 0_4, no, ny, no * nvp, one, w(kt2p), no * nvp, w(kgmq), ny, zero, w(kr1v), ny)
+    end if
     if (.not. ccsdonly) call N(xzr2t3)(no, nv, npo, nvp, w(jopa), w(jopb), w(jvpa), w(jvpb), w(kyall), w(kxacc), w(kra))
     call xztoc(1, 'R1, R2 from pass 1')
   end if
   call xzrel(m1)
 
+  ! ---- CCSD: the dressed <ab||ij> (without W_vvvo), W_ovvo, F_vv, F_oo
+  !      (xzsd.inc); the dressed <ov||vv> goes
+  if (ccsdonly) then
+    m2 = xzmark()
+    kwk = xzget(NW * npo * npo, 'work [K][P]')
+    khh = xzget(NW * no * no * ov, 'work [m][b][i][j]')
+    kee = xzget(NW * ov * npo, 'work [m][b][P]')
+    if (.not. xzdry) then
+      call xztic()
+      call N(xzsdvvoo)(no, nv, npo, nvp, w(kt1), w(ktau), w(jgpp), w(jovvq), w(jooov), w(joooo), w(jovvo), &
+                       w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2), w(kwk), w(khh), w(kee))
+      call xztoc(1, 'dressed <ab||ij>')
+      call N(xzsdweff)(no, nv, nvp, w(kt2), w(kt2p), w(joovv), w(joovvp), w(kovvod), w(kfoo), w(kfvv), &
+                       w(kweff), w(kfevv), w(kfeoo), w(ka2), w(kb2), w(kx2))
+      call xztoc(1, 'W_ovvo, F_vv, F_oo')
+    end if
+    call xzrel(md)
+    kwv = 0
+  else
   ! ---- W_vvvo (without its <ab||cd> part), W_vooo, W_ovvo, F_vv, F_oo
   kwv = xzget(NW * nvp * ov, 'W_vvvo')
   m2 = xzmark()
@@ -240,10 +267,18 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     call xztoc(1, 'moves')
   end if
   kwv = kd
+  end if
 
   ! ---- the sweep over the rows of the dressed <ab||cd>, block by block
   m2 = xzmark()
   kslab = xzget(NW * nqs * nqmax, 'slab of the dressed <ab||cd>')
+  kml = xzget(nv, 'classes of the virtual spinors')
+  kmh = xzget(nv, 'classes of the virtual spinors')
+  if (.not. xzdry) call N(xzvclsrange)(nv, w(kml), w(kmh))
+  if (ccsdonly) then
+    kzl = xzget(NW * npo * ov, 'ladder: <mb||Q> (t2 + tau1)')
+    kyl = xzget(NW * npo * npo, 'ladder: <K||Q> (t2 + tau1)')
+  end if
   kgq = jovvq
   kpib = jvpidx
   if (.not. dense) then
@@ -269,10 +304,23 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     lo = vpoff(h)
     nqh = vpoff(h + 1) - lo
     if (nqh == 0) cycle
+    if (ccsdonly) then
+      ! CCSD: the ladder with the bare <ab||cd> of the group (its occupied
+      ! pairs: the others give zero); its T1 parts after the sweep (xzsdladt1)
+      plo = opoff(h)
+      nph = opoff(h + 1) - plo
+      if (.not. xzdry .and. nph > 0 .and. (myrank == 0 .or. slices)) then
+        call xztic()
+        call N(zc_gemm)(0_4, 1_4, nph, nqh, nqh, one, w(ktt + NW * (lo + nvp * plo)), nvp, &
+                        w(jvvvv + NW * vvoff(h)), nqh, zero, w(klad + NW * (lo + nvp * plo)), nvp)
+        call xztoc(1, 'CCSD pp ladder (GEMM)')
+      end if
+      cycle
+    end if
     if (.not. dense .and. .not. xzdry) then
       call xztic()
-      call N(xzgrpcols)(no, nv, npo, nvp, lo, nqh, w(jovvq), w(jgpp), w(jvpidx), w(kgq), w(kgh), w(kpib))
-      call xztoc(1, 'dressed <ab||cd> rows')
+      call N(xzgrpcols1)(no, nv, npo, nvp, h, lo, nqh, w(jovvq), w(jgpp), w(jvpidx), w(kgq), w(kgh), w(kpib))
+      call xztoc(1, 'columns of a group')
     end if
     do q0 = 0, nqh - 1, nqs
       nq = min(nqs, nqh - q0)
@@ -280,9 +328,9 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
         call xztic()
         ! ~<ab||de> = <ab||de> - sum_m t1[m][a] <mb||de> + sum_m t1[m][b] <ma||de>
         !             + sum_{m<n} tau1[mn][ab] <mn||de>
-        call N(xzdrrows)(no, nv, npo, nvp, nqh, nq, w(kt1), w(ktau + NW * (lo + q0)), &
-                         w(jvvvv + NW * (vvoff(h) + q0 * nqh)), w(kgq), w(kgh), w(jvpa + lo + q0), &
-                         w(jvpb + lo + q0), w(kslab), w(ka2))
+        call N(xzdrrows1)(no, nv, npo, nvp, nqh, nq, w(kt1), w(ktau + NW * (lo + q0)), &
+                          w(jvvvv + NW * (vvoff(h) + q0 * nqh)), w(kgq), w(kgh), w(jvpa + lo + q0), &
+                          w(jvpb + lo + q0), w(kml), w(kmh), w(kslab), w(ka2))
         ! W_vvvo[Q][e][i] += sum_f ~<ab||ef> t1[i][f]
         if (.not. ccsdonly) &
           call N(zc_pair_t1_contract)(w(kwv + NW * (lo + q0) * ov), w(kslab), w(kt1), nq, nv, nqh, w(kpib), no)
@@ -328,6 +376,12 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
     end do
   end do
   dkind = 0
+  if (ccsdonly .and. .not. xzdry .and. (myrank == 0 .or. slices)) then
+    call xztic()
+    call N(xzsdladt1)(no, nv, npo, nvp, w(kt1), w(ktau), w(ktt), w(jovvq), w(jgpp), w(jopa), w(jopb), &
+                      w(jvpa), w(jvpb), w(klad), w(kzl), w(kyl))
+    call xztoc(1, 'CCSD ladder: T1 parts')
+  end if
   if (.not. xzdry) dsec(2, 1) = dsec(2, 1) + omp_get_wtime() - tsg
   call xzrel(m2)
 
@@ -336,10 +390,17 @@ subroutine N(xzstep)(w, kt1, kt2, kt3, kt1n, kt2n, kr3)
   if (.not. xzdry .and. (myrank == 0 .or. slices)) then
     tsg = omp_get_wtime()
     call xztic()
+    if (ccsdonly) then
+      call N(xzsdccsd)(no, nv, npo, nvp, w(jeps), w(kt1), w(kt2), w(kt2p), w(kt2pp), w(jgpp), w(kooovd), &
+                       w(kooood), w(kovvod), w(kweff), w(kfov), w(kfvo), w(kfevv), w(kfeoo), w(kr1v), &
+                       w(klad), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2), w(kwkl), &
+                       w(kt1n), w(kt2n), w(ka2), w(kb2), w(kx2), w(kwring))
+    else
     call N(xzccsd)(no, nv, npo, nvp, w(jeps), w(kt1), w(kt2), w(kt2p), w(kt2pp), w(jgpp), w(kooovd), &
                    w(kooood), w(kovvod), w(kweff), w(kfov), w(kfvo), w(kfevv), w(kfeoo), w(kr1v), &
                    w(kr1c), w(kra), w(klad), w(jopa), w(jopb), w(jvpa), w(jvpb), w(kr2), w(kwkl), &
                    w(kt1n), w(kt2n), w(ka2), w(kb2), w(kx2))
+    end if
     call xztoc(1, 'CCSD part')
     call xztic()
     if (ccsdonly) then
