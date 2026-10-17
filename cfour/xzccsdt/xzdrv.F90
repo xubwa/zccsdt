@@ -1096,6 +1096,12 @@ subroutine xzlayout(w, status)
     if (ncls > 1) call xzt3lay(no, nv, npo, nvp, nto, nvt, ncls, ocls, vcls, otoff, vtoff, w(jvtri), &
                                w(jvsgn), ocoff, vcoff, boff, n3, w(jobase), w(jvcol), w(josig), &
                                w(jvsig), w(jvci), w(jrowpos))
+    ! CCSD: no T3 (xzt3lay sets n3 and boff from the triples again; without
+    ! this the T3 storage and the T3 parts of the DIIS vectors were kept)
+    if (ccsdonly) then
+      n3 = 0
+      boff = 0
+    end if
   end if
   call xzrel(m)
 
