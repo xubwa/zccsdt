@@ -44,7 +44,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   integer(8), intent(out) :: ncyc
   integer(8) :: kl1n, kl2n, kr3, icyc, m0, ov, kk
   integer(8), external :: N(xzdiis_target)
-  real(8) :: norms(3), normt, t0, t1w, ctl(2), tsg
+  real(8) :: norms(3), t0, t1w, ctl(2), tsg
   ZT :: pe
   character(len=256) :: dbg
   integer :: ldbg
@@ -157,10 +157,10 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
       dsec(6, 2) = dsec(6, 2) + omp_get_wtime() - tsg
     end if
     call N(xzlpseudo)(no, nv, w(jl2), w(joovv), pe)
-    normt = norms(1) + norms(2) + norms(3)
     write(6, '(i8,f28.14,3es11.3,i7,f10.2)') icyc, dble(pe), norms, ncnt, omp_get_wtime() - t0
     flush(6)
-    if (normt < conv_t) then
+    ! (the largest change of an element of L1, L2, L3, as for the amplitudes)
+    if (maxval(norms) < conv_t) then
       converged = .true.
       ncyc = icyc
       exit

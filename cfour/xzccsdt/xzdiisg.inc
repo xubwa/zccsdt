@@ -119,7 +119,7 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
   use xzmem
   use xzkern
   use xzdiisd
-  use xzdist, only: myrank, xzmpi_allsum_w, xzmpi_bcast
+  use xzdist, only: myrank, xzmpi_allsum_w, xzmpi_bcast, xzmpi_max
   implicit none
   real(8) :: w(*)
   ZT, intent(inout) :: t1(0:nv-1, 0:no-1), t2(0:nv-1, 0:nv-1, 0:no-1, 0:no-1)
@@ -130,7 +130,7 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
   integer(8) :: ptr(maxdiis)
   ZT :: cz(maxdiis), d(maxdiis), dd, one
   complex(8) :: h(maxdiis, maxdiis), c(maxdiis)
-  real(8) :: s1, s2, s3, sx, ss(1)
+  real(8) :: s1, s2, s3, sx, ss(1), sm(1)
   logical :: small
   one = 1
   n1 = no * nv
@@ -143,35 +143,31 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
   pt = kt3 + NW * soff3
   small = myrank == 0
   ncall = ncall + 1
+  ! norms: the largest change of an element of T1, T2, T3 in this step (the
+  ! new vector minus the extrapolated one of the step before)
   s1 = 0d0
   s2 = 0d0
   if (small) then
-    call N(xzdiff2)(n1, t1n, t1, s1)
-    call N(xzdiff2)(nv * nv * no * no, t2n, t2, s2)
+    call N(xzdmax)(n1, t1n, t1, s1)
+    call N(xzdmax)(nv * nv * no * no, t2n, t2, s2)
   end if
 
   if (ncall == 1 .or. mdiis < 2) then
     ! the first vector starts the sequence
     s3 = 0d0
-    if (infile .or. mdiis == 0 .or. split) then
-      nn = max(m3, 1_8)
-      if (infile) nn = nchunk
-      do off = 0, m3 - 1, nn
-        l = min(nn, m3 - off)
-        call N(xzdiff2)(l, w(pr + NW * off), w(pt + NW * off), sx)
-        s3 = s3 + sx
-      end do
-    else
-      call N(zc_vsub)(n3, w(kr3), w(kt3), w(je3(1)))
-      call N(zc_vdot)(n3, w(je3(1)), w(je3(1)), dd)
-      s3 = dble(dd)
-    end if
+    nn = max(m3, 1_8)
+    if (infile) nn = nchunk
+    do off = 0, m3 - 1, nn
+      l = min(nn, m3 - off)
+      call N(xzdmax)(l, w(pr + NW * off), w(pt + NW * off), sx)
+      s3 = max(s3, sx)
+    end do
     if (split) then
       ss(1) = s3
-      call xzmpi_allsum_w(ss, 1_8)
-      s3 = ss(1)
+      call xzmpi_max(ss, sm, 1_8)
+      s3 = sm(1)
     end if
-    norms = [sqrt(s1)/n1, sqrt(s2)/n2, 6d0 * sqrt(s3)/n3]
+    norms = [s1, s2, s3]
     if (small) then
       t1 = t1n
       t2 = t2n
@@ -199,10 +195,8 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
     s = ord(k)
     call N(zc_vdot)(n1, w(je1(slot)), w(je1(s)), dd)
     d(k) = d(k) + dd
-    if (k == ncnt) s1 = dble(dd)
     call N(zc_vdot)(n2, w(je2(slot)), w(je2(s)), dd)
     d(k) = d(k) + dd
-    if (k == ncnt) s2 = dble(dd)
   end do
   end if
   nrl = (m3 + nchunk - 1) / max(nchunk, 1_8)
@@ -214,6 +208,7 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
       call N(zc_vlincomb)(m3, 1_8, ptr, cz, w(jx3(slot)))
     end if
     call N(zc_vsub)(m3, w(pr), w(pt), w(je3(slot)))
+    call N(xzdmax)(m3, w(pr), w(pt), s3)
     do k = 1, ncnt
       ptr(k) = loc(w(je3(ord(k))))
     end do
@@ -221,9 +216,12 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
     call N(zc_vmdot)(m3, ncnt, w(je3(slot)), ptr, cz)
   else
     cz(1:ncnt) = 0
+    s3 = 0d0
     do ir = 0, nrl - 1
       off = ir * nchunk
       l = min(nchunk, m3 - off)
+      call N(xzdmax)(l, w(pr + NW * off), w(pt + NW * off), sx)
+      s3 = max(s3, sx)
       call N(zc_vsub)(l, w(pr + NW * off), w(pt + NW * off), w(jchunk1))
       call N(xzdiis_io)('w', slot, 1_8, ir, w(jchunk1), l)
       call N(xzdiis_io)('w', slot, 0_8, ir, w(pr + NW * off), l)
@@ -242,9 +240,13 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms)
     call xzmpi_allsum_w(cz, NW * ncnt)
   end if
   d(1:ncnt) = d(1:ncnt) + cz(1:ncnt)
-  s3 = dble(cz(ncnt))
-  if (split) call xzmpi_bcast(d, 8_8 * NW * ncnt)
-  norms = [sqrt(abs(s1))/n1, 2d0 * sqrt(abs(s2))/n2, 6d0 * sqrt(abs(s3))/n3]
+  if (split) then
+    ss(1) = s3
+    call xzmpi_max(ss, sm, 1_8)
+    s3 = sm(1)
+    call xzmpi_bcast(d, 8_8 * NW * ncnt)
+  end if
+  norms = [s1, s2, s3]
   do k = 1, ncnt
     hmat(slot, ord(k)) = d(k)
     hmat(ord(k), slot) = conjg(hmat(slot, ord(k)))
@@ -354,6 +356,20 @@ subroutine N(xzdiff2)(n, a, b, s)
   !$omp parallel do reduction(+:s)
   do i = 1, n
     s = s + dble((a(i) - b(i)) * CONJ(a(i) - b(i)))
+  end do
+end subroutine
+
+! s = the largest |a - b|
+subroutine N(xzdmax)(n, a, b, s)
+  implicit none
+  integer(8), intent(in) :: n
+  ZT, intent(in) :: a(n), b(n)
+  real(8), intent(out) :: s
+  integer(8) :: i
+  s = 0d0
+  !$omp parallel do reduction(max:s)
+  do i = 1, n
+    s = max(s, abs(a(i) - b(i)))
   end do
 end subroutine
 

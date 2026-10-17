@@ -58,7 +58,7 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,i6,a,i6,a,i6)') '   frozen occupied ', nfrozen, '   dropped virtual ', ndropped, &
     '   of ', ntot
   write(6, '(a,i14,a,i14)') '   triples: occupied ', nto, '   virtual ', nvt
-  write(6, '(a,es9.1,a,es9.1,a,i5)') '   convergence: energy ', conv_e, '   amplitudes ', conv_t, &
+  write(6, '(a,es9.1,a,i5)') '   convergence: largest change of an amplitude ', conv_t, &
     '   cycles ', maxcyc
   write(6, '(a,f20.12)') '   E(SCF) of JOBARC: ', escf
   write(6, '(a,i14,a,f10.1,a)') '   work array (MAXCOR): ', maxcor, ' words = ', 8d-6 * maxcor, ' MB'
@@ -534,7 +534,8 @@ end subroutine xzdrv
 ! into PROPS=EXCITATION, EXCITE=NONE: both forms mean EOM here.  The
 ! iterations of an earlier run are not repeated when the files XZAMPS
 ! (XZLAMB) of the run directory belong to these integrals (xzreuse).
-! Thresholds: the amplitudes to 10**-CC_CONV, the energy to 10**-(CC_CONV + 2).
+! Threshold: the largest change of an amplitude (of lambda) in a step below
+! 10**-CC_CONV; the energy is not tested.
 subroutine xzjob()
   use xzdata
   use xzeomd, only: xzeominp
@@ -610,7 +611,6 @@ subroutine xzjob()
   with_lam = q_left .or. with_den
   with_q = method == 'CCSDT[Q]' .or. method == 'CCSDT(Q)' .or. q_left
   conv_t = 10d0 ** (-abs(iflags(4)))
-  conv_e = 10d0 ** (-abs(iflags(4)))
   maxcyc = iflags(7)
   if (maxcyc <= 0) maxcyc = 50
   ! a timing run: ncyc cycles of every iteration, converged or not

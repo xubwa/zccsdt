@@ -1,7 +1,8 @@
 !
 ! The CCSDT iterations (type-generic): second-order start, Jacobi steps
-! (xzstep.inc) with DIIS (xzdiis.F90), convergence as in the Python program:
-! the energy change below conv_e and |dT1| + |dT2| + |dT3| below conv_t.
+! (xzstep.inc) with DIIS (xzdiis.F90), converged when the largest change of
+! an element of T1, T2 and T3 in a step (|dT1|, |dT2|, |dT3|) is below
+! conv_t = 10**-CC_CONV (no test on the energy).
 ! The amplitudes stay in the work array (jt1, jt2, jt3 of xzdata) for what
 ! follows; everything else that is taken here is released.
 !
@@ -28,7 +29,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   logical :: fromccsd
   integer(8), external :: N(xzdiis_target)
   real(8), external :: xzmaxd
-  real(8) :: norms(3), eold, enew, de, normt, t0, t1w, ctl(2), tsg
+  real(8) :: norms(3), eold, enew, de, t0, t1w, ctl(2), tsg
   ZT :: e
   character(len=256) :: dbg
   integer :: ldbg
@@ -192,10 +193,9 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     enew = dble(e)
     de = enew - eold
     eold = enew
-    normt = norms(1) + norms(2) + norms(3)
     write(6, '(i8,f23.14,es19.6,3es11.3,i7,f10.2)') icyc, enew, de, norms, ncnt, omp_get_wtime() - t0
     flush(6)
-    if ( abs(de) < conv_e) then
+    if (maxval(norms) < conv_t) then
       converged = .true.
       ncyc = icyc
       exit
