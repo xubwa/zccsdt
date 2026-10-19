@@ -27,7 +27,7 @@ TEXT = {
 }
 
 
-def load(path, tol=1e-10, drop_forbidden=False, sort=False):
+def load(path, tol=1e-10, drop_forbidden=False, sort=False, freeze=0):
     '''(eris, labels, parity, info) from a Hamiltonian file: the integral
     container of the reference determinant of the first ncore spinors -
     <pq||rs> = (pr|qs) - (ps|qr), the Fock matrix f = h1 + sum_i <pi||qi>,
@@ -42,6 +42,15 @@ def load(path, tol=1e-10, drop_forbidden=False, sort=False):
     n = h1.shape[0]
     lab = np.asarray(z['omega2'], dtype=np.int64)
     par = np.asarray(z['parity'], dtype=np.int64) if 'parity' in z.files else None
+    ecore = float(z['ecore'])
+    if freeze:
+        # the first ``freeze`` spinors of the reference frozen: their mean field in h1, their energy in ecore
+        c, a = slice(0, freeze), slice(freeze, n)
+        vf = np.einsum('pqii->pq', eri[:, :, c, c]) - np.einsum('piiq->pq', eri[:, c, c, :])
+        ecore = float((ecore + np.trace(h1[c, c]) + 0.5 * np.trace(vf[c, c])).real)
+        h1, eri = (h1 + vf)[a, a], np.ascontiguousarray(eri[a, a, a, a])
+        lab, par = lab[freeze:], None if par is None else par[freeze:]
+        no, n = no - freeze, n - freeze
     info = {'n': n, 'ncore': no, 'imag': float(max(abs(h1.imag).max(), abs(eri.imag).max()))}
     if sort:
         # the spinors in the order of their labels (by energy inside a label): the layout of the label blocks
@@ -70,7 +79,7 @@ def load(path, tol=1e-10, drop_forbidden=False, sort=False):
     del eri
     o, v = slice(0, no), slice(no, None)
     fock = h1 + np.einsum('piqi->pq', g[:, o, :, o])
-    e_hf = float(z['ecore']) + float(np.einsum('ii->', h1[o, o]).real) + 0.5 * float(np.einsum('ijij->', g[o, o, o, o]).real)
+    e_hf = ecore + float(np.einsum('ii->', h1[o, o]).real) + 0.5 * float(np.einsum('ijij->', g[o, o, o, o]).real)
     blocks = {name: np.ascontiguousarray(g[tuple(o if c == 'o' else v for c in name)]) for name in BLOCKS}
     del g
     eris = ERIs(nocc=no, fock=fock, mo_energy=fock.diagonal().real.copy(), e_hf=e_hf, e_nuc=0.0, source=str(path), **blocks)

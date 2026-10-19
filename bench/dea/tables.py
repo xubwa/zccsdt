@@ -9,7 +9,9 @@ import os
 import sys
 
 H2CM = 219474.6313632
-SPACES = ('n26', 'n30', 'n32', 'dz', 'n116')
+SPACES = ('n26', 'n30', 'n32', 'dz', 'dyvdz', 'n116', 'ae', 'sogcv', 'sogcvae')
+# (dz: cc-pVDZ-DK; dyvdz: DYVDZ-SOG; n116: DYVTZ-SOG; ae: DYVTZ-SOG, all electrons; sogcv / sogcvae:
+#  DYVTZ-SOG with core-valence functions, 1s frozen / all electrons)
 ROWS = [('3p1h', 'CCSD'), ('3p1h', 'CCSDT'), ('3p1h, row at lowest order', 'CC3'), ('4p2h', 'CCSDT'), ('4p2h', 'CCSDTQ'),
         ('4p2h, row at lowest order', 'CC4'), ('5p3h at lowest order, folded', 'CCSDT'),
         ('5p3h at lowest order, folded', 'CCSDTQ'), ('5p3h', 'CCSDT'), ('5p3h', 'CCSDTQ'), ('6p4h', 'CCSDT'),
@@ -25,7 +27,12 @@ def collect(d):
         name = os.path.basename(path)[:-5]
         parts = name.split('_')
         ham = 'so' if 'so' in parts else ('xc' if 'xc' in parts else None)
-        space = next((s for s in SPACES if s in parts), None)
+        if 'aefc' in parts:                     # (the frozen-1s check from the all-electron file)
+            continue
+        if 'sogcv' in parts:
+            space = 'sogcvae' if 'ae' in parts else 'sogcv'
+        else:
+            space = next((s for s in ('ae', 'dyvdz') + SPACES if s in parts), None)
         if ham is None or space is None:
             continue
         try:
