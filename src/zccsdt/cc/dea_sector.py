@@ -30,14 +30,41 @@ the sector vector in the place of one amplitude:
   terms; the six-index Xv(e; kl; bcd) without T4) - all of
   zccsdt.cc.t4engine.
 
+  With the T of CCSDTQ two terms more:
+    T4      sum_{m<n} WhR(mn) t4(mnij; abcd) + P(a/bcd) sum_{m<n} sum_f [sum_e r2(ae) <mn||ef>] t4(mnij; fbcd)
+
+  The terms of the 4p2h row of dea_ref (T1-dressed f, v; coefficients of
+  the table, A over the external indices) and where they are:
+    1/4 v_cdej r3_iabe, 1/8 v_mnej t2_mnab r3_iecd, -1/2 v_dmef t2_imae r3_jfbc,
+      -1/4 f_me t2_imab r3_jecd, 1/8 v_mnef r3_ieab t3_mnjfcd        22: Wv r3
+    1/4 v_mnej t2_imab r3_necd, -1/4 v_dmef t2_imab r3_jefc, -1/16 v_mnef r2_ef t2_miab t2_njcd,
+      1/8 v_mnef t2_imab r4_njefcd                                    22: t2 XoR
+    1/16 v_mnef r3_meab t3_nijfcd, 1/16 v_mnef t3_mijeab r3_nfcd    22: ZR t3 (the two together)
+    -1/12 v_mdij r3_mabc, -1/6 v_mnej t2_imae r3_nbcd, 1/24 v_dmef t2_ijef r3_mabc,
+      -1/12 f_me t2_ijae r3_mbcd, 1/24 v_mnef r3_mabc t3_nijefd       13: Wo r3
+    1/8 v_bcef t2_ijae r2_fd, -1/16 v_mnef t2_mnab t2_ijec r2_fd, 1/4 v_dmef t2_ijae r3_mfbc,
+      1/24 v_mnef t2_ijae r4_mnfbcd                                   13: t2 XvR
+    -1/12 f_me r2_ae t3_mijbcd, 1/24 v_dmef r2_ef t3_mijabc, 1/24 v_mnef t3_mijabc r3_nefd
+                                                                      13: WoR t3
+    1/8 v_bcef r2_ae t2_ijfd, 1/2 v_mbei r2_ae t2_mjcd, -1/12 v_mnej r2_ae t3_mnibcd,
+      1/4 v_dmef r2_ae t3_mijfbc, -1/16 v_mnef t2_mnab r2_ec t2_ijfd,
+      1/2 v_mnef t2_imae t2_njbc r2_fd                                13: r2 Xv
+    1/24 v_mnef t3_mniabc r3_jefd                                     13: YR t3
+    1/12 f_de r4, 1/16 v_cdef r4, 1/32 v_mnef t2_mnab r4_ijefcd, 1/24 v_mnef t2_mnae r4_ijfbcd
+                                                                      pp
+    -1/24 f_mj r4, 1/96 v_mnij r4, 1/192 v_mnef t2_ijef r4_mnabcd, 1/48 v_mnef t2_imef r4_njabcd
+                                                                      hh
+    1/6 v_mdej r4_imabce, 1/6 v_mnef t2_imae r4_njfbcd                ring
+
   3p1h, sigma3[i; abc]:
     P(a/bc) [ sum_{e<f} Wq3(bc,ef) r3(i; aef) + sum_e Wv(bc,e,i) r2(ae) ]  Wq3 = Wpp + F_vv on pairs / 2
-    + P(c/ab) [ sum_{me} Wr(m,c,e,i) r3(m; abe) + sum_m t(im,ab) (YR(mn; n; c) summed over n + hR(c,m)) ]
+    + P(c/ab) [ sum_{me} Wr(m,c,e,i) r3(m; abe) + sum_m t(im,ab) (sum_n YR(mn; n; c) + hR(c,m)) ]
     - sum_m Fo(m,i) r3(m; abc) + sum_{m<n} WhR(mn) t(mni; abc)
-    + sum_{me} f_me r4(im; eabc)... (the 4p2h terms: f_ov, <mn||ei>, <cm||ef>)
+    + sum_{me} f_me r4(im; abce) + 1/2 sum_{mne} <mn||ei> r4(mn; abce) + P(c/ab) sum_m sum_{e<f} <cm||ef> r4(im; abef)
+    with hR(c, m) = sum_{e<f} <cm||ef> r2(ef)
   2p, sigma2[ab]:
     sum_{e<f} Wq2(ab,ef) r2(ef) + sum_{me} f_me r3(m; eab) + P(ab) sum_m sum_{e<f} <bm||ef> r3(m; aef)
-    + sum_{m<n, e<f} <mn||ef> r4(mn; efab)
+    + sum_{m<n, e<f} <mn||ef> r4(mn; efab)                              Wq2 = Wpp + F_vv on pairs
 
 Storage (Sector): the labels of zccsdt.cc.t3pack.classes_of(); ``shift``
 the class of the pairs of two attached electrons (the target 2 Omega in
@@ -49,7 +76,10 @@ products go through the kernels of the label-block T4 engine
 (csrc/t4sym.c: expansion of a block into the splits (ab|cd), (a|bcd),
 (a|bc) and the antisymmetrizing reduction back).
 
-The ground-state T4 is not done here (the ghost route has it).
+The levels: R to 3p1h (rank 3) or 4p2h (rank 4); T of CCSD (t3 None), of
+CCSDT, or of CCSDTQ (t4 in the blocks of zccsdt.cc.t4engine_sym).  The
+lowest-order rows (CC3, CC4) and the folded 5p3h operators (dea5) are on
+the ghost route.
 '''
 
 import ctypes
@@ -266,7 +296,7 @@ class Ground:
     them): F_vv, F_oo, Whh, Wr, Wpp by classes of pairs, Wv and Wo with their
     T3 terms, T3 on its splits, and the six-index Xv(e; kl; bcd) without T4.'''
 
-    def __init__(self, lay, t2, T3, ints, xv=True):
+    def __init__(self, lay, t2, T3, ints, xv=True, r13=None):
         no, nv, ncls, ko = lay.no, lay.nv, lay.ncls, lay.ko
         dtype = np.result_type(T3, t2, ints.oovv, ints.f)
         self.dtype = dtype
@@ -343,7 +373,8 @@ class Ground:
                         k, mn = ko[i] + c, lay.O2cls[c]
                         T3P[o:o + len(mn) * nK[k]].reshape(len(mn), nK[k])[...] = \
                             T3b[k][lay.posO3[o12.pos[i, mn]]] * o12.psg[i, mn][:, None]
-            R13 = np.zeros(max(lay.r13size, 1), dtype=dtype)
+            # (``r13``: an array of a scratch file where memory is short)
+            R13 = np.zeros(max(lay.r13size, 1), dtype=dtype) if r13 is None else P.zero(r13)
             for Pq in range(nP):
                 for mu in range(ncls):
                     o = lay.r13off[Pq, mu]
@@ -1121,11 +1152,12 @@ def shift_of(eris, target):
     return d // step
 
 
-def memory(sec, rank, isz, batch_bytes=None, ground=True):
+def memory(sec, rank, isz, batch_bytes=None, ground=True, xv_disk=False):
     '''Bytes that ProblemSector holds besides the vectors of the Davidson
     subspace (the integrals of the ground state included), and the most a
     sigma vector allocates on top: (fixed, per sigma), each counted array
-    by array.'''
+    by array.  ``xv_disk``: the six-index Xv (with the rows of T3) in a
+    scratch file, not counted.'''
     batch_bytes = batch_bytes or BATCH_BYTES
     lay = sec.lay
     no, nv, ncls = lay.no, lay.nv, lay.ncls
@@ -1135,7 +1167,8 @@ def memory(sec, rank, isz, batch_bytes=None, ground=True):
     # the dressed integrals (zccsdt.cc.t4engine.Dressed): oovv, oooo, oovo, ovvo, vovv, ovoo, vvvo on pairs, vvvv on pairs
     ints = no * no * nv * nv * 2 + no ** 4 + 2 * no ** 3 * nv + no * nv ** 3 + nQ * nv * no + nQ * nQ
     # Ground: WvA, la13, T12, T3P, R13, Wpp, Wb; the small intermediates; its copies of the integrals
-    gr = (no * nQ * nv + nP * nv * (no + nv) + int(lay.t12size) + int(lay.t3psize) + int(lay.r13size) + wq
+    gr = (no * nQ * nv + nP * nv * (no + nv) + int(lay.t12size) + int(lay.t3psize) + wq
+          + (0 if xv_disk else int(lay.r13size))
           + int(lay.wbsize) + 2 * no ** 4 + 2 * ov * ov + no * nv * nQ + no * no * nQ * 2)
     # its construction on top: einsum of <dm||ef> t2 (v^3 o), the tables of Xv
     build = nv ** 3 * no + 2 * int(lay.mxsize.max(initial=0)) + int(lay.vosize) + int(lay.wrsize) + nv * nv * no * no
@@ -1230,10 +1263,20 @@ class ProblemSector:
         if sh is None or not 0 <= sh < lay.n2:
             raise ValueError('EOM-DEA: no pair of virtual spinors with the target %d' % target)
         self.sec = sec = Sector(lay, sh)
+        # the six-index Xv of the ground state (the largest array) in a scratch file if the rest
+        # and four vectors do not fit with it
+        vec = sum(sec.sizes) * isz
+        fixed, per = memory(sec, rank, isz, 1)
+        self.xv_disk = rank == 4 and fixed + per + 4 * vec > mem_mb * 1e6
+        r13, self.scr = None, None
+        if self.xv_disk:
+            from zccsdt.scratch import Scratch
+            self.scr = Scratch(prefix='zccsdt_dea_', what='the six-index intermediate Xv of EOM-DEA')
+            r13 = self.scr.create('xv', max(int(lay.r13size), 1), dtype)
+            fixed, per = memory(sec, rank, isz, 1, xv_disk=True)
         bb = batch_bytes
         if bb is None:
             # the batches as large as the budget leaves them, at most BATCH_BYTES
-            fixed, per = memory(sec, rank, isz, 1)
             bb = int(min(BATCH_BYTES, max(1 << 24, (mem_mb * 1e6 - fixed - per) / 3)))
         self.batch_bytes = bb
         if t3 is None:
@@ -1241,12 +1284,12 @@ class ProblemSector:
         else:
             T3 = np.ascontiguousarray(lay.t3_from_packed(ccsdt_opt.packed_t3(eris, t3)), dtype=dtype)
         ints = t4engine.Dressed.from_eris(eris, np.asarray(t1, dtype=dtype))
-        self.g = Ground(lay, np.asarray(t2), T3, ints, xv=(rank == 4))
+        self.g = Ground(lay, np.asarray(t2), T3, ints, xv=(rank == 4), r13=r13)
         del ints, T3
         if t4 is not None and rank != 4:
             raise ValueError('T4 with rank 3: not a level of this code')
         self.eng = Engine(sec, self.g, rank, bb, None if t4 is None else np.asarray(t4).ravel())
-        self.mem = memory(sec, rank, isz, bb, ground=False)
+        self.mem = memory(sec, rank, isz, bb, ground=False, xv_disk=self.xv_disk)
         # the elements: denominators e_a + .. - e_i - .. (per block, from the columns), parity masks
         ev = np.asarray(eris.mo_energy).real
         self.eo, self.ev = ev[:no], ev[no:]
@@ -1284,9 +1327,10 @@ class ProblemSector:
         self.prepare_seconds = time.perf_counter() - t0
         if verbose:
             print('  sector: 2p %d, 3p1h %d, 4p2h %d elements; memory %.2f GB fixed + %.2f GB per sigma vector; '
-                  'batches of %.0f MB; prepared in %.1f s'
+                  'batches of %.0f MB%s; prepared in %.1f s'
                   % (sec.n2, sec.size3, sec.size4 if rank == 4 else 0, self.mem[0] / 1e9, self.mem[1] / 1e9,
-                     bb / 1e6, self.prepare_seconds), flush=True)
+                     bb / 1e6, '; Xv in a scratch file (%.2f GB)' % (lay.r13size * isz / 1e9) if self.xv_disk else '',
+                     self.prepare_seconds), flush=True)
 
     def project(self, x):
         for p, m in zip(x, self.masks):

@@ -194,3 +194,15 @@ def test_memory_of_a_sigma_vector(bh):
     tracemalloc.stop()
     plan = sp.mem[1]
     assert peak <= plan, (peak, plan)
+
+
+def test_small_budget(bh):
+    '''A budget that the sector does not fit in: Xv in a scratch file, small
+    batches; the same sigma vector.'''
+    eris = bh._eris
+    a = D.ProblemSector(eris, bh.t1, bh.t2, bh.t3, rank=4, target=0)
+    b = D.ProblemSector(eris, bh.t1, bh.t2, bh.t3, rank=4, target=0, mem_mb=0.01, batch_bytes=1 << 12)
+    assert b.xv_disk and not a.xv_disk
+    x = [np.random.default_rng(2).standard_normal(n) for n in a.sizes]
+    ya, yb = a.sigma(x, a.new()), b.sigma(x, b.new())
+    assert max(abs(p - q).max() for p, q in zip(ya, yb)) < 1e-12

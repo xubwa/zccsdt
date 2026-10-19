@@ -7,7 +7,9 @@ roots of the sector in the blocks 2 Omega = 0 and 2 (parity g) - the
 zero-field splitting - in the same process.
 
 usage: python sector_bench.py <file.npz> <out.json> [--freeze n] [--nsigma 3] [--mem MB]
-                              [--backends ghost,sector] [--roots] [--tol 1e-9]'''
+                              [--backends ghost,sector] [--roots] [--roots-mem MB] [--tol 1e-9]
+--roots-mem: the memory of the roots (default --mem): a run under a smaller budget (batches, the
+             subspace in a scratch file)'''
 import json
 import os
 import sys
@@ -66,6 +68,7 @@ def main():
     mem = opt(args, '--mem', 100000.0, float)
     backends = opt(args, '--backends', 'ghost,sector').split(',')
     tol = opt(args, '--tol', 1e-9, float)
+    rmem = opt(args, '--roots-mem', None, float)
     roots = '--roots' in args
     if roots:
         args.remove('--roots')
@@ -140,7 +143,7 @@ def main():
         phase(be + ': released')
         dump()
     if roots:
-        res = common.run_levels(eris, lab, par, ['ccsdt'], conv_tol=tol, backend='sector', mem_mb=mem,
+        res = common.run_levels(eris, lab, par, ['ccsdt'], conv_tol=tol, backend='sector', mem_mb=rmem or mem,
                                 start_states={'ccsdt': st})
         rec['roots'] = res['ccsdt']
         phase('roots')
