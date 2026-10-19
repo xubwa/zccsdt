@@ -3,7 +3,10 @@ of the blocks 2 Omega = 0 and 2 Omega = 2 (parity g) at every level, total
 energies and their difference - the zero-field splitting of X 3Sigma_g-.
 
 usage: python o2_dea.py <file.npz> <out.json> [level ...] [--exact E0 E1] [--drop] [--tol 1e-9] [--blocks]
---blocks: in the blocks of the labels 2 Omega (zccsdt.cc.dea.ProblemSym)
+                        [--sector] [--mem MB] [--freeze n]
+--blocks: in the blocks of the labels 2 Omega (zccsdt.cc.dea.ProblemSym: two ghost spinors)
+--sector: with --blocks, the levels ccsd, ccsd+t3, ccsdt on the sector itself (zccsdt.cc.dea_sector)
+--mem: the memory of the EOM-DEA problem (MB; default 2000)
 levels: ccsd ccsd+t3 cc3 ccsdt cc4 ccsdt+t4cc4 ccsdt+t4 (default: all)'''
 import os
 import sys
@@ -32,6 +35,15 @@ def main():
         k = args.index('--tol')
         tol = float(args[k + 1])
         del args[k:k + 2]
+    backend = 'ghost'
+    if '--sector' in args:
+        args.remove('--sector')
+        backend = 'sector'
+    mem = 2000.0
+    if '--mem' in args:
+        k = args.index('--mem')
+        mem = float(args[k + 1])
+        del args[k:k + 2]
     freeze = 0
     if '--freeze' in args:
         k = args.index('--freeze')
@@ -53,7 +65,7 @@ def main():
     if par is not None:
         print('  parity (0 g, 1 u): occupied %s virtual %s' % (par[:no], par[no:]))
     print('  thresholds: ground state |dT| < 1e-11, EOM residual norm < %.0e' % tol, flush=True)
-    res = common.run_levels(eris, lab, par, levels, conv_tol=tol, out=out)
+    res = common.run_levels(eris, lab, par, levels, conv_tol=tol, out=out, backend=backend, mem_mb=mem)
     print()
     for line in common.table(res, exact):
         print(line)

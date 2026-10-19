@@ -2067,7 +2067,7 @@ class GCCSDT(UCCSDT):
         return res.e, res
 
     def eom_dea(self, nroots=1, shift=0, rank=None, conv_tol=1e-8, nguess=None, parity=None, target_parity=0,
-                fold5=False, max_cycle=100):
+                fold5=False, max_cycle=100, backend=None):
         '''EOM-DEA: the ``nroots`` lowest E(N+2) - E(N) (Hartree) of the states
         with two electrons more than the reference, and the zccsdt.cc.dea.Result
         (docs/eom.md, section 11).  Vectors r[(a<b)], r[i, (a<b<c)] and, with
@@ -2087,6 +2087,9 @@ class GCCSDT(UCCSDT):
                        rank 4: the roots that follow those of rank 4
         nguess         unit vectors on the lowest pairs (a<b) to start from
                        (default nroots + 2)
+        backend        in the blocks of the labels: 'ghost' (two ghost spinors,
+                       zccsdt.cc.dea.ProblemSym) or 'sector' (the sector itself,
+                       zccsdt.cc.dea_sector; without T4 and without fold5)
         The result is kept as self.eom_dea_result.'''
         from zccsdt.cc import dea, t3pack
         if self.t1 is None:
@@ -2098,11 +2101,18 @@ class GCCSDT(UCCSDT):
         rank = rank or (4 if t4 is not None else 3)
         if rank == 3:
             t4 = None
+        from zccsdt import memory
+        mem_mb = (memory.budget(self.max_memory) or 2e9) / 1e6
         if t3pack.classes_of(eris) is not None:
             if shift is None:
                 raise ValueError('eom_dea: in the blocks of the labels the states are asked for by shift')
-            pb = dea.ProblemSym(eris, self.t1, self.t2, self.t3, t4, rank=rank, target=int(shift), parity=parity,
-                                target_parity=target_parity)
+            if (backend or 'ghost') == 'sector' and t4 is None and not fold5:
+                from zccsdt.cc import dea_sector
+                pb = dea_sector.ProblemSector(eris, self.t1, self.t2, self.t3, rank=rank, target=int(shift),
+                                              parity=parity, target_parity=target_parity, mem_mb=mem_mb)
+            else:
+                pb = dea.ProblemSym(eris, self.t1, self.t2, self.t3, t4, rank=rank, target=int(shift), parity=parity,
+                                    target_parity=target_parity)
         else:
             from zccsdt.cc import ccsdtq_sym
             dense, t3 = self._dense_view()
@@ -2113,7 +2123,7 @@ class GCCSDT(UCCSDT):
                              target_parity=target_parity)
         note = self.verbose >= logger.NOTE
         res = dea.kernel(None, None, None, problem=pb, nroots=nroots, nguess=nguess, conv_tol=conv_tol,
-                         max_cycle=max_cycle, verbose=note, stdout=self.stdout)
+                         max_cycle=max_cycle, verbose=note, stdout=self.stdout, mem_mb=mem_mb)
         if fold5:
             from zccsdt.cc import dea5
             lab = getattr(eris, 'labels', None)
