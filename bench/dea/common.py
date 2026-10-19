@@ -140,13 +140,15 @@ PROBLEM_OF = {'ccsd': dict(rank=3), 'ccsd+t3': dict(rank=3), 'cc3': dict(rank=3,
 
 
 def run_levels(eris, lab, par, levels, targets=(0, 2), conv_tol=1e-9, tight=1e-11, nroots=1, nguess=4, out=None,
-               verbose=True, semicanonical_ok=True, backend='ghost', mem_mb=2000.0):
+               verbose=True, semicanonical_ok=True, backend='sector', mem_mb=2000.0, start_states=None):
     '''Every level in every block: {level: dict(e_cc, roots {target: [omega ..]}, ..)}.
     Blocks: the sum of the labels of the two electrons = target, parity g.
-    ``backend`` in label blocks: 'ghost' (zccsdt.cc.dea.ProblemSym) or 'sector'
-    (zccsdt.cc.dea_sector.ProblemSector: the levels without T4).'''
+    ``backend`` in label blocks: 'sector' (default) or 'ghost' (zccsdt.cc.dea.ProblemSym) -
+    zccsdt.cc.dea_sector.ProblemSector for ccsd, ccsd+t3, ccsdt, ccsdt+t4, the others are on
+    the ghost route in any case.  ``start_states``:
+    ground states already computed {model: ground() of it}.'''
     from zccsdt.cc import dea
-    results, states = {}, {}
+    results, states = {}, dict(start_states or {})
     for lev in levels:
         gm = GROUND_OF[lev]
         if gm not in states:
@@ -167,12 +169,10 @@ def run_levels(eris, lab, par, levels, targets=(0, 2), conv_tol=1e-9, tight=1e-1
                'ground_seconds': st['seconds'], 'roots': {}, 'residuals': {}, 'nsigma': {}, 'sigma_seconds': {},
                'sizes': {}, 'weights': {}}
         for tgt in targets:
-            if getattr(eris, 'use_labels', False) and backend == 'sector' and t4 is None:
+            if getattr(eris, 'use_labels', False) and backend == 'sector' and lev in ('ccsd', 'ccsd+t3', 'ccsdt', 'ccsdt+t4'):
                 from zccsdt.cc import dea_sector
-                if lev not in ('ccsd', 'ccsd+t3', 'ccsdt'):
-                    raise ValueError('%s: not on the sector' % lev)
                 pb = dea_sector.ProblemSector(st['eris'], st['t1'], st['t2'], t3, rank=PROBLEM_OF[lev]['rank'], target=tgt,
-                                              parity=par, target_parity=0, mem_mb=mem_mb, verbose=verbose)
+                                              parity=par, target_parity=0, mem_mb=mem_mb, verbose=verbose, t4=t4)
             elif getattr(eris, 'use_labels', False):
                 if lev in ('cc3', 'cc4', 'ccsdt+t4cc4'):
                     raise ValueError('%s: on the packed layout' % lev)

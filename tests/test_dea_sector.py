@@ -70,6 +70,59 @@ def bh():
     return _bh()
 
 
+@pytest.fixture(scope='module')
+def bh_t4(bh):
+    '''CCSDTQ on the integrals of bh, in the blocks of the labels.'''
+    from zccsdt.cc import ccsdtq_sym
+    r = ccsdtq_sym.kernel(bh._eris, ccsdtq.Options(conv_tol=1e-12, conv_tol_normt=1e-10), t1=bh.t1, t2=bh.t2, t3=bh.t3)
+    assert r.converged
+    return r
+
+
+@pytest.mark.parametrize('shift', [0, 2])
+def test_sector_with_t4(bh, bh_t4, shift):
+    '''The T of CCSDTQ (two more terms of the 4p2h row): the sigma vector of
+    the sector against the ghost route, element by element.'''
+    eris, r = bh._eris, bh_t4
+    sp = D.ProblemSector(eris, r.t1, r.t2, r.t3, rank=4, target=shift, t4=r.t4)
+    gp = dea.ProblemSym(eris, r.t1, r.t2, r.t3, r.t4, rank=4, target=shift)
+    _compare(sp, gp, eris)
+
+
+def _compare(sp, gp, eris):
+    no = eris.nocc
+    nv = np.asarray(eris.fock).shape[0] - no
+    rank = len(sp.sizes) + 1
+    dt = sp.dtype
+    rng = np.random.default_rng(7)
+    x = [rng.standard_normal(n) + (1j * rng.standard_normal(n) if dt.kind == 'c' else 0) for n in sp.sizes]
+    y = sp.sigma(x, sp.new())
+    dpos = sp.dense_positions()
+    full = []
+    for k in range(rank - 1):
+        row = k + 2
+        n = (1 if row == 2 else (no if row == 3 else no * (no - 1) // 2)) * len(Q.tuples(nv, row))
+        f = np.zeros(n, dtype=dt)
+        f[dpos[k]] = x[k]
+        full.append(f)
+    xg = gp.new()
+    xg[0][:] = full[0]
+    for k in range(1, rank - 1):
+        xg[k][:] = full[k][gp.dpos[k]]
+    yg = gp.sigma(xg, gp.new())
+    scale = max(abs(p).max() for p in y)
+    assert scale > 0.1
+    for k in range(rank - 1):
+        got = np.zeros_like(full[k])
+        got[dpos[k]] = y[k]
+        if k == 0:
+            ref = yg[0]
+        else:
+            ref = np.zeros_like(full[k])
+            ref[gp.dpos[k]] = yg[k]
+        assert abs(got - ref).max() < 1e-11 * scale
+
+
 @pytest.mark.parametrize('shift', [0, 2, -2])
 def test_sector_against_reference_and_ghosts(bh, shift):
     '''BH / 6-31G from BH(2+), X2C spinors in the blocks of 2 m_j (4 + 18):

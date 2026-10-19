@@ -3,9 +3,10 @@ of the blocks 2 Omega = 0 and 2 Omega = 2 (parity g) at every level, total
 energies and their difference - the zero-field splitting of X 3Sigma_g-.
 
 usage: python o2_dea.py <file.npz> <out.json> [level ...] [--exact E0 E1] [--drop] [--tol 1e-9] [--blocks]
-                        [--sector] [--mem MB] [--freeze n]
---blocks: in the blocks of the labels 2 Omega (zccsdt.cc.dea.ProblemSym: two ghost spinors)
---sector: with --blocks, the levels ccsd, ccsd+t3, ccsdt on the sector itself (zccsdt.cc.dea_sector)
+                        [--ghost] [--mem MB] [--freeze n]
+--blocks: in the blocks of the labels 2 Omega: the levels ccsd, ccsd+t3, ccsdt, ccsdt+t4 on the sector
+          itself (zccsdt.cc.dea_sector), the others through two ghost spinors (zccsdt.cc.dea.ProblemSym)
+--ghost:  with --blocks, every level through the ghost spinors
 --mem: the memory of the EOM-DEA problem (MB; default 2000)
 levels: ccsd ccsd+t3 cc3 ccsdt cc4 ccsdt+t4cc4 ccsdt+t4 (default: all)'''
 import os
@@ -35,10 +36,12 @@ def main():
         k = args.index('--tol')
         tol = float(args[k + 1])
         del args[k:k + 2]
-    backend = 'ghost'
-    if '--sector' in args:
+    backend = 'sector'
+    if '--ghost' in args:
+        args.remove('--ghost')
+        backend = 'ghost'
+    if '--sector' in args:          # (the default)
         args.remove('--sector')
-        backend = 'sector'
     mem = 2000.0
     if '--mem' in args:
         k = args.index('--mem')

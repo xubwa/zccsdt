@@ -440,8 +440,9 @@ class Engine:
     4p2h, 3: to 3p1h.  ``batch_bytes``: an operand or a product of one batch
     of the passes over r4, at most.'''
 
-    def __init__(self, sec, g, rank=4, batch_bytes=None):
+    def __init__(self, sec, g, rank=4, batch_bytes=None, T4=None):
         self.sec, self.g, self.rank = sec, g, rank
+        self.T4 = None if T4 is None or rank != 4 else np.ascontiguousarray(T4, dtype=g.dtype)
         self.batch_bytes = batch_bytes or BATCH_BYTES
         lay = sec.lay
         self.lay = lay
@@ -460,6 +461,8 @@ class Engine:
         i2, j2 = lay.o2[:, 0], lay.o2[:, 1]
         self.Wh = _c(g.Whh[i2, j2][:, i2, j2] - t4engine._one_body_pairs(g.Fo, no), dtype)       # [(mn), (ij)]
         self.Wr2 = _c(g.Wr.transpose(3, 1, 0, 2).reshape(no * nv, no * nv), dtype)              # [(i a), (m e)]
+        self.WvAt = _c(g.WvA.transpose(0, 2, 1), dtype)                                          # [x, e, (ab)]
+        self.t2_2d = _c(g.t2_xq.transpose(1, 0, 2).reshape(no * no, -1), dtype)                  # [(m x), (ab)]
         self._ring = {}
         self._u = {}
         self.nsigma = 0
@@ -728,8 +731,10 @@ class Engine:
                     for M in sec.blocks4:
                         rows = sec.rows4[M]
                         gemm(_c(self.Wh[np.ix_(rows, rows)].T, dtype), sec.block4(r4, M), sec.block4(s4, M), beta=1.0)
+                    if self.T4 is not None and sec.n2:
+                        self._hh_t4(WhR, s4)
             with timer('dea.rows'):
-                self._rows(r2, r3, X3r, XoR, ZR, Z, WoR, YR, s4, want('x22'), want('x13'))
+                self._rows(r2, r3, X3r, XoR, ZR, Z, WoR, YR, s4, want('x22'), want('x13'), want('hh'))
 
         # ---- sigma3
         if want('row3'):
@@ -910,7 +915,71 @@ class Engine:
                         Z[kK] += X[r0:r0 + len(idx)]
                 del Mb, Xb
 
-    def _rows(self, r2, r3, X3r, XoR, ZR, Z, WoR, YR, s4, w22, w13):
+    def _x13_layout(self, MI):
+        """(offsets by the class of the first index, size) of a row of the T4 block MI on (f | bcd)."""
+        if not hasattr(self, '_l13'):
+            self._l13 = {}
+        if MI not in self._l13:
+            lay = self.lay
+            off = np.full(lay.ncls, -1, dtype=np.int64)
+            n = 0
+            for p in range(lay.ncls):
+                if lay.nV[p] and 0 <= MI - p < lay.n3 and lay.nK[MI - p]:
+                    off[p] = n
+                    n += lay.nV[p] * lay.nK[MI - p]
+            nc = np.where(off >= 0, lay.nK[np.clip(MI - np.arange(lay.ncls), 0, lay.n3 - 1)], 0)
+            self._l13[MI] = (off, n, nc)
+        return self._l13[MI]
+
+    def _xv_t4(self, M, P_, r2, X13):
+        """T of CCSDTQ: sum_{m<n} sum_f G(mn; a, f) t4(mnij; f, bcd) into X[a, (bcd)]
+        of the row (ij), G(mn; a, f) = sum_e r2(a, e) <mn||ef>."""
+        sec, lay, g, dtype = self.sec, self.lay, self.g, self.dtype
+        s, ncls, nV, nK = sec.s, lay.ncls, lay.nV, lay.nK
+        o22 = lay.o22
+        for Pmn, (m, n) in enumerate(lay.o2):
+            sg = int(o22.psg[Pmn, P_])
+            if not sg:
+                continue
+            I = int(o22.pos[Pmn, P_])
+            MI = int(lay.kO4[I])
+            if MI not in lay.sectors:
+                continue
+            off, size, nc = self._x13_layout(MI)
+            E = P.zero(np.empty(max(size, 1), dtype=dtype))
+            ent = (np.array([lay.posO4[I]], dtype=np.int64), np.array([float(sg)]),
+                   np.ascontiguousarray(off[None, :]), np.ascontiguousarray(nc[None, :]),
+                   np.ones((1, ncls), dtype=np.int64))
+            S._x13(lay, 0, lay.block(self.T4, MI), MI, ent, E)
+            G = r2 @ g.oovv[m, n]                                   # [a, f]
+            kmn = lay.ko[m] + lay.ko[n]
+            for p in range(ncls):
+                o = sec.off13[M, p]
+                ph = kmn - s + p
+                if o < 0 or not (0 <= ph < ncls) or off[ph] < 0:
+                    continue
+                nk = int(nK[M - p])
+                assert MI - ph == M - p
+                gemm(G[self.cls(p), self.cls(ph)], E[off[ph]:off[ph] + nV[ph] * nk].reshape(nV[ph], nk),
+                     X13[o:o + nV[p] * nk].reshape(nV[p], nk), beta=1.0)
+
+    def _hh_t4(self, WhR, s4):
+        '''T of CCSDTQ: sum_{m<n} WhR(mn) t4(mnij; abcd).'''
+        sec, lay = self.sec, self.lay
+        mn = lay.O2cls[sec.s]
+        w = WhR[lay.o2[mn, 0], lay.o2[mn, 1]]
+        o22 = lay.o22
+        for M in sec.blocks4:
+            if M not in lay.sectors:
+                continue
+            T, out = lay.block(self.T4, M), sec.block4(s4, M)
+            for r, P_ in enumerate(sec.rows4[M]):
+                I, sg = o22.pos[mn, P_], o22.psg[mn, P_]
+                ok = sg != 0
+                if ok.any():
+                    out[r] += (w[ok] * sg[ok]) @ T[lay.posO4[I[ok]]]
+
+    def _rows(self, r2, r3, X3r, XoR, ZR, Z, WoR, YR, s4, w22, w13, whh=True):
         sec, lay, g, dtype = self.sec, self.lay, self.g, self.dtype
         no, ko, s, ncls = lay.no, lay.ko, sec.s, lay.ncls
         nO, nV, nQ, nK = lay.nO, lay.nV, lay.nQ, lay.nK
@@ -925,26 +994,35 @@ class Engine:
                 bot = Z.get(K, np.zeros((nV[mu], nK[K]), dtype))
                 S13[mu] = _c(np.vstack((top, bot)), dtype)
         isz = np.dtype(dtype).itemsize
+        self.XoR_2d = XoR.reshape(no * no, -1)
         for M in sec.blocks4:
             out = sec.block4(s4, M)
             for r, P_ in enumerate(sec.rows4[M]):
                 i, j = (int(x) for x in lay.o2[P_])
                 if w22 and sec.n22[M]:
-                    X22 = np.zeros(int(sec.n22[M]), dtype=dtype)
+                    # per class q of (ab): one product of the stacked operands (gathered by rows,
+                    # on all threads)  [-Wv(ab, e, x) | t(xm, ab) | ZR(nf; ab)]
+                    #                  [r3(y; e, cd); XoR(m; y; cd); t(nij; f, cd)]
+                    X22 = np.empty(int(sec.n22[M]), dtype=dtype)
                     for q in range(lay.n2):
                         o = sec.off22[M, q]
                         if o < 0:
                             continue
-                        nc = int(nQ[M - q])
-                        Xq = X22[o:o + nQ[q] * nc].reshape(nQ[q], nc)
-                        for x, y, sg in ((i, j, 1.0), (j, i, -1.0)):
+                        nc, nq = int(nQ[M - q]), int(nQ[q])
+                        Xq = X22[o:o + nq * nc].reshape(nq, nc)
+                        parts = []          # (L^T source [*, nQt or nq], rows, sign, cols | R source, rows, sign, cols)
+                        for x, y, sg in ((i, j, 1), (j, i, -1)):
                             e = q - ko[x]
-                            b = self.x3(X3r, y, e) if 0 <= e < ncls and nV[e] else None
+                            if not (0 <= e < ncls):
+                                continue
+                            b = self.x3(X3r, y, e) if nV[e] else None
                             if b is not None and b.shape[1] == nc:
-                                gemm(g.WvA[x, qs(q), cls(e)], b, Xq, alpha=-sg, beta=1.0)
-                            if 0 <= e < ncls and nO[e]:
-                                gemm(_c(g.t2_xq[x, ocls(e), qs(q)].T, dtype), XoR[ocls(e), y, qs(M - q)], Xq,
-                                     alpha=sg, beta=1.0)
+                                parts.append((self.WvAt[x], np.arange(lay.v0[e], lay.v0[e + 1]), -sg, qs(q),
+                                              b, np.arange(nV[e]), 1, None))
+                            if nO[e]:
+                                ms = np.arange(lay.o0[e], lay.o0[e + 1])
+                                parts.append((self.t2_2d, ms * no + x, sg, qs(q),
+                                              self.XoR_2d, ms * no + y, 1, qs(M - q)))
                         for n in range(no):
                             ph = q - s + ko[n]
                             z = ZR.get((n, ph))
@@ -953,16 +1031,34 @@ class Engine:
                                 continue
                             J = int(o12.pos[n, P_])
                             kJ = lay.kO3[J]
-                            if not (0 <= ph < ncls) or lay.t12off[kJ, ph] < 0 or kJ - ph != M - q:
+                            t0 = lay.t12off[kJ, ph]
+                            if t0 < 0 or kJ - ph != M - q:
                                 continue
-                            ld = int(lay.nJ[kJ] * nc)
-                            st = int(lay.t12off[kJ, ph] + lay.posO3[J] * nc)
-                            Tb = np.lib.stride_tricks.as_strided(g.T12[st:], shape=(nV[ph], nc),
-                                                                 strides=(ld * isz, isz))
-                            gemm(_c(z.T, dtype), _c(Tb, dtype), Xq, alpha=float(sg3), beta=1.0)
-                    sec.x22(1, out, M, sec.ent_row(M, r, '22'), X22)
+                            nJk = int(lay.nJ[kJ])
+                            Tsrc = g.T12[t0:t0 + nV[ph] * nJk * nc].reshape(nV[ph] * nJk, nc)
+                            parts.append((z, np.arange(nV[ph]), sg3, None,
+                                          Tsrc, np.arange(nV[ph]) * nJk + int(lay.posO3[J]), 1, None))
+                        k = sum(len(pt[1]) for pt in parts)
+                        if not k:
+                            Xq[...] = 0
+                            continue
+                        with timer('dea.rows.stack'):
+                            Lt = np.empty((k, nq), dtype=dtype)
+                            Rc = np.empty((k, nc), dtype=dtype)
+                            r0 = 0
+                            for A, ra, sa, ca, B, rb, sb, cb in parts:
+                                n_ = len(ra)
+                                P.tn_rows(Lt[r0:r0 + n_], A, ra, np.full(n_, sa), None if ca is None else (ca.start, ca.stop))
+                                P.tn_rows(Rc[r0:r0 + n_], B, rb, np.full(n_, sb), None if cb is None else (cb.start, cb.stop))
+                                r0 += n_
+                        with timer('dea.rows.gemm'):
+                            gemm(Lt.T, Rc, Xq)
+                    with timer('dea.rows.reduce'):
+                        sec.x22(1, out, M, sec.ent_row(M, r, '22'), X22)
                 if w13 and sec.n13[M]:
-                    X13 = np.zeros(int(sec.n13[M]), dtype=dtype)
+                    # per class p of a: [Wo(m, a, ij) | t(ij, ae) | WoR(m, a) | r2(a, e) | -YR(mn; y; a)]
+                    # [r3(m; K); XvR(e; K); t(mij; K); Xv(e; ij; K); t(mnx; K)]
+                    X13 = np.empty(int(sec.n13[M]), dtype=dtype)
                     kP = ko[i] + ko[j]
                     for p in range(ncls):
                         o = sec.off13[M, p]
@@ -970,27 +1066,43 @@ class Engine:
                             continue
                         nk = int(nK[M - p])
                         Xp = X13[o:o + nV[p] * nk].reshape(nV[p], nk)
+                        Ls, Rs = [], []
                         mu = kP - p
                         if mu in S13 and S13[mu].shape[1] == nk:
                             m0 = lay.mix0[mu]
-                            gemm(g.la13[P_, cls(p), m0:m0 + nO[mu] + nV[mu]], S13[mu], Xp, beta=1.0)
+                            Ls.append(g.la13[P_, cls(p), m0:m0 + nO[mu] + nV[mu]])
+                            Rs.append(S13[mu])
                         mu = s - p
                         if 0 <= mu < ncls and lay.r13off[P_, mu] >= 0:
                             o2 = lay.r13off[P_, mu]
                             nr = nO[mu] + nV[mu]
-                            Rb = g.R13[o2:o2 + nr * nk].reshape(nr, nk)
-                            L = np.concatenate((WoR[ocls(mu), cls(p)].T, r2[cls(p), cls(mu)]), axis=1)
-                            gemm(_c(L, dtype), Rb, Xp, beta=1.0)
+                            Ls.append(np.concatenate((WoR[ocls(mu), cls(p)].T, r2[cls(p), cls(mu)]), axis=1))
+                            Rs.append(g.R13[o2:o2 + nr * nk].reshape(nr, nk))
                         for x, y, sg in ((i, j, 1.0), (j, i, -1.0)):
                             c = M - p - ko[x]
                             if not (0 <= c < lay.n2) or lay.t3poff[x, c] < 0:
                                 continue
                             mn = lay.O2cls[c]
                             o3 = lay.t3poff[x, c]
-                            Tb = g.T3P[o3:o3 + len(mn) * nk].reshape(len(mn), nk)
-                            Ym = YR[lay.o2[mn, 0], lay.o2[mn, 1], y, cls(p)]           # [(mn), a]
-                            gemm(_c(Ym.T, dtype), Tb, Xp, alpha=-sg, beta=1.0)
-                    sec.x13(1, out, M, sec.ent_row(M, r, '13'), X13)
+                            Ls.append(-sg * YR[lay.o2[mn, 0], lay.o2[mn, 1], y, cls(p)].T)
+                            Rs.append(g.T3P[o3:o3 + len(mn) * nk].reshape(len(mn), nk))
+                        with timer('dea.rows.stack'):
+                            if Ls:
+                                Lc = _c(np.concatenate(Ls, axis=1), dtype)
+                                Rc = np.empty((Lc.shape[1], nk), dtype=dtype)
+                                r0 = 0
+                                for B in Rs:
+                                    P.tn_rows(Rc[r0:r0 + len(B)], _c(B, dtype), np.arange(len(B)), np.ones(len(B)))
+                                    r0 += len(B)
+                        with timer('dea.rows.gemm'):
+                            if Ls:
+                                gemm(Lc, Rc, Xp)
+                            else:
+                                Xp[...] = 0
+                    if self.T4 is not None and whh and sec.n2:
+                        self._xv_t4(M, P_, r2, X13)
+                    with timer('dea.rows.reduce'):
+                        sec.x13(1, out, M, sec.ent_row(M, r, '13'), X13)
 
 
 # ------------------------------------------------------------------ the problem of the DEA driver
@@ -1034,19 +1146,59 @@ def memory(sec, rank, isz, batch_bytes=None, ground=True):
     # the elements of the sector: masks (1 byte) and the sums of the orbital energies per column
     elems = (sum(sec.sizes) // isz + 1) + int(sec.nA.sum()) + int(lay.nK.sum())
     fixed = ints + gr + en + tables + elems
-    # per sigma: the result, r3 and sigma3 on (a | bc), small intermediates, the larger of the passes
+    # per sigma: the result, r3 and sigma3 on (a | bc), the intermediates of the sector, the
+    # largest of the passes (each batch as Engine makes it)
+    s_, ko, nV, nO, nK, nQc = sec.s, lay.ko, lay.nV, lay.nO, lay.nK, lay.nQ
     x3 = int(sec.x3off[-1])
-    small = 2 * x3 + no ** 3 * nv * 2 + no * no * nQ + no * nv * nQ + 2 * nv * nv * 2
-    zr = 0
+    zr = sum(int(nV[ph] * nQc[s_ + ph - ko[n]]) for n in range(no) for ph in range(ncls)
+             if 0 <= s_ + ph - ko[n] < lay.n2)
+    small = (2 * x3 + 2 * no ** 3 * nv + no * no * nv * nv + no * no * nQ + zr + 2 * nv * nv
+             + nv * no + no * no + 3 * no * nv)
+    uz = 0
     if rank == 4:
         for K in range(lay.n3):
-            mu = K - sec.s
-            if lay.nK[K] and 0 <= mu < ncls and lay.nV[mu]:
-                n12 = sum(lay.nV[p] * lay.nQ[K - p] for p in range(ncls) if lay.nV[p] and 0 <= K - p < lay.n2)
-                zr += lay.nV[mu] * (n12 + lay.nK[K]) + lay.nV[mu] * n12       # U, Z, the copy of U
-    passes = 2 * batch_bytes // isz + (ov + 1 + no + nv) * ov * 2                # a batch and its product; Sj and W
-    rows = 2 * int(max(sec.n22.max(initial=0), sec.n13.max(initial=0)))
-    s = sum(sec.sizes) + small + zr + max(passes, rows) + no * nv * nQ
+            mu = K - s_
+            if nK[K] and 0 <= mu < ncls and nV[mu]:
+                n12 = sum(int(nV[p] * nQc[K - p]) for p in range(ncls) if nV[p] and 0 <= K - p < lay.n2)
+                uz += int(nV[mu]) * (n12 + int(nK[K]))                      # U and Z
+        uz += max([int(nQc[q] * nV[mu] * nV[dl]) for q in range(lay.n2) for mu in range(ncls)
+                   for dl in range(ncls)] + [0])                             # a product of Wpp with r2
+    passes = 0
+    if rank == 4:
+        for M in sec.blocks4:
+            n22 = int(sec.n22[M])
+            if n22:
+                nb = min(len(sec.rows4[M]), max(1, batch_bytes // (isz * n22)))
+                passes = max(passes, 2 * nb * n22)                           # pp: the operand and the product
+        ring = 0
+        for j in range(no):
+            kj, sizes = int(ko[j]), []
+            for d in range(-(ncls - 1), ncls):
+                kK = kj + s_ + d
+                if not (0 <= kK < lay.n3 and nK[kK]):
+                    continue
+                nc = sum(int(nV[ko[m] - d]) for m in range(no) if m != j and 0 <= ko[m] - d < ncls)
+                if not nc:
+                    continue
+                nr = sum(int(nV[ko[i] - d]) for i in range(no) if i != j and 0 <= ko[i] - d < ncls)
+                nr += (d == 0) + (int(nO[kj + d]) + int(nV[kj + d]) if 0 <= kj + d < ncls else 0)
+                sizes.append(((nc + nr) * int(nK[kK]), nc * nr))
+            cur = tot = w = 0
+            for sz, wz in sizes:
+                if cur and (tot + sz) * isz > batch_bytes:
+                    ring = max(ring, tot)
+                    tot = 0
+                cur, tot, w = 1, tot + sz, max(w, wz)
+            ring = max(ring, tot + w)
+        passes = max(passes, ring + (ov + 1 + no + nv) * ov)                 # with the stacked operator
+        s13 = sum(int((nO[mu] + nV[mu]) * nK[mu + s_]) for mu in range(ncls) if 0 <= mu + s_ < lay.n3)
+        # the stacked operands of a row (and their copies in one array each)
+        mV, mO, mQ, mK = int(nV.max()), int(nO.max()), int(nQc.max()), int(nK.max())
+        k22, k13 = 2 * mV + 2 * mO + no * mV, 2 * (mO + mV) + 2 * int(lay.nO2.max())
+        rows = (s13 + int(sec.n22.max(initial=0)) + int(sec.n13.max(initial=0)) + 2 * k22 * 2 * mQ
+                + 2 * k13 * (mV + mK) + no * nv * 4)
+        passes = max(passes, rows)
+    s = sum(sec.sizes) + small + uz + passes
     return isz * (fixed + (build if ground else 0)), isz * s
 
 
@@ -1060,7 +1212,7 @@ class ProblemSector:
     of ``eris`` (or None: the T of CCSD).  ``rank`` 3 or 4.'''
 
     def __init__(self, eris, t1, t2, t3=None, rank=4, target=0, parity=None, target_parity=0, mem_mb=2000.0,
-                 batch_bytes=None, verbose=False):
+                 batch_bytes=None, verbose=False, t4=None):
         from zccsdt.cc import ccsdt_opt, t3pack
         t0 = time.perf_counter()
         if t3pack.classes_of(eris) is None or S.layout_for(eris) is None:
@@ -1091,7 +1243,9 @@ class ProblemSector:
         ints = t4engine.Dressed.from_eris(eris, np.asarray(t1, dtype=dtype))
         self.g = Ground(lay, np.asarray(t2), T3, ints, xv=(rank == 4))
         del ints, T3
-        self.eng = Engine(sec, self.g, rank, bb)
+        if t4 is not None and rank != 4:
+            raise ValueError('T4 with rank 3: not a level of this code')
+        self.eng = Engine(sec, self.g, rank, bb, None if t4 is None else np.asarray(t4).ravel())
         self.mem = memory(sec, rank, isz, bb, ground=False)
         # the elements: denominators e_a + .. - e_i - .. (per block, from the columns), parity masks
         ev = np.asarray(eris.mo_energy).real

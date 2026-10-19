@@ -2087,9 +2087,9 @@ class GCCSDT(UCCSDT):
                        rank 4: the roots that follow those of rank 4
         nguess         unit vectors on the lowest pairs (a<b) to start from
                        (default nroots + 2)
-        backend        in the blocks of the labels: 'ghost' (two ghost spinors,
-                       zccsdt.cc.dea.ProblemSym) or 'sector' (the sector itself,
-                       zccsdt.cc.dea_sector; without T4 and without fold5)
+        backend        in the blocks of the labels: 'sector' (the sector itself,
+                       zccsdt.cc.dea_sector; the default, not with fold5) or 'ghost'
+                       (two ghost spinors, zccsdt.cc.dea.ProblemSym)
         The result is kept as self.eom_dea_result.'''
         from zccsdt.cc import dea, t3pack
         if self.t1 is None:
@@ -2106,10 +2106,10 @@ class GCCSDT(UCCSDT):
         if t3pack.classes_of(eris) is not None:
             if shift is None:
                 raise ValueError('eom_dea: in the blocks of the labels the states are asked for by shift')
-            if (backend or 'ghost') == 'sector' and t4 is None and not fold5:
+            if (backend or 'sector') == 'sector' and not fold5:
                 from zccsdt.cc import dea_sector
                 pb = dea_sector.ProblemSector(eris, self.t1, self.t2, self.t3, rank=rank, target=int(shift),
-                                              parity=parity, target_parity=target_parity, mem_mb=mem_mb)
+                                              parity=parity, target_parity=target_parity, mem_mb=mem_mb, t4=t4)
             else:
                 pb = dea.ProblemSym(eris, self.t1, self.t2, self.t3, t4, rank=rank, target=int(shift), parity=parity,
                                     target_parity=target_parity)
