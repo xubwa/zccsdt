@@ -21,9 +21,11 @@ from pyscf import gto, lib
 
 BASIS = os.path.expanduser('~/scr4/zmr_runs/basis_opt/basis/pyscf/dyvtz_sog.py')
 DYVDZ = os.path.expanduser('~/scr4/zmr_runs/o2_cbs/dz_basis/dyvdz_sog.py')
+DYVQZ = os.path.expanduser('~/scr4/zmr_runs/basis_opt/basis/pyscf/dyvqz_sog.py')
 # On the command line, in the place of DYVTZ-SOG (files with a tag):
 #   --dz             cc-pVDZ-DK (PySCF's; 56 spinors)                                     _dz
 #   --basis dyvdz    DYVDZ-SOG (the j-adapted Dyall double zeta of the other sessions)    _dyvdz
+#   --basis dyvqz    DYVQZ-SOG (220 spinors, the quadruple zeta of the O2 CBS sessions)    _dyvqz
 #   --basis sogcv    DYVTZ-SOG plus the core-valence functions of cc-pCVTZ (the shells of
 #                    cc-pCVTZ that cc-pVTZ does not have: tight 2s2p1d, uncontracted)     _sogcv
 #   --ae             nothing frozen (O 1s correlated): tag _ae, 14 occupied spinors
@@ -82,6 +84,8 @@ def basis_of():
         return 'cc-pvdz-dk'
     if VARIANT == 'dyvdz':
         return runpy.run_path(DYVDZ)['O']
+    if VARIANT == 'dyvqz':
+        return runpy.run_path(DYVQZ)['O']
     sog = runpy.run_path(BASIS)['O']
     if VARIANT == 'sogcv':
         return add_primitives(sog, core_valence_shells())
