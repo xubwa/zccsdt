@@ -1166,7 +1166,9 @@ Two Hamiltonians:
   inside the correlated space, block by block of (2 Omega, parity), lowers
   the energy by 7.5e-10 Eh (largest rotation angle 3.5e-5 rad; TZ:
   -148.322050765318 -> -148.322050766066; DZ: -148.250738032661 ->
-  -148.250738033179) and gives the canonical spinors used here.
+  -148.250738033179) and gives the canonical spinors used here.  The same
+  Hamiltonian in label blocks, without any n^4 array (`run-blocks`, needed
+  from cc-pV5Z-X2C-TP on): 11.10.
 
 Small spaces for comparison with full CI: the n lowest canonical spinors,
 n = 26, 30, 32 (cut between shells; 28 would cut the pi_g(1/2, 3/2) pair of
@@ -1560,6 +1562,168 @@ ranks by its output rows instead of a reduction of sigma4):
   (summed after the passes that make them from r4);
 - the reference: `dea_sector.Engine.sigma` (pieces selectable by `only`),
   element by element, and the roots of 11.6.
+
+### 11.10 The X2Ccorr Hamiltonian in label blocks (`eri4c`, `hblocks`)
+
+The dense route of `o2_x2ccorr.py run` (11.6) holds n^4 complex numbers
+several times: socutils' `x2c_active_eri_4c` makes eight classes of
+integrals by `pyscf.ao2mo.general`, each a full complex (n^2, n^2) array,
+and sums them; then a complex -> real copy, a Hartree-Fock with dense Fock
+builds, four tensordot rotations and `np.savez` of the complex array.
+Profile for cc-pVQZ-X2C-TP (216 correlated spinors, 284 uncontracted AO
+spinors, 48 cores, `bench/dea/x2ccorr_profile.py`):
+
+| step | s | RssAnon, peak in the step |
+|---|---|---|
+| frozen-core mean field (four-component J, K) | 130 | 3.1 GB |
+| `ao2mo.general` LLLL, LLSS, SSLL, SSSS | 171, 194, 197, 224 | 37 GB, then 73 GB (the sum and one class) |
+| `ao2mo.general` four Breit classes | 470, 474, 483, 464 | 73 GB |
+| complex -> real copy | 11 | 55 GB |
+| HF in the correlated space (83 dense Fock builds) | 988 | 21 GB |
+| four tensordot rotations | 175 | 55 GB |
+
+(job MaxRSS 71 GB without the `np.savez` of the 35 GB complex array; the
+whole step was 2901 s in job 32267426, on another node).  The AO integrals
+are a small part of the time: libcint needs 33 s (LLLL) to 298 s (one Breit
+class) for all of them on 8 cores.  For DYVQZ-SOG the step was 5456 s and
+126 GB (job 32222135); for cc-pV5Z-X2C-TP (360 correlated spinors, 444 AO)
+one array is 16 n^4 = 269 GB.
+
+**What replaces it.**  `zccsdt.eri4c` (adapted from socutils'
+`x2c_4c_spinors` and `x2c_active_eri_4c`: the same spinors, classes and
+signs) never makes an n^4 array:
+
+- *labels*: on the axis the AO spinors of PySCF carry m_j and the spinors of
+  the X2CMP calculation 2 Omega; their coefficients vanish on the AO of other
+  m_j (to 1e-11 for the large components of cc-pV5Z-X2C-TP: set to zero), so
+  (pq|rs) vanishes unless -l_p + l_q - l_r + l_s = 0 and the parities add to
+  an even number.  Only those blocks are made and stored: 5.6 % of n^4 for
+  cc-pVQZ-X2C-TP, real (the imaginary parts of the AO integrals are exactly
+  zero on the axis; the first and the last (k, l) of every chunk are checked);
+- *classes*: five instead of eight - (SS|LL) = (LL|SS)^(rspq),
+  (SL|SL) = conj (LS|LS)^(qpsr), (SL|LS) = conj (LS|SL)^(qpsr) (the AO
+  integrals obey these to 6e-13 of the largest Breit integral) - and of the
+  classes that are symmetric under (ij|kl) -> (kl|ij) themselves (LLLL, SSSS,
+  LSLS) only the AO shells I <= K (I = K with weight 1/2):
+  (pq|rs) = Y + Y^(rspq), Y = (LS|LS)' + (LS|SL)/2, then its mirror
+  conj Y^(qpsr) added, then (LL|LL)' + (SS|SS)' + (LL|SS) (the primes: the
+  halves).  About 40 % of the AO integrals of the eight classes (by
+  libcint's times) are computed, each once;
+- *two passes per class*: chunks of AO integrals (all i, j; one k shell; a
+  range of l shells; libcint with OpenMP over the shell pairs ij), the bra by
+  two dense GEMMs (the first on the real view of the complex chunk, no
+  copy), scattered into the half-transformed integrals
+  H[(l1, l2, rho)][k, l, p, q] that the labels allow (k of label rho, l of
+  label l1 - l2 + rho; 12 - 15 % of n^2 N^2); then the ket for every label
+  triple by two GEMMs into the label block (l1, l2, rho, l1 - l2 + rho);
+- *memory plan* (`eri4c.plan`; budget = max_memory less what is resident):
+  the label buffer (13.5 GB for 364 spinors), H of one class (21.1 GB) and
+  one chunk (6.4 GB at most); H goes to a scratch file when it does not fit,
+  and when the label buffer does not fit either, the blocks are made in slabs
+  closed under the two mirrors (one pass over the AO integrals per slab).
+  Measured: peak 13.4 GB for cc-pVQZ-X2C-TP (plan 12.2 GB plus 2 GB resident
+  before), 42.7 GB for cc-pV5Z-X2C-TP (plan 41.6 GB plus 1.3 GB);
+- *over nodes*: `kshells` restricts the k shells; the label buffers of
+  several processes add up (`LabelBuffer.save / add_file`; the mirrors are
+  linear, so each part may apply them).  Not needed so far - one shared node
+  does cc-pV5Z-X2C-TP - and there is no driver for it yet;
+- the mean field of the frozen 1s spinors: by default the four-component J
+  and K of their density as in `run` (`frozen_field`; 113 s for
+  cc-pVQZ-X2C-TP on 48 cores, 1521 s for cc-pV5Z-X2C-TP on 32 cores); with
+  `--fold-core` the four frozen spinors are transformed with the correlated
+  ones (n + 4) and folded (`hblocks.fold`: h1 += sum_c <pc||qc>, ecore +=
+  sum_c h_cc + 1/2 sum_cd <cd||cd>; 20 s).  The two differ by the rounding of
+  the dense route: its J and K contain the coefficients of the 1s spinors off
+  the labels (1e-13) times the large small-component integrals - h1 2.6e-10
+  (DYVDZ-SOG), 7.2e-10 (DYVTZ-SOG), the splits 6e-14 Eh, 1.4e-13 Eh;
+- elements of h1 between groups (6.6e-11 for DYVDZ-SOG, 1.4e-8 for
+  DYVTZ-SOG: rounding of the same kind) are set to zero, as the integrals
+  between groups are not stored (kept, they left f_ov = 5e-9 in the
+  canonical spinors; set to zero, 1e-12).
+
+`zccsdt.hblocks`: the block file (HDF5; the groups (2 Omega, parity), their
+members, a table of the allowed blocks (g1 g2 | g3 g4) with offsets into one
+contiguous dataset, each block [p, q, r, s]; h1, ecore, labels, energies,
+coefficients) - readable through `numpy.memmap` at the dataset offset, or by
+any HDF5 reader; J and K of a density that is block diagonal in the groups
+(the blocks (g g | h h) and (g h | h g) only), the closed-shell HF in the
+correlated space group by group (the procedure of `o2_x2ccorr.hartree_fock`;
+the two spinors of a Kramers pair, of equal energy, ordered by label and not
+by their last digits), the rotation to the canonical spinors block by block
+(U is block diagonal in the groups: every block maps onto itself, four small
+GEMMs - no n^4 tensordot), subsets, folding of frozen spinors.
+`common.load` reads a block file (`.h5`) straight into the antisymmetrized
+blocks of the integral container (the large ones into scratch files when
+they take more than half of the budget).
+
+Generating the integrals once in the canonical spinors (HF first) would need
+the blocks (g g | h h) and (g h | h g) of every group h with an occupied
+spinor - itself a pass over all AO integrals; the rotation of the stored
+blocks costs 10 s (216 spinors) to 56 s (360).
+
+**Validation** (`bench/dea/x2ccorr_compare.py`: element by element against
+the .npz of the dense route, the spinors matched by label, parity and energy;
+`x2ccorr_loadcheck.py`: the integral containers of `common.load`; default
+options):
+
+| | DYVDZ-SOG (52) | DYVTZ-SOG (116) | cc-pVQZ-X2C-TP (216) |
+|---|---|---|---|
+| (pq\|rs), max difference (largest element) | 3.9e-13 (0.82) | 2.3e-12 (0.82) | 1.5e-11 (2.13) |
+| the same with `--fold-core` | 3.4e-11 | 1.2e-10 | |
+| h1 within the groups | 2.9e-12 | 1.2e-11 | 1.9e-11 |
+| ecore, E(reference) | 5e-12 | 6e-12 | 5e-12 |
+| elements of the .npz that the labels forbid | 1.1e-11 | 3.4e-9 | 1.7e-10 |
+| integral container (all seven blocks) | 4.2e-13 | 3.4e-12 | |
+| split, DEA-EOM-CCSDT (4p2h) / Eh | 1.588555960552185e-05 (dense 1.588555954867843e-05) | 1.6414583399182447e-05 (dense: the same digits) | 1.682436874261839e-05 (dense 1.682436871419668e-05) |
+| split, DEA-EOM-CCSD / Eh | 1.4672877995280942e-05 (same digits) | 1.5297908504408042e-05 (dense 1.529790853282975e-05) | 1.579624952796621e-05 (dense 1.57962494995445e-05) |
+
+(DYVDZ-SOG: the splits with the T of CCSDT and of CCSDTQ also to 6e-14 Eh;
+cc-pVQZ-X2C-TP: the DEA on the file of the first run - the frozen-core field
+of the default, LSLS, LLLL, SSSS in full, h1 between groups kept; its
+integrals agree with the dense file to 9.9e-12, as those of the default to
+1.5e-11; total energies of the
+ground and the DEA states to 1.4e-12 Eh.)  The tests
+(`tests/test_eri4c.py`, Li2 with random coefficients that respect m_j and
+parity) compare with the eight `ao2mo.general` calls of socutils in real and
+complex arithmetic, with budgets that put H into a scratch file and that
+force slabs (tracemalloc peak within each plan), kshells in two parts, and
+the J/K, HF, rotation and subsets of the block file against dense arrays.
+
+**Time and memory** of the integral step (SCF from the checkpoint, frozen
+core, integrals, HF, rotation, file):
+
+| | cc-pVQZ-X2C-TP (216), 48 cores | cc-pV5Z-X2C-TP (360), 32 cores |
+|---|---|---|
+| dense route | 2901 s, > 71 GB | not possible on a node (269 GB per array) |
+| blocks, default | 370 s (frozen core 113, integrals 242, HF 4, rotation 10), 13.4 GB | about 4100 s (estimated: frozen core 1521 s + the row below), 43 GB |
+| blocks, `--fold-core` | 319 s (integrals of 220 spinors 270, fold 4, HF 9, rotation 28), 13.6 GB | 2603 s (integrals of 364 spinors 2460, fold 20, HF 42, rotation 48), 42.7 GB |
+| file | 0.98 GB (dense .npz: 35 GB) | 6.4 GB (dense: 269 GB) |
+
+For cc-pV5Z-X2C-TP by class (32 cores, the bra GEMMs in parentheses):
+LSLS 614 s (132), LSSL 951 s (148), LLLL 233 s (125), SSSS 319 s (125),
+LLSS 304 s (145); AO integrals 1500 s of 2444 s, the dense bra GEMMs 675 s.
+A first run with LSLS, LLLL, SSSS in full (no halves) and the
+four-component frozen-core field took 3001 s for the integrals and 4656 s
+for the step, 41.6 GB; E(reference) of the two runs agrees to 3e-11 Eh (the
+difference of the frozen-core fields).
+
+**Usage**
+
+    python bench/dea/o2_x2ccorr.py run-blocks <dir with the SCF checkpoint> --basis pv5z_x2c_tp \
+        [--out <dir>] [--max-memory MB] [--npz] [--direct] [--fold-core]
+    python bench/dea/o2_dea.py <dir>/o2_hf2plus_pv5z_x2c_tp_n360_x2ccorr.h5 out.json ccsd ccsdt --blocks
+
+Not done:
+- the bra GEMMs are dense in the AO index (27 % of the time for
+  cc-pV5Z-X2C-TP); the coefficients are block diagonal in m_j (a factor of
+  about 5 in the flops of the first two quarters);
+- the four-component J and K of the frozen 1s density (`frozen_field`,
+  PySCF's DHF) take 1521 s for cc-pV5Z-X2C-TP; `--fold-core` replaces them
+  at the price of 1e-10 differences from the dense route;
+- the split over nodes by k shells has no driver;
+- `common.load` still builds the dense antisymmetrized blocks of the
+  container (vvvv 120 GB for 350 virtual spinors, in a scratch file) - the
+  native port reads the block file instead.
 
 ## 12. Left-hand eigenvectors (`zccsdt.cc.eom_left`)
 
