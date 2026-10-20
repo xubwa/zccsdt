@@ -4,8 +4,8 @@
 #
 # EOM-DEA-CCSDT of the native program over MPI ranks (cfour/xzccsdt,
 # docs/native.md, section 20.6): one run directory on the shared file
-# system (bench/dea/native_rundir.py), the CCSDT amplitudes once (one rank),
-# then the roots of %xzdea with 1 rank x 32 threads and 2 ranks x 16 threads
+# system (bench/dea/native_rundir.py), the CCSDT amplitudes in the first run,
+# the roots of %xzdea with 1 rank x 32 threads and 2 ranks x 16 threads
 # on the first node, 2 ranks x 32 threads and 4 ranks x 16 threads on both.
 #
 #   sbatch native_mpi.sbatch SNAP NPZ FREEZE RUNDIR [ESTATE_THR] [MEM_GB] [RUNS]
@@ -46,10 +46,7 @@ run() {   # tag ranks ranks-per-node threads hosts
   grep "Elapsed\|Maximum resident" "xzccsdt.$1.time"
   cp XZDEA "XZDEA.$1" 2> /dev/null
 }
-# the amplitudes (XZAMPS) once, one rank, all cores of the first node
-if [ ! -f XZAMPS ]; then
-  run ccsdt 1 1 32 "${nodes[0]}"
-fi
+# (the first run makes the CCSDT amplitudes, XZAMPS, over its ranks; the others take them)
 for r in $runs; do
   case $r in
     r1x32) run r1x32 1 1 32 "${nodes[0]}" ;;
