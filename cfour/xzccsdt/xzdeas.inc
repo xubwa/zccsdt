@@ -75,10 +75,8 @@ subroutine N(xzdsig)(w, kv, ks)
     end if
     call zc_vzero_d(NW * (dn2 + dsz3 + dsz4), w(ks))
     call N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwor, kq3, kxor, kzr, zrhave, ku, kz, ktu)
-    ! (the thin products of the pp ladder of every rank are summed into XoR below)
-    if (ddist .and. myrank > 0) call zc_vzero_d(NW * no * no * nvp, w(kxor))
-    ! (the same of XvR: its thin rows of the ring)
-    if (ddist .and. myrank > 0) call zc_vzero_d(NW * zsize, w(kz))
+    ! (over the ranks XoR and XvR are partial sums: summed below, after the
+    ! thin products of the pp ladder and of the ring have been added)
     t1 = omp_get_wtime()
     tdpart(1) = tdpart(1) + t1 - t0
   end if
@@ -138,6 +136,7 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
   use xzdata
   use xzkern
   use xzdead
+  use xzpar, only: myrank, nrank, xzmpi_allsum_w
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwor, kq3, kxor, kzr, ku, kz, ktu
@@ -208,12 +207,15 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
     call zc_vzero_d(NW * no * nv, w(kht))
     call zc_vzero_d(NW * no * no, w(kwhr))
   end if
+  ! (over the ranks the sums over an occupied index of r3 are split by that
+  ! index, mod(index, ranks): YR and ZR are summed here, XoR and XvR are
+  ! partial sums until the passes over r4 have added to them (N(xzdsig)))
   ! YR(mn; y; d) = sum_{e<f} <mn||ef> r3(y; efd), H[y][m][d][c] = sum_{e<f} <md||ef> r3(y; ef c)
   call zc_vzero_d(NW * no * no * no * nv, w(kyr))
   call zc_vzero_d(NW * no * no * nv * nv, w(khm))
   do y = 0, no - 1
     k = blk3(y)
-    if (k < 0) cycle
+    if (k < 0 .or. .not. own(y)) cycle
     do p = 0, ncls - 1
       if (off12(k, p) < 0) cycle
       q = k - p
@@ -224,6 +226,7 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
                       w(khm + NW * (y * no * nv * nv + vcoff(p))), nv)
     end do
   end do
+  if (ddist) call xzmpi_allsum_w(w(kyr), NW * no * no * no * nv)
   ! Y3[m][c] = sum_n YR(mn; n; c), WoR, Q3
   do m = 0, no - 1
     do c = 0, nv - 1
@@ -248,7 +251,7 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
   call zc_vzero_d(NW * no * no * nvp, w(kxor))
   do n = 0, no - 1
     k = blk3(n)
-    if (k < 0) cycle
+    if (k < 0 .or. .not. own(n)) cycle
     do p = 0, ncls - 1
       if (off12(k, p) < 0) cycle
       q = k - p
@@ -259,7 +262,8 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
       end do
     end do
   end do
-  call N(zc_gemm)(0_4, 0_4, no, no * nvp, no, half, w(kwhr), no, w(et2p), no * nvp, one, w(kxor), no * nvp)
+  if (.not. ddist .or. myrank == 0) &
+    call N(zc_gemm)(0_4, 0_4, no, no * nvp, no, half, w(kwhr), no, w(et2p), no * nvp, one, w(kxor), no * nvp)
   !$omp parallel do collapse(2) private(q, a, b)
   do m = 0, no - 1
     do y = 0, no - 1
@@ -284,19 +288,21 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
         ph = ocls(m) + ocls(n) - p
         if (n == m .or. dnV(ph) == 0) cycle
         if (zroff(n, ph) < 0) cycle
+        zrhave(n, ph) = .true.
+        if (.not. own(m)) cycle
         call N(zc_gemm)(1_4, 0_4, dnV(ph), dnQ(q), dnV(p), one, &
                         w(joovv + NW * (((m * no + n) * nv + vcoff(p)) * nv + vcoff(ph))), nv, &
                         w(kx3r + NW * (x3off(m) + off12(k, p))), dnQ(q), one, w(kzr + NW * zroff(n, ph)), dnQ(q))
-        zrhave(n, ph) = .true.
       end do
     end do
   end do
+  if (ddist .and. zrsize > 0) call xzmpi_allsum_w(w(kzr), NW * zrsize)
   ! U(e; d, (bc)) and XvR(e; bcd) = P(d/bc) U, without its 4p2h term
   call zc_vzero_d(NW * usize, w(ku))
   call zc_vzero_d(NW * zsize, w(kz))
   do m = 0, no - 1
     kk = blk3(m)
-    if (kk < 0) cycle
+    if (kk < 0 .or. .not. own(m)) cycle
     do ph = 0, ncls - 1
       if (off12(kk, ph) < 0) cycle
       qq = kk - ph
@@ -324,7 +330,7 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
       end do
     end do
   end do
-  if (dn2 > 0) then
+  if (dn2 > 0 .and. (.not. ddist .or. myrank == 0)) then
     do k = 0, n3c - 1
       if (uoffk(k) < 0) cycle
       mu = k - ds
@@ -371,6 +377,15 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
     call N(xzdx12)(w, 1, kz + NW * zoffk(k), dnK(k), k, ne, row, sg, xoff, s1, s2, ku)
     deallocate(row, sg, xoff, s1, s2)
   end do
+
+contains
+
+  ! the occupied index x is this rank's (over the ranks: mod(x, ranks); one rank: all)
+  logical function own(x)
+    integer(8), intent(in) :: x
+    own = .not. ddist
+    if (ddist) own = mod(x, int(nrank, 8)) == myrank
+  end function
 end subroutine
 
 ! ---------------------------------------------------------------------------
