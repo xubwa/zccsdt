@@ -5458,11 +5458,14 @@ the hh ladder (its rows from all rows of the block) and the six-index
 products; the thin products of the pp ladder are summed with XoR (on all
 ranks; sigma2 and the 3p1h parts on rank 0).  The ring
 writes rows of other owners - the product of a spectator j has the rows
-(i, j) of all i - so its work items are the blocks (spectator, class
-difference), dealt to the ranks by their cost (the largest first to the
-least loaded rank, the same deal on every rank): a rank expands, multiplies
-and reduces its blocks into the rows of all ranks, and sigma4 is summed by
-slices at the end (`xzmpi_slices_add`: every rank the sum of its own
+(i, j) of all i - so its work items are the batches of the serial code
+(spectator, batch of blocks), dealt to the ranks by a cost that counts the
+products, the elements moved by the expansion and the reduction, and the
+walks through the quadruples of the rows (m, j) (the largest first to the
+least loaded rank, the same deal on every rank; items of single blocks
+walked the quadruple lists once per block, and the ring of one rank took
+2.5 times that of another, job 32268203); a rank expands, multiplies and reduces its batches into
+the rows of all ranks, and sigma4 is summed by slices at the end (`xzmpi_slices_add`: every rank the sum of its own
 slice); the thin rows of sigma3 and XvR are summed too.  The 3p1h and 2p
 rows are rank 0's.  Every rank makes R13 (Xv) of its pairs only, so that
 the largest array is divided too.  The other ranks take as many words as
@@ -5486,12 +5489,26 @@ every run; `bench/dea/native_mpi.sbatch`):
 | 2 x 16, one node | 6.67, 6.47 | 0.45, 2.16, 1.72, 0.96; 0.53 | 468 | 38 696 / 38 742 |
 | 2 x 32, two nodes | 4.84, 4.60 | 0.41, 1.43, 1.22, 0.86; 0.39 | 339 | 38 696 / 38 603 |
 | 4 x 16, two nodes | 3.81, 3.72 | 0.50, 1.01, 0.86, 0.46; 0.64 | 269 | 23 536 / 23 866 |
+| 4 x 16, two nodes, the intermediates split and the ring by batches (job 32269591, c092/c094, `--exclusive`) | 3.40, 3.33 | 0.37, 1.01, 0.61, 0.46; 0.61 | 242 | 23 536 |
+| the same nodes, the ring by blocks (the binary of 93164be) | 3.63, 3.59 | 0.37, 1.01, 0.86, 0.46; 0.59 | 258 | |
+| **DYVQZ-SOG** (10 + 206), jobs 32268202 / 32269044 (c227/c232 both) | | | | |
+| 1 rank x 32 threads (job 32265420, c301) | 29.9, 29.2 | 0.7, 9.9, 10.2, 5.0; - | 2483 | 99 800 / 98 500 |
+| 4 x 16, two nodes, the ring by blocks (93164be) | 15.22, 15.12 | 1.19, 3.58, 5.90, 1.55; 1.55 | 1085 | 48 963 |
+| 4 x 16, two nodes, the ring by batches (fceb0a9) | 13.09, 13.14 | 1.21, 3.58, 3.77, 1.55; 1.55 | 941 | 48 963 |
 
 The pp ladder, the ring, the rows of sigma4 and the hh ladder are divided;
-the small intermediates (0.1 s for 116 spinors) are made by every rank, and
-the transfers (the vector to all ranks and sigma4 by slices: 0.2 GB each
-for 116 spinors, 1.2 GB for 168) take 0.05 - 0.1 s and 0.4 - 0.6 s: two
-nodes are 2.2 times one rank for 116 spinors and 2.1 times for 168.  (The
+the small intermediates were made by every rank in the first runs of the table (0.1 s
+for 116 spinors, 0.5 s for 168 on four ranks; split by the occupied index
+since, 0.37 s), and the transfers (the vector to all ranks and sigma4 by
+slices: 0.2 GB each for 116 spinors, 1.2 GB for 168, 2.8 GB for DYVQZ)
+take 0.05 - 0.1 s, 0.4 - 0.6 s and 1.6 s: two nodes are 2.2 times one rank
+for 116 spinors, 2.35 times for 168 and 2.6 times for DYVQZ (one rank on
+another node of the same type).  At DYVQZ the ring of ranks 0 and 1 (the first node, c227) takes 262
+s of the run against 118 - 120 s on ranks 2 and 3 (c232), with the pp ladder and the rows equal on all ranks (the per-rank sums of the
+last output lines of the ranks; not understood: at 168 spinors on c092/c094 the four rings are equal); the time ranks 2 and 3 wait is in their
+transfers (354 - 361 s against 181 s on rank 1).  The 168-spinor run of job
+32269043 shared a node with other jobs (every pass 30 % slower) and is not
+in the table.  (The
 ring of an earlier version, in which every rank expanded all rows of every
 spectator for its own output rows, took 0.25 s on four ranks; job
 32265195.)  The ranks hold their parts: rank 0 of two takes 7.8 GB where one
@@ -5550,11 +5567,12 @@ sigma vector.
 - Only the elements of the parity of the target are needed (half of the
   vector): the masks are applied to a vector of both parities, as in the
   Python program.
-- Over ranks: the small intermediates are made by every rank (0.35 - 0.5 s
-  for 168 spinors), and the vector to the ranks and sigma4 by slices are
-  synchronous transfers (0.4 - 0.6 s for 168 spinors); two nodes give 2.1 -
-  2.2 times one rank.  The rows of the six-index products are reduced row
-  by row (one entry per call of the kernel).
+- Over ranks: the vector to the ranks and sigma4 by slices are synchronous
+  transfers (0.4 - 0.6 s for 168 spinors, 1.6 s for DYVQZ); two nodes give
+  2.2 - 2.6 times one rank.  At DYVQZ the ring of the ranks of the first node takes twice as long as that
+  of the second (the same pair of nodes in both runs; the cause is
+  not known).  The rows of the six-index products
+  are reduced row by row (one entry per call of the kernel).
 - The subspace in files reads it about seven times per new vector (16.4):
   168 spinors under 16 GB, 50 s per sigma vector with the solver instead of
   8 s.  A subspace smaller than 3 roots + 4 vectors in the work array is not
