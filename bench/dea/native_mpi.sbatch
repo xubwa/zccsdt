@@ -12,7 +12,7 @@
 #
 #   SNAP    a snapshot with the MPI binary SNAP/xzccsdt_mpi and the Python package (native_rundir.py)
 #   RUNDIR  on a file system that both nodes see (made here if it has no ZMAT)
-set -u
+# (no set -u: setvars.sh of oneAPI reads unset variables)
 snap=$1
 npz=$2
 freeze=$3
