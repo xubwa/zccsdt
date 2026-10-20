@@ -5392,6 +5392,7 @@ pairs only (20.6).
 |---|---|---|---|---|
 | 116 spinors, MEMORY_SIZE 100 GB | 100 GB | 13 884 | 14 133 | 23 vectors in the work array (9.9 GB) |
 | the same, `maxcor 500000000` (4 GB) | 4 GB | 3 677 | 3 868 | in files (10.4 GB); the same roots (4e-11) |
+| the same, `maxcor 400000000` (3.2 GB; three iterations) | 3.2 GB | 3 190 | 3 197 | in files; the batches 323 and 340 MB (bisected), the iterations those of the run above |
 | 168 spinors, MEMORY_SIZE 100 GB | 100 GB | 68 807 | 68 078 | 23 vectors in the work array (55 GB) |
 
 The resident set follows the words of the work array that are used (MKL
@@ -5426,10 +5427,11 @@ norm 1e-9 unless said otherwise; E in Eh):
 | case | native | Python | difference |
 |---|---|---|---|
 | 26 spinors, split | 1.5767221e-05 | 1.576720396e-05 (JSON of 11.6) | 1.8e-11 |
-| DYVDZ, CC_CONV=12, `%eomthrs 1e-11`: E(2 Omega = 0), E(2), split | -150.08744260782260, -150.08742672225537, 1.588556722e-05 | the sector, |dT| < 1e-11, residual norm 1e-11: -150.0874426078221, -150.08742672225455, 1.588556756e-05 | 4.8e-13, 8.2e-13, 3.4e-13 |
+| DYVDZ, CC_CONV=12, `%eomthrs 1e-11`: E(2 Omega = 0), E(2), split | -150.08744260782260, -150.08742672225537, 1.588556722e-05 | the sector, the norm of dT below 1e-11, residual norm 1e-11: -150.0874426078221, -150.08742672225455, 1.588556756e-05 | 4.8e-13, 8.2e-13, 3.4e-13 |
 | the same against the JSON of 11.6 (residual norm 1e-9) | | 1.588555955e-05 | 7.7e-12 (the threshold of the JSON) |
 | TZ (10 + 106), CC_CONV=10, `%eomthrs 1e-10` | -150.21709561322, -150.21707919864, 1.6414585e-05 | -150.21709561323, -150.21707919864, 1.6414583399e-05 (11.6) | 1e-11, 1e-11, 1.6e-12 |
 | 168 spinors (10 + 158, 1s frozen), CC_CONV=10, `%eomthrs 1e-10` | -150.22882293513, -150.22880648606, 1.6449066e-05 | -150.22882293512, -150.22880648609, 1.6449031676e-05 (11.6) | 8e-12, 2.6e-11, 3.4e-11 (the JSON: residual norm 1e-9) |
+| DYVQZ-SOG (10 + 206), CC_CONV=10, `%eomthrs 1e-10`: E(CCSDT), E(2 Omega = 0), E(2), split | -148.895224614241, -150.25266284304, -150.25264609144, 1.6751600e-05 (3.6766 cm-1) | the production run of the sector (job 32236524): -148.89522461421, -150.25266284301, -150.25264609143, 1.6751580e-05 (3.6765 cm-1) | 3e-11, 2.7e-11, 7e-12, 2.0e-11 |
 | DYVDZ over 1, 2, 4 ranks (20.6) | identical to 14 decimals, the same 33 + 32 sigma vectors | | |
 
 ### 20.6 Over MPI ranks
@@ -5484,11 +5486,11 @@ The pp ladder, the ring, the rows of sigma4 and the hh ladder are divided;
 the small intermediates (0.1 s for 116 spinors) are made by every rank, and
 the transfers (the vector to all ranks and sigma4 by slices: 0.2 GB each
 for 116 spinors, 1.2 GB for 168) take 0.05 - 0.1 s and 0.4 - 0.6 s: two
-nodes are 2.2 times one rank for 116 spinors and 2.1 times for 168.  (The ring of an earlier version, in
-which every rank expanded all rows of every spectator for its own output
-rows, took 0.25 s on four ranks; job 32265195.)  The ranks hold their parts:
-rank 0 of two takes 7.8 GB where one rank takes 13.9 GB (R13 and the
-subspace divided).
+nodes are 2.2 times one rank for 116 spinors and 2.1 times for 168.  (The
+ring of an earlier version, in which every rank expanded all rows of every
+spectator for its own output rows, took 0.25 s on four ranks; job
+32265195.)  The ranks hold their parts: rank 0 of two takes 7.8 GB where one
+rank takes 13.9 GB (R13 and the subspace divided).
 
 ### 20.7 Timings
 
@@ -5514,10 +5516,27 @@ Hamiltonian), 32 cores of a Xeon Gold 6248R node, 120 GB:
 
 Every pass of the native sigma vector is faster (Python, 116 spinors, the
 same node: rows 1.15, ring 0.79, pp 0.68, small intermediates 0.56 s); the
-products are the same.  The native runs needed fewer sigma vectors: the
-solver of section 16 (one correction per unconverged root, a subspace of 23)
-against the block Davidson of the Python program (a subspace of 12), at a
-threshold on the largest element (1e-10) instead of the norm (1e-9).
+products are the same.
+
+**DYVQZ-SOG** (10 + 206, 9 classes; 3.5e8 elements of a vector, 2.8 GB): the
+native program alone in job 32265420 (node c301), against the production
+run of the Python sector on a node of the same type (job 32236524, c705, 32
+cores; not the same node):
+
+| | Python sector | native | |
+|---|---|---|---|
+| a sigma vector | 47.4 - 48.3 s | 25.9 s (pp 9.9 - of it the products 7.3 -, ring 10.2, rows 5.0, intermediates 0.7; the expansions and reductions 9.5 of it) | 1.9x |
+| the roots of 2 Omega = 0 and 2 | 57 + 42 sigma vectors, 5736 s | 43 + 41, 2483 s (29.9, 29.2 s per sigma vector with the solver) | 2.3x |
+| CCSDT | 127 s | 81 s | |
+| intermediates of the ground state | (in the sigma vector of the first target) | 21 s (Xv 11.9 GB) | |
+| memory | MaxRSS 110 GB (three levels) | work array used 99.8 GB of 100 GB (the subspace: 13 vectors in the work array, 73 GB), resident 98.5 GB | |
+
+The native runs needed fewer sigma vectors: the solver of section 16 (one
+correction per unconverged root, a subspace of 23; 13 for DYVQZ) against
+the block Davidson of the Python program (a subspace of 12), at a threshold
+on the largest element (1e-10) instead of the norm (1e-9).  At DYVQZ the
+expansions and reductions of the passes (memory-bound) are a third of a
+sigma vector.
 
 ### 20.8 Not done
 
@@ -5526,9 +5545,12 @@ threshold on the largest element (1e-10) instead of the norm (1e-9).
 - Only the elements of the parity of the target are needed (half of the
   vector): the masks are applied to a vector of both parities, as in the
   Python program.
-- Over ranks: the expansion of the rows of the ring is done for every
-  spectator on every rank (the products are divided); the rows of the
-  six-index products are reduced row by row.
-- The test of the memory plan with batches smaller than 1 GB at production
-  size (the bisection was exercised at small sizes, the 4 GB run kept the
-  largest batches).
+- Over ranks: the small intermediates are made by every rank (0.35 - 0.5 s
+  for 168 spinors), and the vector to the ranks and sigma4 by slices are
+  synchronous transfers (0.4 - 0.6 s for 168 spinors); two nodes give 2.1 -
+  2.2 times one rank.  The rows of the six-index products are reduced row
+  by row (one entry per call of the kernel).
+- The subspace in files reads it about seven times per new vector (16.4):
+  168 spinors under 16 GB, 50 s per sigma vector with the solver instead of
+  8 s.  A subspace smaller than 3 roots + 4 vectors in the work array is not
+  tried.
