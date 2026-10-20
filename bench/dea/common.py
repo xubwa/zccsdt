@@ -10,6 +10,7 @@ Script-level code (a standing decision: no general helper of this kind in
 the package).'''
 import json
 import time
+from itertools import product
 
 import numpy as np
 
@@ -36,6 +37,8 @@ def load(path, tol=1e-10, drop_forbidden=False, sort=False, freeze=0):
     ``drop_forbidden``: integrals that the labels omega2 (and parity) forbid
     are set to zero; info['forbidden'] is the largest of them in any case.'''
     from zccsdt.eris import BLOCKS, ERIs
+    if str(path).endswith('.h5'):
+        return load_blocks(path, drop_forbidden=drop_forbidden, sort=sort, freeze=freeze)
     z = np.load(path)
     h1, eri = np.asarray(z['h1']), np.asarray(z['eri'])
     no = int(z['ncore'])
@@ -95,6 +98,102 @@ def load(path, tol=1e-10, drop_forbidden=False, sort=False, freeze=0):
     info['e_ref'] = e_hf
     if sort:
         eris.labels, eris.modulus, eris.use_labels = lab.copy(), 0, True
+    return eris, lab, par, info
+
+
+def load_blocks(path, drop_forbidden=False, sort=False, freeze=0, max_memory=None):
+    '''load() for a block file of zccsdt.hblocks (o2_x2ccorr.py run-blocks):
+    the same container, built block by block - nothing n^4 but the
+    antisymmetrized blocks of the container themselves, which go to scratch
+    files (zccsdt.scratch) when they take more than half of the budget
+    (``max_memory`` MB for the process; default: 80 % of what is free).
+    Elements that the labels forbid are not in the file: drop_forbidden has
+    nothing to do, info['forbidden'] is 0.'''
+    from zccsdt import hblocks, memory
+    from zccsdt.eris import BLOCKS, ERIs
+    from zccsdt.scratch import Scratch
+    bf = hblocks.BlockFile(path)
+    n_all, no_all = bf.n, bf.ncore
+    h1 = bf.h1
+    lab_all, par_all = bf.labels()
+    ecore = bf.ecore
+    # the reference energy with all occupied spinors, frozen or not (equal to that of load())
+    e_hf = bf.reference_energy(h1)
+    if freeze:
+        c = np.arange(freeze)
+        vf = np.zeros_like(h1)
+        v = bf.jk(bf.occupied_density(c))
+        for g, m in enumerate(bf.members):
+            vf[np.ix_(m, m)] = v[g]
+        ecore = float((ecore + np.trace(h1[:freeze, :freeze]) + 0.5 * np.trace(vf[:freeze, :freeze])).real)
+        h1 = h1 + vf
+    act = np.arange(freeze, n_all)
+    n, no = len(act), no_all - freeze
+    lab, par = lab_all[act], par_all[act]
+    info = {'n': n, 'ncore': no, 'imag': 0.0, 'forbidden': 0.0}
+    perm = np.arange(n)
+    if sort:
+        perm = np.concatenate((np.argsort(lab[:no], kind='stable'), no + np.argsort(lab[no:], kind='stable')))
+        info['perm'] = perm
+    lab, par = lab[perm], par[perm]
+    tpos = np.full(n_all, -1, dtype=np.int64)          # position in the container of each spinor of the file
+    tpos[act[perm]] = np.arange(n)
+    # Fock matrix of the active occupied spinors (the frozen ones are in h1)
+    f_all = bf.fock(h1, occ=np.arange(freeze, no_all))
+    fock = f_all[np.ix_(act[perm], act[perm])]
+    o, v = slice(0, no), slice(no, None)
+    nv = n - no
+    dims = {'o': no, 'v': nv}
+    dtype = bf.dtype
+    budget = memory.budget(max_memory)
+    sizes = {name: int(np.prod([dims[c] for c in name])) * dtype.itemsize for name in BLOCKS}
+    blocks, scr = {}, None
+    held = 0
+    for name in sorted(BLOCKS, key=lambda k: sizes[k]):
+        shape = tuple(dims[c] for c in name)
+        if budget is None or held + sizes[name] <= budget // 2:
+            blocks[name] = np.zeros(shape, dtype=dtype)
+            held += sizes[name]
+        else:
+            if scr is None:
+                scr = Scratch(prefix='zccsdt_dea_eris_', what='the antisymmetrized integrals')
+            blocks[name] = scr.create(name, shape, dtype)
+    # each spinor of a group: (local index, letter o/v, position in the o or v range)
+    parts = []
+    for g, m in enumerate(bf.members):
+        t = tpos[m]
+        loc = np.flatnonzero(t >= 0)
+        oc = loc[t[loc] < no]
+        vi = loc[t[loc] >= no]
+        parts.append([(x, c, t[x] - (0 if c == 'o' else no)) for x, c in ((oc, 'o'), (vi, 'v')) if len(x)])
+    want = set(BLOCKS)
+    # T[p,q,r,s] = 1/2 [(pr|qs) + (qs|pr) - (ps|qr) - (qr|ps)] from each (ab|cd): (axes of X for p, q, r, s, sign)
+    terms = (((0, 2, 1, 3), 0.5), ((2, 0, 3, 1), 0.5), ((0, 2, 3, 1), -0.5), ((2, 0, 1, 3), -0.5))
+    for b in bf.blocks:
+        X = None
+        for axes, sign in terms:
+            gs = [b[a] for a in axes]
+            for pp, qq, rr, ss in product(*(parts[g] for g in gs)):
+                name = pp[1] + qq[1] + rr[1] + ss[1]
+                if name not in want:
+                    continue
+                if X is None:
+                    X = np.asarray(bf.block(b))
+                sub = X.transpose(axes)[np.ix_(pp[0], qq[0], rr[0], ss[0])]
+                blocks[name][np.ix_(pp[2], qq[2], rr[2], ss[2])] += sign * sub
+    eris = ERIs(nocc=no, fock=fock, mo_energy=fock.diagonal().real.copy(), e_hf=e_hf, e_nuc=0.0, source=str(path),
+                **blocks)
+    eris._scratch = scr
+    info['fock_offdiag_oo_vv'] = float(max(abs(fock[o, o] - np.diag(fock.diagonal()[o])).max(),
+                                           abs(fock[v, v] - np.diag(fock.diagonal()[v])).max()))
+    info['fock_ov'] = float(abs(fock[o, v]).max())
+    if info['fock_offdiag_oo_vv'] < 1e-7:
+        fock[o, o] = np.diag(fock.diagonal()[o])
+        fock[v, v] = np.diag(fock.diagonal()[v])
+    info['e_ref'] = e_hf
+    if sort:
+        eris.labels, eris.modulus, eris.use_labels = lab.copy(), 0, True
+    bf.close()
     return eris, lab, par, info
 
 

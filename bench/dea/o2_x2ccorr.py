@@ -25,7 +25,15 @@ usage:
       the spinors of <dir>/o2_2plus_krhf_x2cmp.chk (bench/dea/o2_scf.py): the Hamiltonian of
       the 116 correlated spinors, closed-shell Hartree-Fock for the 10 electrons of O2(2+)
       inside that space (label block by label block), canonical spinors, and the files
-      <dir>/o2_hf2plus_n<n>_x2ccorr.npz of the n lowest of them'''
+      <dir>/o2_hf2plus_n<n>_x2ccorr.npz of the n lowest of them
+  python o2_x2ccorr.py run-blocks <dir> [n ...] [--out <dir2>] [--max-memory MB] [--npz] [--direct] [--dhf-field]
+      the same Hamiltonian without the n^4 array (zccsdt.eri4c, zccsdt.hblocks): integrals in the
+      blocks of the labels and parities, the HF and its rotation block by block, the block files
+      <dir2 or dir>/o2_hf2plus_n<n>_x2ccorr.h5 (with --npz also the .npz of the dense route);
+      --max-memory: MB for the whole process (default: 80 % of what is free); --direct: all eight
+      classes of AO integrals (default: five and the mirror relations); the raw integrals of the
+      X2CMP spinors go to a scratch file (ZCCSDT_TMPDIR / TMPDIR); the mean field of the frozen 1s
+      spinors from the same blocks, or with --dhf-field from the four-component J, K as in run'''
 import os
 import sys
 import time
@@ -193,9 +201,172 @@ def run(outdir, sizes):
               % (m, name, e_ref, lab[no:no + 4], pr[no:no + 4], time.time() - T0), flush=True)
 
 
+def rss():
+    from zccsdt import memory
+    return memory.resident() / 1e9
+
+
+def run_blocks(outdir, sizes, max_memory=None, npz=False, direct=False, dest=None, dhf_field=False):
+    '''run() without the n^4 array: zccsdt.eri4c into a block file of the X2CMP
+    spinors, the HF and the rotation on its blocks (zccsdt.hblocks).  The
+    mean field of the frozen 1s spinors: from the same blocks (the frozen
+    spinors are transformed with the others and folded, hblocks.fold), or
+    with ``dhf_field`` by the four-component J and K of their density
+    (frozen_field, as run(): 1521 s of 2.6 h for cc-pV5Z-X2C-TP on 32 cores).'''
+    import tempfile
+    from zccsdt import eri4c, hblocks
+    from zccsdt.scratch import scratch_dir
+    mf = o2_scf.run_scf(os.path.join(outdir, 'o2_2plus_krhf_x2cmp%s.chk' % o2_scf.TAG), verbose=0)
+    C, om2, par, io, iv, e = o2_scf.spinors(mf)
+    nf = o2_scf.NFROZEN
+    cols = np.concatenate((io[nf:], iv))
+    c, lab, pr = C[:, cols], om2[cols], par[cols]
+    no, n = len(io) - nf, len(cols)
+    if dhf_field:
+        hc, ecore = frozen_field(mf, C[:, io[:nf]])
+        nfold = 0
+    else:
+        hc, ecore = frozen_field(mf, C[:, :0])         # the bare four-component operator, E_nuc
+        nfold = nf
+        cols = np.concatenate((io, iv))
+        c, lab, pr = C[:, cols], om2[cols], par[cols]
+    print('four-component one-electron operator%s: ecore = %.12f  (%.0f s, RssAnon %.2f GB)'
+          % (' and frozen-core mean field' if dhf_field else '', ecore, time.time() - T0, rss()), flush=True)
+    _, ml, ms = eri4c.x2c_4c_spinors(mf, c)
+    c4 = np.vstack((ml, ms))
+    h1 = c4.conj().T @ hc @ c4
+    del hc, c4, ml, ms
+    real = abs(h1.imag).max() < 1e-9 and abs(c.imag).max() < 1e-12
+    if real:
+        h1 = h1.real.copy()
+    # (the elements of h1 between groups are rounding, as those of (pq|rs) that are not stored; in the
+    # dense route they cancel against the latter in the Fock matrix: f_ov 1e-10 there, 5e-9 with them
+    # kept here for the 116 spinors of DYVTZ-SOG)
+    ok1 = (lab[:, None] == lab[None, :]) & (pr[:, None] == pr[None, :])
+    print('h1: largest element between the groups of (2 Omega, parity) %.1e (set to zero)'
+          % abs(h1[~ok1]).max(initial=0.0), flush=True)
+    h1 = h1 * ok1
+    t0 = time.time()
+    fd, raw = tempfile.mkstemp(prefix='o2_x2ccorr_raw_', suffix='.h5', dir=scratch_dir())
+    os.close(fd)
+    bf = None
+    name = os.path.join(dest or outdir, 'o2_hf2plus%s_n%d_x2ccorr.h5' % (o2_scf.TAG, n))
+    try:
+        for buf, layout in eri4c.make(mf, c, lab, pr, direct=direct, real=real, max_memory=max_memory):
+            if bf is None:
+                groups, members = hblocks.layout_members(layout)
+                bf = hblocks.BlockFile.create(raw, groups, members, no + nfold, ecore, h1, buf.dtype)
+            forb = hblocks.write_label_buffer(bf, buf, layout)
+            print('label blocks written (%.2f GB of blocks in the file); largest element that the parities forbid '
+                  '%.1e  (RssAnon %.2f GB)' % (bf.nbytes() / 1e9, forb, rss()), flush=True)
+            del buf
+        print('integrals of %d spinors in blocks (%.0f s): %s, %d blocks, %.2f GB (dense complex: %.2f GB); '
+              'hermiticity h1 %.1e  (RssAnon %.2f GB)'
+              % (n + nfold, time.time() - t0, bf.dtype.name, len(bf.blocks), bf.nbytes() / 1e9,
+                 16 * (n + nfold) ** 4 / 1e9, abs(h1 - h1.conj().T).max(), rss()), flush=True)
+        if nfold:
+            t1 = time.time()
+            fd, raw2 = tempfile.mkstemp(prefix='o2_x2ccorr_raw_', suffix='.h5', dir=scratch_dir())
+            os.close(fd)
+            folded = hblocks.fold(bf, nfold, raw2)
+            bf.close()
+            os.remove(raw)
+            bf, raw = folded, raw2
+            h1 = bf.h1
+            lab, pr = lab[nfold:], pr[nfold:]
+            c = c[:, nfold:]
+            print('frozen-core mean field from the blocks of the %d frozen spinors: ecore = %.12f  (%.0f s)'
+                  % (nfold, bf.ecore, time.time() - t1), flush=True)
+        t1 = time.time()
+        U, members, eps, e_hf, e_start = hblocks.hartree_fock(bf, h1, no)
+        Uf = np.zeros((n, n), dtype=np.result_type(*U.values()))
+        for g, m in enumerate(bf.members):
+            Uf[np.ix_(m, members[g])] = U[g]
+        s_occ = np.linalg.svd(Uf[:no, :no], compute_uv=False)
+        print('HF (%.0f s): E = %.12f, lowering against the determinant of the X2CMP spinors %.3e Eh; smallest '
+              'singular value of the occupied-occupied block of U %.10f (largest rotation angle %.2e rad); max |U_vo| '
+              '%.2e  (RssAnon %.2f GB)' % (time.time() - t1, e_hf, e_hf - e_start, s_occ.min(),
+                                           np.arccos(min(1.0, s_occ.min())), abs(Uf[no:, :no]).max(), rss()),
+              flush=True)
+        h1n = Uf.conj().T @ h1 @ Uf
+        cn = c @ Uf
+        k = np.argmax(abs(Uf), axis=0)
+        labn, prn = lab[k], pr[k]
+        t1 = time.time()
+        out = hblocks.rotate(bf, U, members, name + '.part', h1n, attrs=dict(e_hf=e_hf, nelec=no + 2, nact=4),
+                             arrays=dict(omega2=labn, parity=prn, mo_coeff=cn, mo_frozen=C[:, io[:nf]]))
+        bf.close()
+        bf = None
+        f = out.fock(h1n)
+        out.h5['eps'] = f.diagonal().real
+        print('rotation of the blocks (%.0f s, RssAnon %.2f GB); canonical spinors: largest off-diagonal Fock '
+              'element in a group %.1e; energies and labels (2 Omega, parity):'
+              % (time.time() - t1, rss(), abs(f - np.diag(f.diagonal())).max()))
+        for p in range(n):
+            print('  %4d %14.8f %3d %s%s' % (p + 1, f[p, p].real, labn[p], 'gu'[prn[p]],
+                                             '  occupied' if p < no else ''))
+        e_ref = out.reference_energy(h1n)
+        out.close()
+        os.replace(name + '.part', name)
+        print('n = %3d: %s  E(reference determinant) %.12f; pi*: 2 Omega %s parity %s  (%.0f s)'
+              % (n, name, e_ref, labn[no:no + 4], prn[no:no + 4], time.time() - T0), flush=True)
+    finally:
+        if bf is not None:
+            bf.close()
+        os.remove(raw)
+    for m in sizes:
+        m = m or n
+        out = hblocks.BlockFile(name)
+        if m < n:
+            if abs(out['eps'][m] - out['eps'][m - 1]) < 1e-7:
+                raise RuntimeError('%d spinors cut a degenerate level' % m)
+            sub = os.path.join(dest or outdir, 'o2_hf2plus%s_n%d_x2ccorr.h5' % (o2_scf.TAG, m))
+            arrays = {k: out[k][:m] for k in ('omega2', 'parity', 'eps')}
+            arrays.update(mo_coeff=out['mo_coeff'][:, :m], mo_frozen=out['mo_frozen'])
+            s = hblocks.subset(out, m, sub, arrays=arrays, attrs={k: out.attr(k) for k in ('e_hf', 'nelec', 'nact')})
+            s.close()
+            out.close()
+            out = hblocks.BlockFile(sub)
+            print('n = %3d: %s' % (m, sub), flush=True)
+        if npz:
+            path = out.path[:-3] + '.npz'
+            np.savez(path, h1=out.h1.astype(complex), eri=out.to_dense().astype(complex), ecore=out.ecore,
+                     nelec=out.attr('nelec'), ncore=out.ncore, nact=4, omega2=out['omega2'], parity=out['parity'],
+                     eps=out['eps'], mo_coeff=out['mo_coeff'], mo_frozen=out['mo_frozen'], e_hf=out.attr('e_hf'))
+            print('  dense copy %s' % path, flush=True)
+        out.close()
+    with open('/proc/self/status') as f:
+        hwm = [x for x in f if x.startswith('VmHWM')]
+    print('peak memory of the process: %s' % hwm[0].split(':')[1].strip(), flush=True)
+
+
+def _option(args, key, conv, default=None):
+    if key in args:
+        k = args.index(key)
+        v = conv(args[k + 1])
+        del args[k:k + 2]
+        return v
+    return default
+
+
 if __name__ == '__main__':
     lib.num_threads(int(os.environ.get('OMP_NUM_THREADS', 1)))
-    if sys.argv[1] == 'check':
-        check(sys.argv[2], sys.argv[3])
+    args = sys.argv[1:]
+    if args[0] == 'check':
+        check(args[1], args[2])
+    elif args[0] == 'run-blocks':
+        mm = _option(args, '--max-memory', float)
+        npz = '--npz' in args
+        if npz:
+            args.remove('--npz')
+        direct = '--direct' in args
+        if direct:
+            args.remove('--direct')
+        dest = _option(args, '--out', str)
+        dhf = '--dhf-field' in args
+        if dhf:
+            args.remove('--dhf-field')
+        sizes = [int(x) for x in args[2:]] or ([0] if o2_scf.TAG else [26, 30, 32, 116])
+        run_blocks(args[1], sizes, mm, npz, direct, dest, dhf)
     else:
-        run(sys.argv[2], [int(x) for x in sys.argv[3:]] or ([0] if o2_scf.TAG else [26, 30, 32, 116]))
+        run(args[1], [int(x) for x in args[2:]] or ([0] if o2_scf.TAG else [26, 30, 32, 116]))
