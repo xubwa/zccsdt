@@ -78,6 +78,9 @@ module xzdead
   integer(8), allocatable :: r13p(:), dqb(:)
   integer(8) :: r13loc = 0, r13pmax = 0
   integer(8) :: dwq2 = 0                    ! the 2p ladder operator of the problem in hand
+  ! option deaplan n1 n2 ...: the memory per rank for these numbers of ranks, nothing computed
+  logical :: dplan = .false.
+  integer(8) :: dplanc = 0, dplann(16) = 0
 
   ! ---- the sector of the problem in hand (xzdsec)
   integer(8) :: ds = 0                      ! the shift: the class of the pairs of the two attached electrons

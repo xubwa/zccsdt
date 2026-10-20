@@ -38,6 +38,12 @@ subroutine N(xzdea)(w, ecorr)
   call xzdglay(w)
   call xzdquadn()
   call xzeomstep()
+  ! option deaplan: the memory per rank for some numbers of ranks, then back
+  if (dplan) then
+    call planranks()
+    call xzrel(m0)
+    return
+  end if
   ! the pairs of every rank (the same for all targets) - their rows of r4 and
   ! their part of R13 (the rows of T3 and Xv); one rank: all
   allocate(guess(max(dnt, 1_8)))
@@ -411,6 +417,114 @@ contains
       call xzrel(mp)
     end do
     call xzrel(mk)
+  end subroutine
+
+  ! Option deaplan n1 n2 ...: what EOM-DEA takes on every rank for n1, n2,
+  ! ... ranks, from dry runs of its allocations in the work array of this
+  ! run (one rank, after the layout of the integrals and the amplitudes):
+  ! the arrays of the ground state with R13 of the pairs of the rank, the
+  ! transient of making them, and per target the two whole vectors with the
+  ! 2p operator, a sigma vector with batches of 1 GB and of one element, and
+  ! the part of a vector that the rank holds (the subspace: msub vectors and
+  ! their sigma vectors of that part).  Nothing is computed.
+  subroutine planranks()
+    integer(8) :: nr0, mr0, ii, n, rr, base, mk, mp, kk, kept, r13w, pim, vec, own, sg1, sgf, tim, tvec
+    integer(8) :: wvec, wsg1, wsgf, wown, wmsub, totm, totf, r13f
+    integer(8), allocatable :: sh(:)
+    real(8), parameter :: gb = 8d-9
+    nr0 = nrank
+    mr0 = myrank
+    allocate(sh(max(dnt, 1_8)))
+    nsel = 0
+    do it = 1, dnt
+      call problem(it, s, nroot, ok)
+      if (.not. ok) cycle
+      nsel = nsel + 1
+      sh(nsel) = s
+    end do
+    base = xztop
+    write(6, '(/,a)') '  EOM-DEA: the memory of a rank (option deaplan; GB of the work array, nothing computed)'
+    write(6, '(a,f9.2,a)') '   the integrals and the amplitudes (every rank): ', gb * base, ' GB'
+    write(6, '(a)') '   ranks rank   kept  of it R13 making them  2 vectors  sigma 1 GB / 1   part of a vector  subspace ' // &
+      ' total: subspace in the work array / in files;  R13 in the file XZDXV'
+    call xzdry_begin()
+    do ii = 1, dplanc
+      n = dplann(ii)
+      nrank = n
+      do rr = 0, n - 1
+        myrank = rr
+        call xzdranges(w, nsel, sh)
+        dxvfile = .false.
+        mk = xzmark()
+        call N(xzeomkeep)()
+        call N(xzdkeep)()
+        kept = xztop - mk
+        r13w = NW * r13loc
+        r13f = NW * r13pmax
+        xzpeak = xztop
+        call N(xzeomim)(w)
+        call N(xzdim)(w)
+        pim = xzpeak - xztop
+        wvec = 0
+        wsg1 = 0
+        wsgf = 0
+        wown = 0
+        wmsub = 0
+        totm = base + kept + pim
+        totf = totm
+        do it = 1, dnt
+          call problem(it, s, nroot, ok)
+          if (.not. ok) cycle
+          call xzdsec(s)
+          ddist = .false.
+          if (n > 1) then
+            call xzdslices(int(NW, 8))
+            ddist = .true.
+          end if
+          nlen = dn2 + dsz3 + dsz4
+          own = nlen
+          if (n > 1) then
+            own = esoff(rr + 1) - esoff(rr)
+            if (rr == 0) own = own + dn2 + dsz3
+          end if
+          mp = xzmark()
+          call N(xzdwq2)(w)
+          kk = xzget(NW * nlen, 'DEA: a vector')
+          kk = xzget(NW * nlen, 'DEA: its sigma vector')
+          vec = xztop - mp
+          dbatch = 1
+          xzpeak = xztop
+          call N(xzdsig)(w, kk, kk)
+          call N(xzdprec)(w, kk, zz)
+          sgf = xzpeak - xztop
+          dbatch = 1073741824_8 / (8 * NW)
+          xzpeak = xztop
+          call N(xzdsig)(w, kk, kk)
+          call N(xzdprec)(w, kk, zz)
+          sg1 = xzpeak - xztop
+          msub = subspace(nroot)
+          wvec = max(wvec, vec)
+          wsg1 = max(wsg1, sg1)
+          wsgf = max(wsgf, sgf)
+          wown = max(wown, NW * own)
+          wmsub = max(wmsub, msub)
+          totm = max(totm, base + kept + vec + sg1 + 2 * msub * NW * own)
+          totf = max(totf, base + kept + vec + sg1 + msub * NW * min(nlen, 1048576_8))
+          ddist = .false.
+          call xzrel(mp)
+        end do
+        call xzrel(mk)
+        write(6, '(i7,i5,f8.2,f10.2,f13.2,f11.2,f9.2,a,f6.2,f12.2,a,i3,a,f6.2,a,f6.2,f9.2,a,f6.2,a,f6.2)') n, rr, gb * kept, &
+          gb * r13w, gb * pim, gb * wvec, gb * wsg1, ' /', gb * wsgf, gb * wown, '   ', wmsub, ' x 2 x part   ', gb * totm, &
+          ' /', gb * totf, gb * (totm - r13w + r13f), ' /', gb * (totf - r13w + r13f), ''
+      end do
+    end do
+    call xzdry_end(kk)
+    nrank = nr0
+    myrank = mr0
+    dbatch = 0
+    call xzdranges(w, nsel, sh)
+    deallocate(sh)
   end subroutine
 
   ! the file XZDXV of R13 ('o': opened, 'c': closed and deleted)
