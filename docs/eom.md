@@ -1722,8 +1722,12 @@ Not done:
   at the price of 1e-10 differences from the dense route;
 - the split over nodes by k shells has no driver;
 - `common.load` still builds the dense antisymmetrized blocks of the
-  container (vvvv 120 GB for 350 virtual spinors, in a scratch file) - the
-  native port reads the block file instead.
+  container (vvvv 120 GB for 350 virtual spinors, in a scratch file) for
+  the Python sector.  The native EOM-DEA-CCSDT runs from the block file:
+  `bench/dea/native_rundir.py <file.h5>` writes the blocks with an occupied
+  index and `<ab||cd>` in blocks of the label sums (the file `xzvvvv`), no
+  n^4 array (docs/native.md 20.1; validation, the plan and the timings of
+  cc-pV5Z-X2C-TP: 20.4, 20.5, 20.7).
 
 ## 12. Left-hand eigenvectors (`zccsdt.cc.eom_left`)
 
