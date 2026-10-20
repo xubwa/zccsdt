@@ -19,8 +19,8 @@ subroutine N(xzdea)(w, ecorr)
   real(8), target :: w(*)
   real(8), intent(in) :: ecorr
   integer(8) :: m0, ms, it, s, nroot, nlen, kxa, kxb, msub, sigw, avail, nfound, nsig, nit, nst, k, r, a, b, q, t
-  integer(8) :: peak, blo, bhi, bmid, btarget, reserve, kpib, ng, nsel
-  integer(8), allocatable :: guess(:), lead(:, :), cyc(:)
+  integer(8) :: peak, blo, bhi, bmid, btarget, reserve, kpib, ng, nsel, nsh, myrank0, kbr(2)
+  integer(8), allocatable :: guess(:), lead(:, :), cyc(:), shl(:)
   complex(8), allocatable :: ee(:)
   real(8), allocatable :: rmax(:), rnorm(:), wts(:, :), dg(:)
   ZT, allocatable :: vlead(:, :)
@@ -46,37 +46,46 @@ subroutine N(xzdea)(w, ecorr)
   end if
   ! the pairs of every rank (the same for all targets) - their rows of r4 and
   ! their part of R13 (the rows of T3 and Xv); one rank: all
-  allocate(guess(max(dnt, 1_8)))
-  nsel = 0
+  allocate(shl(max(dnt, 1_8)))
+  nsh = 0
   do it = 1, dnt
     call problem(it, s, nroot, ok)
     if (.not. ok) cycle
-    nsel = nsel + 1
-    guess(nsel) = s
+    nsh = nsh + 1
+    shl(nsh) = s
   end do
-  call xzdranges(w, nsel, guess)
-  deallocate(guess)
+  call xzdranges(w, nsh, shl)
   ! R13 in the work array if all of EOM-DEA fits there with it (with the
   ! smallest batches and the smallest subspace), else in the file XZDXV
-  ! (XZDXV.<rank>), read once per sigma vector; option deaxv m / f: the one or the other
+  ! (XZDXV.<rank>), read once per sigma vector; option deaxv m / f: the one or
+  ! the other.  More than one rank: the same on all ranks, decided by every
+  ! rank alike for the rank whose part takes the most (the work arrays of all
+  ! ranks have the words of rank 0)
+  myrank0 = myrank
   call xzoptget('deaxv', arg, larg)
   if (larg > 0) then
     dxvfile = arg(1:1) == 'f' .or. arg(1:1) == 'F'
   else
     dxvfile = .false.
-    if (xzdry) then
-      k = xzmark()
-      peak = xzpeak
-      xzpeak = xztop
-      call allocs()
-      t = xzpeak
-      call xzrel(k)
-      xzpeak = peak
-    else
-      call xzdry_begin()
-      call allocs()
-      call xzdry_end(t)
-    end if
+    t = 0
+    do r = 0, nrank - 1
+      if (nrank > 1) call asrank(r, .false.)
+      if (xzdry) then
+        k = xzmark()
+        peak = xzpeak
+        xzpeak = xztop
+        call allocs()
+        t = max(t, xzpeak)
+        call xzrel(k)
+        xzpeak = peak
+      else
+        call xzdry_begin()
+        call allocs()
+        call xzdry_end(peak)
+        t = max(t, peak)
+      end if
+    end do
+    if (nrank > 1) call asrank(myrank0, .false.)
     dxvfile = t > xzsize
   end if
   if (xzdry) then
@@ -119,6 +128,9 @@ subroutine N(xzdea)(w, ecorr)
     write(6, '(a,i6,a)') '   ', nsig, ' sigma vectors'
     write(6, '(a,8f8.2)') '   seconds of them: intermediates, pp, ring, hh, rows, 3p1h, 2p, MPI and XZDXV ', tdpart(1:7), &
       tdpart(12)
+    call xz_rss(kbr)
+    write(6, '(a,i14,a,f10.1,a,f10.1,a,f10.1,a)') '   work array used: ', xzpeak, ' words = ', 8d-6 * xzpeak, &
+      ' MB of ', 8d-6 * xzsize, ' MB;  peak resident memory of the process: ', 1d-3 * kbr(1), ' MB'
     if (dxvfile) call xvfile('c')
     call xzrel(m0)
     return
@@ -245,16 +257,16 @@ subroutine N(xzdea)(w, ecorr)
     else
       blo = 1
       bhi = btarget
-      if (sigpeak(bhi) + reserve <= xzsize) then
+      if (sigpeakall(bhi) + reserve <= xzsize) then
         blo = bhi
-      else if (sigpeak(blo) + reserve > xzsize) then
+      else if (sigpeakall(blo) + reserve > xzsize) then
         write(6, '(/,a)') ' @XZCCSDT-F, the work array is too short for the sigma vectors of EOM-DEA.'
-        write(6, '(a,i16,a,i16)') '   words needed: ', sigpeak(blo) + reserve, '   words there: ', xzsize
+        write(6, '(a,i16,a,i16)') '   words needed: ', sigpeakall(blo) + reserve, '   words there: ', xzsize
         call xzerrex
       else
         do while (bhi - blo > max(1_8, blo / 64))
           bmid = blo + (bhi - blo) / 2
-          if (sigpeak(bmid) + reserve <= xzsize) then
+          if (sigpeakall(bmid) + reserve <= xzsize) then
             blo = bmid
           else
             bhi = bmid
@@ -265,6 +277,8 @@ subroutine N(xzdea)(w, ecorr)
     dbatch = blo
     sigw = sigpeak(dbatch) - xztop
     avail = xzsize - xztop - sigw
+    ! (more than one rank: the words of the subspace as the rank that fits the fewest vectors of its part leaves them)
+    if (dist) avail = min(avail, ranksub(dbatch))
     write(6, '(a,f10.1,a,f10.1,a,f10.1,a)') '   a sigma vector takes ', 8d-6 * sigw, ' MB of the work array (batches of ', &
       8d-6 * NW * dbatch, ' MB); free besides it: ', 8d-6 * avail, ' MB'
     ! the start: unit vectors on the lowest pairs (a<b) of the masks
@@ -597,6 +611,67 @@ contains
     call xzdry_end(pk)
     dbatch = keep
     sigpeak = pk
+  end function
+
+  ! (more than one rank) this rank in the place of rank r for a dry run:
+  ! the pairs of rank r, its part of R13, with sec its rows of r4 of the
+  ! sector in hand
+  subroutine asrank(r, sec)
+    integer(8), intent(in) :: r
+    logical, intent(in) :: sec
+    myrank = r
+    call xzdranges(w, nsh, shl)
+    if (sec) call xzdslices(int(NW, 8))
+  end subroutine
+
+  ! (more than one rank) the words of R13 that rank r holds more than rank
+  ! myrank0 (dqb: the pairs of all ranks)
+  integer(8) function r13more(r)
+    integer(8), intent(in) :: r
+    r13more = 0
+    if (.not. dxvfile) r13more = NW * ((r13p(dqb(r + 1)) - r13p(dqb(r))) - (r13p(dqb(myrank0 + 1)) - r13p(dqb(myrank0))))
+  end function
+
+  ! the most of the work array that a sigma vector takes on any rank with
+  ! batches of nb elements, with what that rank holds more than rank 0 (the
+  ! ranks are run dry one after the other)
+  integer(8) function sigpeakall(nb)
+    integer(8), intent(in) :: nb
+    integer(8) :: r, pk
+    pk = sigpeak(nb)
+    if (dist) then
+      do r = 0, nrank - 1
+        if (r == myrank0) cycle
+        call asrank(r, .true.)
+        pk = max(pk, sigpeak(nb) + r13more(r))
+      end do
+      call asrank(myrank0, .true.)
+    end if
+    sigpeakall = pk
+  end function
+
+  ! (more than one rank) the words that rank 0 may plan its subspace with:
+  ! every rank holds msub vectors of its own part (rank 0: r2, r3 and its
+  ! rows of r4) and their sigma vectors next to its sigma vector - rank 0's
+  ! words are those of the rank that holds the fewest vectors of its part,
+  ! in the measure of rank 0's part
+  integer(8) function ranksub(nb)
+    integer(8), intent(in) :: nb
+    integer(8) :: r, own, own0, free, fmin
+    real(8) :: x
+    own0 = dn2 + dsz3 + esoff(1)
+    x = huge(1d0)
+    fmin = huge(1_8)
+    do r = 0, nrank - 1
+      call asrank(r, .true.)
+      own = esoff(r + 1) - esoff(r)
+      if (r == 0) own = own + dn2 + dsz3
+      free = xzsize - sigpeak(nb) - r13more(r)
+      fmin = min(fmin, free)
+      x = min(x, dble(free) / dble(NW * own + xzalign))
+    end do
+    call asrank(myrank0, .true.)
+    ranksub = min(fmin, int(x * dble(NW * own0 + xzalign), 8))
   end function
 
   subroutine r8view(k, n, p)
