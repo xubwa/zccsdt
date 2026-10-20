@@ -1001,6 +1001,7 @@ the zero-field splitting of X 3Sigma_g-).
 | the 5p3h operators at lowest order, folded | `src/zccsdt/cc/dea5.py`, `tests/test_dea5.py` |
 | any rank on determinants (reference route) | `src/zccsdt/cc/dea_strings.py`, `tests/test_dea_strings.py` |
 | front end | `GCCSDT.eom_dea` (`docs/usage.md`) |
+| the native program (cfour/xzccsdt): the sector, R to 4p2h, T of CCSDT, over MPI ranks | `CALC=CCSDT` with `%xzdea`; docs/native.md, section 20 |
 | O2: SCF of O2(2+), Hamiltonian files, levels | `bench/dea/` (`o2_scf.py`, `o2_x2ccorr.py`, `common.py`, `o2_dea.py`, `o2_strings.py`, `o2_fold5.py`, `sizes.py`; the sector: `sector_bench.py`, `sector_check.py`, `sector_cost.py`) |
 
 ### 11.1 Operators and levels
@@ -1535,7 +1536,9 @@ and 250 - 300 GB through the ghosts.
 
 **For the native program** (cfour/xzccsdt, which has EOM-EE in label
 blocks with real arithmetic, its Davidson solver and MPI over the rows of R3,
-docs/native.md 16), what this needs:
+docs/native.md 16), what this needs - done as described here, docs/native.md,
+section 20 (the six-index Xv in a file when it does not fit, the ring over
+ranks by its output rows instead of a reduction of sigma4):
 
 - the vector: r2 on the pairs of one class, r3 in blocks [i, K], r4 in
   blocks [(ij), quadruples of class M] (the quadruple lists and the (a | bcd),

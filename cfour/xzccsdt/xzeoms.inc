@@ -1009,8 +1009,11 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   evoff = 0
   call N(xzevopen)(nloc, msub, min(msub, nroot + 3), min(msub, 3 * nroot + 4), avail, .not. sd)
   if (.not. quiet) then
-    if (ecmd) write(6, '(a,i4,a,f10.1,a,f10.1,a)') '   over ', nrank, &
+    if (ecmd .and. .not. edea) write(6, '(a,i4,a,f10.1,a,f10.1,a)') '   over ', nrank, &
       ' ranks: every rank holds its rows of R3 of every vector (rank 0 with the singles and doubles: ', &
+      8d-6 * NW * nloc, ' MB of ', 8d-6 * NW * nlen, ' MB)'
+    if (ecmd .and. edea) write(6, '(a,i4,a,f10.1,a,f10.1,a)') '   over ', nrank, &
+      ' ranks: every rank holds its rows of r4 of every vector (rank 0 with r2 and r3: ', &
       8d-6 * NW * nloc, ' MB of ', 8d-6 * NW * nlen, ' MB)'
     if (evfile) then
       write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the files EOMCnnnn, ' // &
