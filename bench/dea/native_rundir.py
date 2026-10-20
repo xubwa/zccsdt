@@ -14,7 +14,15 @@ of their labels, and E(SCF) (SCFENEG) and the frozen pairs (NUMDROPA, 0)
 are put into that JOBARC.  Nothing of the stand-in molecule is read by the
 native program.
 
-usage: python bench/dea/native_rundir.py <file.npz> <outdir> [--freeze n] [--targets 0,2] [--roots 1]
+A block file of zccsdt.hblocks (.h5, o2_x2ccorr.py run-blocks) is written
+without any n^4 array: the blocks with an occupied index from the label
+blocks of the file (common.load_blocks without <vv||vv>), and <ab||cd> not
+as moinpppp - (nv (nv + 1) / 2)^2 complex numbers, 60 GB for 350 virtual
+spinors - but as the file xzvvvv of the native program (cfour/xzccsdt
+xzread.F90, xzvvhdr): one block per sum of the labels of a pair, made
+group by group from the blocks of the file (write_vvvv_blocks).
+
+usage: python bench/dea/native_rundir.py <file.npz | file.h5> <outdir> [--freeze n] [--targets 0,2] [--roots 1]
            [--cc-conv 10] [--estate-conv 9] [--mem-gb 8] [--section text] [--cfour-bin dir]
   --freeze n      the first n spinors of the reference frozen (their mean field folded in; common.load)
   --targets       2 Omega of the two attached electrons, one problem each (default 0,2)
@@ -25,6 +33,8 @@ usage: python bench/dea/native_rundir.py <file.npz> <outdir> [--freeze n] [--tar
   --xz line       a line of the section %xzccsdt (repeatable)
   --phases seed   every spinor multiplied by a phase exp(i x), x random with this seed: complex
                   integrals with the same labels (a test of the complex arithmetic)
+  --moinpppp      a block file written as before: the full container (common.load_blocks) and
+                  moinpppp instead of xzvvvv (a check of the two routes on the same integrals)
 '''
 import os
 import shutil
@@ -72,6 +82,71 @@ def write_parity(directory, par):
             f.write(' '.join('%d' % x for x in par[k:k + 16]) + '\n')
 
 
+def write_vvvv_blocks(path, bf, vpos, verbose=True):
+    '''The file xzvvvv (docs/native.md section 2; the reader: xzvvhdr / xzrdvvb
+    of cfour/xzccsdt/xzread.F90) from the block file ``bf`` (zccsdt.hblocks):
+    <ab||cd> = (ac|bd) - (ad|bc) for a<b, c<d in blocks of the pairs of one
+    label sum.  ``vpos[x]``: CFOUR's number of the virtual spinor of global
+    index x of the block file (-1: not a virtual spinor of the run).
+    A group at a time: (ac|bd) on the ordered pairs (a, b) of the group from
+    the blocks (g_a g_c | g_b g_d) of the file, then the antisymmetrization
+    and the pairs a<b.  Returns (groups, elements, largest block).'''
+    import time
+    t0 = time.perf_counter()
+    lab = [g[0] for g in bf.groups]
+    G = len(bf.groups)
+    vloc = [np.flatnonzero(vpos[m] >= 0) for m in bf.members]      # local indices of the virtual members
+    vnum = [vpos[m][x] for m, x in zip(bf.members, vloc)]           # their CFOUR numbers
+    sums = sorted({lab[g1] + lab[g2] for g1 in range(G) for g2 in range(G) if len(vloc[g1]) and len(vloc[g2])})
+    dt = np.dtype(np.float64 if bf.dtype.kind == 'f' else np.complex128)
+    cnt, pairs, plan = [], [], []
+    for L in sums:
+        gp = [(g1, g2) for g1 in range(G) for g2 in range(G) if lab[g1] + lab[g2] == L and len(vloc[g1])
+              and len(vloc[g2])]
+        ra = np.concatenate([np.repeat(vnum[g1], len(vnum[g2])) for g1, g2 in gp])
+        rb = np.concatenate([np.tile(vnum[g2], len(vnum[g1])) for g1, g2 in gp])
+        strict = np.flatnonzero(ra < rb)
+        num = ra[strict] + rb[strict] * (rb[strict] - 1) // 2
+        o = np.argsort(num, kind='stable')
+        cnt.append(len(o))
+        pairs.append(num[o])
+        plan.append((L, gp, ra, rb, strict[o]))
+    nv = int(vpos.max()) + 1
+    assert sum(cnt) == nv * (nv - 1) // 2, 'the pairs of the label sums are not all pairs'
+    nwf = 1 if dt.kind == 'f' else 2
+    with open(path, 'wb') as f:
+        f.write(b'XZVVVV01')
+        np.array([nv, nwf, len(cnt)], dtype='<i8').tofile(f)
+        np.array(cnt, dtype='<i8').tofile(f)
+        np.concatenate(pairs).astype('<i8').tofile(f)
+        nel = 0
+        for L, gp, ra, rb, sel in plan:
+            off = np.concatenate(([0], np.cumsum([len(vnum[g1]) * len(vnum[g2]) for g1, g2 in gp])))
+            N = off[-1]
+            X = np.zeros((N, N), dtype=dt)                  # X[(a b), (c d)] = (ac|bd)
+            for k, (g1, g2) in enumerate(gp):
+                for l, (g3, g4) in enumerate(gp):
+                    b = (g1, g3, g2, g4)
+                    if b not in bf.offset:
+                        continue
+                    x = np.asarray(bf.block(b))[np.ix_(vloc[g1], vloc[g3], vloc[g2], vloc[g4])]
+                    X[off[k]:off[k + 1], off[l]:off[l + 1]] = x.transpose(0, 2, 1, 3).reshape(off[k + 1] - off[k], -1)
+            # the column of (d, c) for the column of (c, d)
+            where = {(int(a), int(b)): i for i, (a, b) in enumerate(zip(ra, rb))}
+            swap = np.array([where[(int(b), int(a))] for a, b in zip(ra[sel], rb[sel])], dtype=np.int64)
+            Y = X[sel]
+            del X
+            B = Y[:, sel] - Y[:, swap]
+            del Y
+            np.ascontiguousarray(B).astype(dt.newbyteorder('<'), copy=False).tofile(f)
+            nel += B.size
+            del B
+    if verbose:
+        print('xzvvvv: %d groups of pairs (label sums %d .. %d), %d elements (%.2f GB), largest block %d pairs; %.1f s'
+              % (len(cnt), sums[0], sums[-1], nel, nel * nwf * 8 / 1e9, max(cnt), time.perf_counter() - t0), flush=True)
+    return len(cnt), nel, max(cnt)
+
+
 def main():
     args = sys.argv[1:]
     opt = {'--freeze': '0', '--targets': '0,2', '--roots': '1', '--cc-conv': '10', '--estate-conv': '9',
@@ -86,9 +161,20 @@ def main():
             k = args.index(key)
             opt[key] = args[k + 1]
             del args[k:k + 2]
+    old = '--moinpppp' in args
+    if old:
+        args.remove('--moinpppp')
     path, out = args[0], args[1]
     from zccsdt import cfour
-    eris, lab, par, info = common.load(path, sort=True, freeze=int(opt['--freeze']))
+    blocks = path.endswith('.h5') and not old
+    if blocks:
+        from zccsdt.eris import BLOCKS
+        if opt['--phases'] is not None:
+            raise SystemExit('--phases: not with a block file')
+        eris, lab, par, info = common.load_blocks(path, sort=True, freeze=int(opt['--freeze']),
+                                                  names=[b for b in BLOCKS if b != 'vvvv'])
+    else:
+        eris, lab, par, info = common.load(path, sort=True, freeze=int(opt['--freeze']))
     no, n = eris.nocc, info['n']
     print('%s: %d spinors, %d occupied, frozen %s; E(reference) %.12f; largest |imag| %.1e, |f_ov| %.1e, '
           'forbidden integral %.1e' % (path, n, no, opt['--freeze'], info['e_ref'], info['imag'], info['fock_ov'],
@@ -124,6 +210,16 @@ def main():
         if name not in ('JOBARC', 'JAINDX'):
             shutil.move(os.path.join(tmp, name), os.path.join(out, name))
     shutil.rmtree(tmp)
+    if blocks:
+        # <ab||cd> as the file xzvvvv: the CFOUR number of every virtual spinor of the block file
+        from zccsdt import hblocks
+        bf = hblocks.BlockFile(path)
+        fr = int(opt['--freeze'])
+        act = np.arange(fr, bf.n)
+        vpos = np.full(bf.n, -1, dtype=np.int64)
+        vpos[act[info['perm'][no:]]] = np.arange(n - no)
+        write_vvvv_blocks(os.path.join(out, 'xzvvvv'), bf, vpos)
+        bf.close()
     arc = cfour.JobArc(out)
     arc.put('SCFENEG', np.array([eris.e_hf], dtype='<f8'))
     arc.put('NUMDROPA', np.array([0], dtype='<i8'))

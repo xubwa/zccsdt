@@ -101,14 +101,16 @@ def load(path, tol=1e-10, drop_forbidden=False, sort=False, freeze=0):
     return eris, lab, par, info
 
 
-def load_blocks(path, drop_forbidden=False, sort=False, freeze=0, max_memory=None):
+def load_blocks(path, drop_forbidden=False, sort=False, freeze=0, max_memory=None, names=None):
     '''load() for a block file of zccsdt.hblocks (o2_x2ccorr.py run-blocks):
     the same container, built block by block - nothing n^4 but the
     antisymmetrized blocks of the container themselves, which go to scratch
     files (zccsdt.scratch) when they take more than half of the budget
     (``max_memory`` MB for the process; default: 80 % of what is free).
     Elements that the labels forbid are not in the file: drop_forbidden has
-    nothing to do, info['forbidden'] is 0.'''
+    nothing to do, info['forbidden'] is 0.  ``names``: the blocks to build
+    (default all of BLOCKS; the others are None - e.g. without 'vvvv' for
+    native_rundir.py, which writes <vv||vv> in label blocks itself).'''
     from zccsdt import hblocks, memory
     from zccsdt.eris import BLOCKS, ERIs
     from zccsdt.scratch import Scratch
@@ -146,10 +148,11 @@ def load_blocks(path, drop_forbidden=False, sort=False, freeze=0, max_memory=Non
     dims = {'o': no, 'v': nv}
     dtype = bf.dtype
     budget = memory.budget(max_memory)
-    sizes = {name: int(np.prod([dims[c] for c in name])) * dtype.itemsize for name in BLOCKS}
-    blocks, scr = {}, None
+    want = set(BLOCKS if names is None else names)
+    sizes = {name: int(np.prod([dims[c] for c in name])) * dtype.itemsize for name in want}
+    blocks, scr = {name: None for name in BLOCKS}, None
     held = 0
-    for name in sorted(BLOCKS, key=lambda k: sizes[k]):
+    for name in sorted(want, key=lambda k: sizes[k]):
         shape = tuple(dims[c] for c in name)
         if budget is None or held + sizes[name] <= budget // 2:
             blocks[name] = np.zeros(shape, dtype=dtype)
@@ -166,7 +169,6 @@ def load_blocks(path, drop_forbidden=False, sort=False, freeze=0, max_memory=Non
         oc = loc[t[loc] < no]
         vi = loc[t[loc] >= no]
         parts.append([(x, c, t[x] - (0 if c == 'o' else no)) for x, c in ((oc, 'o'), (vi, 'v')) if len(x)])
-    want = set(BLOCKS)
     # T[p,q,r,s] = 1/2 [(pr|qs) + (qs|pr) - (ps|qr) - (qr|ps)] from each (ab|cd): (axes of X for p, q, r, s, sign)
     terms = (((0, 2, 1, 3), 0.5), ((2, 0, 3, 1), 0.5), ((0, 2, 3, 1), -0.5), ((2, 0, 1, 3), -0.5))
     for b in bf.blocks:

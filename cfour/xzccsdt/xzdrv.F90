@@ -24,7 +24,7 @@ subroutine xzdrv(w, maxcor)
   use xzdist
   use xzpland, only: planq, pneedq, pneedw, lslot, lfile, lchunk
   use xzeomd
-  use xzdead, only: xzdeaout
+  use xzdead, only: xzdeaout, dplan, dplanc, dplann
   use omp_lib
   implicit none
   integer(8), intent(in) :: maxcor
@@ -37,7 +37,8 @@ subroutine xzdrv(w, maxcor)
   real(8) :: sync(2)
   real(8) :: ecorr, eq5, eq6, etot, t0, tread, tcc, tq, twall, tlm, tden, lhs, rhs, teom, elow
   character(len=32) :: arg
-  integer :: larg
+  integer :: larg, ios
+  integer(8) :: k
 
   twall = omp_get_wtime()
   call xzinit(loc(w(1)), maxcor)
@@ -229,6 +230,37 @@ subroutine xzdrv(w, maxcor)
     rplan(17) = dble(epw)
     rplan(18:20) = dble([lslot, merge(1_8, 0_8, lfile), lchunk])
     call xzmpi_bcast(rplan, 8_8 * size(rplan))
+  end if
+  ! (option deaplan n1 n2 ...: the memory of EOM-DEA per rank for n1, n2, ... ranks,
+  ! from dry runs after the layout and the places of the amplitudes; nothing computed)
+  call xzoptget('deaplan', arg, larg)
+  if (larg > 0 .and. with_dea) then
+    if (nrank > 1) then
+      write(6, '(/,a)') ' @XZCCSDT-F, option deaplan: a plan for several ranks is made by one rank.'
+      call xzerrex
+    end if
+    dplanc = 0
+    do k = 1, 16
+      read(arg(1:larg), *, iostat=ios) dplann(1:k)
+      if (ios /= 0) exit
+      dplanc = k
+    end do
+    if (dplanc == 0 .or. minval(dplann(1:max(dplanc, 1_8))) < 1) then
+      write(6, '(/,a)') ' @XZCCSDT-F, option deaplan: numbers of ranks expected.'
+      call xzerrex
+    end if
+    jt1 = xzget(nwe * no * nv, 'T1')
+    jt2 = xzget(nwe * no * no * nv * nv, 'T2')
+    jt3 = xzget(nwe * n3, 'T3')
+    dplan = .true.
+    if (nwe == 2) then
+      call xzdea_z(w, 0d0)
+    else
+      call xzdea_d(w, 0d0)
+    end if
+    dplan = .false.
+    write(6, '(/,a)') '   option deaplan: a plan only, no calculation.'
+    return
   end if
   ! (a test hook: option wfail, an error on a rank other than 0)
   call xzoptget('wfail', length=larg)
@@ -1223,8 +1255,10 @@ subroutine xzlayout(w, status)
   implicit none
   real(8) :: w(*)
   integer(8), intent(out) :: status
-  integer(8) :: m, mint, kbuf, krow, ksrc, ksg, po, pv, nbuf, k, jold(7), nel(7), ktn
+  integer(8) :: m, mint, kbuf, krow, ksrc, ksg, po, pv, nbuf, k, jold(7), nel(7), ktn, nwf, bmax
   real(8) :: vmax, offmax, ximag
+  logical :: vvblk
+  logical, save :: toldvv = .false.
   real(8), external :: xzimag
   real(8) :: tol_label, tol_imag
   character(len=8) :: what
@@ -1376,6 +1410,41 @@ subroutine xzlayout(w, status)
   joovvp = jold(5)
   jgpp = jold(6)
   jovvq = jold(7)
+
+  ! ---- <ab||cd> from the file xzvvvv in blocks (ours, xzrdvvb): straight into its place
+  call xzvvhdr(vvblk, nwf, bmax)
+  if (vvblk) then
+    jvvvv = xzget(nwe * nvv, '<vv||vv> on a<b, c<d')
+    m = xzmark()
+    kbuf = xzget(nwf * bmax, 'a block of the file xzvvvv')
+    ksrc = xzget(2 * nvp, 'permutation of the pairs')
+    ksg = xzget(nvp, 'signs of the pairs')
+    if (.not. xzdry) then
+      call xzrdvvb(w(jvvvv), nwf, w(jvpa), w(jvpb), w(jvpgrp), w(ksrc), w(ksg), w(kbuf), offmax, ximag)
+      if (offmax > tol_label) then
+        write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
+        write(6, '(a,es10.2,a)') '             an element of <vv||vv> (the file xzvvvv) that they forbid is ', offmax, &
+          '.  The labels are not used.'
+        status = 1
+        return
+      end if
+      if (offmax > 1d-12) write(6, '(a,es10.2,a,es9.2,a)') '   the largest element of <vv||vv> that the labels forbid: ', &
+        offmax, ' (below the tolerance ', tol_label, ': taken as zero)'
+      if (ximag > tol_imag) then
+        write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', ximag, &
+          ' (above the tolerance ', tol_imag, ', option imagtol: complex arithmetic)'
+        status = 2
+        return
+      end if
+      if (ximag > 1d-12) write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', &
+        ximag, ' (below the tolerance ', tol_imag, ': taken as zero)'
+      if (.not. toldvv) write(6, '(a,i3,a)') '   <vv||vv>: the file xzvvvv (blocks of the label sums, ', nwf, &
+        ' words per element), not moinpppp'
+      toldvv = .true.
+    end if
+    call xzrel(m)
+    return
+  end if
 
   ! ---- <ab||cd>: the record of the file is read where the blocks stay
   m = xzmark()

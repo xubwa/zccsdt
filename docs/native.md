@@ -317,6 +317,7 @@ file, complex, the first index fastest, antisymmetrized integrals):
 | `moinhhhh`, `moinhhhp`, `moinhhpp`, `moinphhp` | `<ij||kl>`, `<ij||ka>`, `<ij||ab>`, `<ia||bj>` |
 | `PPPH0001` ... | `<ab||ci>`, one file per occupied spinor |
 | `moinpppp` | `<ab||cd>` on pairs (written only with `ABCDTYPE=STANDARD`) |
+| `xzvvvv` | optional, not a file of CFOUR: `<ab||cd>` for a<b, c<d in the blocks of the pairs of one label sum - what `bench/dea/native_rundir.py` writes from a block file of `zccsdt.hblocks`; if it is there, `moinpppp` is not read (format: 20.1) |
 | `dgcosym` | optional: the block of the SCF of every spinor (`xsox2chf`; one record of `nmototal` 8-byte integers, the order of `scf2ceig`; all 1 without a section `%dglin` in the ZMAT). The symmetry labels of the run if it has more than one block and there is no `xzlabels` (section 6) |
 | `xzlabels` | optional, not a file of CFOUR: a symmetry label per spinor; goes before `dgcosym` (section 6) |
 | `XZAMPS` | the amplitudes of an earlier run, for `(q)` / `[q]`, `lambda`, `(q)_l` / `[q]_l` and for the ranks other than 0 |
@@ -4507,6 +4508,7 @@ package):
 | `eomtest seed` | the sigma vector against the derivative of the amplitude step (16.5); one rank |
 | `deasig file`, `deaonly pieces`, `deabatch n` | EOM-DEA: the sigma vector of the vector of a file (the first target) to `file.out`; only the pieces named (pp hh ring x22 x13 row3 row2, as `dea_sector.Engine.sigma(only=...)`); batches of n elements (20.5); over ranks too |
 | `deaxv m` / `deaxv f` | EOM-DEA: R13 (Xv) in the work array / in the file `XZDXV`, whatever fits (20.4) |
+| `deaplan n1 n2 ...` | EOM-DEA: the memory of every rank for n1, n2, ... ranks from dry runs, then the program stops (one rank; 20.4) |
 | `eomsig file`, `eomsd` | the sigma vector of the vector of a file; its singles-doubles block (16.5); over ranks too (16.7) |
 | `mpitest n` | the chunked transfers on arrays of n words (15.2) |
 | `qsample x`, `qstop n` | (Q): a sample of the quadruples; stop after n tasks (restart test, section 5) |
@@ -5303,6 +5305,47 @@ the Hamiltonian file (1e-10 for O2) is left out, as by every CFOUR chain.
 `--phases seed` multiplies every spinor by a random phase: complex integrals
 with the same labels (a test of the complex arithmetic).
 
+**From a block file, without an n^4 array** (the X2Ccorr Hamiltonian in
+label blocks of docs/eom.md 11.10, `o2_hf2plus_*_x2ccorr.h5`; 2026-10-20).
+`native_rundir.py <file.h5> <dir> ...` (the same options) writes the blocks
+with an occupied index from the label blocks of the file
+(`common.load_blocks(names=...)` without `vvvv`: `<ov||vv>` is the largest,
+o v^3) and `<ab||cd>` not as `moinpppp` - a record of (v(v+1)/2)^2 complex
+numbers, 60 GB for 350 virtual spinors, which the reader holds whole while it
+sorts it (section 4) - but as the file **`xzvvvv`**: one dense block per sum
+of the labels of a pair (2 Omega_a + 2 Omega_b), made group by group from the
+blocks (g_a g_c | g_b g_d) of the file (`write_vvvv_blocks`: (ac|bd) on the
+ordered pairs of the group, then (ac|bd) - (ad|bc) on the pairs a<b; the
+largest group of cc-pV5Z-X2C-TP, label sum 0, has 8173 pairs: 2.1 GB of
+ordered pairs while it is made).  The format (stream, 8 bytes per number):
+
+    'XZVVVV01', nv, nwf (1 real, 2 complex), ngrp
+    cnt(ngrp)                 the pairs of each group (their sum: nv (nv - 1) / 2)
+    pair(nvp)                 the pairs, group after group: a + b (b - 1) / 2 for a < b,
+                              CFOUR's numbers of the virtual spinors from 0
+    the blocks, group after group: [i][j] = <pair_i || pair_j>, row-major
+
+The program reads it when it is there (`xzvvhdr`, `xzrdvvb` of `xzread.F90`;
+the output says `<vv||vv>: the file xzvvvv`): block by block of the file into
+the diagonal blocks of its own groups of pairs, every element to its place
+with the signs of its two pairs (the program may order the spinors
+differently: `vperm`); the transient is one block of the file, not the record
+of `moinpppp`.  The groups of the file need not be those of the program
+(`labels 0`: one group of all pairs, the blocks of the file are parts of it);
+an element of the file between two groups of the program is checked against
+`labtol` as the elements of `moinpppp` are, a complex file against `imagtol`.
+`--moinpppp` writes a block file the old way (the full container and
+`moinpppp`: the check of the two routes on the same integrals, 20.5).  For
+cc-pV5Z-X2C-TP (360 spinors, 10 + 350) the run directory takes 67 s and 11 GB
+(`xzvvvv` 2.8 GB, 23 groups; the ten files `PPPH` 3.4 GB).
+`bench/dea/native_blocks.sbatch SNAP H5 RUNDIR TAG [MAXCYC] [MEMWORDS]`
+makes the run directory and runs it with one rank of 48 threads per node
+(`MEMORY_SIZE` at most the least `MemAvailable` of the nodes less 6 GB:
+GETMEM of a rank of 155 GB failed on a node that had 141 GB, job 32272419);
+`bench/dea/jobarc_flags.py <dir> 97=3` sets `ESTATE_MAXCYC` (or the memory,
+36) in JOBARC without xjoda - a timing run of three iterations per target,
+whose CCSDT amplitudes the next run takes.
+
 ### 20.2 The sigma vector
 
 The vector, one region `[r2 | r3 | r4]` of the shift s (the class of a pair
@@ -5400,6 +5443,53 @@ pairs only (20.6).
 The resident set follows the words of the work array that are used (MKL
 and the OpenMP runtime add 0.2 - 0.4 GB).
 
+**The plan of a rank for n ranks: option `deaplan n1 n2 ...`** (one rank, in
+the run directory of the case; the program reads the integrals, runs the
+memory plan of section 4, then the dry runs of EOM-DEA for every rank of
+every n - with R13 of the pairs of that rank and its rows of r4 - prints a
+line per rank and stops; nothing is computed, 24 s for cc-pV5Z-X2C-TP).
+The columns: the arrays of the ground state that stay (with R13 of the
+rank), the transient of making them, the two whole vectors with the 2p
+operator, a sigma vector with batches of 1 GB and of one element, the part
+of a vector that the rank holds, and the totals with the subspace (the
+default 23 vectors) in the work array or in files, also with R13 in
+`XZDXV`.  **cc-pV5Z-X2C-TP** (10 + 350, 12 classes, real; a vector 2.55e9
+elements, 20.4 GB; R13 84.5 GB in all; `pv5z_run`, 2026-10-20), GB of the
+rank that takes the most:
+
+| ranks | R13 of a rank | stays, with it | part of a vector | subspace in files (the floor) | vectors of the subspace that fit in 120 / 170 GB |
+|---|---|---|---|---|---|
+| 1 | 84.5 | 112.1 | 20.4 | 176.3 (R13 in the file: 93.8) | 0 / 1 (R13 in the file) |
+| 2 | 43.2 | 70.8 | 10.6 | 135.0 | 0 / 1 |
+| 4 | 22.0 | 49.6 | 5.6 | 113.8 | 0 / 5 |
+| 6 | 15.5 | 43.1 | 3.7 | 107.3 | 1 / 8 |
+| 8 | 11.6 | 39.3 | 2.8 | 103.5 | 2 / 11 |
+| 12 | 7.8 | 35.4 | 1.9 | 99.6 | 5 / 18 |
+| 16 | 5.8 | 33.4 | 1.4 | 97.6 | 8 / 23 |
+
+What every rank holds whatever their number: the integrals and the
+amplitudes 6.4 GB, the arrays of the ground state without R13 27.6 GB (the
+table of the quadruples of the classes 4.9, W_pp as [(bc) e][f] 5.7, the pp
+operator of the 4p2h row 2.8, T3 on (e | cd) and by an index and a pair
+4.7, the operands of EOM-EE 8.6), their transient 11.9 GB (the products of
+Xv of one pair, 11.3), **the two whole vectors 41.3 GB** and a sigma vector
+16.3 GB (U 5.7, XvR 1.9, the buffers of a batch of the passes; one element
+per batch saves nothing: the expansion of one row is 2.8 GB) - 91.6 GB
+before R13 and the subspace.  The solver keeps a smaller subspace in the
+work array only if at least 3 roots + 4 = 7 vectors fit (16.4), else it
+goes to files (2 x 2.8 GB per vector on the disk of every node at 8 ranks,
+read about seven times per new vector).  So a rank of cc-pV5Z-X2C-TP fits a
+whole node (48 cores, `--mem=180G`, `MemAvailable` 167 - 172 GB at the
+start) from 6 ranks on, and 120 GB only from 16 ranks on.
+Measured, 8 ranks x 48 threads, `MEMORY_SIZE` 170 GB (job 32272311): 11
+vectors in the work array (the plan above), the largest rank used 168 641
+of 169 999 MB, the others 150 901 - 168 204 MB; resident 133 - 150 GB after
+three iterations per target (the subspace not yet filled).  The production
+run (12 ranks, `MEMORY_SIZE` 154.9 GB - the least `MemAvailable` of its
+nodes less 6 GB -, job 32272434): 14 and 15 vectors in the work array; rank
+0 used 153 297 MB (resident 151 150 MB), the largest other rank 153 691 of
+154 871 MB (resident 151 518 MB), the smallest 135 353 MB.
+
 ### 20.5 Validation
 
 **The sigma vector element by element against `dea_sector.Engine.sigma`**
@@ -5435,6 +5525,27 @@ norm 1e-9 unless said otherwise; E in Eh):
 | 168 spinors (10 + 158, 1s frozen), CC_CONV=10, `%eomthrs 1e-10` | -150.22882293513, -150.22880648606, 1.6449066e-05 | -150.22882293512, -150.22880648609, 1.6449031676e-05 (11.6) | 8e-12, 2.6e-11, 3.4e-11 (the JSON: residual norm 1e-9) |
 | DYVQZ-SOG (10 + 206), CC_CONV=10, `%eomthrs 1e-10`: E(CCSDT), E(2 Omega = 0), E(2), split | -148.895224614241, -150.25266284304, -150.25264609144, 1.6751600e-05 (3.6766 cm-1) | the production run of the sector (job 32236524): -148.89522461421, -150.25266284301, -150.25264609143, 1.6751580e-05 (3.6765 cm-1) | 3e-11, 2.7e-11, 7e-12, 2.0e-11 |
 | DYVDZ over 1, 2, 4 ranks (20.6) | identical to 14 decimals, the same 33 + 32 sigma vectors | | |
+
+**From the block file** (20.1; 2026-10-20; the files of docs/eom.md 11.10
+with the default options, `x2cblk/{dzdef,tzd,pvqzd}`): the same block file
+written both ways - `xzvvvv`, and `--moinpppp` - gives the same roots to all
+digits printed; against the runs of the dense `.npz` files above the
+differences are those of the two Hamiltonian files (11.10: integrals to
+1.5e-11).
+
+| case | xzvvvv: E(2 Omega = 0), E(2) | moinpppp, the same file | reference |
+|---|---|---|---|
+| DYVDZ, CC_CONV=12, ESTATE_CONV=11 | -150.08744260781970, -150.08742672225239 | the same digits; also with `real 0`, with `xzvvvv` written complex, and over 2 and 3 ranks | the .npz (above): -150.08744260782260, -150.08742672225537 |
+| the same, `labels 0` (one problem of all pairs; its lowest root found is the pair of 2 Omega = +-2) | -150.08742672225264 | -150.08742672225264 | |
+| TZ (10 + 106), CC_CONV=10, ESTATE_CONV=10 | -150.21709561323652, -150.21707919864454 | the same digits | the .npz: -150.21709561322, -150.21707919864 |
+| the same over 3 ranks, `maxcor 500000000` (subspace 9 vectors) | -150.21709561322419, -150.21707919865020 | | |
+| cc-pVQZ-X2C-TP (10 + 206), MEMORY_SIZE 100 GB (13 vectors), serial | -150.26441254321131, -150.26439571881491 | the same digits | the Python sector on the dense file (11.6): -150.26441254319857, -150.26439571882986, split 1.682436871419668e-05 Eh |
+| the same, 170 GB (23 vectors), 1 rank x 48 threads, MPI binary | -150.26441254319741, -150.26439571882486 (split 1.68243726e-05) | | 1.2e-12, 5.0e-12 (split 3.8e-12) |
+| the same, 2 ranks x 48 threads on two nodes | -150.26441254319735, -150.26439571882480 | | |
+
+(The serial run with the smaller subspace converges to the same threshold,
+1e-10 on the largest element of the residual, by another path: 1.3e-11 and
+1.5e-11 from the reference.)
 
 ### 20.6 Over MPI ranks
 
@@ -5514,6 +5625,24 @@ spectator for its own output rows, took 0.25 s on four ranks; job
 32265195.)  The ranks hold their parts: rank 0 of two takes 7.8 GB where one
 rank takes 13.9 GB (R13 and the subspace divided).
 
+**Every rank has the words of rank 0, and rank 0 plans for the rank that
+holds the most** (2026-10-20).  The ranges of pairs are cut by the elements
+of r4 summed over the targets, so the parts of R13 and the rows of one
+target differ from rank to rank; until then rank 0 chose the batches and the
+subspace for its own part.  At cc-pV5Z-X2C-TP over 8 ranks rank 3 holds
+11.6 GB of R13 and 2.80 GB of a vector where rank 0 holds 10.7 GB and 2.63
+GB, and with 12 vectors of the subspace (rank 0's choice) rank 3 stopped at
+its first sigma vector, 0.36 GB short (job 32272248).  Now every rank runs
+the dry runs of all ranks alike (the pairs of a rank are known to all,
+`xzdranges`; `asrank` in `xzdeam.inc` puts a rank in the place of rank r
+for a dry run): R13 goes to `XZDXV` on all ranks if one rank does not hold
+it; the batches are bisected on the largest sigma vector of any rank plus
+what that rank holds of R13 more than rank 0; and the words of the subspace
+are those of the rank that holds the fewest vectors of its part (`ranksub`).
+TZ over 3 ranks with `maxcor 500000000`: 9 vectors, the largest rank uses
+3941 of 4000 MB (resident 4190 MB); the ranks other than 0 now print their
+work array used and peak resident set at the end.
+
 ### 20.7 Timings
 
 One job per comparison, the Python sector first (`bench/dea/native_bench.sbatch`:
@@ -5560,6 +5689,54 @@ on the largest element (1e-10) instead of the norm (1e-9).  At DYVQZ the
 expansions and reductions of the passes (memory-bound) are a third of a
 sigma vector.
 
+**From the block files, whole nodes** (2026-10-20; nodes of 2 x Xeon Gold
+6248R, 48 cores, `--exclusive --mem=180G`, one run directory on /scratch16;
+`%eomthrs` 1e-10, CC_CONV=10).  cc-pVQZ-X2C-TP (10 + 206), job 32272007
+(c507, c512; the CCSDT amplitudes of the first run taken by the others):
+
+| ranks x threads | a sigma vector with the solver (s) | of it: intermediates, pp, ring, rows; the transfers (s) | EOM-DEA, both targets (s) | work array used / resident, rank 0 (MB) |
+|---|---|---|---|---|
+| 1 x 48, one node | 25.0, 26.3 | 0.82, 8.21, 7.97, 4.36; - | 1686 (35 + 30 sigma vectors) | 155 747 / 153 745 (23 vectors) |
+| 2 x 48, two nodes | 15.9, 14.7 | 0.81, 3.85, 4.11, 2.01; 3.02 | 1014 | 84 832 / 83 720 |
+| 4 x 24, two nodes | 10.5, 10.6 | 1.13, 2.61, 2.75, 1.18; 1.80 | 695 | 53 274 / 53 056 |
+
+(CCSDT: 28 cycles, 2.27 s per cycle on one node.)  The same roots in the
+three runs (20.5).  Two ranks of 24 threads on a node are 1.5 times one of
+48 (the threads of the second socket add little to one rank) - but at
+cc-pV5Z-X2C-TP a rank needs 92 GB before its part (20.4), so two of them
+do not fit a node.
+
+**cc-pV5Z-X2C-TP** (10 + 350; the run directory from the block file in 67
+s, 20.1), 8 ranks x 48 threads on 8 nodes: CCSDT 28 cycles, 11.6 s per
+cycle, 326 s (job 32272248), E(CCSDT) = -148.916391284243 (E(SCF)
+-148.325694978171); the intermediates of EOM-DEA 31 - 42 s; a sigma vector
+66 s (target 0) and 87 s (target 2) with the solver, of it intermediates
+10.6 / 18.9, pp 16.3 / 16.7, ring 12.0 / 11.7, rows 4.7 / 5.3, and the
+transfers - the vector to the ranks and sigma4 by slices, 20 GB each - 23.7
+/ 43.0 s (job 32272311, three iterations per target).  From the QZ rates at
+one rank the pieces grow with the work of the case (`sizes`: the products
+of the pp ladder 18 times those of QZ, the ring 11 times, the expanded rows
+7.3 times): pp 8.2 x 18 / (8 ranks, about 9 x the cores used well) = 16 s
+as measured; the transfers were not in that estimate and are now a third
+of a sigma vector.
+
+The production run of cc-pV5Z-X2C-TP, 12 ranks x 48 threads on 12 nodes
+(job 32272434, the amplitudes of the timing run): the intermediates 38 s;
+target 0: 51 sigma vectors (48 cycles, 14 vectors of the subspace), 2296 s,
+45.0 s per sigma vector with the solver (intermediates 6.8, pp 10.5, ring
+7.4, rows 2.7, 3p1h 0.8; the transfers 15.6); target 2: 38 sigma vectors (35
+cycles, 15 vectors), 1947 s, 51.2 s (pp 12.3, ring 7.5, rows 3.4; the
+transfers 18.8); EOM-DEA 4281 s, the run 4305 s (12 x 1.2 node-hours).
+
+| | E(2 Omega = 0) / Eh | E(2 Omega = 2) / Eh | split / Eh | cm-1 |
+|---|---|---|---|---|
+| cc-pVQZ-X2C-TP (10 + 206), 1 x 48 | -150.26441254319741 | -150.26439571882486 | 1.6824373e-05 | 3.6925 |
+| cc-pV5Z-X2C-TP (10 + 350), 12 x 48 | -150.27870443446366 | -150.27868757728118 | 1.6857182e-05 | 3.6997 |
+
+(DEA-EOM-CCSDT, 4p2h, T of CCSDT, X2Ccorr; residuals 5.7e-11, 5.3e-11;
+E(CCSDT) of 5Z -148.916391284243; the weights of 2p, 3p1h, 4p2h 0.8405,
+0.1462, 0.0133.)
+
 ### 20.8 Not done
 
 - R to 5p3h; the T of CCSDTQ / CC4 in the sector; DIP; left-hand vectors;
@@ -5577,3 +5754,16 @@ sigma vector.
   168 spinors under 16 GB, 50 s per sigma vector with the solver instead of
   8 s.  A subspace smaller than 3 roots + 4 vectors in the work array is not
   tried.
+- **Every rank holds two whole vectors** (41 GB at cc-pV5Z-X2C-TP) and the
+  whole small intermediates of a sigma vector (U, XvR: 7.5 GB), with the
+  arrays of the ground state 92 GB per rank before its part (20.4): two
+  ranks do not fit a node, although two ranks of 24 threads are 1.5 times
+  one of 48 (QZ, 20.7), and a node of 120 GB holds a rank with its subspace
+  only from 16 ranks on.  The hh ladder needs the rows of all ranks of a
+  block and the ring reads and writes the rows (m, j) of all m; holding only
+  the own rows needs those rows sent per block (hh) and per spectator
+  (ring) instead of the whole vector and the sum by slices.  The table of
+  the quadruples of the classes (4.9 GB) is on every rank as well.
+- At cc-pV5Z-X2C-TP over 8 ranks the transfers (the vector to the ranks,
+  sigma4 by slices: 20 GB each) take 24 - 43 s of a sigma vector of 66 -
+  87 s.

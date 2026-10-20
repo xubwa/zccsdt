@@ -490,6 +490,162 @@ subroutine xzrdvvvv(v, vpa, vpb, row, src, sg, offmax)
 end subroutine xzrdvvvv
 
 ! ---------------------------------------------------------------------------
+! The file xzvvvv (not a file of CFOUR): <ab||cd> for a<b, c<d in the blocks
+! of the pairs of one label sum, the elements between pairs of different
+! label sums not stored - what `bench/dea/native_rundir.py` writes from a
+! block file of zccsdt.hblocks (docs/eom.md 11.10) in the place of moinpppp,
+! whose record of (nv (nv + 1) / 2)^2 complex numbers is 60 GB for 350
+! virtual spinors.  If the file is there, moinpppp is not read.  A stream
+! file, 8 bytes per number, little-endian:
+!   'XZVVVV01', nv, nwf (words per element: 1 real, 2 complex), ngrp
+!   cnt(ngrp)       the pairs of each group (their sum: nv (nv - 1) / 2)
+!   pair(nvp)       the pairs of the groups, group after group: a + b (b - 1) / 2
+!                   for a < b, CFOUR's numbers of the virtual spinors from 0
+!   the blocks, group after group: [i][j] = <pair_i || pair_j>, row-major
+! The groups need not be those of the program (labels 0: one group of all
+! pairs; the groups of the file then are parts of it).
+!   there: the file is there; nwf; bmax: the elements of its largest block
+subroutine xzvvhdr(there, nwf, bmax)
+  use xzdata
+  implicit none
+  logical, intent(out) :: there
+  integer(8), intent(out) :: nwf, bmax
+  character(len=8) :: tag
+  integer(8) :: hdr(3), nbytes, nexp
+  integer(8), allocatable :: cnt(:)
+  integer :: ios
+  nwf = 0
+  bmax = 0
+  inquire(file='xzvvvv', exist=there, size=nbytes)
+  if (.not. there) return
+  open(unit=72, file='xzvvvv', access='stream', form='unformatted', status='old', action='read', iostat=ios)
+  if (ios == 0) read(72, iostat=ios) tag, hdr
+  if (ios /= 0 .or. tag /= 'XZVVVV01') then
+    write(6, '(/,a)') ' @XZCCSDT-F, the file xzvvvv is not a file of <vv||vv> in blocks (XZVVVV01).'
+    call xzerrex
+  end if
+  if (hdr(1) /= nv .or. hdr(2) < 1 .or. hdr(2) > 2 .or. hdr(3) < 1) then
+    write(6, '(/,a,3i10,a,i8)') ' @XZCCSDT-F, the file xzvvvv: virtual spinors, words, groups ', hdr, &
+      '; this run has virtual spinors ', nv
+    call xzerrex
+  end if
+  nwf = hdr(2)
+  allocate(cnt(hdr(3)))
+  read(72, iostat=ios) cnt
+  close(72)
+  nexp = 32 + 8 * hdr(3) + 8 * nvp + 8 * nwf * sum(cnt ** 2)
+  if (ios /= 0 .or. sum(cnt) /= nvp .or. minval(cnt) < 0 .or. nbytes /= nexp) then
+    write(6, '(/,a,i14,a,i14,a)') ' @XZCCSDT-F, the file xzvvvv has ', nbytes, ' bytes; its header announces ', &
+      nexp, ' (or its pairs are not those of this run).'
+    call xzerrex
+  end if
+  bmax = maxval(cnt) ** 2
+  deallocate(cnt)
+end subroutine xzvvhdr
+
+! ---------------------------------------------------------------------------
+! <ab||cd> for a<b, c<d from the file xzvvvv (xzvvhdr) into the diagonal
+! blocks of the groups of pairs of the program, [Q][Q'] at vvoff(g), nwe
+! words per element (the real parts only if nwe = 1).  Block by block of the
+! file: one block in buf, each element to its place with the signs of the
+! two pairs (the program may number the spinors in another order, operm /
+! vperm).  offmax: the largest element of the file between two groups of the
+! program (zero by symmetry if the labels are right); ximag: the largest
+! imaginary part (a complex file, nwe = 1).
+! qof: 2 nvp integers, sg: nvp reals, buf: nwf bmax words.
+subroutine xzrdvvb(v, nwf, vpa, vpb, vpgrp, qof, sg, buf, offmax, ximag)
+  use xzdata
+  implicit none
+  integer(8), intent(in) :: nwf
+  real(8) :: v(0:*)
+  integer(8), intent(in) :: vpa(0:nvp-1), vpb(0:nvp-1), vpgrp(0:nvp-1)
+  integer(8) :: qof(0:nvp-1, 0:1)
+  real(8) :: sg(0:nvp-1), buf(0:*)
+  real(8), intent(out) :: offmax, ximag
+  character(len=8) :: tag
+  integer(8) :: hdr(3), q, a, b, k, f, n, k0, i, j, qi, qj, gi, lo, nq, kb, idx
+  integer(8) :: pos
+  integer(8), allocatable :: cnt(:)
+  real(8) :: s, x
+  integer :: ios
+
+  offmax = 0d0
+  ximag = 0d0
+  !$omp parallel do
+  do k = 0, nwe * nvv - 1
+    v(k) = 0d0
+  end do
+  ! the pair of the program with CFOUR's number s, and its sign there
+  do q = 0, nvp - 1
+    a = vperm(vpa(q))
+    b = vperm(vpb(q))
+    sg(q) = merge(1d0, -1d0, a < b)
+    qof(min(a, b) + max(a, b) * (max(a, b) - 1) / 2, 0) = q
+  end do
+  open(unit=72, file='xzvvvv', access='stream', form='unformatted', status='old', action='read', iostat=ios)
+  if (ios == 0) read(72, iostat=ios) tag, hdr
+  if (ios == 0) then
+    allocate(cnt(hdr(3)))
+    read(72, iostat=ios) cnt
+  end if
+  if (ios == 0) read(72, iostat=ios) qof(:, 1)
+  if (ios /= 0) then
+    write(6, '(/,a,i8)') ' @XZCCSDT-F, reading the file xzvvvv failed, iostat ', ios
+    call xzerrex
+  end if
+  do k = 0, nvp - 1
+    if (qof(k, 1) < 0 .or. qof(k, 1) >= nvp) then
+      write(6, '(/,a,i14)') ' @XZCCSDT-F, the file xzvvvv: a pair number out of range, ', qof(k, 1)
+      call xzerrex
+    end if
+    qof(k, 1) = qof(qof(k, 1), 0)
+  end do
+  pos = 33 + 8 * hdr(3) + 8 * nvp
+  k0 = 0
+  do f = 1, hdr(3)
+    n = cnt(f)
+    if (n > 0) then
+      read(72, pos=pos, iostat=ios) buf(0:nwf*n*n-1)
+      if (ios /= 0) then
+        write(6, '(/,a,i6,a,i8)') ' @XZCCSDT-F, reading block ', f, ' of the file xzvvvv failed, iostat ', ios
+        call xzerrex
+      end if
+    end if
+    pos = pos + 8 * nwf * n * n
+    !$omp parallel do private(i, j, qi, qj, gi, lo, nq, kb, idx, s, x) reduction(max:offmax, ximag) schedule(dynamic, 16)
+    do i = 0, n - 1
+      qi = qof(k0 + i, 1)
+      gi = vpgrp(qi)
+      lo = vpoff(gi)
+      nq = vpoff(gi + 1) - lo
+      do j = 0, n - 1
+        qj = qof(k0 + j, 1)
+        kb = nwf * (i * n + j)
+        if (vpgrp(qj) /= gi) then
+          x = abs(buf(kb))
+          if (nwf == 2) x = hypot(buf(kb), buf(kb + 1))
+          offmax = max(offmax, x)
+          cycle
+        end if
+        s = sg(qi) * sg(qj)
+        idx = nwe * (vvoff(gi) + (qi - lo) * nq + (qj - lo))
+        v(idx) = s * buf(kb)
+        if (nwf == 2) then
+          if (nwe == 2) then
+            v(idx + 1) = s * buf(kb + 1)
+          else
+            ximag = max(ximag, abs(buf(kb + 1)))
+          end if
+        end if
+      end do
+    end do
+    k0 = k0 + n
+  end do
+  close(72)
+  deallocate(cnt)
+end subroutine xzrdvvb
+
+! ---------------------------------------------------------------------------
 ! The largest element of the small blocks and of <ov||vv> that the labels
 ! forbid: an element <pq||rs> with class(p) + class(q) /= class(r) + class(s).
 subroutine xzchklab(oooo, ooov, oovv, ovvo, ovvq, vpgrp, vmax, what)
