@@ -5413,7 +5413,8 @@ writes sigma of it to `file.out`; the masks of the parity applied to both):
 | the same with phases on the spinors (complex integrals, largest imaginary part 0.21) | 2.3e-15, 4.8e-15, 7.2e-15 |
 | O2 DYVDZ (10 + 42), 6 classes; targets 0 and 2 | 6.0e-14 (7.5), 1.2e-13 (29), 2.1e-13 (54) |
 | the same, R13 in the file `XZDXV` | identical |
-| the same over 3 and 4 ranks (20.6; 3 ranks with `XZDXV.<rank>`); 26 spinors with phases over 3 ranks | 1.8e-13 (52); 8.5e-15 (14) |
+| the same over 3 and 4 ranks (20.6; 3 ranks with `XZDXV.<rank>`); 26 spinors with phases over 3 ranks | 1.8e-13 (52); 1.1e-14 (14) |
+| 168 spinors (10 + 158, 8 classes; 1.5e8 elements of r4), targets 0 and 2 (job 32265685) | 3.2e-11 (570), 1.2e-10 (1350), 1.7e-10 (2200): 8e-14 of the largest elements |
 
 **One class** (`labels 0`, 26 spinors: all pairs one problem): the three
 lowest roots are the root of 2 Omega = 0 and the two of +-2 of the blocks,
@@ -5473,12 +5474,17 @@ every run; `bench/dea/native_mpi.sbatch`):
 | 2 x 16, one node | 1.09, 1.06 | 0.11, 0.25, 0.30, 0.18; 0.10 | 75.5 | 7 767 / 8 384 |
 | 2 x 32, two nodes | 0.88, 0.86 | 0.11, 0.18, 0.22, 0.21; 0.05 | 62.1 | 7 767 / 8 228 |
 | 4 x 16, two nodes | 0.66, 0.66 | 0.11, 0.13, 0.15, 0.09; 0.10 | 46.3 | 5 074 / 5 724 |
-SEC168MPI
+| **168 spinors** (10 + 158), job 32265684 | | | | |
+| 1 rank x 32 threads, one node | 7.99, 7.68 | 0.35, 2.99, 1.82, 1.73; - | 557 | 68 807 / 67 974 |
+| 2 x 16, one node | 6.67, 6.47 | 0.45, 2.16, 1.72, 0.96; 0.53 | 468 | 38 696 / 38 742 |
+| 2 x 32, two nodes | 4.84, 4.60 | 0.41, 1.43, 1.22, 0.86; 0.39 | 339 | 38 696 / 38 603 |
+| 4 x 16, two nodes | 3.81, 3.72 | 0.50, 1.01, 0.86, 0.46; 0.64 | 269 | 23 536 / 23 866 |
 
 The pp ladder, the ring, the rows of sigma4 and the hh ladder are divided;
 the small intermediates (0.1 s for 116 spinors) are made by every rank, and
 the transfers (the vector to all ranks and sigma4 by slices: 0.2 GB each
-for 116 spinors) take 0.05 - 0.1 s.  (The ring of an earlier version, in
+for 116 spinors, 1.2 GB for 168) take 0.05 - 0.1 s and 0.4 - 0.6 s: two
+nodes are 2.2 times one rank for 116 spinors and 2.1 times for 168.  (The ring of an earlier version, in
 which every rank expanded all rows of every spectator for its own output
 rows, took 0.25 s on four ranks; job 32265195.)  The ranks hold their parts:
 rank 0 of two takes 7.8 GB where one rank takes 13.9 GB (R13 and the
