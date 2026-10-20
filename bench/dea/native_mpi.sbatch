@@ -1,0 +1,69 @@
+#!/bin/bash
+#SBATCH -p parallel -A lcheng24 -N 2 --ntasks-per-node=1 -c 32 --mem=120G -t 6:00:00
+#SBATCH -J zc_dea_mpi
+#
+# EOM-DEA-CCSDT of the native program over MPI ranks (cfour/xzccsdt,
+# docs/native.md, section 20.6): one run directory on the shared file
+# system (bench/dea/native_rundir.py), the CCSDT amplitudes in the first run,
+# the roots of %xzdea with 1 rank x 32 threads and 2 ranks x 16 threads
+# on the first node, 2 ranks x 32 threads and 4 ranks x 16 threads on both.
+#
+#   sbatch native_mpi.sbatch SNAP NPZ FREEZE RUNDIR [ESTATE_THR] [MEM_GB] [RUNS] [SNAPB]
+#
+#   SNAPB   a second snapshot: every run is repeated with its binary (tag .b),
+#           the two binaries on the same nodes
+#   RUNS    the runs, default "r1x32 r2x16 n2r2x32 n2r4x16" (ranks x threads; n2: two nodes)
+#   SNAP    a snapshot with the MPI binary SNAP/xzccsdt_mpi and the Python package (native_rundir.py)
+#   RUNDIR  on a file system that both nodes see (made here if it has no ZMAT)
+# (setvars.sh of oneAPI first: it reads unset variables and sets some of its own)
+zargs=("$@")
+source /data/lcheng24/intel/oneapi/setvars.sh --force > /dev/null 2>&1
+set -- "${zargs[@]}"
+snap=$1
+npz=$2
+freeze=$3
+rdir=$4
+thr=${5:-1e-10}
+memgb=${6:-100}
+runs=${7:-r1x32 r2x16 n2r2x32 n2r4x16}
+snapb=${8:-}
+export PYTHONPATH=$snap/src:$HOME/apps/socutils-git-env:${PYTHONPATH:-}
+export PATH=$PATH:/cm/shared/apps/slurm/current/bin
+export I_MPI_PIN_DOMAIN=omp
+nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
+echo "nodes ${nodes[*]}, job $SLURM_JOB_ID, $(date)"
+if [ ! -f "$rdir/ZMAT" ]; then
+  mkdir -p "$rdir"
+  python -u "$snap/bench/dea/native_rundir.py" "$npz" "$rdir" --freeze "$freeze" --mem-gb "$memgb" --cc-conv 10 \
+    --estate-conv 9 > "$rdir/rundir.log" 2>&1
+  printf '\n%%eomthrs\n%s\n\n' "$thr" >> "$rdir/ZMAT"
+fi
+cd "$rdir"
+run() {   # tag ranks ranks-per-node threads hosts [binary]
+  export OMP_NUM_THREADS=$4
+  echo "=== $1: $2 ranks, $3 per node, $4 threads, hosts $5, ${6:-$snap/xzccsdt_mpi}"
+  /usr/bin/time -v mpirun -np "$2" -ppn "$3" -hosts "$5" "${6:-$snap/xzccsdt_mpi}" > "xzccsdt.$1.out" 2> "xzccsdt.$1.time"
+  echo "exit $?"
+  grep "sigma vectors:\|per sigma\|the vector to the ranks\|work array used\|peak resident\|EOM-DEA \|over " "xzccsdt.$1.out"
+  sed -n '/the states (two/,/XZDEA has/p' "xzccsdt.$1.out" | grep "^ *[-0-9]"
+  grep "Elapsed\|Maximum resident" "xzccsdt.$1.time"
+  cp XZDEA "XZDEA.$1" 2> /dev/null
+}
+# (the first run makes the CCSDT amplitudes, XZAMPS, over its ranks; the others take them)
+for r in $runs; do
+  case $r in
+    r1x32) run r1x32 1 1 32 "${nodes[0]}" ;;
+    r2x16) run r2x16 2 2 16 "${nodes[0]}" ;;
+    n2r2x32) run n2r2x32 2 1 32 "${nodes[0]},${nodes[1]}" ;;
+    n2r4x16) run n2r4x16 4 2 16 "${nodes[0]},${nodes[1]}" ;;
+  esac
+  if [ -n "$snapb" ]; then
+    case $r in
+      r1x32) run r1x32.b 1 1 32 "${nodes[0]}" "$snapb/xzccsdt_mpi" ;;
+      r2x16) run r2x16.b 2 2 16 "${nodes[0]}" "$snapb/xzccsdt_mpi" ;;
+      n2r2x32) run n2r2x32.b 2 1 32 "${nodes[0]},${nodes[1]}" "$snapb/xzccsdt_mpi" ;;
+      n2r4x16) run n2r4x16.b 4 2 16 "${nodes[0]},${nodes[1]}" "$snapb/xzccsdt_mpi" ;;
+    esac
+  fi
+done
+echo "done $(date)"

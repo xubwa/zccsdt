@@ -96,6 +96,7 @@ module xzdata
   logical :: q_left = .false.       ! (Q) with lambda on the left: (Q)_Lambda
   logical :: with_den = .false.     ! the density and the orbital gradient of CCSDT are (xzden.inc)
   logical :: with_eom = .false.     ! excited states are: EOM-EE-CCSDT (xzeom.inc)
+  logical :: with_dea = .false.     ! two electrons attached: EOM-DEA-CCSDT (xzdea.inc, %xzdea of the ZMAT)
   ! CC3 (xzcc3.inc; docs/native.md, section 17): the model of the iterations and
   ! of the EOM sigma vector.  0 CCSDT; 1 CC3 with T3 stored (the CCSDT step with
   ! the T3 couplings of the triples equation off: no ring, no pp or hh ladder,

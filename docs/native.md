@@ -36,7 +36,9 @@ without stored triples (the batches of `csrc/cc3_fly.c`, over MPI ranks;
 EOM-CC3 folded, the totally symmetric states) and, as a check, with T3
 stored (its EOM in every label shift) - section 17.  CC4 and EOM-EE-CC4
 without stored quadruples, over MPI ranks, with checkpoints after every
-evaluation of the T4 terms - section 19.
+evaluation of the T4 terms - section 19.  EOM-DEA-CCSDT (two electrons
+attached, 2p + 3p1h + 4p2h on the sector itself, the roots of the targets 2
+Omega of `%xzdea`), over MPI ranks too - section 20.
 
 **The program takes no argument** (since commit a38e493): the job comes from
 the ZMAT as joda stored it, and the steps that were arguments before (`(q)`,
@@ -104,6 +106,7 @@ the ZMAT asks for, from the flags that joda stored in JOBARC (`xzjob` in
 | `CALC=MP2` | the MP2 energy of the integral files (a check; `TOTENERG` not written) |
 | `CALC=CC3` (with or without `EXCITE=EOMEE`) | stops: not in this version (the place of the next method in `xzjob`) |
 | `CALC=CC4` (with or without `EXCITE=EOMEE`) | CC4 without stored quadruples, from the CCSDT amplitudes; EOM-EE-CC4 with the quadruples folded in (section 19) |
+| `CALC=CCSDT` and the section `%xzdea` | CCSDT, then EOM-DEA-CCSDT: the states with two electrons more (section 20: the targets 2 Omega and their roots from `%xzdea`, the thresholds as for EOM-EE) |
 
 What joda (x2cso branch, `cfour-x2cso/bin/xjoda`, with `RELATIVISTIC=X2C1E`)
 stores for these, measured 2026-10-12 on the test case of the package
@@ -318,6 +321,7 @@ file, complex, the first index fastest, antisymmetrized integrals):
 | `xzlabels` | optional, not a file of CFOUR: a symmetry label per spinor; goes before `dgcosym` (section 6) |
 | `XZAMPS` | the amplitudes of an earlier run, for `(q)` / `[q]`, `lambda`, `(q)_l` / `[q]_l` and for the ranks other than 0 |
 | `XZLAMB` | lambda of an earlier run, for `(q)_l` / `[q]_l`, `density` and for the ranks other than 0 |
+| `xzparity` | optional, not a file of CFOUR: a parity (0 g, 1 u) per spinor of the SCF, the format of `xzlabels` without the modulus; EOM-DEA with `parity g` / `u` in `%xzdea` (section 20.1) |
 | `IIII`; `JOBARC`: `scf2ccmo` | only for the density with frozen or dropped spinors: the AO integrals of `xsox2catm` (read by CFOUR's `int_mintv2e`) and the spinors of the SCF |
 
 `moinpphh` is not read (it is the conjugate of `moinhhpp`; the Python reader
@@ -342,6 +346,8 @@ Written:
 | `XZCC4` | CC4: the amplitudes and the held T4 terms of the last completed T4 evaluation, or the converged CC4 amplitudes - what a later run of the same ZMAT continues from or takes (19.5) |
 | `XZE4R.nnn`, `XZE4Q.nnn` | EOM-CC4, per problem (label shift) nnn: the roots that are done and the vectors; the last T4 evaluation of the root in hand (19.5) |
 | `EOMCnnnn`, `EOMHnnnn` | only if the subspace of the EOM solver does not fit in the work array: its vectors and their sigma vectors (CFOUR's names), deleted at the end (section 16.4); over ranks `EOMCnnnn.<rank>`, `EOMHnnnn.<rank>`: the rows of a rank other than 0 (16.7) |
+| `XZDEA`; `JOBARC`: `TOTENER2` | EOM-DEA: a text line per state (2 Omega, root, omega, total energy, residual, weights of 2p, 3p1h, 4p2h, the leading pair); the total energy of the lowest state (section 20.1) |
+| `XZDXV` | EOM-DEA, only if the work array does not hold it: the rows of T3 and the six-index Xv of the ground state (R13) pair by pair; `XZDXV.<rank>` of a rank other than 0; deleted at the end (section 20.4) |
 
 A run that reads `XZAMPS` or `XZLAMB` must run in the mode of the run that wrote it
 (labels used or not, real or complex: both follow from the same integral
@@ -407,6 +413,7 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzeom.inc`, `xzeoms.inc`, `xzeomd.F90` | EOM-EE-CCSDT: the intermediates of the ground state and the sigma vector; the solver, the driver, the test hooks and the vector operations over ranks; the input (flags, ZMAT sections), the label shifts and their layout, the slices and commands of the ranks, the results (section 16) |
 | `xzcc3.inc` | CC3 (section 17): the step without stored triples, the batches of occupied triples and their fold, the diagonal Fock operator of T3, the folded EOM sigma vector and its driver |
 | `xzcc4.inc` | CC4 (section 19): the T4 terms of the doubles and triples equations per occupied quadruple (dense and in sectors, with label shifts), the extrapolation over the macro iterations, the T4 terms of a sigma vector and the folded EOM driver, the files of a later run (`XZCC4`, `XZE4R`, `XZE4Q`, `XZEOMR`) |
+| `xzdead.F90`, `xzdea.inc`, `xzdeas.inc`, `xzdeam.inc` | EOM-DEA-CCSDT (section 20): the input, the blocks of the sector and the tables, the slices of the ranks, the results; the intermediates of the ground state (Xv, the forms of T3); the sigma vector, the preconditioner, the masks of the parity; the driver |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
 Kernels of `csrc/` that are called: `zc_t3_pass1r`, `zc_t3_pass2r` (the
@@ -4498,6 +4505,8 @@ package):
 | `den_active` | the density files of the active spinors alone |
 | `wfail` | an error on a rank other than 0 (the exit through `MPI_Abort`, 15.2) |
 | `eomtest seed` | the sigma vector against the derivative of the amplitude step (16.5); one rank |
+| `deasig file`, `deaonly pieces`, `deabatch n` | EOM-DEA: the sigma vector of the vector of a file (the first target) to `file.out`; only the pieces named (pp hh ring x22 x13 row3 row2, as `dea_sector.Engine.sigma(only=...)`); batches of n elements (20.5); over ranks too |
+| `deaxv m` / `deaxv f` | EOM-DEA: R13 (Xv) in the work array / in the file `XZDXV`, whatever fits (20.4) |
 | `eomsig file`, `eomsd` | the sigma vector of the vector of a file; its singles-doubles block (16.5); over ranks too (16.7) |
 | `mpitest n` | the chunked transfers on arrays of n words (15.2) |
 | `qsample x`, `qstop n` | (Q): a sample of the quadruples; stop after n tasks (restart test, section 5) |
@@ -5212,3 +5221,359 @@ Lines of `%xzccsdt` (section 18; an ordinary run needs none):
   (Q) with the divide and the contractions in batches of columns).
 - Density, Lambda, IP / EA for CC4; the label-shifted Python reference
   (cc4fly has shift 0 only).
+
+## 20. EOM-DEA-CCSDT: two electrons attached
+
+    CALC=CCSDT  and the section %xzdea      CCSDT, then the states with two electrons more
+    mpirun -np 4 -ppn 2 xzccsdt_mpi         the same over ranks (20.6)
+
+The double electron attachment of docs/eom.md, section 11, on the sector
+itself (11.9): R = 2p + 3p1h + 4p2h - `r2[(a<b)]`, `r3[i, (a<b<c)]`,
+`r4[(i<j), (a<b<c<d)]` - on the ground state of CCSDT, the eigenvalues
+E(N+2) - E_CCSDT(N), in the blocks of the symmetry labels: a problem is a
+target 2 Omega, the sum of the labels of the two attached electrons.  The
+application is the zero-field splitting of O2 X 3Sigma_g- from O2(2+)
+(docs/eom.md 11.6).  The Python program (`src/zccsdt/cc/dea_sector.py`,
+`Engine.sigma`) is the reference of the sigma vector and of the roots; its
+factorization, its layouts and its passes are taken over one to one (the
+term list: the module docstring of `dea_sector`, docs/eom.md 11.9).
+Sources: `xzdead.F90` (input, tables, slices, the results),
+`xzdea.inc` (the intermediates of the ground state), `xzdeas.inc` (the
+sigma vector, the preconditioner, the masks of the parity), `xzdeam.inc`
+(the driver); the solver is that of section 16 (`xzeoms.inc`, generalized
+to the vectors of the sector).  No kernel was written: the expansions and
+reductions of `csrc/t4sym.c` (`zc_t4s_x22`, `zc_t4s_x13`, `zc_t4s_x12`,
+`zc_t4s_quads`, added to `KERNELS` of the Makefile), `zc_tn_rows`
+(tnpack.c), `zc_pair_one_body_add`, `zc_vprecond` (t3pack.c), `zc_gemm`.
+
+Not here: R to 5p3h (the folded or complete 5p3h row of docs/eom.md 11.3,
+11.8), the T of CCSDTQ or CC4 (the two T4 terms of 11.9), DIP, left-hand
+vectors, the file of the root vectors.
+
+### 20.1 Input and output
+
+    *CFOUR(CALC=CCSDT, ..., CC_CONV=10, ESTATE_CONV=9, ESTATE_MAXCYC=120, MEMORY_SIZE=100, MEM_UNIT=GB)
+    ...
+    %xzdea
+    0 1
+    2 1
+    parity g
+
+| what | ZMAT | default |
+|---|---|---|
+| the targets | `%xzdea` (ours: CFOUR has no keyword for DEA - `EXCITE` stops at `EOMDIP`): lines `target [roots]`, 2 Omega in the labels of the run, until an empty line or a line that starts with `%` | - (the section is what asks for EOM-DEA) |
+| the parity of the states | `parity g` / `parity u` in `%xzdea`; needs the file `xzparity` | all |
+| the start | `guess n` in `%xzdea`: unit vectors on the n lowest pairs (a<b) of the target (the masks) | max(4, roots + 2) |
+| threshold, iterations, roots, subspace | `ESTATE_CONV` (or `%eomthrs`), `ESTATE_MAXCYC`, `%eomnroot`, `%eomndav0` - as for EOM-EE (16.1) | 10^-5, 40, 1, max(22 + roots, 4 roots + 8) |
+
+`%xzdea` goes with `CALC=CCSDT` without `EXCITE` and `PROPS`; the
+amplitudes are those of the run or of `XZAMPS` (section 1).  The file
+`xzparity` (ours, written by `bench/dea/native_rundir.py`): the format of
+`xzlabels` without the modulus - a line with the number of spinors of the
+SCF, then one parity (0 g, 1 u) per spinor in the order of `scf2ceig`.  The
+mask keeps the elements whose spinors have the total parity of the target
+(the occupied ones counting negatively), as `dea_sector.ProblemSector`.
+
+Output per target: the sizes of the parts, the batches and the place of the
+subspace, CFOUR's line per iteration (`EOM cycle`), the time per sigma
+vector and its pieces, per root omega (Eh, eV, cm-1), the largest element
+and the norm of the residual, the weights of 2p, 3p1h, 4p2h, the total
+energy and the largest elements of r2 (the two spinors in the numbering of
+the SCF, their labels and energies); at the end one table of all states
+with the energies above the lowest.  Files: `XZDEA` (text: a line per
+state - 2 Omega, root, omega, total energy, residual, weights, converged,
+the leading pair and its weight - and two comment lines with E(SCF),
+E(CCSDT)); JOBARC `TOTENER2`: the total energy of the lowest converged
+state; `TOTENERG` stays E(CCSDT).
+
+**Hamiltonians from outside CFOUR's chain.**  The X2Ccorr Hamiltonians of
+O2(2+) (the files `o2_hf2plus_*_x2ccorr.npz` of bench/dea/common.py) are
+not made by CFOUR.  `bench/dea/native_rundir.py <file.npz> <dir> [--freeze n]
+[--targets 0,2] [--roots 1] [--cc-conv 10] [--estate-conv 9] [--mem-gb 100]
+[--xz 'option'] [--phases seed]` makes a run directory: CFOUR's `xjoda` on a
+stand-in molecule (HF / 6-31G with the GENBAS of cfour/merge/test) for JOBARC
+and joda's flags, then the integral files, `scf2ceig`, `nmototal`,
+`xzlabels` (2 Omega) and `xzparity` of the spinors of the Hamiltonian file in
+the order of their labels (`zccsdt.cfour.write`; the frozen spinors folded
+into the one-electron part by `common.load`), E(SCF) as `SCFENEG` and
+`NUMDROPA` 0 in JOBARC; the ZMAT has `%xzdea` with the targets and
+`parity g`.  Nothing of the stand-in molecule is read by `xzccsdt`.  The
+files have the spinor energies only (canonical spinors): f_ov of the SCF of
+the Hamiltonian file (1e-10 for O2) is left out, as by every CFOUR chain.
+`--phases seed` multiplies every spinor by a random phase: complex integrals
+with the same labels (a test of the complex arithmetic).
+
+### 20.2 The sigma vector
+
+The vector, one region `[r2 | r3 | r4]` of the shift s (the class of a pair
+of two attached electrons, (target - 2 l_min) / step): r2 the pairs a<b of
+group s; r3 one block per group K of the virtual triples, its rows the
+occupied i of class K - s; r4 one block per class M of the virtual
+quadruples, its rows the occupied pairs of group M - s in their order, its
+columns the quadruples of class M (lexicographic, `zc_t4s_quads`) - the
+layout of `dea_sector.Sector`, so that a vector of the Python program is
+read element for element (the test hook `deasig`, 20.5).  Since the pairs
+are numbered by groups, the rows of r4 in the order of the blocks are the
+occupied pairs in their order: a range of pairs is a range of r4 (20.6).
+
+**The ground state, once** (`N(xzdim)`, after `N(xzeomim)` of EOM-EE): the
+operators of the T3 equation of the native program are those of the T4
+equation that the sector needs - W_vvvo is Wv (with its T2 and T3 parts),
+W_ovvo is Wr, F_vv, F_oo, W_oooo is Whh on pairs, and the pp operator of
+the T3 equation in the place of `<ab||cd>` is Wpp + F_vv / 2 on pairs (Wq
+of the 3p1h row) -, except Wo: the W_vooo of the native step leaves its f_ov
+term to the T3 equation, so `Wo = - W_vooo - sum_e f[m][e] t2[P][a][e]`.
+Made here: Wv as [i][e][Q], [Wo | t2] by pairs (`la13` of the Python
+program), Wr as [(i a)][(m e)], Wh = Whh - F_oo on pairs, Wq of the 4p2h row
+(Wpp + F_vv / 3) and Wpp as [(bc) e][f] (from the pp operator and F_vv,
+`zc_pair_one_body_add`), `<dm||ef>` in blocks, T3 on (e | cd) and by an
+index and a pair, and R13: per occupied pair (k, l) and class mu the rows
+`t(m kl; K)` of the m of class mu above the six-index `Xv(e; kl; K)` of the
+T4 equation without T4 (`N(xzdxv)`: the term `- P(kl) <mn||el> t(mnk, bcd)`
+directly, the other three as products per (class of e, class of d) on all
+threads, reduced over (d | bc) by `zc_t4s_x12`).  R13 is the largest array
+(1.0 GB for 116 spinors, 5.2 GB for 168, about 12 GB for 216).
+
+**A sigma vector** (`N(xzdsig)`, the order of `Engine.sigma`): the small
+intermediates (r2 on all pairs, r3 on (a | bc) by `zc_t4s_x12`, h, WhR, YR,
+H, WoR, Q3, XoR, ZR, U and XvR without their 4p2h terms); the pp ladder per
+block in batches of rows (`zc_t4s_x22` expand, one GEMM per group of (ef)
+with Wq, `zc_t4s_x22` reduce) with its thin products per row (the 4p2h terms
+of sigma2, of sigma3 and of XoR); the ring per spectator j and class
+difference d (`zc_t4s_x13` expand of the rows (m, j), one GEMM with the block
+of the stacked operator [Wr rows (i a) | f_ov | -1/2 <mj||ek> | 1/2 <mj||ef>]
+gathered per block, `zc_t4s_x13` reduce into the rows (i, j), the thin rows
+to sigma3 and XvR); the hh ladder per block (one GEMM with the pairs of the
+block); the rows of sigma4 one occupied pair at a time (per group of (ab)
+one GEMM of the operands stacked by `zc_tn_rows`, per class of a one GEMM
+of [Wo | t2 | WoR | r2 | -YR] with [r3; XvR; T3 rows; Xv; T3P], each reduced
+once); the 3p1h row; the 2p row; the masks of the parity.  Real arithmetic
+where the integrals are real (as the rest of the program); the same source
+for complex numbers.
+
+### 20.3 The solver
+
+`N(xzesolve)` of section 16, unchanged in its algorithm (CFOUR's design:
+one orthonormal basis for all roots of a target, a correction r / (omega -
+D) per unconverged root and iteration, the test on the largest element of
+the residual, compaction to roots + 2 Ritz vectors), with hooks for the
+vector of the sector (`edea` of `xzeomd`: the part that rank 0 holds -
+r2, r3 -, the first part - r2, for the weights and the leading elements -,
+the rest - r4): the sigma vector `N(xzdsig)`, the preconditioner
+`N(xzdprec)` (the differences of the spinor energies per block,
+`zc_vprecond`, floor 1e-3 as the Python solver), the start from unit
+vectors on the lowest pairs of the target in the masks.  The sigma vector
+applies the masks; the corrections stay in them.  The subspace: in the work
+array, smaller in the work array, or in the files `EOMCnnnn`, `EOMHnnnn`
+(16.4).
+
+### 20.4 Memory and disk
+
+In the work array, after the integrals and the amplitudes: the kept arrays
+of `N(xzeomim)` and those of 20.2 (with R13), then per target the 2p
+operator, two vectors, the subspace and the arrays of a sigma vector (the
+small intermediates, then pass by pass the buffers of the pp ladder, of the
+ring and of the rows, each released before the next).  **The batches** of
+the passes over r4 (an operand of the pp ladder, an operand and a product of
+a batch of the ring) are as large as the work array leaves them next to
+the buffer of the subspace in files, at most 1 GB: the largest that fits is
+found by bisection on the dry run of a sigma vector (monotone in the batch).
+The plan of the program (section 4) runs EOM-DEA dry with the smallest
+batches and the smallest subspace (the floor); the subspace then takes
+what is left, as in 16.4.  **R13** is in the work array if EOM-DEA fits there
+with it (a dry run of all of it at the floor); otherwise in the file
+`XZDXV` (`XZDXV.<rank>`) of the run directory, written pair by pair when it
+is made and read pair by pair in the rows of every sigma vector (the free
+disk is checked; the file is deleted at the end); option `deaxv m` / `deaxv
+f` forces the one or the other.  Over ranks every rank holds R13 of its
+pairs only (20.6).
+
+| case | the work array | used (MB) | peak resident (MB) | subspace |
+|---|---|---|---|---|
+| 116 spinors, MEMORY_SIZE 100 GB | 100 GB | 13 884 | 14 133 | 23 vectors in the work array (9.9 GB) |
+| the same, `maxcor 500000000` (4 GB) | 4 GB | 3 677 | 3 868 | in files (10.4 GB); the same roots (4e-11) |
+| the same, `maxcor 400000000` (3.2 GB; three iterations) | 3.2 GB | 3 190 | 3 197 | in files; the batches 323 and 340 MB (bisected), the iterations those of the run above |
+| 168 spinors, MEMORY_SIZE 100 GB | 100 GB | 68 807 | 68 078 | 23 vectors in the work array (55 GB) |
+| the same, `maxcor 2000000000` (16 GB; job 32265685) | 16 GB | 13 431 | 13 800 | in files (52.6 GB); the roots identical to 14 decimals (52 s per sigma vector with the solver: the files) |
+| DYVQZ-SOG (216 spinors), MEMORY_SIZE 100 GB | 100 GB | 99 755 | 98 478 | 13 vectors in the work array (73 GB) |
+
+The resident set follows the words of the work array that are used (MKL
+and the OpenMP runtime add 0.2 - 0.4 GB).
+
+### 20.5 Validation
+
+**The sigma vector element by element against `dea_sector.Engine.sigma`**
+(`bench/dea/native_check.py <rundir> <binary> [--target t] [--batch n]
+[--complex] [--xz option]`: the integrals of the run directory read by
+`zccsdt.cfour.from_cfour`, the amplitudes of the native `XZAMPS`, a random
+vector written to a file; the native program with the option `deasig file`
+writes sigma of it to `file.out`; the masks of the parity applied to both):
+
+| case | largest difference (largest element) in 2p, 3p1h, 4p2h |
+|---|---|
+| O2 26 spinors (10 + 16), 4 classes, real; targets 0, 2, -2; batches of 1, 50 elements and 1 GB | 2.7e-15 (1.4), 4.0e-15 (6.7), 7.1e-15 (12) |
+| the same, complex arithmetic (`real 0`) | 3.1e-15, 4.1e-15, 7.1e-15 |
+| the same with phases on the spinors (complex integrals, largest imaginary part 0.21) | 2.3e-15, 4.8e-15, 7.2e-15 |
+| O2 DYVDZ (10 + 42), 6 classes; targets 0 and 2 | 6.0e-14 (7.5), 1.2e-13 (29), 2.1e-13 (54) |
+| the same, R13 in the file `XZDXV` | identical |
+| the same over 3 and 4 ranks (20.6; 3 ranks with `XZDXV.<rank>`); 26 spinors with phases over 3 ranks | 1.8e-13 (52); 1.1e-14 (14) |
+| 168 spinors (10 + 158, 8 classes; 1.5e8 elements of r4), targets 0 and 2 (job 32265685) | 3.2e-11 (570), 1.2e-10 (1350), 1.7e-10 (2200): 8e-14 of the largest elements |
+
+**One class** (`labels 0`, 26 spinors: all pairs one problem): the three
+lowest roots are the root of 2 Omega = 0 and the two of +-2 of the blocks,
+1e-10 (the threshold).
+
+**The roots** (ESTATE_CONV / `%eomthrs` as given; the Python roots: residual
+norm 1e-9 unless said otherwise; E in Eh):
+
+| case | native | Python | difference |
+|---|---|---|---|
+| 26 spinors, split | 1.5767221e-05 | 1.576720396e-05 (JSON of 11.6) | 1.8e-11 |
+| DYVDZ, CC_CONV=12, `%eomthrs 1e-11`: E(2 Omega = 0), E(2), split | -150.08744260782260, -150.08742672225537, 1.588556722e-05 | the sector, the norm of dT below 1e-11, residual norm 1e-11: -150.0874426078221, -150.08742672225455, 1.588556756e-05 | 4.8e-13, 8.2e-13, 3.4e-13 |
+| the same against the JSON of 11.6 (residual norm 1e-9) | | 1.588555955e-05 | 7.7e-12 (the threshold of the JSON) |
+| TZ (10 + 106), CC_CONV=10, `%eomthrs 1e-10` | -150.21709561322, -150.21707919864, 1.6414585e-05 | -150.21709561323, -150.21707919864, 1.6414583399e-05 (11.6) | 1e-11, 1e-11, 1.6e-12 |
+| 168 spinors (10 + 158, 1s frozen), CC_CONV=10, `%eomthrs 1e-10` | -150.22882293513, -150.22880648606, 1.6449066e-05 | -150.22882293512, -150.22880648609, 1.6449031676e-05 (11.6) | 8e-12, 2.6e-11, 3.4e-11 (the JSON: residual norm 1e-9) |
+| DYVQZ-SOG (10 + 206), CC_CONV=10, `%eomthrs 1e-10`: E(CCSDT), E(2 Omega = 0), E(2), split | -148.895224614241, -150.25266284304, -150.25264609144, 1.6751600e-05 (3.6766 cm-1) | the production run of the sector (job 32236524): -148.89522461421, -150.25266284301, -150.25264609143, 1.6751580e-05 (3.6765 cm-1) | 3e-11, 2.7e-11, 7e-12, 2.0e-11 |
+| DYVDZ over 1, 2, 4 ranks (20.6) | identical to 14 decimals, the same 33 + 32 sigma vectors | | |
+
+### 20.6 Over MPI ranks
+
+The rows of r4 are dealt to the ranks by occupied pairs: one range of
+pairs per rank, the same for all targets, of about equal sums of the
+elements of their rows over the targets (`xzdranges`); in the layout of
+r4 a range of pairs is a range of elements (20.2), so that every rank
+holds one slice of every vector - rank 0 with r2 and r3 in front, as the
+singles and doubles of EOM-EE (16.7) - and the vector operations of the
+solver are the commands of 16.7 on these slices (`N(xzeserve)`; the
+`op_shift` of a target sets up its sector, the batches of rank 0 and two
+whole vectors on the other ranks, `N(xzdshift)`).
+
+A sigma vector (`N(xzdsig)` on every rank): r2 and r3 of rank 0 and the
+rows of every rank go to all ranks (`xzmpi_bcast_w`, `xzmpi_slices_put`);
+the small intermediates are sums over an occupied index of r3, split by
+that index over the ranks (mod(index, ranks)): YR and ZR are summed at
+once, XoR and XvR stay partial sums until the passes over r4 have added to
+them; every rank makes the rows of sigma4 of its pairs in the pp ladder,
+the hh ladder (its rows from all rows of the block) and the six-index
+products; the thin products of the pp ladder are summed with XoR (on all
+ranks; sigma2 and the 3p1h parts on rank 0).  The ring
+writes rows of other owners - the product of a spectator j has the rows
+(i, j) of all i - so its work items are the batches of the serial code
+(spectator, batch of blocks), dealt to the ranks by a cost that counts the
+products, the elements moved by the expansion and the reduction, and the
+walks through the quadruples of the rows (m, j) (the largest first to the
+least loaded rank, the same deal on every rank; items of single blocks
+walked the quadruple lists once per block, and the ring of one rank took
+2.5 times that of another, job 32268203); a rank expands, multiplies and reduces its batches into
+the rows of all ranks, and sigma4 is summed by slices at the end (`xzmpi_slices_add`: every rank the sum of its own
+slice); the thin rows of sigma3 and XvR are summed too.  The 3p1h and 2p
+rows are rank 0's.  Every rank makes R13 (Xv) of its pairs only, so that
+the largest array is divided too.  The other ranks take as many words as
+rank 0 (`MEMORY_SIZE`): they hold what rank 0 holds but r2 and r3.
+Per sigma vector the transfers are the vector to all ranks and sigma4 by
+slices (each about one vector per rank), and the small sums.
+
+Measured (one job each, two nodes of 2 x Xeon Gold 6248R, `-N 2
+--ntasks-per-node=1 -c 32`, `mpirun -ppn`; CCSDT once; `%eomthrs 1e-10`; the
+same numbers of sigma vectors and the same roots, to all digits printed, in
+every run; `bench/dea/native_mpi.sbatch`):
+
+| TZ (10 + 106), job 32265683 | a sigma vector with the solver (s) | of it: intermediates, pp, ring, rows; the transfers (s) | EOM-DEA, both targets (s) | work array used / resident, rank 0 (MB) |
+|---|---|---|---|---|
+| 1 rank x 32 threads, one node | 1.43, 1.37 | 0.10, 0.38, 0.29, 0.45; - | 97.8 | 13 884 / 14 218 |
+| 2 x 16, one node | 1.09, 1.06 | 0.11, 0.25, 0.30, 0.18; 0.10 | 75.5 | 7 767 / 8 384 |
+| 2 x 32, two nodes | 0.88, 0.86 | 0.11, 0.18, 0.22, 0.21; 0.05 | 62.1 | 7 767 / 8 228 |
+| 4 x 16, two nodes | 0.66, 0.66 | 0.11, 0.13, 0.15, 0.09; 0.10 | 46.3 | 5 074 / 5 724 |
+| **168 spinors** (10 + 158), job 32265684 | | | | |
+| 1 rank x 32 threads, one node | 7.99, 7.68 | 0.35, 2.99, 1.82, 1.73; - | 557 | 68 807 / 67 974 |
+| 2 x 16, one node | 6.67, 6.47 | 0.45, 2.16, 1.72, 0.96; 0.53 | 468 | 38 696 / 38 742 |
+| 2 x 32, two nodes | 4.84, 4.60 | 0.41, 1.43, 1.22, 0.86; 0.39 | 339 | 38 696 / 38 603 |
+| 4 x 16, two nodes | 3.81, 3.72 | 0.50, 1.01, 0.86, 0.46; 0.64 | 269 | 23 536 / 23 866 |
+| 4 x 16, two nodes, the intermediates split and the ring by batches (job 32269591, c092/c094, `--exclusive`) | 3.40, 3.33 | 0.37, 1.01, 0.61, 0.46; 0.61 | 242 | 23 536 |
+| the same nodes, the ring by blocks (the binary of 93164be) | 3.63, 3.59 | 0.37, 1.01, 0.86, 0.46; 0.59 | 258 | |
+| **DYVQZ-SOG** (10 + 206), jobs 32268202 / 32269044 (c227/c232 both) | | | | |
+| 1 rank x 32 threads (job 32265420, c301) | 29.9, 29.2 | 0.7, 9.9, 10.2, 5.0; - | 2483 | 99 800 / 98 500 |
+| 4 x 16, two nodes, the ring by blocks (93164be) | 15.22, 15.12 | 1.19, 3.58, 5.90, 1.55; 1.55 | 1085 | 48 963 |
+| 4 x 16, two nodes, the ring by batches (fceb0a9) | 13.09, 13.14 | 1.21, 3.58, 3.77, 1.55; 1.55 | 941 | 48 963 |
+
+The pp ladder, the ring, the rows of sigma4 and the hh ladder are divided;
+the small intermediates were made by every rank in the first runs of the table (0.1 s
+for 116 spinors, 0.5 s for 168 on four ranks; split by the occupied index
+since, 0.37 s), and the transfers (the vector to all ranks and sigma4 by
+slices: 0.2 GB each for 116 spinors, 1.2 GB for 168, 2.8 GB for DYVQZ)
+take 0.05 - 0.1 s, 0.4 - 0.6 s and 1.6 s: two nodes are 2.2 times one rank
+for 116 spinors, 2.35 times for 168 and 2.6 times for DYVQZ (one rank on
+another node of the same type).  At DYVQZ the ring of ranks 0 and 1 (the first node, c227) takes 262
+s of the run against 118 - 120 s on ranks 2 and 3 (c232), with the pp ladder and the rows equal on all ranks (the per-rank sums of the
+last output lines of the ranks; not understood: at 168 spinors on c092/c094 the four rings are equal); the time ranks 2 and 3 wait is in their
+transfers (354 - 361 s against 181 s on rank 1).  The 168-spinor run of job
+32269043 shared a node with other jobs (every pass 30 % slower) and is not
+in the table.  (The
+ring of an earlier version, in which every rank expanded all rows of every
+spectator for its own output rows, took 0.25 s on four ranks; job
+32265195.)  The ranks hold their parts: rank 0 of two takes 7.8 GB where one
+rank takes 13.9 GB (R13 and the subspace divided).
+
+### 20.7 Timings
+
+One job per comparison, the Python sector first (`bench/dea/native_bench.sbatch`:
+`sector_bench.py` - ground state, three sigma vectors, the roots of 2 Omega
+= 0 and 2 -, then the native program in node-local /tmp on the same
+Hamiltonian), 32 cores of a Xeon Gold 6248R node, 120 GB:
+
+| | Python sector | native | |
+|---|---|---|---|
+| **116 spinors** (job 32260659, c686) | | | |
+| a sigma vector | 3.4 - 3.6 s | 1.45 s (pieces: rows 0.50, ring 0.43, pp 0.40, intermediates 0.10) | 2.4x |
+| the roots of 2 Omega = 0 and 2 | 62 + 38 sigma vectors, 399 s | 37 + 32, 121 s (1.81, 1.66 s per sigma vector with the solver) | 3.3x |
+| CCSDT | 22 s | 9.2 s | |
+| the run | 469 s (integrals, CCSDT, preparation, three sigma vectors, roots) | 132 s | |
+| memory | peak 10.9 GB | work array used 13.9 GB, resident 14.1 GB (the subspace of 23 vectors in it) | |
+| **168 spinors** (job 32260660, c572) | | | |
+| a sigma vector | 13.3 - 15.0 s | 6.97 s (pieces: pp 2.95 - of it the products 2.05 -, ring 1.83, rows 1.76, intermediates 0.35) | 2.0x |
+| the roots of 2 Omega = 0 and 2 | 64 + 40 sigma vectors, 1615 s (14.1, 13.3 s each) | 38 + 32, 552 s (7.99, 7.78 s per sigma vector with the solver) | 2.9x |
+| CCSDT | 58 s | 25 s | |
+| the run | 1838 s | 588 s | 3.1x |
+| memory | peak 48.7 GB (plan 9.3 GB fixed + 3.9 GB per sigma vector; a subspace of 12 vectors) | work array used 68.8 GB, resident 68.1 GB (the subspace of 23 vectors in it: 55 GB) | |
+
+Every pass of the native sigma vector is faster (Python, 116 spinors, the
+same node: rows 1.15, ring 0.79, pp 0.68, small intermediates 0.56 s); the
+products are the same.
+
+**DYVQZ-SOG** (10 + 206, 9 classes; 3.5e8 elements of a vector, 2.8 GB): the
+native program alone in job 32265420 (node c301), against the production
+run of the Python sector on a node of the same type (job 32236524, c705, 32
+cores; not the same node):
+
+| | Python sector | native | |
+|---|---|---|---|
+| a sigma vector | 47.4 - 48.3 s | 25.9 s (pp 9.9 - of it the products 7.3 -, ring 10.2, rows 5.0, intermediates 0.7; the expansions and reductions 9.5 of it) | 1.9x |
+| the roots of 2 Omega = 0 and 2 | 57 + 42 sigma vectors, 5736 s | 43 + 41, 2483 s (29.9, 29.2 s per sigma vector with the solver) | 2.3x |
+| CCSDT | 127 s | 81 s | |
+| intermediates of the ground state | (in the sigma vector of the first target) | 21 s (Xv 11.9 GB) | |
+| memory | MaxRSS 110 GB (three levels) | work array used 99.8 GB of 100 GB (the subspace: 13 vectors in the work array, 73 GB), resident 98.5 GB | |
+
+The native runs needed fewer sigma vectors: the solver of section 16 (one
+correction per unconverged root, a subspace of 23; 13 for DYVQZ) against
+the block Davidson of the Python program (a subspace of 12), at a threshold
+on the largest element (1e-10) instead of the norm (1e-9).  At DYVQZ the
+expansions and reductions of the passes (memory-bound) are a third of a
+sigma vector.
+
+### 20.8 Not done
+
+- R to 5p3h; the T of CCSDTQ / CC4 in the sector; DIP; left-hand vectors;
+  the vectors of the roots in a file.
+- Only the elements of the parity of the target are needed (half of the
+  vector): the masks are applied to a vector of both parities, as in the
+  Python program.
+- Over ranks: the vector to the ranks and sigma4 by slices are synchronous
+  transfers (0.4 - 0.6 s for 168 spinors, 1.6 s for DYVQZ); two nodes give
+  2.2 - 2.6 times one rank.  At DYVQZ the ring of the ranks of the first node takes twice as long as that
+  of the second (the same pair of nodes in both runs; the cause is
+  not known).  The rows of the six-index products
+  are reduced row by row (one entry per call of the kernel).
+- The subspace in files reads it about seven times per new vector (16.4):
+  168 spinors under 16 GB, 50 s per sigma vector with the solver instead of
+  8 s.  A subspace smaller than 3 roots + 4 vectors in the work array is not
+  tried.

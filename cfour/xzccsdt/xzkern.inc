@@ -441,3 +441,27 @@
       type(*), dimension(*) :: ysq, xo, r1, rasq, work
       real(c_double) :: stats(4)
     end subroutine
+
+    ! ---- the blocks of a symmetry label of the T4 equation (csrc/t4sym.c), used by EOM-DEA:
+    !      a block of rows of a quadruple / triple list expanded into the splits (a | bcd),
+    !      (ab | cd), (a | bc) of a product (mode 0), or reduced back from it (mode 1)
+    subroutine N(zc_t4s_x13)(mode, r, ldr, quads, na, nent, row, sgn, xoff, s1, s2, ncls, n, kv, posv, pos3, x) bind(C)
+      import
+      integer(c_int), value :: mode, ncls, n
+      integer(c_int64_t), value :: ldr, na, nent
+      type(*), dimension(*) :: r, quads, row, sgn, xoff, s1, s2, kv, posv, pos3, x
+    end subroutine
+
+    subroutine N(zc_t4s_x22)(mode, r, ldr, quads, na, nent, row, sgn, xoff, s1, s2, nq, n, kv, posq, x) bind(C)
+      import
+      integer(c_int), value :: mode, nq, n
+      integer(c_int64_t), value :: ldr, na, nent
+      type(*), dimension(*) :: r, quads, row, sgn, xoff, s1, s2, kv, posq, x
+    end subroutine
+
+    subroutine N(zc_t4s_x12)(mode, r, ldr, tri, nk, nent, row, sgn, xoff, s1, s2, ncls, n, kv, posv, posq, x) bind(C)
+      import
+      integer(c_int), value :: mode, ncls, n
+      integer(c_int64_t), value :: ldr, nk, nent
+      type(*), dimension(*) :: r, tri, row, sgn, xoff, s1, s2, kv, posv, posq, x
+    end subroutine

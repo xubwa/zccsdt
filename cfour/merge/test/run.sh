@@ -15,8 +15,11 @@
 # first run (file XZAMPS) instead of iterating; then CALC=CC3 (xjoda again):
 # CC3 without stored triples; then CALC=CC4, which must start from the CCSDT
 # amplitudes of XZAMPS (written again by the program before it: the CC3 run
-# has removed XZKEY).  Compared with the reference numbers below: E(SCF),
-# E(CCSDT), E(CC3) and E(CC4) to 1e-8 Eh.  Prints PASS or FAIL;
+# has removed XZKEY); then CALC=CCSDT with the section %xzdea: EOM-DEA-CCSDT
+# (HF(2-), the lowest root of 2 Omega = 0 and 2, on the amplitudes of
+# XZAMPS).  Compared with the reference numbers below: E(SCF), E(CCSDT),
+# E(CC3), E(CC4) and the two DEA roots to 1e-8 Eh (the DEA roots: the Python
+# sector on these integral files, bench/dea/native_ref.py).  Prints PASS or FAIL;
 # exit status 0 on PASS.  A few seconds (OMP_NUM_THREADS threads).
 #
 set -u
@@ -24,6 +27,8 @@ ref_scf=-100.064473416710
 ref_cc=-100.196412399000
 ref_cc3=-100.196407469096
 ref_cc4=-100.196781330907
+ref_dea0=0.810714303198
+ref_dea2=1.678276632877
 tol=1e-8
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -57,7 +62,14 @@ sed -i 's/CALC=CCSDT,/CALC=CC4,/' ZMAT
 "$bin/xjoda" > xjoda.cc4.out 2>&1 || { echo "FAIL: xjoda (CALC=CC4) stopped (exit $?), see $d/xjoda.cc4.out"; exit 1; }
 "$xz" > xzccsdt.cc4.out 2>&1 || { echo "FAIL: xzccsdt (CALC=CC4) stopped (exit $?), see $d/xzccsdt.cc4.out"; exit 1; }
 
+# EOM-DEA-CCSDT: CALC=CCSDT again (XZAMPS of the CCSDT run is taken) with %xzdea
+sed -i 's/CALC=CC4,/CALC=CCSDT,ESTATE_CONV=9,/' ZMAT
+printf '\n%%xzdea\n0 1\n2 1\n\n' >> ZMAT
+"$bin/xjoda" > xjoda.dea.out 2>&1 || { echo "FAIL: xjoda (%xzdea) stopped (exit $?), see $d/xjoda.dea.out"; exit 1; }
+"$xz" > xzccsdt.dea.out 2>&1 || { echo "FAIL: xzccsdt (%xzdea) stopped (exit $?), see $d/xzccsdt.dea.out"; exit 1; }
+
 val() { awk -v k="$2" '$1 == k { v = $NF } END { print v }' "$1"; }
+dea() { awk -v t="$1" '$1 == t && $2 == 1 { print $3 }' XZDEA; }
 bad=0
 check() {   # what value reference
   local ok
@@ -78,5 +90,7 @@ check 'E(CC3)' "$(val xzccsdt.cc3.out 'E(CC3)')" $ref_cc3
 grep -q 'CC3 converged in' xzccsdt.cc3.out || { echo "  the CC3 run did not iterate (CCSDT amplitudes taken?)"; bad=1; }
 check 'E(CC4)' "$(val xzccsdt.cc4.out 'E(CC4)')" $ref_cc4
 grep -q 'they are the start of the CC4 iterations' xzccsdt.cc4.out || { echo "  the CC4 run did not start from XZAMPS"; bad=1; }
+check 'EOM-DEA omega, 2 Omega = 0' "$(dea 0)" $ref_dea0
+check 'EOM-DEA omega, 2 Omega = 2' "$(dea 2)" $ref_dea2
 if [ $bad = 0 ]; then echo "PASS"; else echo "FAIL (outputs in $d)"; fi
 exit $bad

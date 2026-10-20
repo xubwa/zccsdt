@@ -17,3 +17,6 @@
 #include "xzeoms.inc"
 #include "xzcc3.inc"
 #include "xzcc4.inc"
+#include "xzdea.inc"
+#include "xzdeas.inc"
+#include "xzdeam.inc"

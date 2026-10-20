@@ -114,8 +114,35 @@ module xzeomd
   real(8) :: e4eclu(64) = 0d0, e4rayc(64) = 0d0, e4shotc(64) = 0d0
   real(8) :: rpp(maxres) = 0d0, rshot(maxres) = 0d0, rfirst(maxres) = 0d0
   integer(8) :: neomsig = 0, neomsd = 0
+  ! The solver serves EOM-DEA as well (xzdea.inc): its vectors are then
+  ! [r2 | r3 | r4] of the sector - edea; the part that rank 0 holds (r2, r3),
+  ! the first part (r2: the weights and the largest elements of a root) and
+  ! the rest (r4)
+  logical :: edea = .false.
+  integer(8) :: dvsd = 0, dv1 = 0, dvbig = 0
 
 contains
+
+  ! the elements of a vector that rank 0 holds in front (the singles and
+  ! doubles; DEA: r2 and r3), of its first part (the singles; DEA: r2), and
+  ! of the rest (the triples of the shift; DEA: r4)
+  integer(8) function xzensd()
+    use xzdata, only: no, nv, npo, nvp
+    xzensd = no * nv + npo * nvp
+    if (edea) xzensd = dvsd
+  end function
+
+  integer(8) function xzen1()
+    use xzdata, only: no, nv
+    xzen1 = no * nv
+    if (edea) xzen1 = dv1
+  end function
+
+  integer(8) function xzenbig()
+    use xzdata, only: n3s
+    xzenbig = n3s
+    if (edea) xzenbig = dvbig
+  end function
 
   ! the name of the file of vector j: EOMCnnnn (kind 1), EOMHnnnn (kind 2),
   ! the names of CFOUR's xx2ceomcc (libx2ccc/davhcfname)

@@ -72,6 +72,14 @@ integer(8) function xzpeak_cc(w)
       call xzeom_d(w, e)
     end if
   end if
+  ! EOM-DEA (one rank)
+  if (with_dea) then
+    if (nwe == 2) then
+      call xzdea_z(w, e)
+    else
+      call xzdea_d(w, e)
+    end if
+  end if
   ! the density stage (rank 0): the integrals, the amplitudes and lambda again, then its arrays
   if (with_den .and. .not. xzworker()) then
     call xzrel(mlay)
@@ -152,6 +160,8 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   if (with_den .and. .not. (with_cc .or. with_lam)) what = 'the density'
   if (with_eom) what = trim(mname) // ', EOM'
   if (with_eom .and. .not. with_cc) what = 'EOM'
+  if (with_dea) what = trim(mname) // ', EOM-DEA'
+  if (with_dea .and. .not. with_cc) what = 'EOM-DEA'
   f = no * nv * nvp                       ! elements of a half-expanded batch of one pair
   ! ---- the smallest and the target batch sizes
   plo(1) = min(nv, nqmax)
@@ -383,6 +393,11 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       pneedw = max(pneedw, xzpeak_cc(w))
       asworker = .false.
       if (maxthr > nthr0) call omp_set_num_threads(nthr0)
+      ! (EOM-DEA: a rank other than 0 holds what rank 0 holds but r2, r3 -
+      ! the intermediates, two whole vectors, its rows of the subspace; the
+      ! batches and the subspace are decided by rank 0 in its work array:
+      ! the other ranks take as many words as rank 0)
+      if (with_dea) pneedw = max(pneedw, xzsize)
     end if
   end if
   if (.not. planq) then

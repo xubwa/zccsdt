@@ -56,10 +56,10 @@ KCC     ?= $(CC)
 KCFLAGS ?= $(CFLAGS)
 
 # the C kernels that the program calls
-KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda cc3_fly cc3_native cc3_shift cc4_native
-MODS    := xzkern xzopt xzmem xzdata xzdiis xzlkry xzpar xzdist xzfrzd xzfrz xzpland xzeomd
+KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda cc3_fly cc3_native cc3_shift cc4_native t4sym
+MODS    := xzkern xzopt xzmem xzdata xzdiis xzlkry xzpar xzdist xzfrzd xzfrz xzpland xzeomd xzdead
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
-INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzlkry.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc xzeom.inc xzeoms.inc xzcc3.inc xzcc4.inc
+INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzlkry.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc xzeom.inc xzeoms.inc xzcc3.inc xzcc4.inc xzdea.inc xzdeas.inc xzdeam.inc
 
 OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil xzmpi $(KERNELS)))
 
@@ -90,8 +90,9 @@ $(BUILD)/xzdata.o: $(BUILD)/xzopt.o
 $(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzfrzd.o
 $(BUILD)/xzpland.o: $(BUILD)/xzdata.o
 $(BUILD)/xzeomd.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzpar.o
-$(BUILD)/xzdrv.o: $(BUILD)/xzplan.o
-$(BUILD)/xzplan.o: $(BUILD)/xzeomd.o
+$(BUILD)/xzdead.o: $(BUILD)/xzdata.o $(BUILD)/xzkern.o $(BUILD)/xzopt.o $(BUILD)/xzeomd.o $(BUILD)/xzpar.o
+$(BUILD)/xzdrv.o: $(BUILD)/xzplan.o $(BUILD)/xzdead.o
+$(BUILD)/xzplan.o: $(BUILD)/xzeomd.o $(BUILD)/xzdead.o
 $(BUILD)/xzdist.o: $(BUILD)/xzdata.o $(BUILD)/xzpar.o $(BUILD)/xzopt.o
 
 $(BUILD):
