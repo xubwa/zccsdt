@@ -26,14 +26,16 @@ usage:
       the 116 correlated spinors, closed-shell Hartree-Fock for the 10 electrons of O2(2+)
       inside that space (label block by label block), canonical spinors, and the files
       <dir>/o2_hf2plus_n<n>_x2ccorr.npz of the n lowest of them
-  python o2_x2ccorr.py run-blocks <dir> [n ...] [--out <dir2>] [--max-memory MB] [--npz] [--direct] [--dhf-field]
+  python o2_x2ccorr.py run-blocks <dir> [n ...] [--out <dir2>] [--max-memory MB] [--npz] [--direct] [--fold-core]
       the same Hamiltonian without the n^4 array (zccsdt.eri4c, zccsdt.hblocks): integrals in the
       blocks of the labels and parities, the HF and its rotation block by block, the block files
       <dir2 or dir>/o2_hf2plus_n<n>_x2ccorr.h5 (with --npz also the .npz of the dense route);
       --max-memory: MB for the whole process (default: 80 % of what is free); --direct: all eight
       classes of AO integrals (default: five and the mirror relations); the raw integrals of the
       X2CMP spinors go to a scratch file (ZCCSDT_TMPDIR / TMPDIR); the mean field of the frozen 1s
-      spinors from the same blocks, or with --dhf-field from the four-component J, K as in run'''
+      spinors from the four-component J, K of their density as in run, or with --fold-core from the
+      blocks of the frozen spinors transformed with the others (faster; differs by the rounding of
+      the coefficients off the labels: 1e-8 in h1 for DYVTZ-SOG)'''
 import os
 import sys
 import time
@@ -206,13 +208,13 @@ def rss():
     return memory.resident() / 1e9
 
 
-def run_blocks(outdir, sizes, max_memory=None, npz=False, direct=False, dest=None, dhf_field=False):
+def run_blocks(outdir, sizes, max_memory=None, npz=False, direct=False, dest=None, dhf_field=True):
     '''run() without the n^4 array: zccsdt.eri4c into a block file of the X2CMP
     spinors, the HF and the rotation on its blocks (zccsdt.hblocks).  The
-    mean field of the frozen 1s spinors: from the same blocks (the frozen
-    spinors are transformed with the others and folded, hblocks.fold), or
-    with ``dhf_field`` by the four-component J and K of their density
-    (frozen_field, as run(): 1521 s of 2.6 h for cc-pV5Z-X2C-TP on 32 cores).'''
+    mean field of the frozen 1s spinors: with ``dhf_field`` by the
+    four-component J and K of their density (frozen_field, as run(): 1521 s
+    for cc-pV5Z-X2C-TP on 32 cores), else from the same blocks (the frozen
+    spinors transformed with the others and folded, hblocks.fold).'''
     import tempfile
     from zccsdt import eri4c, hblocks
     from zccsdt.scratch import scratch_dir
@@ -363,9 +365,9 @@ if __name__ == '__main__':
         if direct:
             args.remove('--direct')
         dest = _option(args, '--out', str)
-        dhf = '--dhf-field' in args
-        if dhf:
-            args.remove('--dhf-field')
+        dhf = '--fold-core' not in args
+        if not dhf:
+            args.remove('--fold-core')
         sizes = [int(x) for x in args[2:]] or ([0] if o2_scf.TAG else [26, 30, 32, 116])
         run_blocks(args[1], sizes, mm, npz, direct, dest, dhf)
     else:

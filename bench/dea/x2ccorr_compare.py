@@ -62,9 +62,12 @@ def main():
     print('  eps        max difference %.1e' % abs(z['eps'] - bf['eps'][pn]).max())
     print('  mo_coeff   max difference %.1e' % abs(z['mo_coeff'] - bf['mo_coeff'][:, pn]).max())
     h1 = bf.h1[np.ix_(pn, pn)]
-    print('  h1         max difference %.1e (largest |h1| %.1e)' % (abs(z['h1'] - h1).max(), abs(z['h1']).max()))
-    eri = npz_member(old, 'eri')
     lab, par = np.asarray(z['omega2']), np.asarray(z['parity'])
+    ok1 = (lab[:, None] == lab[None, :]) & (par[:, None] == par[None, :])
+    print('  h1         max difference within the groups %.1e (largest |h1| %.1e); largest element of the .npz '
+          'between groups %.1e (zero in the block file)' % (abs(z['h1'] - h1)[ok1].max(), abs(z['h1']).max(),
+                                                           abs(z['h1'][~ok1]).max(initial=0.0)))
+    eri = npz_member(old, 'eri')
     worst, forb, big = 0.0, 0.0, 0.0
     where = None
     for p in range(n):
