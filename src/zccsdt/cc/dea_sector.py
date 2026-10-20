@@ -1355,18 +1355,24 @@ class ProblemSector:
         self.seconds += time.perf_counter() - t0
         return y
 
-    def _den_blocks(self, part):
-        '''(slice, den [rows, cols]) of the blocks of a part, one at a time.'''
+    def _den_blocks(self, part, chunk=1 << 21):
+        """(slice, den [rows, cols]) of the blocks of a part, a few rows at a time
+        (at most about ``chunk`` elements: no array of the size of a block)."""
         sec = self.sec
         if part == 0:
             yield slice(0, sec.n2), self.cden[0][None, :]
-        elif part == 1:
-            for K in sec.blocks3:
-                yield slice(sec.off3[K], sec.off3[K + 1]), self.cden[1][K][None, :] - self.eo[sec.rows3[K]][:, None]
+            return
+        if part == 1:
+            blocks = [(sec.off3[K], self.cden[1][K], self.eo[sec.rows3[K]]) for K in sec.blocks3]
         else:
-            for M in sec.blocks4:
-                eo2 = self.eo[self.lay.o2[sec.rows4[M]]].sum(axis=1)
-                yield slice(sec.off4[M], sec.off4[M + 1]), self.cden[2][M][None, :] - eo2[:, None]
+            blocks = [(sec.off4[M], self.cden[2][M], self.eo[self.lay.o2[sec.rows4[M]]].sum(axis=1))
+                      for M in sec.blocks4]
+        for off, cols, rows in blocks:
+            n = len(cols)
+            step = max(1, chunk // max(n, 1))
+            for r0 in range(0, len(rows), step):
+                r1 = min(len(rows), r0 + step)
+                yield slice(off + r0 * n, off + r1 * n), cols[None, :] - rows[r0:r1, None]
 
     def precond(self, x, omega, floor=1e-3):
         for part, p in enumerate(x):

@@ -578,10 +578,14 @@ the state for a closed-shell reference; in the blocks of the labels where
 the iterations ran in them, by masks on the packed layout otherwise.
 `rank` 3 or 4 (default 4 after `CCSDTQ`, whose T4 is then in the matrix);
 `parity` (0 / 1 per active spinor) with `target_parity` restricts the
-vectors further.  The total energy of a state is `mycc.e_tot + e`.  The
-cost of a sigma vector is that of an iteration of the ground state with two
-more occupied spinors.  Any rank (5p3h, 6p4h, ..) for small spaces:
-`zccsdt.cc.dea_strings`.
+vectors further.  The total energy of a state is `mycc.e_tot + e`.  In
+the blocks of the labels the sigma vector is evaluated on the sector itself
+(`backend='sector'`, the default; `docs/eom.md` 11.9: 12 - 22 times faster
+than through the ghosts for 116 - 168 spinors); `backend='ghost'` takes the
+route through two ghost spinors, whose sigma vector costs an iteration of
+the ground state with two more occupied spinors (and which `fold5` and the
+masks on the packed layout use).  Any rank (5p3h, 6p4h, ..) for small
+spaces: `zccsdt.cc.dea_strings`.
 
 **EOM-CCSD** on CCSD amplitudes: `zccsdt.cc.eom.kernel(eris, t1, t2, None,
 nroots=..)` with the amplitudes of `zccsdt.cc.solver.kernel(eris, 'ccsd')`;
