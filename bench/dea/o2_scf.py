@@ -29,6 +29,8 @@ BASIS_DIR = os.path.expanduser('~/scr4/zmr_runs/basis_opt/basis/pyscf')
 #   --basis dyvqz    DYVQZ-SOG (220 spinors, the quadruple zeta of the O2 CBS sessions)    _dyvqz
 #   --basis <name>_x2c_tp   the scalar cc-pVXZ-X2C-TP family of the basis session
 #                    (pvtz, apvtz, pvqz, pv5z, ...: BASIS_DIR/<name>_x2c_tp.py)     _<name>_x2c_tp
+#   --basis pwcvtz_x2c_tp, pwcvqz_x2c_tp   the core-valence sets of that family (2026-10-20;
+#                    core-valence functions uncontracted; 172 and 336 spinors)       _pwcv<x>z_x2c_tp
 #   --basis sogcv    DYVTZ-SOG plus the core-valence functions of cc-pCVTZ (the shells of
 #                    cc-pCVTZ that cc-pVTZ does not have: tight 2s2p1d, uncontracted)     _sogcv
 #   --ae             nothing frozen (O 1s correlated): tag _ae, 14 occupied spinors
@@ -106,8 +108,16 @@ def run_scf(chk=None, verbose=4):
     mol = gto.M(atom='O 0 0 0; O 0 0 1.20752', basis={'O': sog}, verbose=verbose, nucmod='G', charge=2, spin=0)
     mf = spinor_hf.KRHF(mol)
     mf.with_x2c = x2cmp.X2CMP(mol, x2cmp='x2cmp', with_gaunt=True, with_breit=True)
-    # (with the tight functions of sogcv the gradient stays at 4e-9 while the energy is stationary to 1e-13)
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-8 if VARIANT == 'sogcv' else 1e-9, 200
+    # (with the tight functions of sogcv the gradient stays at 4e-9 while the energy is stationary to 1e-13;
+    # for pwcvtz_x2c_tp at 5.1e-7 from cycle 13 on and for pwcvqz_x2c_tp at 4.2e-6, |ddm| 1e-11 - 1e-10:
+    # the Kramers-restricted solver leaves |FC - SCe| = 2.2e-7 (pwcvtz), while one diagonalization of the
+    # same F by scipy.linalg.eigh gives |g| = 1.4e-8 and changes D by 1e-7.  The X2CMP Fock matrix of these
+    # sets is not Kramers-symmetric to that level (the partners of 1s differ by 3e-7 Eh on its diagonal;
+    # x2camf's atomic Dirac HF reports "did NOT converge", and E(SCF) differs by 1e-6 Eh between processes):
+    # the floor of the solver, not of the SCF.  The X2Ccorr runs with the 1s correlated redo the HF in the
+    # space of all spinors and do not depend on it.)
+    mf.conv_tol, mf.max_cycle = 1e-13, 200
+    mf.conv_tol_grad = 1e-5 if VARIANT.startswith('pwcv') else 1e-8 if VARIANT == 'sogcv' else 1e-9
     if chk and os.path.exists(chk) and not os.path.exists(chk + '.done'):
         os.remove(chk)              # (left by a run that did not converge)
     if chk and os.path.exists(chk):
@@ -129,7 +139,16 @@ def run_scf(chk=None, verbose=4):
 
 def spinors(mf):
     '''(C, 2 m_j, parity, occupied by energy, virtual by energy, energies) of
-    the SCF: the spinors adapted to the axis, real coefficients.'''
+    the SCF: the spinors adapted to the axis, real coefficients.  If a spinor
+    is not a parity eigenfunction to 1e-10 (the 1s sigma_g and sigma_u pairs,
+    1.5 mEh apart, come mixed by 2e-4 rad out of the Kramers-restricted
+    solver for pwcvtz_x2c_tp), the occupied and the virtual spinors of each
+    2 m_j are made parity eigenfunctions (eigenvectors of the inversion in
+    their span) and canonical within each parity (eigenvectors of the Fock
+    matrix there): rotations within the occupied and within the virtual
+    space, the determinant and its energy unchanged.  Without it the block
+    files drop the integrals between the mixed spinors as forbidden (h1 1.9e-4
+    and (pq|rs) 8.7e-4 for pwcvtz_x2c_tp with the 1s correlated).'''
     from zccsdt import eris as E
     ax = E.axial_spinors(mf, with_mj=True)
     if ax is None:
@@ -137,17 +156,62 @@ def spinors(mf):
     C, level, mj = ax
     occ = np.asarray(mf.mo_occ) > 0
     e = np.asarray(mf.mo_energy)
-    par = parities(mf.mol, C, mf.get_ovlp())
+    S = mf.get_ovlp()
+    par = parities(mf.mol, C, S)
     assert abs(abs(par) - 1).max() < 1e-6, abs(abs(par) - 1).max()
+    om2 = np.round(2 * mj).astype(np.int64)
+    dev = abs(abs(par) - 1).max()
+    if dev > 1e-10:
+        C, e = adapt_parity(mf, C, om2, occ, S)
+        par = parities(mf.mol, C, S)
+        print('spinors made parity eigenfunctions: largest 1 - |parity| %.1e before, %.1e after'
+              % (dev, abs(abs(par) - 1).max()), flush=True)
     io = np.where(occ)[0][np.argsort(e[occ], kind='stable')]
     iv = np.where(~occ)[0][np.argsort(e[~occ], kind='stable')]
-    return C, np.round(2 * mj).astype(np.int64), (par < 0).astype(np.int64), io, iv, e
+    return C, om2, (par < 0).astype(np.int64), io, iv, e
 
 
-def parities(mol, C, S):
-    '''<p| inversion |p> of the spinors C (the inversion through the
-    midpoint of the two equal atoms: the function of atom A goes to the
-    same function of atom B with (-1)^l).'''
+def adapt_parity(mf, C, om2, occ, S):
+    '''(C, energies): within the occupied and within the virtual spinors of
+    each 2 m_j, eigenvectors of the inversion and, within each parity, of
+    the Fock matrix of the determinant of ``occ`` (spinors.__doc__).'''
+    dm = mf.make_rdm1(C, mf.mo_occ)
+    F = mf.get_fock(dm=dm)
+    PC = inversion(mf.mol, C)
+    C = C.copy()
+    e = np.array(mf.mo_energy, dtype=float)
+    for space in (occ, ~occ):
+        for m in np.unique(om2[space]):
+            idx = np.flatnonzero(space & (om2 == m))
+            M = C[:, idx].conj().T @ S @ PC[:, idx]
+            M = 0.5 * (M + M.conj().T)
+            w, v = np.linalg.eigh(M)
+            cols, ens = [], []
+            for sel in (w < 0, w > 0):
+                cs = C[:, idx] @ v[:, sel]
+                f = cs.conj().T @ F @ cs
+                ee, u = np.linalg.eigh(0.5 * (f + f.conj().T))
+                cols.append(cs @ u)
+                ens.append(ee)
+            cn, en = np.hstack(cols), np.concatenate(ens)
+            o = np.argsort(en, kind='stable')
+            cn, en = cn[:, o], en[o]
+            # the sign of each new spinor: its largest coefficient positive, as the old one
+            k = np.argmax(abs(cn), axis=0)
+            ph = cn[k, np.arange(len(idx))]
+            cn = cn * (abs(ph) / ph)
+            if np.iscomplexobj(cn) and not np.iscomplexobj(C):
+                assert abs(cn.imag).max() < 1e-10, abs(cn.imag).max()
+                cn = cn.real
+            C[:, idx] = cn
+            e[idx] = en
+    return C, e
+
+
+def inversion(mol, C):
+    '''P C: the inversion through the midpoint of the two equal atoms
+    applied to the spinors C (the function of atom A goes to the same
+    function of atom B with (-1)^l).'''
     n = mol.nao_2c()
     half = n // 2
     sign = []
@@ -158,8 +222,12 @@ def parities(mol, C, S):
     sign = np.array(sign, dtype=float)
     assert len(sign) == n
     perm = np.concatenate((np.arange(half, n), np.arange(half)))
-    PC = (sign[:, None] * C)[perm]              # (P C)[mu at B] = (-1)^l C[mu at A]
-    return np.einsum('mp,mn,np->p', C.conj(), S, PC).real
+    return (sign[:, None] * C)[perm]              # (P C)[mu at B] = (-1)^l C[mu at A]
+
+
+def parities(mol, C, S):
+    '''<p| inversion |p> of the spinors C.'''
+    return np.einsum('mp,mn,np->p', C.conj(), S, inversion(mol, C)).real
 
 
 def main():

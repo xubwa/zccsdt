@@ -7,7 +7,7 @@
 # system that all nodes see (made by native_rundir.py if it has no ZMAT, no
 # n^4 array), then one rank per node with 48 threads.
 #
-#   sbatch -N 12 -t 8:00:00 native_blocks.sbatch SNAP H5 RUNDIR TAG [MAXCYC] [MEMWORDS]
+#   sbatch -N 12 -t 8:00:00 native_blocks.sbatch SNAP H5 RUNDIR TAG [MAXCYC] [MEMWORDS] [FREEZE]
 #
 #   SNAP      a snapshot with the MPI binary SNAP/xzccsdt_mpi and the Python package (src/, bench/)
 #   MAXCYC    ESTATE_MAXCYC (default 120; 3: a timing run - the CCSDT amplitudes stay in XZAMPS and
@@ -15,6 +15,8 @@
 #   MEMWORDS  MEMORY_SIZE in words (default 165 GB), at most the least MemAvailable of the nodes
 #             less 6 GB: GETMEM of every rank must succeed (nodes of the partition have had 140 -
 #             175 GB available at the start of a job)
+#   FREEZE    the first FREEZE spinors of the block file frozen when the run directory is made
+#             (native_rundir.py --freeze; default 0)
 # (setvars.sh of oneAPI first: it reads unset variables and sets some of its own)
 zargs=("$@")
 source /data/lcheng24/intel/oneapi/setvars.sh --force > /dev/null 2>&1
@@ -25,6 +27,7 @@ rdir=$3
 tag=$4
 maxcyc=${5:-120}
 memw=${6:-20625000000}
+freeze=${7:-0}
 export PYTHONPATH=$snap/src:$HOME/apps/socutils-git-env:${PYTHONPATH:-}
 export PATH=$PATH:/cm/shared/apps/slurm/current/bin
 export I_MPI_PIN_DOMAIN=omp
@@ -34,7 +37,7 @@ nn=${#nodes[@]}
 hosts=$(IFS=,; echo "${nodes[*]}")
 echo "nodes ${nodes[*]}, job $SLURM_JOB_ID, $(date)"
 if [ ! -f "$rdir/ZMAT" ]; then
-  python -u "$snap/bench/dea/native_rundir.py" "$h5" "$rdir" --cc-conv 10 --estate-conv 10 > "$rdir.rundir.log" 2>&1 || exit 1
+  python -u "$snap/bench/dea/native_rundir.py" "$h5" "$rdir" --cc-conv 10 --estate-conv 10 --freeze $freeze > "$rdir.rundir.log" 2>&1 || exit 1
 fi
 cd "$rdir" || exit 1
 avail=$(srun -N $nn --ntasks-per-node=1 awk '/MemAvailable/ {print int($2 / 1024)}' /proc/meminfo | sort -n | head -1)
