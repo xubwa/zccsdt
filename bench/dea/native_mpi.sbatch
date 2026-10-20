@@ -12,7 +12,10 @@
 #
 #   SNAP    a snapshot with the MPI binary SNAP/xzccsdt_mpi and the Python package (native_rundir.py)
 #   RUNDIR  on a file system that both nodes see (made here if it has no ZMAT)
-# (no set -u: setvars.sh of oneAPI reads unset variables)
+# (setvars.sh of oneAPI first: it reads unset variables and sets some of its own)
+zargs=("$@")
+source /data/lcheng24/intel/oneapi/setvars.sh --force > /dev/null 2>&1
+set -- "${zargs[@]}"
 snap=$1
 npz=$2
 freeze=$3
@@ -20,7 +23,6 @@ rdir=$4
 thr=${5:-1e-10}
 memgb=${6:-100}
 export PYTHONPATH=$snap/src:$HOME/apps/socutils-git-env:${PYTHONPATH:-}
-source /data/lcheng24/intel/oneapi/setvars.sh --force > /dev/null 2>&1
 export PATH=$PATH:/cm/shared/apps/slurm/current/bin
 export I_MPI_PIN_DOMAIN=omp
 nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
