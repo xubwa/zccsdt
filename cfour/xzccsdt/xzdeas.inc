@@ -606,10 +606,17 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
         nit = nit + 1
         ij(nit) = j
         ib(nit) = t
+        ! (the products, the elements moved by the expansion and the reduction,
+        ! and their walks through the quadruples of the rows (m, j), twice)
         icost(nit) = 0d0
         do b = bfirst(t), bfirst(t + 1) - 1
           icost(nit) = icost(nit) + dble(bnc(b)) * dble(bnr(b)) * dble(dnK(bkk(b))) + &
-                       16d0 * dble(bnc(b) + bnr(b)) * dble(dnK(bkk(b)))
+                       64d0 * dble(bnc(b) + bnr(b)) * dble(dnK(bkk(b)))
+        end do
+        do mm = 0, no - 1
+          if (mm == j) cycle
+          pq = opidx(max(mm, j), min(mm, j))
+          if (blk4(pq) >= 0) icost(nit) = icost(nit) + 2d0 * 16d0 * dble(nqa(blk4(pq)))
         end do
       end do
     end do

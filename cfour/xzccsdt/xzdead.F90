@@ -866,8 +866,7 @@ contains
     xt = 0
     do b = 1, nbk
       sz = (bnc(b) + bnr(b)) * dnK(bkk(b))
-      ! (over the ranks every block is a batch of its own: the work items that are dealt)
-      if (nbat > 0 .and. b > bfirst(nbat) .and. (tot + sz > dbatch .or. ddist)) then
+      if (nbat > 0 .and. b > bfirst(nbat) .and. tot + sz > dbatch) then
         mbmax = max(mbmax, mt)
         xbmax = max(xbmax, xt)
         tot = 0
