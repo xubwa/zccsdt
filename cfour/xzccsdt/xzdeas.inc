@@ -305,12 +305,21 @@ subroutine N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwo
         k = dl + qq
         if (dnV(dl) == 0 .or. dnV(mu) == 0 .or. k < 0 .or. k >= n3c) cycle
         if (uoffk(k) < 0 .or. vooff(m, mu, dl) < 0) cycle
-        ! sum_f <dm||ef> r3(m; f bc) for every e: [d][(bc)] at U[e] + off12(K, d)
-        do e = 0, dnV(mu) - 1
-          call N(zc_gemm)(0_4, 0_4, dnV(dl), dnQ(qq), dnV(ph), one, &
-                          w(dvo + NW * (vooff(m, mu, dl) + e * dnV(dl) * dnV(ph))), dnV(ph), &
-                          w(kx3r + NW * (x3off(m) + off12(kk, ph))), dnQ(qq), one, &
-                          w(ku + NW * (uoffk(k) + e * n12(k) + off12(k, dl))), dnQ(qq))
+        ! sum_f <dm||ef> r3(m; f bc) as [(e, d)][(bc)] (one product), added to
+        ! [d][(bc)] at U[e] + off12(K, d)
+        nq = dnQ(qq)
+        ne = dnV(mu)
+        nr = dnV(dl)
+        call N(zc_gemm)(0_4, 0_4, ne * nr, nq, dnV(ph), one, w(dvo + NW * vooff(m, mu, dl)), dnV(ph), &
+                        w(kx3r + NW * (x3off(m) + off12(kk, ph))), nq, zero, w(ktu), nq)
+        o = uoffk(k) + off12(k, dl)
+        !$omp parallel do private(d, bc)
+        do e = 0, ne - 1
+          do d = 0, nr - 1
+            do bc = 0, nq - 1
+              u(o + e * n12(k) + d * nq + bc) = u(o + e * n12(k) + d * nq + bc) + tu((e * nr + d) * nq + bc)
+            end do
+          end do
         end do
       end do
     end do

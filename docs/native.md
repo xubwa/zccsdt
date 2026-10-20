@@ -5462,22 +5462,27 @@ rank 0 (`MEMORY_SIZE`): they hold what rank 0 holds but r2 and r3.
 Per sigma vector the transfers are the vector to all ranks and sigma4 by
 slices (each about one vector per rank), and the small sums.
 
-Measured (TZ, 10 + 106; one job, two nodes of 2 x Xeon Gold 6248R; CCSDT
-once; `%eomthrs 1e-10`; the same 37 + 32 sigma vectors in every run):
+Measured (one job each, two nodes of 2 x Xeon Gold 6248R, `-N 2
+--ntasks-per-node=1 -c 32`, `mpirun -ppn`; CCSDT once; `%eomthrs 1e-10`; the
+same numbers of sigma vectors and the same roots, to all digits printed, in
+every run; `bench/dea/native_mpi.sbatch`):
 
-| ranks x threads (nodes) | a sigma vector with the solver (s) | of it: intermediates, pp, ring, rows; the transfers (s) | EOM-DEA (s) | work array used / resident, rank 0 (MB) |
+| TZ (10 + 106), job 32265683 | a sigma vector with the solver (s) | of it: intermediates, pp, ring, rows; the transfers (s) | EOM-DEA, both targets (s) | work array used / resident, rank 0 (MB) |
 |---|---|---|---|---|
-| 1 x 32 (1) | 1.43, 1.38 | 0.10, 0.38, 0.30, 0.44; - | 98.4 | 13 884 / 14 205 |
-| 2 x 16 (1) | 1.03, 1.00 | 0.10, 0.25, 0.28, 0.17; 0.05 | 71.5 | 7 767 / 8 356 |
-| 2 x 32 (2) | 0.89, 0.87 | 0.11, 0.19, 0.25, 0.21; 0.02 | 63.1 | 7 767 / 8 253 |
-| 4 x 16 (2) | 0.71, 0.71 | 0.11, 0.13, 0.25, 0.09; 0.06 | 50.1 | 5 074 / 5 732 |
+| 1 rank x 32 threads, one node | 1.43, 1.37 | 0.10, 0.38, 0.29, 0.45; - | 97.8 | 13 884 / 14 218 |
+| 2 x 16, one node | 1.09, 1.06 | 0.11, 0.25, 0.30, 0.18; 0.10 | 75.5 | 7 767 / 8 384 |
+| 2 x 32, two nodes | 0.88, 0.86 | 0.11, 0.18, 0.22, 0.21; 0.05 | 62.1 | 7 767 / 8 228 |
+| 4 x 16, two nodes | 0.66, 0.66 | 0.11, 0.13, 0.15, 0.09; 0.10 | 46.3 | 5 074 / 5 724 |
+SEC168MPI
 
-(job 32265195, nodes c232, c235; the two targets of a run.)  The pp ladder,
-the rows of sigma4 and the hh ladder are divided; the small intermediates
-(0.1 s) and the ring (its expansion of the rows of every spectator on every
-rank) are not, and set the limit here: two nodes are twice one rank of 32
-threads.  The ranks hold their parts: rank 0 of two takes 7.8 GB where one
-rank takes 13.9 GB (R13 and the subspace divided).
+The pp ladder, the ring, the rows of sigma4 and the hh ladder are divided;
+the small intermediates (0.1 s for 116 spinors) are made by every rank, and
+the transfers (the vector to all ranks and sigma4 by slices: 0.2 GB each
+for 116 spinors) take 0.05 - 0.1 s.  (The ring of an earlier version, in
+which every rank expanded all rows of every spectator for its own output
+rows, took 0.25 s on four ranks; job 32265195.)  The ranks hold their parts:
+rank 0 of two takes 7.8 GB where one rank takes 13.9 GB (R13 and the
+subspace divided).
 
 ### 20.7 Timings
 
