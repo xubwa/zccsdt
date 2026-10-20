@@ -576,6 +576,11 @@ subroutine N(xzepcollect)(w, kx)
   integer(8), intent(in) :: kx
   if (.not. ecmd) return
   if (myrank == 0) call xzecmd(op_collect, xzewhich(kx))
+  if (edea) then
+    ! (EOM-DEA: every rank holds only its rows - the whole vector to rank 0)
+    call N(xzepslices)(w, kx, .false.)
+    return
+  end if
   call xzmpi_slices_put(w(kx + NW * xzensd()), eswoff)
 end subroutine
 
@@ -589,7 +594,32 @@ subroutine N(xzepspread)(w, kx)
   integer(8), intent(in) :: kx
   if (.not. ecmd) return
   if (myrank == 0) call xzecmd(op_spread, xzewhich(kx))
+  if (edea) then
+    ! (EOM-DEA: every rank its rows of the whole vector of rank 0)
+    call N(xzepslices)(w, kx, .true.)
+    return
+  end if
   call xzmpi_bcast_w(w(kx), NW * (xzensd() + xzenbig()))
+end subroutine
+
+! EOM-DEA (the test hook deasig): the rows of r4 of the whole vector x of
+! rank 0 to their owners (out), or from them to rank 0 (not out)
+subroutine N(xzepslices)(w, kx, out)
+  use xzdata
+  use xzeomd
+  use xzpar, only: myrank, nrank, xzmpi_send_w, xzmpi_recv_w
+  implicit none
+  real(8) :: w(*)
+  integer(8), intent(in) :: kx
+  logical, intent(in) :: out
+  integer(8) :: r, k
+  do r = 1, nrank - 1
+    k = kx + NW * (dvsd + esoff(r))
+    if (myrank == 0 .and. out) call xzmpi_send_w(w(k), NW * (esoff(r + 1) - esoff(r)), r, 23_8)
+    if (myrank == 0 .and. .not. out) call xzmpi_recv_w(w(k), NW * (esoff(r + 1) - esoff(r)), r, 23_8)
+    if (myrank == r .and. out) call xzmpi_recv_w(w(k), NW * (esoff(r + 1) - esoff(r)), 0_8, 23_8)
+    if (myrank == r .and. .not. out) call xzmpi_send_w(w(k), NW * (esoff(r + 1) - esoff(r)), 0_8, 23_8)
+  end do
 end subroutine
 
 ! The sigma vector of x into y.  More than one rank (and R3): the singles
