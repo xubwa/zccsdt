@@ -30,7 +30,7 @@ dopy=${7:-1}
 tag=$(basename "$npz" .npz)
 mkdir -p "$outdir"
 export OMP_NUM_THREADS=32
-export PYTHONPATH=$snap/src:$HOME/apps/socutils-git-env
+export PYTHONPATH=$snap/src:$HOME/apps/socutils-git-env:${PYTHONPATH:-}
 echo "node $(hostname), job $SLURM_JOB_ID, $(date)"; lscpu | grep 'Model name'
 cd "$snap"
 if [ "$dopy" = 1 ]; then

@@ -29,6 +29,8 @@ subroutine N(xzdsig)(w, kv, ks)
   use xzmem
   use xzkern
   use xzdead
+  use xzpar, only: myrank, xzmpi_bcast_w, xzmpi_slices_put, xzmpi_allsum_w, xzmpi_sum0_w
+  use xzeomd, only: eswoff
   use omp_lib
   implicit none
   real(8), target :: w(*)
@@ -63,27 +65,49 @@ subroutine N(xzdsig)(w, kv, ks)
   zrhave = .false.
   if (.not. xzdry) then
     t0 = omp_get_wtime()
+    ! (over the ranks: r2, r3 of rank 0 and the rows of r4 of every rank to
+    ! all ranks; every rank makes the rows of sigma4 of its pairs)
+    if (ddist) then
+      call xzmpi_bcast_w(w(kv), NW * (dn2 + dsz3))
+      call xzmpi_slices_put(w(k4), eswoff)
+      tdpart(12) = tdpart(12) + omp_get_wtime() - t0
+    end if
     call zc_vzero_d(NW * (dn2 + dsz3 + dsz4), w(ks))
     call N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwor, kq3, kxor, kzr, zrhave, ku, kz, ktu)
+    ! (the thin products of the pp ladder of every rank are summed into XoR below)
+    if (ddist .and. myrank > 0) call zc_vzero_d(NW * no * no * nvp, w(kxor))
     t1 = omp_get_wtime()
     tdpart(1) = tdpart(1) + t1 - t0
   end if
   call N(xzdpp)(w, k4, s2, s4, kx3s, kxor)
+  if (ddist .and. .not. xzdry) then
+    t0 = omp_get_wtime()
+    call xzmpi_allsum_w(w(kxor), NW * no * no * nvp)
+    call xzmpi_sum0_w(w(kx3s), NW * x3size)
+    if (dn2 > 0) call xzmpi_sum0_w(w(s2), NW * dn2)
+    tdpart(12) = tdpart(12) + omp_get_wtime() - t0
+  end if
   call N(xzdring)(w, k4, s3, s4, kz)
+  if (ddist .and. .not. xzdry) then
+    t0 = omp_get_wtime()
+    call xzmpi_bcast_w(w(kz), NW * zsize)
+    tdpart(12) = tdpart(12) + omp_get_wtime() - t0
+  end if
   if (.not. xzdry .and. xzdwant('hh')) then
     t0 = omp_get_wtime()
     call N(xzdhh)(w, k4, s4)
     tdpart(4) = tdpart(4) + omp_get_wtime() - t0
   end if
   call N(xzdrows)(w, k3, kr2, kx3r, kxor, kzr, zrhave, kz, kwor, kyr, s4)
-  if (.not. xzdry) then
+  ! (the 3p1h and 2p rows: rank 0)
+  if (.not. xzdry .and. (.not. ddist .or. myrank == 0)) then
     t0 = omp_get_wtime()
     call N(xzdrow3)(w, k3, kr2, kx3r, kx3s, kq3, kwhr, s3)
     t1 = omp_get_wtime()
     tdpart(6) = tdpart(6) + t1 - t0
   end if
-  call N(xzdrow2)(w, k2, kx3r, s2)
-  if (.not. xzdry) tdpart(7) = tdpart(7) + omp_get_wtime() - t1
+  if (.not. ddist .or. myrank == 0) call N(xzdrow2)(w, k2, kx3r, s2)
+  if (.not. xzdry .and. (.not. ddist .or. myrank == 0)) tdpart(7) = tdpart(7) + omp_get_wtime() - t1
   call N(xzdproj)(w, ks)
   if (.not. xzdry) ndeasig = ndeasig + 1
   deallocate(zrhave)
@@ -338,7 +362,7 @@ subroutine N(xzdpp)(w, k4, ks2, ks4, kx3s, kxor)
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: k4, ks2, ks4, kx3s, kxor
-  integer(8) :: m0, kt, kx, mm, c, nr, na, nbm, need, r0, r1, nb, r, q, o, nc, pq, u, v, ncol, a, b, p, ka, mu
+  integer(8) :: m0, kt, kx, mm, c, nr, na, nbm, need, r0, r1, nb, r, q, o, nc, pq, u, v, ncol, a, b, p, ka, mu, ra, rb
   integer(8), allocatable :: row(:), xoff(:, :), s1(:, :), s2(:, :)
   real(8), allocatable :: sg(:)
   real(8) :: t0, ta, tb
@@ -347,11 +371,13 @@ subroutine N(xzdpp)(w, k4, ks2, ks4, kx3s, kxor)
   ZT :: one, zero, alpha
   one = 1
   zero = 0
-  ! the buffers: the largest batch of any block
+  ! the buffers: the largest batch of any block (of the rows of this rank)
   need = 1
   do mm = 0, n4c - 1
     if (.not. inblk4(mm) .or. n22(mm) == 0) cycle
-    nr = dnO2(mm - ds)
+    call xzdown(mm, ra, rb)
+    nr = rb - ra
+    if (nr == 0) cycle
     nbm = min(nr, max(1_8, dbatch / n22(mm)))
     need = max(need, nbm * n22(mm))
   end do
@@ -369,11 +395,13 @@ subroutine N(xzdpp)(w, k4, ks2, ks4, kx3s, kxor)
   do mm = 0, n4c - 1
     if (.not. inblk4(mm) .or. n22(mm) == 0) cycle
     c = mm - ds
-    nr = dnO2(c)
+    call xzdown(mm, ra, rb)
+    nr = rb - ra
+    if (nr == 0) cycle
     na = nqa(mm)
     nbm = min(nr, max(1_8, dbatch / n22(mm)))
-    do r0 = 0, nr - 1, nbm
-      r1 = min(nr, r0 + nbm)
+    do r0 = ra, rb - 1, nbm
+      r1 = min(rb, r0 + nbm)
       nb = r1 - r0
       allocate(row(0:nb-1), sg(0:nb-1), xoff(0:npg-1, 0:nb-1), s1(0:npg-1, 0:nb-1), s2(0:npg-1, 0:nb-1))
       do r = 0, nb - 1
@@ -524,6 +552,8 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
     wgmax = 0
     call xzdringbat(nbk, bkk, bnc, bnr, nbat, bfirst, mbmax, xbmax, wgmax)
     do t = 1, nbat
+      ! (a batch without a row of this rank: nothing to make)
+      if (all(bnr(bfirst(t):bfirst(t + 1) - 1) == 0)) cycle
       ! the places of the blocks of the batch in the operand and the product
       mo = 0
       xo = 0
@@ -544,6 +574,7 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
         nk = dnK(bkk(b))
         nc = bnc(b)
         nr = bnr(b)
+        if (nr == 0) cycle
         ! the codes of the columns (m nv + e) and of the rows of the stacked operator
         do mm = 0, no - 1
           if (mbase(mm, b) < 0) cycle
@@ -735,7 +766,7 @@ subroutine N(xzdhh)(w, k4, ks4)
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: k4, ks4
-  integer(8) :: mm, c, p0, nr
+  integer(8) :: mm, c, p0, nr, ra, rb
   ZT :: one
   one = 1
   do mm = 0, n4c - 1
@@ -743,8 +774,11 @@ subroutine N(xzdhh)(w, k4, ks4)
     c = mm - ds
     p0 = opoff(c)
     nr = dnO2(c)
-    call N(zc_gemm)(1_4, 0_4, nr, nqa(mm), nr, one, w(dwh + NW * (p0 * npo + p0)), npo, w(k4 + NW * off4(mm)), nqa(mm), &
-                    one, w(ks4 + NW * off4(mm)), nqa(mm))
+    ! (the rows ra .. rb - 1 of this rank, from all rows of the block)
+    call xzdown(mm, ra, rb)
+    if (rb == ra) cycle
+    call N(zc_gemm)(1_4, 0_4, rb - ra, nqa(mm), nr, one, w(dwh + NW * (p0 * npo + p0 + ra)), npo, w(k4 + NW * off4(mm)), &
+                    nqa(mm), one, w(ks4 + NW * (off4(mm) + ra * nqa(mm))), nqa(mm))
   end do
 end subroutine
 
@@ -767,7 +801,7 @@ subroutine N(xzdrows)(w, k3, kr2, kx3r, kxor, kzr, zrhave, kz, kwor, kyr, ks4)
   integer(8), intent(in) :: k3, kr2, kx3r, kxor, kzr, kz, kwor, kyr, ks4
   logical, intent(in) :: zrhave(0:no-1, 0:ncls-1)
   integer(8) :: m0, kx22, kx13, klt, krc, klc, krc3, ks13, k22max, k13max, nkmax, mu, kk, s13size
-  integer(8) :: mm, c, r, pq, i, j, q, nc, nq, kr, x, y, n, ph, jj, kj, t0p, p, nk, ksum, ec, nb, cc, a, o, e, ii
+  integer(8) :: mm, c, r, pq, i, j, q, nc, nq, kr, x, y, n, ph, jj, kj, t0p, p, nk, ksum, ec, nb, cc, a, o, e, ii, ra, rb
   integer(8), allocatable :: s13off(:), rows(:)
   integer(8) :: one_row(1), xo22(npg), xs1(npg), xs2(npg), xo13(ncls), ys1(ncls), ys2(ncls)
   real(8) :: one_sg(1), t0, ta
@@ -839,7 +873,8 @@ subroutine N(xzdrows)(w, k3, kr2, kx3r, kxor, kzr, zrhave, kz, kwor, kyr, ks4)
   do mm = 0, n4c - 1
     if (.not. inblk4(mm)) cycle
     c = mm - ds
-    do r = 0, dnO2(c) - 1
+    call xzdown(mm, ra, rb)
+    do r = ra, rb - 1
       pq = opoff(c) + r
       i = opa(pq)
       j = opb(pq)
@@ -1196,10 +1231,12 @@ subroutine N(xzdproj)(w, kx)
   use xzdata
   use xzmem
   use xzdead
+  use xzpar, only: myrank
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: kx
-  integer(8) :: m0, kp, k, nk, nr, c, r, a, t, mm, q, p0, pr, i0
+  integer(8) :: m0, kp, k, nk, nr, c, r, a, t, mm, q, p0, pr, i0, ra, rb
+  logical :: r23
   integer(2), pointer :: tri(:, :), quads(:, :)
   integer(8), pointer :: vpa(:), vpb(:), opa(:), opb(:)
   integer(1), pointer :: cp(:)
@@ -1226,11 +1263,14 @@ subroutine N(xzdproj)(w, kx)
   call xzdiv(w, jvpb, nvp, vpb)
   call xzdiv(w, jopa, npo, opa)
   call xzdiv(w, jopb, npo, opb)
+  r23 = .not. ddist .or. myrank == 0
   do t = 0, dn2 - 1
+    if (.not. r23) exit
     q = vpoff(ds) + t
     if (mod(dpv(vpa(q)) + dpv(vpb(q)) + dtpar, 2_8) /= 0) x(t) = 0
   end do
   do k = 0, n3c - 1
+    if (.not. r23) exit
     nr = off3(k + 1) - off3(k)
     if (nr == 0) cycle
     nk = dnK(k)
@@ -1257,8 +1297,9 @@ subroutine N(xzdproj)(w, kx)
     do a = 0, nk - 1
       cp(a) = int(mod(dpv(quads(0, i0 + a)) + dpv(quads(1, i0 + a)) + dpv(quads(2, i0 + a)) + dpv(quads(3, i0 + a)), 2_8), 1)
     end do
+    call xzdown(mm, ra, rb)
     !$omp parallel do private(a, pr, p0)
-    do r = 0, dnO2(c) - 1
+    do r = ra, rb - 1
       p0 = opoff(c) + r
       pr = dpo(opa(p0)) + dpo(opb(p0)) + dtpar
       do a = 0, nk - 1
@@ -1288,11 +1329,13 @@ subroutine N(xzdprec)(w, kx, omega)
   use xzmem
   use xzkern
   use xzdead
+  use xzpar, only: myrank
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: kx
   ZT, intent(in) :: omega
-  integer(8) :: m0, kc, k, nk, nr, c, r, a, t, mm, q, p0, i0, nmax
+  integer(8) :: m0, kc, k, nk, nr, c, r, a, t, mm, q, p0, i0, nmax, ra, rb
+  logical :: r23
   real(8), pointer :: cs(:), eps(:)
   integer(2), pointer :: tri(:, :), quads(:, :)
   integer(8), pointer :: vpa(:), vpb(:), opa(:), opb(:)
@@ -1319,8 +1362,9 @@ subroutine N(xzdprec)(w, kx, omega)
   call xzdiv(w, jopa, npo, opa)
   call xzdiv(w, jopb, npo, opb)
   allocate(ro(0:max(npo, no, 1_8) - 1))
+  r23 = .not. ddist .or. myrank == 0
   ! r2
-  if (dn2 > 0) then
+  if (dn2 > 0 .and. r23) then
     do t = 0, dn2 - 1
       q = vpoff(ds) + t
       cs(t) = eps(no + vpa(q)) + eps(no + vpb(q))
@@ -1330,6 +1374,7 @@ subroutine N(xzdprec)(w, kx, omega)
   end if
   ! r3
   do k = 0, n3c - 1
+    if (.not. r23) exit
     nr = off3(k + 1) - off3(k)
     if (nr == 0) cycle
     nk = dnK(k)
@@ -1355,12 +1400,13 @@ subroutine N(xzdprec)(w, kx, omega)
       cs(a) = eps(no + quads(0, i0 + a)) + eps(no + quads(1, i0 + a)) + eps(no + quads(2, i0 + a)) + &
               eps(no + quads(3, i0 + a))
     end do
-    nr = dnO2(c)
-    do r = 0, nr - 1
+    call xzdown(mm, ra, rb)
+    if (rb == ra) cycle
+    do r = ra, rb - 1
       p0 = opoff(c) + r
-      ro(r) = eps(opa(p0)) + eps(opb(p0))
+      ro(r - ra) = eps(opa(p0)) + eps(opb(p0))
     end do
-    call N(zc_vprecond)(w(kx + NW * (dn2 + dsz3 + off4(mm))), nr, nk, ro, cs, omega, floor)
+    call N(zc_vprecond)(w(kx + NW * (dn2 + dsz3 + off4(mm) + ra * nk)), rb - ra, nk, ro, cs, omega, floor)
   end do
   deallocate(ro)
   call xzrel(m0)

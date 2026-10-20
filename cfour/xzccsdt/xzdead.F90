@@ -80,6 +80,11 @@ module xzdead
   integer(8), allocatable :: zroff(:, :), uoffk(:), zoffk(:)
   integer(8) :: zrsize = 0, usize = 0, zsize = 0, x3size = 0, n22max = 0, n13max = 0
   logical, allocatable :: inblk4(:)         ! M is a block of r4 (rows and quadruples)
+  ! the occupied pairs of this rank (more than one rank: xzdslices; else all):
+  ! its rows of r4, those of the sigma vector that it makes
+  integer(8) :: dp0 = 0, dp1 = 0
+  integer(8), allocatable :: dpidx(:, :)    ! the occupied pairs: dpidx(j, i) for i < j (a copy of the table jopidx)
+  logical :: ddist = .false.                ! the sigma vector over the ranks
 
   ! ---- the results
   integer(8) :: dnres = 0
@@ -347,9 +352,13 @@ contains
   subroutine xzdglay(w)
     use xzdata
     real(8), target :: w(*)
-    integer(8), pointer :: opgrp(:)
+    integer(8), pointer :: opgrp(:), opidx(:, :)
     integer(8) :: k, p, n, i, c, pq, mu, ka, be, kp, m, ph
     call xzdiv(w, jopgrp, npo, opgrp)
+    call xzdiv2(w, jopidx, no, no, opidx)
+    if (allocated(dpidx)) deallocate(dpidx)
+    allocate(dpidx(0:no-1, 0:no-1))
+    dpidx = opidx
     n2c = npg
     n3c = ntg
     n4c = 4 * ncls - 3
@@ -546,6 +555,9 @@ contains
              n13(0:n4c-1), off12(0:n3c-1, 0:ncls-1), n12(0:n3c-1), x3off(0:no), zroff(0:no-1, 0:ncls-1), &
              uoffk(0:n3c-1), zoffk(0:n3c-1), inblk4(0:n4c-1))
     dn2 = dnQ(s)
+    dp0 = 0
+    dp1 = npo
+    ddist = .false.
     ! r3: the block K has the occupied of class K - s
     off3(0) = 0
     blk3 = -1
@@ -657,6 +669,69 @@ contains
     end do
   end subroutine xzdsec
 
+  ! The rows of r4 of every rank (more than one rank): one range of occupied
+  ! pairs per rank - the order of the pairs is that of the blocks of r4, so
+  ! that a range of pairs is a range of r4 - chosen so that the parts of a
+  ! vector that the ranks hold (rank 0: r2, r3 and its rows of r4) have about
+  ! equal numbers of elements.  esoff (xzeomd): the first element of r4 of
+  ! every rank, relative to r4, eswoff the same in words; dp0, dp1: the pairs
+  ! of this rank.  One rank: all.
+  subroutine xzdslices(nw)
+    use xzdata
+    use xzpar, only: myrank, nrank
+    use xzeomd, only: esoff, eswoff, esmax
+    integer(8), intent(in) :: nw
+    integer(8), allocatable :: pb(:), cum(:)
+    integer(8) :: r, p, tot, nsd, t
+    if (allocated(esoff)) deallocate(esoff, eswoff)
+    allocate(esoff(0:nrank), eswoff(0:nrank), pb(0:nrank), cum(0:max(npo, 1_8)))
+    cum(0) = 0
+    do p = 0, npo - 1
+      t = 0
+      if (blk4(p) >= 0) t = nqa(blk4(p))
+      cum(p + 1) = cum(p) + t
+    end do
+    nsd = dn2 + dsz3
+    tot = nsd + dsz4
+    pb(0) = 0
+    do r = 1, nrank - 1
+      t = (r * tot) / nrank
+      pb(r) = npo
+      do p = 0, npo - 1
+        if (nsd + cum(p) >= t) then
+          pb(r) = p
+          exit
+        end if
+      end do
+      pb(r) = max(pb(r), pb(r - 1))
+    end do
+    pb(nrank) = npo
+    esmax = 0
+    do r = 0, nrank
+      esoff(r) = cum(pb(r))
+    end do
+    do r = 0, nrank - 1
+      esmax = max(esmax, esoff(r + 1) - esoff(r))
+    end do
+    eswoff = nw * esoff
+    dp0 = pb(myrank)
+    dp1 = pb(myrank + 1)
+    deallocate(pb, cum)
+  end subroutine xzdslices
+
+  ! the rows a <= r < b of the block M (of the pairs of group M - ds) that
+  ! this rank makes
+  subroutine xzdown(m, a, b)
+    use xzdata, only: opoff
+    integer(8), intent(in) :: m
+    integer(8), intent(out) :: a, b
+    integer(8) :: c
+    c = m - ds
+    a = max(dp0, opoff(c)) - opoff(c)
+    b = min(dp1, opoff(c + 1)) - opoff(c)
+    if (b < a) b = a
+  end subroutine xzdown
+
   ! The blocks of the ring of the spectator j (dea_sector.Engine.ring_tables):
   ! for every d = class(m) - class(e) with triples (bcd) of the group
   ! kK = class(j) + s + d, the columns (m, e) of the operand - m not j, e of
@@ -667,6 +742,7 @@ contains
   ! (brv); -1: none.
   subroutine xzdringblk(j, nbk, bd, bkk, bnc, bnr, bfov, bro, brv, mbase, ibase)
     use xzdata
+    use xzpar, only: myrank
     integer(8), intent(in) :: j
     integer(8), intent(out) :: nbk
     integer(8), intent(out) :: bd(*), bkk(*), bnc(*), bnr(*), bfov(*), bro(*), brv(*)
@@ -686,29 +762,36 @@ contains
       end do
       if (nc == 0) cycle
       nbk = nbk + 1
+      ! (the rows (i, a): of the pairs (i, j) of this rank; those of sigma3
+      ! and XvR: rank 0)
       nr = 0
       do m = 0, no - 1
         ibase(m, nbk) = -1
         c = ocls(m) - d
         if (m == j .or. dnV(c) == 0) cycle
+        if (ddist) then
+          if (xzdpidx(min(m, j), max(m, j)) < dp0 .or. xzdpidx(min(m, j), max(m, j)) >= dp1) cycle
+        end if
         ibase(m, nbk) = nr
         nr = nr + dnV(c)
       end do
       bfov(nbk) = -1
-      if (d == 0) then
-        bfov(nbk) = nr
-        nr = nr + 1
-      end if
       ci = ocls(j) + d
       bro(nbk) = -1
       brv(nbk) = -1
-      if (dnO(ci) > 0) then
-        bro(nbk) = nr
-        nr = nr + dnO(ci)
-      end if
-      if (dnV(ci) > 0) then
-        brv(nbk) = nr
-        nr = nr + dnV(ci)
+      if (.not. ddist .or. myrank == 0) then
+        if (d == 0) then
+          bfov(nbk) = nr
+          nr = nr + 1
+        end if
+        if (dnO(ci) > 0) then
+          bro(nbk) = nr
+          nr = nr + dnO(ci)
+        end if
+        if (dnV(ci) > 0) then
+          brv(nbk) = nr
+          nr = nr + dnV(ci)
+        end if
       end if
       bd(nbk) = d
       bkk(nbk) = kk
@@ -716,6 +799,13 @@ contains
       bnr(nbk) = nr
     end do
   end subroutine xzdringblk
+
+  ! the number of the occupied pair i < j (the tables of the program)
+  integer(8) function xzdpidx(i, j)
+    use xzdata, only: no
+    integer(8), intent(in) :: i, j
+    xzdpidx = dpidx(j, i)
+  end function
 
   ! The batches of the blocks of the ring of j (Engine._ring_pass): a block
   ! after the other while the operand and the product of the batch hold at

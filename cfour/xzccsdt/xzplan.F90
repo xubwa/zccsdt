@@ -393,6 +393,11 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       pneedw = max(pneedw, xzpeak_cc(w))
       asworker = .false.
       if (maxthr > nthr0) call omp_set_num_threads(nthr0)
+      ! (EOM-DEA: a rank other than 0 holds what rank 0 holds but r2, r3 -
+      ! the intermediates, two whole vectors, its rows of the subspace; the
+      ! batches and the subspace are decided by rank 0 in its work array:
+      ! the other ranks take as many words as rank 0)
+      if (with_dea) pneedw = max(pneedw, xzsize)
     end if
   end if
   if (.not. planq) then

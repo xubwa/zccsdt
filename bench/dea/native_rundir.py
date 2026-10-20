@@ -23,6 +23,8 @@ usage: python bench/dea/native_rundir.py <file.npz> <outdir> [--freeze n] [--tar
   --estate-conv   ESTATE_CONV: the largest element of a residual below 10^-N (default 9)
   --mem-gb        MEMORY_SIZE in GB (default 8)
   --xz line       a line of the section %xzccsdt (repeatable)
+  --phases seed   every spinor multiplied by a phase exp(i x), x random with this seed: complex
+                  integrals with the same labels (a test of the complex arithmetic)
 '''
 import os
 import shutil
@@ -73,7 +75,7 @@ def write_parity(directory, par):
 def main():
     args = sys.argv[1:]
     opt = {'--freeze': '0', '--targets': '0,2', '--roots': '1', '--cc-conv': '10', '--estate-conv': '9',
-           '--mem-gb': '8', '--cfour-bin': BIN}
+           '--mem-gb': '8', '--cfour-bin': BIN, '--phases': None}
     xz = []
     while '--xz' in args:
         k = args.index('--xz')
@@ -94,6 +96,18 @@ def main():
     # (the files have the spinor energies only: canonical spinors; f_ov of the SCF is left out)
     f = np.asarray(eris.fock)
     eris.fock = np.diag(np.diag(f))
+    if opt['--phases'] is not None:
+        # (as bench/cfour/labelled_run.py: <pq||rs> picks up conj(f_p f_q) f_r f_s)
+        ph = np.exp(1j * np.random.default_rng(int(opt['--phases'])).uniform(0, 2 * np.pi, n))
+        sl = {'o': slice(0, no), 'v': slice(no, n)}
+        for key in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv'):
+            fz = [ph[sl[c]] for c in key]
+            x = np.asarray(getattr(eris, key)).astype(np.complex128)
+            x *= (fz[0].conj()[:, None, None, None] * fz[1].conj()[None, :, None, None]
+                  * fz[2][None, None, :, None] * fz[3][None, None, None, :])
+            setattr(eris, key, x)
+        eris.fock = np.asarray(eris.fock).astype(np.complex128)
+        print('phases on the spinors (seed %s): complex integrals' % opt['--phases'])
     os.makedirs(out, exist_ok=True)
     targets = '\n'.join('%s %s' % (t, opt['--roots']) for t in opt['--targets'].split(','))
     extra = ('%xzccsdt\n' + '\n'.join(xz) + '\n') if xz else ''
