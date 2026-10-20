@@ -96,6 +96,10 @@ module xzdead
   integer(8) :: dp0 = 0, dp1 = 0
   integer(8), allocatable :: dpidx(:, :)    ! the occupied pairs: dpidx(j, i) for i < j (a copy of the table jopidx)
   logical :: ddist = .false.                ! the sigma vector over the ranks
+  ! the segments of an exchange of rows between the ranks (xzmpi_segs): peer,
+  ! word of the work array, words, 0 send / 1 receive
+  integer(8) :: dsn = 0
+  integer(8), allocatable :: dsp(:), dspos(:), dslen(:), dsdir(:)
 
   ! ---- the results
   integer(8) :: dnres = 0
@@ -852,6 +856,83 @@ contains
     integer(8), intent(in) :: i, j
     xzdpidx = dpidx(j, i)
   end function
+
+  ! the rank that holds the occupied pair p (its rows of r4; dqb)
+  integer(8) function xzdowner(p)
+    use xzpar, only: nrank
+    integer(8), intent(in) :: p
+    integer(8) :: r
+    xzdowner = nrank - 1
+    do r = 0, nrank - 1
+      if (p < dqb(r + 1)) then
+        xzdowner = r
+        return
+      end if
+    end do
+  end function
+
+  ! the elements of a vector that this rank holds: r2, r3 (rank 0's; a copy
+  ! on the other ranks, for the sigma vector) and its rows of r4 (all with
+  ! one rank)
+  integer(8) function xzdpart()
+    use xzpar, only: myrank
+    use xzeomd, only: esoff
+    xzdpart = dn2 + dsz3 + dsz4
+    if (ddist) xzdpart = dn2 + dsz3 + esoff(myrank + 1) - esoff(myrank)
+  end function
+
+  ! The rows (m, j) of r4 of the spectator j, m /= j, as a rank takes them
+  ! for the ring over the ranks (20.6): block after block of r4, within a
+  ! block in the order of m; lrow(m) the row of (m, j) in its block there
+  ! (-1: none), jb0(M) the first element of the block M, tot all elements
+  subroutine xzdringlay(j, lrow, jb0, tot)
+    use xzdata, only: no
+    integer(8), intent(in) :: j
+    integer(8), intent(out) :: lrow(0:no-1), jb0(0:n4c-1), tot
+    integer(8) :: mx, m, px, cnt
+    tot = 0
+    lrow = -1
+    do mx = 0, n4c - 1
+      jb0(mx) = tot
+      cnt = 0
+      do m = 0, no - 1
+        if (m == j) cycle
+        px = dpidx(max(m, j), min(m, j))
+        if (blk4(px) /= mx) cycle
+        lrow(m) = cnt
+        cnt = cnt + 1
+      end do
+      tot = tot + cnt * nqa(mx)
+    end do
+  end subroutine xzdringlay
+
+  ! a segment of the exchange in hand (dsn = 0 starts one)
+  subroutine xzdseg(peer, pos, len, dir)
+    integer(8), intent(in) :: peer, pos, len, dir
+    integer(8), allocatable :: t(:)
+    integer(8) :: n
+    if (.not. allocated(dsp)) allocate(dsp(1024), dspos(1024), dslen(1024), dsdir(1024))
+    if (dsn >= size(dsp, kind=8)) then
+      n = 2 * size(dsp, kind=8)
+      allocate(t(n))
+      t(1:dsn) = dsp(1:dsn)
+      call move_alloc(t, dsp)
+      allocate(t(n))
+      t(1:dsn) = dspos(1:dsn)
+      call move_alloc(t, dspos)
+      allocate(t(n))
+      t(1:dsn) = dslen(1:dsn)
+      call move_alloc(t, dslen)
+      allocate(t(n))
+      t(1:dsn) = dsdir(1:dsn)
+      call move_alloc(t, dsdir)
+    end if
+    dsn = dsn + 1
+    dsp(dsn) = peer
+    dspos(dsn) = pos
+    dslen(dsn) = len
+    dsdir(dsn) = dir
+  end subroutine xzdseg
 
   ! The batches of the blocks of the ring of j (Engine._ring_pass): a block
   ! after the other while the operand and the product of the batch hold at

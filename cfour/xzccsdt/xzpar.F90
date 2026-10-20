@@ -108,6 +108,14 @@ module xzpar
       type(*), dimension(*) :: buf
       integer(c_int64_t) :: off(*)
     end subroutine
+    ! segments of an array to and from other ranks, all at once (received:
+    ! stored, or with add = 1 added through tmp of ntmp words)
+    subroutine xzmpi_segs(w, n, peer, pos, len, dir, add, tmp, ntmp) bind(C)
+      import
+      type(*), dimension(*) :: w, tmp
+      integer(c_int64_t), value :: n, add, ntmp
+      integer(c_int64_t) :: peer(*), pos(*), len(*), dir(*)
+    end subroutine
     subroutine xzmpi_set_chunk(n) bind(C)
       import
       integer(c_int64_t), value :: n

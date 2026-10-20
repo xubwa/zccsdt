@@ -208,6 +208,82 @@ void xzmpi_slices_put(double *buf, const int64_t *off)
     }
 }
 
+/* ---- Segments: pieces of an array between pairs of ranks, all at once (the
+ * rows of the EOM-DEA vectors that a rank takes from their owners, and the
+ * rows of sigma that it gives back).  n segments; segment s is len[s] words
+ * at the word pos[s] of w (Fortran numbering, from 1), sent to (dir[s] = 0)
+ * or received from (dir[s] = 1) the rank peer[s] (never this rank).  add = 0:
+ * a received segment is stored; add = 1: it is added to what is there
+ * (through tmp, ntmp words, at least one chunk or the longest segment; the
+ * additions are made one after the other, so segments of several ranks may
+ * add to the same words).  The two sides list the segments between two
+ * ranks in the same order with the same lengths.  All sends are posted
+ * first, then the receives: no rank waits for another before it has posted
+ * what it gives. */
+void xzmpi_segs(double *w, int64_t n, const int64_t *peer, const int64_t *pos, const int64_t *len,
+                const int64_t *dir, int64_t add, double *tmp, int64_t ntmp)
+{
+    int64_t nsend = 0, nrecv = 0, maxlen = 0;
+    for (int64_t s = 0; s < n; s++) {
+        int64_t c = (len[s] + xz_chunk - 1) / xz_chunk;
+        if (dir[s] == 0) nsend += c; else nrecv += c;
+        if (len[s] > maxlen) maxlen = len[s];
+    }
+    MPI_Request *rq = malloc(sizeof(MPI_Request) * (size_t)(nsend + nrecv + 1));
+    int64_t nrq = 0;
+    for (int64_t s = 0; s < n; s++) {
+        if (dir[s] != 0) continue;
+        for (int64_t o = 0; o < len[s]; o += xz_chunk) {
+            int m = (int)(len[s] - o < xz_chunk ? len[s] - o : xz_chunk);
+            MPI_Isend(w + pos[s] - 1 + o, m, MPI_DOUBLE, (int)peer[s], 31 + (int)add, MPI_COMM_WORLD, &rq[nrq++]);
+        }
+    }
+    if (!add) {
+        for (int64_t s = 0; s < n; s++) {
+            if (dir[s] == 0) continue;
+            for (int64_t o = 0; o < len[s]; o += xz_chunk) {
+                int m = (int)(len[s] - o < xz_chunk ? len[s] - o : xz_chunk);
+                MPI_Irecv(w + pos[s] - 1 + o, m, MPI_DOUBLE, (int)peer[s], 31, MPI_COMM_WORLD, &rq[nrq++]);
+            }
+        }
+    } else if (nrecv > 0) {
+        /* the receives that add: up to nslot at a time, in the order of the list */
+        int64_t slot = xz_chunk < maxlen ? xz_chunk : maxlen;
+        int nslot = (int)(ntmp / (slot > 0 ? slot : 1));
+        if (nslot > 16) nslot = 16;
+        if (nslot < 1) nslot = 1;
+        MPI_Request *ar = malloc(sizeof(MPI_Request) * (size_t)nslot);
+        double **dst = malloc(sizeof(double *) * (size_t)nslot);
+        int *cnt = malloc(sizeof(int) * (size_t)nslot);
+        int64_t s = 0, o = 0, done = 0, posted = 0;
+        for (int k = 0; k < nslot; k++) ar[k] = MPI_REQUEST_NULL;
+        while (done < nrecv) {
+            for (int k = 0; k < nslot && posted < nrecv; k++) {
+                if (ar[k] != MPI_REQUEST_NULL) continue;
+                while (s < n && (dir[s] == 0 || o >= len[s])) { s++; o = 0; }
+                int m = (int)(len[s] - o < xz_chunk ? len[s] - o : xz_chunk);
+                dst[k] = w + pos[s] - 1 + o;
+                cnt[k] = m;
+                MPI_Irecv(tmp + (int64_t)k * slot, m, MPI_DOUBLE, (int)peer[s], 32, MPI_COMM_WORLD, &ar[k]);
+                o += m;
+                posted++;
+            }
+            int k;
+            MPI_Waitany(nslot, ar, &k, MPI_STATUS_IGNORE);
+            double *x = dst[k], *y = tmp + (int64_t)k * slot;
+            const int m = cnt[k];
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < m; i++) x[i] += y[i];
+            done++;
+        }
+        free(ar);
+        free(dst);
+        free(cnt);
+    }
+    MPI_Waitall((int)nrq, rq, MPI_STATUSES_IGNORE);
+    free(rq);
+}
+
 /* The name of the node of this rank (for the output), at most len - 1 characters. */
 void xzmpi_node(char *name, int64_t len)
 {
@@ -242,6 +318,9 @@ void xzmpi_allsum_w(double *buf, int64_t n) { (void)buf; (void)n; }
 void xzmpi_node(char *name, int64_t len) { if (len > 0) name[0] = 0; }
 void xzmpi_slices_add(double *buf, const int64_t *off, double *tmp) { (void)buf; (void)off; (void)tmp; }
 void xzmpi_slices_put(double *buf, const int64_t *off) { (void)buf; (void)off; }
+void xzmpi_segs(double *w, int64_t n, const int64_t *peer, const int64_t *pos, const int64_t *len,
+                const int64_t *dir, int64_t add, double *tmp, int64_t ntmp)
+{ (void)w; (void)n; (void)peer; (void)pos; (void)len; (void)dir; (void)add; (void)tmp; (void)ntmp; }
 void xzmpi_finalize(void) {}
 void xzmpi_abort(int64_t code) { exit((int)code); }
 

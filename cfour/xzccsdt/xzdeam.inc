@@ -234,17 +234,18 @@ subroutine N(xzdea)(w, ecorr)
     end if
     ms = xzmark()
     call N(xzdwq2)(w)
-    kxa = xzget(NW * nlen, 'DEA: a vector')
-    kxb = xzget(NW * nlen, 'DEA: its sigma vector')
-    msub = subspace(nroot)
-    ! (over the ranks: the rows of r4 of every rank, before the batches - a
-    ! sigma vector of a rank takes the buffers of its rows)
+    ! (over the ranks: the rows of r4 of every rank, before the vectors and the
+    ! batches - a rank holds its part of a vector, and a sigma vector of a
+    ! rank takes the buffers of its rows)
     if (dist) then
       call xzdslices(int(NW, 8))
       ddist = .true.
       write(6, '(a,i4,a,i14,a,i14,a)') '   over ', nrank, ' ranks: rank 0 holds r2, r3 and ', esoff(1), &
         ' elements of r4, the longest part of another rank ', esmax, ' elements'
     end if
+    kxa = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)')
+    kxb = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)')
+    msub = subspace(nroot)
     ! the batches of the passes over r4: as large as the work array leaves them
     ! (at most 1 GB of an operand) next to the buffer of the subspace in files
     ! - the batches first, as for the DIIS vectors and the EOM-EE subspace
@@ -421,8 +422,8 @@ contains
       nlen = dn2 + dsz3 + dsz4
       mp = xzmark()
       call N(xzdwq2)(w)
-      kk = xzget(NW * nlen, 'DEA: a vector')
-      kk = xzget(NW * nlen, 'DEA: its sigma vector')
+      kk = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)')
+      kk = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)')
       msub = subspace(nroot)
       kk = xzget(msub * NW * min(nlen, 1048576_8) + 64, 'DEA: the subspace (the buffer of its files)')
       call N(xzdsig)(w, kk, kk)
@@ -459,7 +460,7 @@ contains
     base = xztop
     write(6, '(/,a)') '  EOM-DEA: the memory of a rank (option deaplan; GB of the work array, nothing computed)'
     write(6, '(a,f9.2,a)') '   the integrals and the amplitudes (every rank): ', gb * base, ' GB'
-    write(6, '(a)') '   ranks rank   kept  of it R13 making them  2 vectors  sigma 1 GB / 1   part of a vector  subspace ' // &
+    write(6, '(a)') '   ranks rank   kept  of it R13 making them    2 parts  sigma 1 GB / 1   part of a vector  subspace ' // &
       ' total: subspace in the work array / in files;  R13 in the file XZDXV'
     call xzdry_begin()
     do ii = 1, dplanc
@@ -503,8 +504,8 @@ contains
           end if
           mp = xzmark()
           call N(xzdwq2)(w)
-          kk = xzget(NW * nlen, 'DEA: a vector')
-          kk = xzget(NW * nlen, 'DEA: its sigma vector')
+          kk = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)')
+          kk = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)')
           vec = xztop - mp
           dbatch = 1
           xzpeak = xztop
@@ -632,6 +633,13 @@ contains
     if (.not. dxvfile) r13more = NW * ((r13p(dqb(r + 1)) - r13p(dqb(r))) - (r13p(dqb(myrank0 + 1)) - r13p(dqb(myrank0))))
   end function
 
+  ! (more than one rank) the words of the two parts of the vectors that rank r
+  ! holds more than rank myrank0 (the sector in hand)
+  integer(8) function vecmore(r)
+    integer(8), intent(in) :: r
+    vecmore = 2 * NW * ((esoff(r + 1) - esoff(r)) - (esoff(myrank0 + 1) - esoff(myrank0)))
+  end function
+
   ! the most of the work array that a sigma vector takes on any rank with
   ! batches of nb elements, with what that rank holds more than rank 0 (the
   ! ranks are run dry one after the other)
@@ -643,7 +651,7 @@ contains
       do r = 0, nrank - 1
         if (r == myrank0) cycle
         call asrank(r, .true.)
-        pk = max(pk, sigpeak(nb) + r13more(r))
+        pk = max(pk, sigpeak(nb) + r13more(r) + vecmore(r))
       end do
       call asrank(myrank0, .true.)
     end if
@@ -666,7 +674,7 @@ contains
       call asrank(r, .true.)
       own = esoff(r + 1) - esoff(r)
       if (r == 0) own = own + dn2 + dsz3
-      free = xzsize - sigpeak(nb) - r13more(r)
+      free = xzsize - sigpeak(nb) - r13more(r) - vecmore(r)
       fmin = min(fmin, free)
       x = min(x, dble(free) / dble(NW * own + xzalign))
     end do
@@ -711,8 +719,10 @@ end subroutine
 ! ---------------------------------------------------------------------------
 ! A rank other than 0, at the command of rank 0 that a target starts
 ! (N(xzeserve), op_shift): the sector of the shift s, the rows of r4 of this
-! rank, the batches nb of rank 0, the 2p operator, two whole vectors; ms, mv
-! the marks of the problem and of its vectors.
+! rank, the batches nb of rank 0, the 2p operator, its parts of two vectors
+! (r2, r3 - for the sigma vector - and its rows of r4; ekx are the addresses
+! that whole vectors would have, of which the solver touches only the rows
+! of this rank, evoff ..); ms, mv the marks of the problem and of its vectors.
 subroutine N(xzdshift)(w, s, nb, ms, mv)
   use xzdata
   use xzmem
@@ -732,8 +742,8 @@ subroutine N(xzdshift)(w, s, nb, ms, mv)
   dvbig = dsz4
   ms = xzmark()
   call N(xzdwq2)(w)
-  ekx(1) = xzget(NW * (dvsd + dvbig), 'DEA: a vector')
-  ekx(2) = xzget(NW * (dvsd + dvbig), 'DEA: its sigma vector')
+  ekx(1) = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)') - NW * esoff(myrank)
+  ekx(2) = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)') - NW * esoff(myrank)
   mv = xzmark()
   edist = .true.
   ecmd = .true.
