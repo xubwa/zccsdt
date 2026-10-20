@@ -29,14 +29,15 @@ subroutine N(xzdsig)(w, kv, ks)
   use xzmem
   use xzkern
   use xzdead
-  use xzpar, only: myrank, xzmpi_bcast_w, xzmpi_slices_put, xzmpi_allsum_w, xzmpi_sum0_w
-  use xzeomd, only: eswoff
+  use xzpar, only: myrank, nrank, xzmpi_bcast_w, xzmpi_slices_put, xzmpi_allsum_w, xzmpi_sum0_w, xzmpi_slices_add, &
+                   xzmpi_chunk
+  use xzeomd, only: eswoff, esmax
   use omp_lib
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: kv, ks
   integer(8) :: m0, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwor, kq3, kxor, kzr, ku, kz, ktu, k2, k3, k4
-  integer(8) :: s2, s3, s4
+  integer(8) :: s2, s3, s4, kss
   logical, allocatable :: zrhave(:, :)
   real(8) :: t0, t1
   k2 = kv
@@ -76,6 +77,8 @@ subroutine N(xzdsig)(w, kv, ks)
     call N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwor, kq3, kxor, kzr, zrhave, ku, kz, ktu)
     ! (the thin products of the pp ladder of every rank are summed into XoR below)
     if (ddist .and. myrank > 0) call zc_vzero_d(NW * no * no * nvp, w(kxor))
+    ! (the same of XvR: its thin rows of the ring)
+    if (ddist .and. myrank > 0) call zc_vzero_d(NW * zsize, w(kz))
     t1 = omp_get_wtime()
     tdpart(1) = tdpart(1) + t1 - t0
   end if
@@ -89,8 +92,11 @@ subroutine N(xzdsig)(w, kv, ks)
   end if
   call N(xzdring)(w, k4, s3, s4, kz)
   if (ddist .and. .not. xzdry) then
+    ! (the ring: every rank its blocks (spectator, class), all rows (i, j) - sigma4
+    ! is summed by slices below -, the rows of sigma3 and of XvR summed here)
     t0 = omp_get_wtime()
-    call xzmpi_bcast_w(w(kz), NW * zsize)
+    call xzmpi_allsum_w(w(kz), NW * zsize)
+    if (dsz3 > 0) call xzmpi_sum0_w(w(s3), NW * dsz3)
     tdpart(12) = tdpart(12) + omp_get_wtime() - t0
   end if
   if (.not. xzdry .and. xzdwant('hh')) then
@@ -108,6 +114,15 @@ subroutine N(xzdsig)(w, kv, ks)
   end if
   if (.not. ddist .or. myrank == 0) call N(xzdrow2)(w, k2, kx3r, s2)
   if (.not. xzdry .and. (.not. ddist .or. myrank == 0)) tdpart(7) = tdpart(7) + omp_get_wtime() - t1
+  ! (over the ranks: the slice of sigma4 of every rank, summed - the ring wrote rows of all ranks)
+  if (ddist) then
+    kss = xzget(NW * max(1_8, min(xzmpi_chunk(), esmax)), 'DEA: buffer of the sum of sigma4')
+    if (.not. xzdry) then
+      t0 = omp_get_wtime()
+      call xzmpi_slices_add(w(s4), eswoff, w(kss))
+      tdpart(12) = tdpart(12) + omp_get_wtime() - t0
+    end if
+  end if
   call N(xzdproj)(w, ks)
   if (.not. xzdry) ndeasig = ndeasig + 1
   deallocate(zrhave)
@@ -498,13 +513,17 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
   use xzmem
   use xzkern
   use xzdead
+  use xzpar, only: myrank, nrank
   use omp_lib
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: k4, ks3, ks4, kz
   integer(8) :: m0, kmb, kxb, kwg, j, nbk, nbat, t, b, mbmax, xbmax, wgmax, mo, xo, nk, kk, c, i, x, pq, mm
-  integer(8) :: ne, e, l, ci, nc, nr, r, a, cc, nw2
+  integer(8) :: ne, e, l, ci, nc, nr, r, a, cc, nw2, nit, it, rk
   integer(8), allocatable :: bd(:), bkk(:), bnc(:), bnr(:), bfov(:), bro(:), brv(:), mbase(:, :), ibase(:, :)
+  real(8), allocatable :: icost(:), rload(:)
+  integer(8), allocatable :: iown(:, :), ij(:), ib(:)
+  logical, allocatable :: mine(:, :)
   integer(8), allocatable :: bfirst(:), bmo(:), bxo(:), rcode(:), ccode(:)
   integer(8), allocatable :: erow(:), exoff(:, :), es1(:, :), es2(:, :), em(:), sel(:)
   real(8), allocatable :: esg(:)
@@ -544,6 +563,44 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
   call N(xzdv)(w, kz, zsize, z)
   allocate(rcode(0:nw2+no+nv), ccode(0:nw2), erow(0:no-1), exoff(0:ncls-1, 0:no-1), es1(0:ncls-1, 0:no-1), &
            es2(0:ncls-1, 0:no-1), em(0:no-1), sel(0:no-1), esg(0:no-1))
+  ! over the ranks: the batches (spectator j, block) are dealt to the ranks,
+  ! the largest first to the rank with the least work so far (products and
+  ! the elements that are moved) - every rank the same deal
+  allocate(mine(0:no-1, 2 * ncls))
+  mine = .true.
+  if (ddist) then
+    allocate(icost(no * 2 * ncls), ij(no * 2 * ncls), ib(no * 2 * ncls), rload(0:nrank-1))
+    nit = 0
+    do j = 0, no - 1
+      call xzdringblk(j, nbk, bd, bkk, bnc, bnr, bfov, bro, brv, mbase, ibase)
+      if (nbk == 0) cycle
+      mbmax = 0
+      xbmax = 0
+      wgmax = 0
+      call xzdringbat(nbk, bkk, bnc, bnr, nbat, bfirst, mbmax, xbmax, wgmax)
+      do t = 1, nbat
+        nit = nit + 1
+        ij(nit) = j
+        ib(nit) = t
+        icost(nit) = 0d0
+        do b = bfirst(t), bfirst(t + 1) - 1
+          icost(nit) = icost(nit) + dble(bnc(b)) * dble(bnr(b)) * dble(dnK(bkk(b))) + &
+                       16d0 * dble(bnc(b) + bnr(b)) * dble(dnK(bkk(b)))
+        end do
+      end do
+    end do
+    rload = 0d0
+    mine = .false.
+    do it = 1, nit
+      ! (the largest that is left)
+      a = maxloc(icost(1:nit), 1)
+      rk = minloc(rload, 1) - 1
+      rload(rk) = rload(rk) + icost(a)
+      if (rk == myrank) mine(ij(a), ib(a)) = .true.
+      icost(a) = -1d0
+    end do
+    deallocate(icost, ij, ib, rload)
+  end if
   do j = 0, no - 1
     call xzdringblk(j, nbk, bd, bkk, bnc, bnr, bfov, bro, brv, mbase, ibase)
     if (nbk == 0) cycle
@@ -552,8 +609,8 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
     wgmax = 0
     call xzdringbat(nbk, bkk, bnc, bnr, nbat, bfirst, mbmax, xbmax, wgmax)
     do t = 1, nbat
-      ! (a batch without a row of this rank: nothing to make)
-      if (all(bnr(bfirst(t):bfirst(t + 1) - 1) == 0)) cycle
+      ! (over the ranks: the batches of this rank)
+      if (.not. mine(j, t)) cycle
       ! the places of the blocks of the batch in the operand and the product
       mo = 0
       xo = 0
@@ -637,7 +694,7 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
       end do
     end do
   end do
-  deallocate(rcode, ccode, erow, exoff, es1, es2, em, sel, esg)
+  deallocate(rcode, ccode, erow, exoff, es1, es2, em, sel, esg, mine)
   deallocate(bd, bkk, bnc, bnr, bfov, bro, brv, mbase, ibase, bfirst, bmo, bxo)
   tdpart(3) = tdpart(3) + omp_get_wtime() - t0
   call xzrel(m0)

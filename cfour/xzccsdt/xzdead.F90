@@ -793,7 +793,6 @@ contains
   ! (brv); -1: none.
   subroutine xzdringblk(j, nbk, bd, bkk, bnc, bnr, bfov, bro, brv, mbase, ibase)
     use xzdata
-    use xzpar, only: myrank
     integer(8), intent(in) :: j
     integer(8), intent(out) :: nbk
     integer(8), intent(out) :: bd(*), bkk(*), bnc(*), bnr(*), bfov(*), bro(*), brv(*)
@@ -813,16 +812,11 @@ contains
       end do
       if (nc == 0) cycle
       nbk = nbk + 1
-      ! (the rows (i, a): of the pairs (i, j) of this rank; those of sigma3
-      ! and XvR: rank 0)
       nr = 0
       do m = 0, no - 1
         ibase(m, nbk) = -1
         c = ocls(m) - d
         if (m == j .or. dnV(c) == 0) cycle
-        if (ddist) then
-          if (xzdpidx(min(m, j), max(m, j)) < dp0 .or. xzdpidx(min(m, j), max(m, j)) >= dp1) cycle
-        end if
         ibase(m, nbk) = nr
         nr = nr + dnV(c)
       end do
@@ -830,19 +824,17 @@ contains
       ci = ocls(j) + d
       bro(nbk) = -1
       brv(nbk) = -1
-      if (.not. ddist .or. myrank == 0) then
-        if (d == 0) then
-          bfov(nbk) = nr
-          nr = nr + 1
-        end if
-        if (dnO(ci) > 0) then
-          bro(nbk) = nr
-          nr = nr + dnO(ci)
-        end if
-        if (dnV(ci) > 0) then
-          brv(nbk) = nr
-          nr = nr + dnV(ci)
-        end if
+      if (d == 0) then
+        bfov(nbk) = nr
+        nr = nr + 1
+      end if
+      if (dnO(ci) > 0) then
+        bro(nbk) = nr
+        nr = nr + dnO(ci)
+      end if
+      if (dnV(ci) > 0) then
+        brv(nbk) = nr
+        nr = nr + dnV(ci)
       end if
       bd(nbk) = d
       bkk(nbk) = kk
@@ -874,7 +866,8 @@ contains
     xt = 0
     do b = 1, nbk
       sz = (bnc(b) + bnr(b)) * dnK(bkk(b))
-      if (nbat > 0 .and. b > bfirst(nbat) .and. tot + sz > dbatch) then
+      ! (over the ranks every block is a batch of its own: the work items that are dealt)
+      if (nbat > 0 .and. b > bfirst(nbat) .and. (tot + sz > dbatch .or. ddist)) then
         mbmax = max(mbmax, mt)
         xbmax = max(xbmax, xt)
         tot = 0
