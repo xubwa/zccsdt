@@ -24,6 +24,7 @@ subroutine xzdrv(w, maxcor)
   use xzdist
   use xzpland, only: planq, pneedq, pneedw, lslot, lfile, lchunk
   use xzeomd
+  use xzdead, only: xzdeaout
   use omp_lib
   implicit none
   integer(8), intent(in) :: maxcor
@@ -90,6 +91,10 @@ subroutine xzdrv(w, maxcor)
     call xzerrex
   end if
   ! (EOM-EE-CCSDT and the folded EOM-CC3 run over the ranks; the check route of CC3 with R3 stored does not)
+  if (with_dea .and. nrank > 1) then
+    write(6, '(a)') ' @XZCCSDT-F, EOM-DEA (%xzdea) runs with one rank in this version.'
+    call xzerrex
+  end if
   if (with_eom .and. nrank > 1 .and. cc3mode == 1) then
     write(6, '(a)') ' @XZCCSDT-F, the excited states of CC3 with T3 stored (option cc3 stored, a check route) run with one'
     write(6, '(a)') '             rank: their sigma vectors are not distributed.  EOM-EE-CCSDT and EOM-CC3 without stored'
@@ -143,7 +148,7 @@ subroutine xzdrv(w, maxcor)
   !      the amplitudes, every rank does its batches), (Q) on all ranks from
   !      the files XZAMPS and XZLAMB, the density stage on rank 0
   docc = with_cc
-  planq = .not. (with_cc .or. with_lam .or. with_den .or. with_eom)
+  planq = .not. (with_cc .or. with_lam .or. with_den .or. with_eom .or. with_dea)
   if (with_den .and. .not. (with_cc .or. with_lam) .and. myrank > 0) return
   ! (a test hook: option den_active 1 writes the files of the active spinors alone)
   call xzoptget('den_active', arg, larg)
@@ -450,6 +455,19 @@ subroutine xzdrv(w, maxcor)
     call xztable(5, 'EOM: the intermediates and the sigma vectors', teomim + teomsig + teomsd, neomsig)
   end if
 
+  ! ---- EOM-DEA-CCSDT: two electrons attached (the pp operator takes the place of <ab||cd>)
+  if (with_dea) then
+    t0 = omp_get_wtime()
+    if (nwe == 2) then
+      call xzdea_z(w, ecorr)
+    else
+      call xzdea_d(w, ecorr)
+    end if
+    teom = omp_get_wtime() - t0
+    call xzoptget('deasig', length=larg)
+    if (larg > 0) return
+  end if
+
   ! ---- the density and the orbital gradient of CCSDT; the files of xx2czvec
   tden = 0d0
   if (with_den) then
@@ -561,6 +579,7 @@ subroutine xzdrv(w, maxcor)
       write(6, '(a,f25.12)') '   TOTENER2 written to JOBARC (the lowest state):   ', escf + ecorr + elow
     end if
   end if
+  if (with_dea) call xzdeaout(escf, ecorr)
   call xz_rss(kb)
   write(6, '(/,a,f10.2,a,a5,a,f10.2,a,f10.2,a,f10.2,a)') '   wall times: integrals ', tread, ' s   ', mname, ' ', tcc, &
     ' s   Lambda ', tlm, ' s   (Q) ', tq, ' s'
@@ -571,7 +590,10 @@ subroutine xzdrv(w, maxcor)
     ' MB (', 100d0 * xzpeak / max(xzsize, 1_8), ' % of MAXCOR)'
   write(6, '(a,f10.1,a)') '   peak resident memory of the process: ', 1d-3 * kb(1), ' MB'
   write(6, '(a,f10.2,a)') '   XZCCSDT total wall time: ', omp_get_wtime() - twall, ' s'
-  if (with_eom) then
+  if (with_dea) write(6, '(a,f10.2,a)') '               EOM-DEA ', teom, ' s'
+  if (with_dea) then
+    write(6, '(a)') '   XZCCSDT finished: EOM-DEA-CCSDT done.'
+  else if (with_eom) then
     write(6, '(a,a,a)') '   XZCCSDT finished: EOM-EE-', trim(mname), ' done.'
   else if (with_den) then
     write(6, '(a)') '   XZCCSDT finished: density of CCSDT done.'
@@ -607,6 +629,7 @@ end subroutine xzdrv
 subroutine xzjob()
   use xzdata
   use xzeomd, only: xzeominp
+  use xzdead, only: xzdeainp
   implicit none
   integer(8) :: iflags, iflags2
   common /flags/ iflags(100)
@@ -614,7 +637,7 @@ subroutine xzjob()
   character(len=32) :: arg
   integer :: larg
   integer(8) :: level, nexc, iexc, iprop, ideriv
-  logical :: eom, den
+  logical :: eom, den, dea
   logical, save :: done = .false.
 
   ! (a rank other than 0 is here twice: before its work array and in xzdrv)
@@ -694,6 +717,18 @@ subroutine xzjob()
   end if
   with_eom = eom
   if (with_eom) call xzeominp()
+  ! EOM-DEA-CCSDT: CALC=CCSDT and the section %xzdea (xzdead.F90; docs/native.md, section 20)
+  call xzdeainp(dea)
+  if (dea) then
+    if (method /= 'CCSDT' .or. cc3mode /= 0 .or. cc4) then
+      write(6, '(/,a,a,a)') ' @XZCCSDT-F, %xzdea (EOM-DEA) goes with CALC=CCSDT alone, without EXCITE and PROPS (here ', &
+        trim(method), ').'
+      call xzerrex
+    end if
+    method = 'CCSDT_DEA'
+    with_dea = .true.
+    call xzeominp()
+  end if
   with_cc = method /= 'MP2'
   q_left = method == 'CCSDT(Q)_L'
   with_den = den

@@ -29,6 +29,16 @@ module xzkern
       integer(c_int64_t) :: n
     end function
 
+    ! the quadruples a<b<c<d of n indices with kv[a] + kv[b] + kv[c] + kv[d] = m (csrc/t4sym.c):
+    ! their number, written to out[.][4] (16-bit integers; the address) unless it is 0
+    function zc_t4s_quads(n, kv, m, out) bind(C) result(cnt)
+      import
+      integer(c_int), value :: n, m
+      type(*), dimension(*) :: kv
+      integer(c_intptr_t), value :: out
+      integer(c_int64_t) :: cnt
+    end function
+
     subroutine zc_tn_zero(p, nbytes) bind(C)
       import
       type(*), dimension(*) :: p

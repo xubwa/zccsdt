@@ -513,7 +513,7 @@ subroutine N(xzepdot)(w, kx, ky, r3only, res)
   ZT :: r(1)
   integer(8) :: lo, nsd
   if (ecmd .and. myrank == 0) call xzecmd(op_dot, xzewhich(kx), xzewhich(ky), merge(1d0, 0d0, r3only))
-  nsd = no * nv + npo * nvp
+  nsd = xzensd()
   lo = evoff
   if (r3only) lo = max(lo, nsd)
   call N(zc_vdot)(evoff + evlen - lo, w(kx + NW * lo), w(ky + NW * lo), r(1))
@@ -608,6 +608,10 @@ subroutine N(xzepsig)(w, kx, ky, sd)
   logical, intent(in) :: sd
   integer(8) :: nsd
   real(8) :: t0
+  if (edea) then
+    call N(xzdsig)(w, kx, ky)
+    return
+  end if
   if (.not. ecmd .or. sd) then
     call N(xzesig)(w, kx, ky, sd)
     return
@@ -808,6 +812,10 @@ subroutine N(xzeprec)(w, kx, omega, sd)
   real(8) :: eo2(0:max(npo, 1_8) - 1), ev2(0:max(nvp, 1_8) - 1)
   integer(8) :: nsd, g, ni, na, a, b
   real(8), parameter :: floor = 1d-3
+  if (edea) then
+    call N(xzdprec)(w, kx, omega)
+    return
+  end if
   if (ecmd .and. myrank == 0) call xzecmd(op_prec, xzewhich(kx), dble(omega), N(xzeimag)(omega))
   nsd = no * nv + npo * nvp
   ! (the singles and doubles: rank 0's)
@@ -969,9 +977,9 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
   integer :: ios
   integer(8) :: wpos
 
-  nsd = no * nv + npo * nvp
+  nsd = xzensd()
   nlen = nsd
-  if (.not. sd) nlen = nsd + n3s
+  if (.not. sd) nlen = nsd + xzenbig()
   ! (the vectors to start from and those returned at kout: singles and
   ! doubles, or - EOM-CC4, evfin / evfout - whole vectors)
   nin = nsd
@@ -1150,16 +1158,16 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
       ov = abs(sum(CONJ(cr(1:n, c)) * ym(1:n, k)))
       if (ov > 0.7d0) cyc(k) = ccyc(c)
     end do
-    call N(zc_vdot)(no * nv, w(kxa), w(kxa), s)
+    call N(zc_vdot)(xzen1(), w(kxa), w(kxa), s)
     wts(1, k) = dble(s)
-    call N(zc_vdot)(npo * nvp, w(kxa + NW * no * nv), w(kxa + NW * no * nv), s)
+    call N(zc_vdot)(nsd - xzen1(), w(kxa + NW * xzen1()), w(kxa + NW * xzen1()), s)
     wts(2, k) = dble(s)
     wts(3, k) = 0d0
     if (.not. sd) then
       call N(xzepdot)(w, kxa, kxa, .true., s)
       wts(3, k) = dble(s)
     end if
-    call N(xzelead)(no * nv, w(kxa), nlead, lead(1, k), vlead(1, k))
+    call N(xzelead)(xzen1(), w(kxa), nlead, lead(1, k), vlead(1, k))
     ! (a whole vector: the rows of the other ranks)
     if (kout > 0 .and. evfout) call N(xzepcollect)(w, kxa)
     if (kout > 0) call N(xzecopy)(nout, w(kxa), w(kout + NW * nout * (k - 1)))
