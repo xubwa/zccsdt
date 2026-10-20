@@ -264,17 +264,27 @@ def kernel(eris, t1, t2, t3=None, t4=None, rank=3, row3='full', row4='full', lab
     t0 = time.perf_counter()
     pb = problem or Problem(eris, t1, t2, t3, t4, rank, row3, row4, labels, target, parity, target_parity, mem_mb)
     times = {'prepare': time.perf_counter() - t0}
-    store = eom.Store(pb.sizes, pb.dtype)
-    gs = pb.guesses(nguess or nroots + 2)
+    gs_n = nguess or nroots + 2
+    max_space = max_space or max(8 + 4 * nroots, gs_n + nroots)
+    # the subspace (V and S, the corrections and a work vector): in memory if it fits next to
+    # what the problem holds (problems with a memory plan: pb.mem = (fixed, per sigma vector)),
+    # else its last part (4p2h) in a scratch file
+    mapped = False
+    if getattr(pb, 'mem', None) is not None:
+        vec = sum(pb.sizes) * pb.dtype.itemsize
+        mapped = sum(pb.mem) + (2 * max_space + nroots + 2) * vec > mem_mb * 1e6
+    store = eom.Store(pb.sizes, pb.dtype, mapped=mapped)
+    gs = pb.guesses(gs_n)
     if not gs:
         raise ValueError('EOM-DEA: no pair of virtual spinors with these labels')
     nroots = min(nroots, len(gs))
     counts = tuple(int(m.sum()) for m in pb.masks)
     if verbose:
-        print('EOM-DEA: rank %d (%s), %d roots, vectors of %s elements (%s in the masks), %s'
+        print('EOM-DEA: rank %d (%s), %d roots, vectors of %s elements (%s in the masks), %s%s'
               % (pb.rank, ' + '.join(['2p', '3p1h', '4p2h'][:pb.rank - 1]), nroots,
                  ' + '.join(str(s) for s in pb.sizes), ' + '.join(str(c) for c in counts),
-                 'real' if pb.dtype.kind == 'f' else 'complex'), file=out, flush=True)
+                 'real' if pb.dtype.kind == 'f' else 'complex',
+                 '; the subspace in a scratch file' if mapped else ''), file=out, flush=True)
 
     def log(it, n, w, res, conv, sec):
         if verbose:
@@ -282,12 +292,16 @@ def kernel(eris, t1, t2, t3=None, t4=None, rank=3, row3='full', row4='full', lab
                 '%.11f %.1e%s' % (x.real, r, '*' if c else ' ') for x, r, c in zip(w, res, conv)), sec),
                 file=out, flush=True)
     t1_ = time.perf_counter()
-    res = eom.davidson(pb.sigma, pb.precond, gs, store, nroots, conv_tol, max_space or max(8 + 4 * nroots, len(gs) + nroots),
-                       max_cycle, log=log)
+    try:
+        res = eom.davidson(pb.sigma, pb.precond, gs, store, nroots, conv_tol, max(max_space, len(gs) + nroots),
+                           max_cycle, log=log)
+        vec = [[np.array(p) for p in res.vectors[k]] for k in range(len(res.vectors))] if mapped else res.vectors
+    finally:
+        store.close()
     times['iterations'] = time.perf_counter() - t1_
     times['sigma'] = pb.seconds / max(pb.nsigma, 1)
     order = np.argsort(res.e.real, kind='stable')
-    vec = [res.vectors[k] for k in order]
+    vec = [vec[k] for k in order]
     wts = np.array([[float(np.vdot(p, p).real) for p in v] for v in vec])
     if verbose:
         for k, j in enumerate(order):

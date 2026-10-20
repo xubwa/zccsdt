@@ -997,10 +997,11 @@ the zero-field splitting of X 3Sigma_g-).
 | What | Where |
 |---|---|
 | the route through two ghost spinors, packed layout and label blocks | `src/zccsdt/cc/dea.py` (`Problem`, `ProblemSym`, `kernel`), `tests/test_dea.py` |
+| the sector itself in label blocks, no ghosts (the default in label blocks: R to 4p2h, T of CCSD, CCSDT, CCSDTQ; 11.9) | `src/zccsdt/cc/dea_sector.py`, the surviving terms `src/zccsdt/cc/dea_ref.py`, `tests/test_dea_sector.py` |
 | the 5p3h operators at lowest order, folded | `src/zccsdt/cc/dea5.py`, `tests/test_dea5.py` |
 | any rank on determinants (reference route) | `src/zccsdt/cc/dea_strings.py`, `tests/test_dea_strings.py` |
 | front end | `GCCSDT.eom_dea` (`docs/usage.md`) |
-| O2: SCF of O2(2+), Hamiltonian files, levels | `bench/dea/` (`o2_scf.py`, `o2_x2ccorr.py`, `common.py`, `o2_dea.py`, `o2_strings.py`, `o2_fold5.py`, `sizes.py`) |
+| O2: SCF of O2(2+), Hamiltonian files, levels | `bench/dea/` (`o2_scf.py`, `o2_x2ccorr.py`, `common.py`, `o2_dea.py`, `o2_strings.py`, `o2_fold5.py`, `sizes.py`; the sector: `sector_bench.py`, `sector_check.py`, `sector_cost.py`) |
 
 ### 11.1 Operators and levels
 
@@ -1053,8 +1054,10 @@ those of Hbar(CCSD): DEA-EOM-CCSD.
 
 Vectors are stored short (the rows with both ghosts).  The residual code
 works on the padded arrays: a sigma vector costs an iteration of the
-ground state with o + 2 occupied spinors, about (o + 2)^4 / (6 o^2) times
-what the sector alone would cost in the T4 terms (5.8 for o = 10).
+ground state with o + 2 occupied spinors, C(o + 2, 4) / C(o, 2) times what
+the sector alone costs in the pp ladder of T4 (11 for o = 10).  Section
+11.9 evaluates the sector itself; in label blocks it is the default for R
+to 4p2h.
 
 **States** are selected by masks on the packed layout (`Problem`: a label
 that adds with its `target`, and a parity), or by blocks:
@@ -1313,6 +1316,10 @@ The determinant route needs the determinants with hmax + 2 holes as
 intermediates: for 5p3h with 106 virtual spinors 3.4e12 before the labels.
 It is the reference of the small spaces.
 
+These are the times of the ghost route; on the sector itself the 4p2h
+sigma vector of 116 spinors takes 3.2 s on 32 cores (ghost route on the same
+node: 39 s), 11.9.
+
 ### 11.8 Not done
 
 - The complete 5p3h row for large spaces: the R-linear terms of the
@@ -1324,7 +1331,9 @@ It is the reference of the small spaces.
 - A sigma vector of the ghost route costs an iteration of the ground state
   with o + 2 occupied spinors: the engines work on the padded arrays, not
   on the sector (the passes over rows of T4 that hold a ghost and those
-  that hold none are both done).  The folded 5p3h row makes its
+  that hold none are both done).  For R to 4p2h in label blocks the sector
+  itself (11.9) has replaced it; the lowest-order rows (CC3, CC4) and the
+  folded 5p3h operators still go through the ghosts.  The folded 5p3h row makes its
   intermediates of (P) for all occupied pairs and quadruples of the padded
   spinors at every sigma vector, although T2 + R2 differs from T2 in one
   occupied pair.
@@ -1332,10 +1341,222 @@ It is the reference of the small spaces.
   properties.
 - Complex arithmetic in `dea5` and `dea_strings` (real integrals: axial
   spinors); the ghost route of `dea.Problem` takes both.
-- Out-of-core vectors: the Davidson subspace of the 4p2h problem is in
-  memory (116 spinors: 2.8e7 numbers, 224 MB, per vector).
+- Out-of-core vectors on the ghost route: its Davidson subspace is in
+  memory (116 spinors: 2.8e7 numbers, 224 MB, per vector); on the sector
+  (11.9) the 4p2h part goes to a scratch file when it does not fit.
 - The guess is unit vectors on the lowest pairs (a<b): a block whose
   lowest states have little weight there needs `nguess`.
+
+### 11.9 The sector itself, without ghosts (`dea_sector`)
+
+The ghost route of 11.2 evaluates the residual of the ground state on the
+padded spinors and keeps the rows with both ghosts: the T4 equation runs
+over all C(o + 2, 4) occupied quadruples (495 for o = 10) where the sector
+has C(o, 2) occupied pairs (45), and its blocks of T4 are those of the
+padded spinors (O2(2+), 168 spinors: 1.60e9 numbers in the ghost blocks for
+1.5e8 of the 4p2h vector).  `zccsdt.cc.dea_sector` evaluates the same sigma
+vector on the short arrays r2[(a<b)], r3[i, (a<b<c)], r4[(i<j), (a<b<c<d)]
+in the blocks of the labels, with nothing padded.
+
+**Which terms survive** (`zccsdt.cc.dea_ref`).  No integral and no T has
+a ghost index and R has both, so in a product that survives on the rows
+(g1 g2 ..) R is one factor and g1, g2 are two of its external occupied
+letters.  From the table of the amplitude equations (`ccsdtq_terms`,
+T1-dressed, T = T2 + T3 (+ T4)), for every term `coef A(product)` of the
+residual of rank k and every amplitude factor with two external occupied
+letters (L1, L2): that factor becomes r of the sector (with the sign that
+brings L1, L2 to the front of its occupied letters), the antisymmetrizer
+keeps the permutations that put g1 on L1 and g2 on L2 (their sign times
+the antisymmetrizer over the k - 2 others).  Merged, this gives 7 terms in
+the 2p row, 19 in the 3p1h row and 40 in the 4p2h row (42 with the T4 of
+CCSDTQ: r2(ae) <mn||ef> t4(mnij; fbcd) and r2(ef) <mn||ef> t4(mnij; abcd));
+`python -m zccsdt.cc.dea_ref [--t4]` prints them.  Evaluated on dense
+arrays they are the ghost route to 1e-15 (H4, T of CCSD, CCSDT, CCSDTQ,
+real and complex).
+
+**Factorized** as the T4 equation of `t4engine` (the intermediates of the
+ground state are those of the label-block engine, `t4engine_sym`), with i < j
+real, the ghosts implied, P the antisymmetrizers over the splits:
+
+4p2h, sigma4[ij; abcd]:
+
+    pp     P(ab/cd) sum_{e<f} Wq(ab,ef) r4(ij; efcd)                Wq = Wpp + F_vv on pairs / 3
+    hh     sum_{m<n} Wh(mn,ij) r4(mn; abcd)                          Wh = Whh - F_oo on pairs
+    ring   P(ij) P(a/bcd) sum_{me} Wr(m,a,e,i) r4(mj; ebcd)
+    22     P(ab/cd) { P(ij) [ - sum_e Wv(ab,e,i) r3(j; cde) + sum_m t(im,ab) XoR(m; j; cd) ]
+                      + sum_{nf} ZR(nf; ab) t(nij; fcd) }
+    13     P(a/bcd) { sum_m Wo(m,a,ij) r3(m; bcd) + sum_e t(ij,ae) XvR(e; bcd)
+                      + sum_m WoR(m,a) t(mij; bcd) + sum_e r2(ae) Xv(e; ij; bcd)
+                      - P(ij) sum_{m<n} YR(mn; j; a) t(mni; bcd) }
+    T4     + sum_{m<n} WhR(mn) t4(mnij; abcd) + P(a/bcd) sum_{m<n} sum_f [sum_e r2(ae) <mn||ef>] t4(mnij; fbcd)
+
+with the intermediates of the sector (linear in R, made per sigma vector)
+
+    XoR(m; j; cd) = sum_{ne} <mn||ej> r3(n; ecd) + 1/2 sum_n WhR(mn) t(nj, cd)
+                    - P(cd) sum_{e<f} <dm||ef> r3(j; efc) + sum_n sum_{e<f} <mn||ef> r4(nj; efcd)
+    XvR(e; bcd)   = P(d/bc) [ sum_{mf} <dm||ef> r3(m; fbc) + 1/2 sum_f Wpp(bc,ef) r2(fd) ]
+                    + 1/2 sum_{mnf} <mn||ef> r4(mn; fbcd)
+    WoR(m, d)     = - sum_{e<f} <dm||ef> r2(ef) - sum_e f_me r2(de) - sum_n YR(mn; n; d)
+    YR(mn; j; d)  = sum_{e<f} <mn||ef> r3(j; efd),   WhR(mn) = sum_{e<f} <mn||ef> r2(ef)
+    ZR(nf; ab)    = sum_{me} <mn||ef> r3(m; eab)
+
+and those of the ground state (once per problem): F_vv, F_oo, Wpp, Whh, Wr;
+Wv(ab,e,i) and Wo(m,a,ij) with their T3 terms; the six-index Xv(e; kl; bcd)
+of the T4 equation without T4.  The 22 / 13 lines are the products with Wv,
+Wo, Xv, Xo, Y, Z of the T4 equation (`t4engine`) in which R takes one place:
+every term of the 4p2h row of `dea_ref` is in exactly one of them (the list
+is in the docstring of `dea_sector`; the two terms of 1/2 [[V,T3],T3] with
+r3 in one place and in the other are one product, ZR t3, by the symmetry of
+<mn||ef> under (m e) <-> (n f)).
+
+3p1h, sigma3[i; abc]:
+
+    P(a/bc) [ sum_{e<f} Wq3(bc,ef) r3(i; aef) + sum_e Wv(bc,e,i) r2(ae) ]    Wq3 = Wpp + F_vv on pairs / 2
+    + P(c/ab) [ sum_{me} Wr(m,c,e,i) r3(m; abe) + sum_m t(im,ab) (sum_n YR(mn; n; c) + hR(c, m)) ]
+    - sum_m Fo(m,i) r3(m; abc) + sum_{m<n} WhR(mn) t(mni; abc)
+    + sum_{me} f_me r4(im; abce) + 1/2 sum_{mne} <mn||ei> r4(mn; abce) + P(c/ab) sum_m sum_{e<f} <cm||ef> r4(im; abef)
+
+with hR(c, m) = sum_{e<f} <cm||ef> r2(ef); 2p, sigma2[ab]:
+
+    sum_{e<f} Wq2(ab,ef) r2(ef) + sum_{me} f_me r3(m; eab) + P(ab) sum_m sum_{e<f} <bm||ef> r3(m; aef)
+    + sum_{m<n, e<f} <mn||ef> r4(mn; efab)                            Wq2 = Wpp + F_vv on pairs
+
+**Operation counts** (multiply-adds, dense, before the labels; o, v the
+correlated occupied and virtual spinors):
+
+| Piece | Sector | Ghost route (o + 2 occupied, the T4 equation) |
+|---|---|---|
+| pp ladder | C(o,2) C(v,2)^3 ~ o^2 v^6 / 16 | C(o+2,4) C(v,2)^3 ~ (o+2)^4 v^6 / 192 |
+| ring | o^3 v^5 / 6 | (o+2)^5 v^5 / 36 |
+| 22 (Wv r3, t2 XoR, ZR t3) | o^2 v^5 / 4 + o^3 v^4 / 4 + o^3 v^5 / 8 | the products with Wv, Xo, Z on all quadruples |
+| 13 (Wo r3, t2 XvR, WoR t3, r2 Xv, YR t3) | o^2 v^5 (o + v) / 12 + o^4 v^4 / 12 | as above |
+| hh | o^4 v^4 / 96 | (o+2)^6 v^4 / 1152 |
+| XvR, ZR, XoR (per sigma) | o v^5 / 2, o^2 v^4 / 2, o^3 v^3 | - |
+| 3p1h row | o v^5 / 4 (its pp ladder) | an iteration of CCSDT with o + 2 |
+
+For o = 10 the pp ladder is 11 times smaller on the sector (495 / 45); the
+labels cut both by about the same factor.
+
+**Storage** (`Sector`): the labels of `t3pack.classes_of()`; `shift` the
+class of a pair of two attached electrons ((target - 2 l_min) / step).
+r2: the pairs of class shift; r3: one block per class K of the virtual
+triples, rows the occupied i of class K - shift; r4: one block per class M
+of the virtual quadruples (a list, `zc_t4s_quads`), rows the occupied pairs
+of class M - shift.  Parity is a mask, as in 11.2.  The products go
+through the kernels of the label-block T4 engine (`csrc/t4sym.c`, no new
+kernel): a block of rows expanded on (ab | cd), (a | bcd) or (a | bc) and
+reduced back antisymmetrized.
+
+- pp ladder: per block M the rows in batches (an operand and a product of
+  at most `batch_bytes`), r4 on [(ef), (row, (cd))], one product with the
+  block of Wq per class of (ef); from the same view the 4p2h terms of
+  sigma2, of sigma3 (<cm||ef>) and of XoR (thin products per row).
+- ring: per spectator j the rows (m, j) on [(m e), (bcd)], grouped by
+  d = k_m - k_e (the triples (bcd) then have one class), times the stacked
+  operator [Wr rows (i a) | f_ov | -1/2 <mj||ei> | 1/2 <mj||ef>]: the ring,
+  and the 4p2h terms of sigma3 and of XvR as rows of the same product;
+  the blocks d in batches of `batch_bytes`.
+- hh ladder: per block one product with Wh on the pairs of the block.
+- the rows of sigma4 one at a time: X[(ab), (cd)] per class of (ab) and
+  X[a, (bcd)] per class of a, each one product of stacked operands
+  (gathered on all threads, `tn_rows`), reduced once.
+
+**Memory** (`memory()`, the plan of `ProblemSector`): fixed - the dressed
+integrals (<vv||vv> on pairs, as the ground state has them), the
+intermediates of the ground state (Xv with the rows of T3 is the largest:
+5.2 GB for 168 spinors, 11.9 GB for DYVQZ; in a scratch file when the
+budget does not hold it with four vectors), Wq for the 4p2h and the 3p1h rows, the
+tables and masks of the elements; per sigma vector - the result, r3 and
+sigma3 on (a | bc), the intermediates of the sector, the largest of the
+passes (the pp batches, a ring batch with the stacked operator, the
+operands of one row).  `batch_bytes` is what the budget leaves, at most
+1 GB.  The Davidson subspace goes into a scratch file (its 4p2h part) when
+2 max_space + nroots + 2 vectors do not fit next to the plan
+(`dea.kernel`).
+
+**Validation** (`tests/test_dea_sector.py`; `bench/dea/`):
+
+| Check | Agreement |
+|---|---|
+| `dea_ref` (the surviving terms on dense arrays) against the ghost route `dea.Problem`, H4 / STO-3G, random vectors, T of CCSD, CCSDT, CCSDTQ, real and complex | 1e-15 (test: 1e-11) |
+| the sector against the ghost route in label blocks (`ProblemSym`), every element: BH from BH(2+) / 6-31G, X2C, 2 m_j of the pair 0, +-2, R to 3p1h and to 4p2h, T of CCSDT and of CCSDTQ (test: 1e-11); O2 / 26 spinors, T of CCSDT and CCSDTQ, and DYVDZ (52), 2 Omega = 0 and 2, parity g (`sector_check.py`) | 2e-14 of 10 - 60 |
+| the sector against `dea_ref` on dense arrays: O2 / 26 spinors (2 Omega = 0) and 32 spinors (2 Omega = 2), X2Ccorr; elements outside the blocks of the reference: 1e-14 | 2e-14 of 15 |
+| roots through the front end, both routes (BH) | 1e-9 |
+| O2 X2Ccorr, 26 spinors: DEA-EOM-CCSD, -CCSD with T3, -CCSDT | all 11 printed digits |
+| O2 DYVDZ-SOG (52) X2Ccorr: E(2 Omega = 0), E(2 Omega = 2), split | equal to the last digit (split 1.588555954867843e-05 Eh = 3.4865 cm-1) |
+| O2 TZ (116) X2Ccorr, DEA-EOM-CCSDT | E(2 Omega = 0), E(2 Omega = 2) all 11 printed digits; split 1.641458334e-05 against 1.641458340e-05 Eh (6e-14: the residual threshold 1e-9), 3.6026 cm-1 |
+| O2 sogcv, 1s frozen (168) X2Ccorr, DEA-EOM-CCSDT | energies 3e-14, 9e-14; split 1.644903156e-05 against 1.644903168e-05 Eh (1.1e-13), 3.6101 cm-1; the same under a budget of 14 GB (batches of 374 MB, the subspace in a scratch file): the same energies and split to all digits, 64 + 40 sigma vectors of 21.5, 20.2 s; RssAnon +15.5 GB over the roots against the budget of 14 GB - the preconditioner of that run divided by temporaries of the size of a block (now rows of at most 2e6 elements) and the root vectors are copied out of the scratch file at the end (1.2 GB each) |
+| a sigma vector against the plan (tracemalloc; RssAnon over the phase) | BH (batches of 16 kB) in the test; 116 spinors 1.39 / 1.54 GB against 1.47; 168 spinors 3.53 / 4.3 GB against 3.92 (the RssAnon of the phase includes what the allocator keeps) |
+
+**Measured** (`bench/dea/sector_bench.py`: one Slurm job per comparison,
+the ghost route first, then the sector, in one process - same node, 32
+cores of a Xeon Gold 6248R, 120 GB; the time of a sigma vector of the
+block 2 Omega = 0 for a random vector):
+
+| | ghost route | sector | |
+|---|---|---|---|
+| **116 spinors** (10 + 106), job 32222499 | | | |
+| 4p2h sigma vector | 42.8, 38.7, 39.6 s | 3.4, 3.3, 3.2 s | 12x |
+| pieces of a sigma vector | T4 ring 16.0, rows 10.8, pp 7.1 s; the CCSDT step on o + 2 | rows 1.2, pp 0.7, ring 0.7, intermediates 0.5 s | |
+| memory of the sigma vectors (RssAnon peak over the phase) | +10.5 GB | +1.5 GB (plan 1.47) | |
+| prepared (fixed part) | 2.6 s | 3.2 s, +1.6 GB (plan 1.98) | |
+| a run, 2 Omega = 0 and 2 | 62 + 38 sigma vectors, 43 s each (24 cores, the run of 11.6) | 62 + 38, 4.0 s each, 460 s | |
+| **168 spinors** (sogcv, 1s frozen: 10 + 158), job 32222500 | | | |
+| 4p2h sigma vector | 393.5, 392.3, 389.0 s | 18.0, 17.4, 17.4 s (another node: 13.9, 14.3 s) | 22x |
+| pieces | T4 ring 191, rows 103, pp 54, Xv 17 s | ring 4.9, pp 4.6, rows 4.2, intermediates 2.5 s | |
+| memory of the sigma vectors | +43 GB (the run of 11.6: MaxRSS 85 GB) | +4.3 GB (plan 3.92) | |
+| prepared | 21.5 s | 28.5 s, +8.5 GB (plan 9.3; Xv with the rows of T3 5.2 GB of it) | |
+| a run, 2 Omega = 0 and 2 | 64 + 40 sigma vectors, 311 s each on 48 cores: 9.2 h | 64 + 40, 26 s each (the code before the stacked rows), 51 min | |
+
+The ghost route spends its time in the T4 ring and the products of one
+occupied quadruple, both over the C(12, 4) quadruples of the padded spinors;
+on the sector the pp ladder, the ring and the rows are of one size, the pp
+ladder at 400 GF/s (168 spinors) and the ring and the rows at 75 - 77
+GF/s (smaller products: the rows per occupied pair, the ring per
+spectator and label).
+
+**DYVQZ** (o = 10, v = 206), counted from the labels (`sector_cost.py` on the
+SCF of the DYVQZ-SOG session; the Hamiltonian file was not there yet),
+2 Omega = 0 (2 Omega = 2: 4% less):
+
+| | sector | ghost route |
+|---|---|---|
+| 4p2h elements (the blocks; half of them parity u) | 3.48e8 = 2.8 GB per vector | T4 blocks 3.76e9 = 30 GB per array |
+| pp ladder, multiply-adds | 5.6e12 | 6.0e13 |
+| ring, rows, hh | 8.9e11, 7.8e11, 4e9 | |
+| fixed memory (plan) | 24 GB: Xv with the rows of T3 11.9, <vv\|\|vv> on pairs 3.6, the rest of the integrals and intermediates | |
+| per sigma vector (plan) | 6.1 GB | |
+| a sigma vector, 32 cores | about 45 s (the rates of the 168-spinor run per piece: pp 14, ring 12, rows 10, the rest 8 s) | 35 - 45 h per run were estimated |
+
+A run of both blocks: about 100 sigma vectors, 1.5 h of sigma vectors on
+32 cores, with the subspace (2 max_space + 3 = 27 vectors, 76 GB) in a
+scratch file on a node of 120 GB - a few hours in all, against 35 - 45 h
+and 250 - 300 GB through the ghosts.
+
+**For the native program** (cfour/xzccsdt, which has EOM-EE in label
+blocks with real arithmetic, its Davidson solver and MPI over the rows of R3,
+docs/native.md 16), what this needs:
+
+- the vector: r2 on the pairs of one class, r3 in blocks [i, K], r4 in
+  blocks [(ij), quadruples of class M] (the quadruple lists and the (a | bcd),
+  (ab | cd) expansions of `t4sym.c`, which the CC4 code of the native
+  program has in its own form); parity a mask; a label shift = the class of
+  the pair, as `%xzeom` gives shifts;
+- the intermediates of the ground state: those of an EOM-EE sigma vector
+  (F, Wpp, Whh, Wr, Wv and Wo with T3) plus the six-index Xv of the T4
+  equation (the largest array; on disk when it does not fit);
+- per sigma vector: the small intermediates (XoR, XvR, ZR, YR, WoR, WhR;
+  o v^3 at most), then three passes over r4 - the pp ladder by batches of
+  rows of a block, the ring by spectator and label, the rows of sigma4 one
+  occupied pair at a time - and the 3p1h and 2p rows; all of it products of
+  blocks (dgemm) with the expansions and reductions of `t4sym.c`;
+- MPI: the rows of r4 (occupied pairs) are the natural unit, 45 for o = 10
+  - the pp ladder and the rows by pairs, the ring by spectator (its products
+  write rows (i, j) of other owners: a reduction of sigma4 by rows, as the
+  EOM-EE code reduces sigma_3); the small intermediates on every rank
+  (summed after the passes that make them from r4);
+- the reference: `dea_sector.Engine.sigma` (pieces selectable by `only`),
+  element by element, and the roots of 11.6.
 
 ## 12. Left-hand eigenvectors (`zccsdt.cc.eom_left`)
 
