@@ -1727,7 +1727,11 @@ Not done:
   `bench/dea/native_rundir.py <file.h5>` writes the blocks with an occupied
   index and `<ab||cd>` in blocks of the label sums (the file `xzvvvv`), no
   n^4 array (docs/native.md 20.1; validation, the plan and the timings of
-  cc-pV5Z-X2C-TP: 20.4, 20.5, 20.7).
+  cc-pV5Z-X2C-TP: 20.4, 20.5, 20.7).  DEA-EOM-CCSDT (4p2h, T of CCSDT)
+  of cc-pV5Z-X2C-TP, native, 12 nodes, 72 min: E(2 Omega = 0) =
+  -150.27870443446366, E(2) = -150.27868757728118, split 1.6857182e-05 Eh
+  = 3.6997 cm-1 (cc-pVQZ-X2C-TP: 1.6824372e-05 Eh = 3.6925 cm-1;
+  E(CCSDT) = -148.916391284243).
 
 ## 12. Left-hand eigenvectors (`zccsdt.cc.eom_left`)
 

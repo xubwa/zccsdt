@@ -5485,8 +5485,10 @@ Measured, 8 ranks x 48 threads, `MEMORY_SIZE` 170 GB (job 32272311): 11
 vectors in the work array (the plan above), the largest rank used 168 641
 of 169 999 MB, the others 150 901 - 168 204 MB; resident 133 - 150 GB after
 three iterations per target (the subspace not yet filled).  The production
-run took `MEMORY_SIZE` 155 GB (9 vectors), clear of what the nodes had
-available.
+run (12 ranks, `MEMORY_SIZE` 154.9 GB - the least `MemAvailable` of its
+nodes less 6 GB -, job 32272434): 14 and 15 vectors in the work array; rank
+0 used 153 297 MB (resident 151 150 MB), the largest other rank 153 691 of
+154 871 MB (resident 151 518 MB), the smallest 135 353 MB.
 
 ### 20.5 Validation
 
@@ -5717,6 +5719,23 @@ of the pp ladder 18 times those of QZ, the ring 11 times, the expanded rows
 7.3 times): pp 8.2 x 18 / (8 ranks, about 9 x the cores used well) = 16 s
 as measured; the transfers were not in that estimate and are now a third
 of a sigma vector.
+
+The production run of cc-pV5Z-X2C-TP, 12 ranks x 48 threads on 12 nodes
+(job 32272434, the amplitudes of the timing run): the intermediates 38 s;
+target 0: 51 sigma vectors (48 cycles, 14 vectors of the subspace), 2296 s,
+45.0 s per sigma vector with the solver (intermediates 6.8, pp 10.5, ring
+7.4, rows 2.7, 3p1h 0.8; the transfers 15.6); target 2: 38 sigma vectors (35
+cycles, 15 vectors), 1947 s, 51.2 s (pp 12.3, ring 7.5, rows 3.4; the
+transfers 18.8); EOM-DEA 4281 s, the run 4305 s (12 x 1.2 node-hours).
+
+| | E(2 Omega = 0) / Eh | E(2 Omega = 2) / Eh | split / Eh | cm-1 |
+|---|---|---|---|---|
+| cc-pVQZ-X2C-TP (10 + 206), 1 x 48 | -150.26441254319741 | -150.26439571882486 | 1.6824373e-05 | 3.6925 |
+| cc-pV5Z-X2C-TP (10 + 350), 12 x 48 | -150.27870443446366 | -150.27868757728118 | 1.6857182e-05 | 3.6997 |
+
+(DEA-EOM-CCSDT, 4p2h, T of CCSDT, X2Ccorr; residuals 5.7e-11, 5.3e-11;
+E(CCSDT) of 5Z -148.916391284243; the weights of 2p, 3p1h, 4p2h 0.8405,
+0.1462, 0.0133.)
 
 ### 20.8 Not done
 
