@@ -802,6 +802,8 @@ subroutine N(xzdrows)(w, k3, kr2, kx3r, kxor, kzr, zrhave, kz, kwor, kyr, ks4)
   logical, intent(in) :: zrhave(0:no-1, 0:ncls-1)
   integer(8) :: m0, kx22, kx13, klt, krc, klc, krc3, ks13, k22max, k13max, nkmax, mu, kk, s13size
   integer(8) :: mm, c, r, pq, i, j, q, nc, nq, kr, x, y, n, ph, jj, kj, t0p, p, nk, ksum, ec, nb, cc, a, o, e, ii, ra, rb
+  integer(8) :: kb13
+  integer :: ios
   integer(8), allocatable :: s13off(:), rows(:)
   integer(8) :: one_row(1), xo22(npg), xs1(npg), xs2(npg), xo13(ncls), ys1(ncls), ys2(ncls)
   real(8) :: one_sg(1), t0, ta
@@ -879,6 +881,21 @@ subroutine N(xzdrows)(w, k3, kr2, kx3r, kxor, kzr, zrhave, kz, kwor, kyr, ks4)
       i = opa(pq)
       j = opb(pq)
       one_row(1) = r
+      ! R13 of the pair: in the work array, or read from the file XZDXV
+      if (dxvfile) then
+        kb13 = dr13 - NW * r13p(pq)
+        if (w13 .and. n13(mm) > 0 .and. r13p(pq + 1) > r13p(pq)) then
+          ta = omp_get_wtime()
+          read(81, pos=1 + 8 * NW * (r13p(pq) - r13p(dq0)), iostat=ios) w(dr13:dr13 + NW * (r13p(pq + 1) - r13p(pq)) - 1)
+          if (ios /= 0) then
+            write(6, '(/,a,i8,a)') ' @XZCCSDT-F, reading the file XZDXV of Xv failed (iostat ', ios, ').'
+            call xzerrex
+          end if
+          tdpart(12) = tdpart(12) + omp_get_wtime() - ta
+        end if
+      else
+        kb13 = dr13 - NW * r13p(dq0)
+      end if
       if (w22 .and. n22(mm) > 0) then
         ta = omp_get_wtime()
         do q = 0, npg - 1
@@ -1004,7 +1021,7 @@ subroutine N(xzdrows)(w, k3, kr2, kx3r, kxor, kzr, zrhave, kz, kwor, kyr, ks4)
               do e = 0, nb - 1
                 rows(e) = e
               end do
-              call N(xzdgrow)(w, dr13 + NW * r13off(pq, mu), nk, nb, rows, 1, 0_8, nk, krc3 + NW * ksum * nk, nk)
+              call N(xzdgrow)(w, kb13 + NW * r13off(pq, mu), nk, nb, rows, 1, 0_8, nk, krc3 + NW * ksum * nk, nk)
               ksum = ksum + nb
             end if
           end if

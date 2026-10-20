@@ -50,7 +50,11 @@ subroutine N(xzdkeep)()
   dla13 = xzget(NW * npo * nv * (no + nv), 'DEA: [W_vooo | t2] by pairs')
   dt12 = xzget(NW * t12size, 'DEA: T3 on (e | cd)')
   dt3p = xzget(NW * t3psize, 'DEA: T3 by an index and a pair')
-  dr13 = xzget(NW * r13size, 'DEA: the rows of T3 and Xv')
+  if (dxvfile) then
+    dr13 = xzget(NW * r13pmax, 'DEA: the rows of T3 and Xv of one pair (the file XZDXV)')
+  else
+    dr13 = xzget(NW * r13loc, 'DEA: the rows of T3 and Xv')
+  end if
   dwq4 = xzget(NW * nvv, 'DEA: the pp operator of the 4p2h row')
   dwb = xzget(NW * wbsize, 'DEA: W_pp as [(bc) e][f]')
   dwh = xzget(NW * npo * npo, 'DEA: the hh operator')
@@ -169,7 +173,7 @@ subroutine N(xzdt3)(w)
   use xzdead
   implicit none
   real(8), target :: w(*)
-  ZT, pointer :: t3(:), t3p(:), r13(:)
+  ZT, pointer :: t3(:), t3p(:)
   integer(8), pointer :: otri(:, :), opgrp(:)
   integer(1), pointer :: osgn(:, :)
   integer(8) :: k, p, j, nj, nk, i, c, o, r, pq, jj, mu, m, kk
@@ -178,13 +182,11 @@ subroutine N(xzdt3)(w)
   real(8) :: s
   call N(xzdv)(w, jt3, n3, t3)
   call N(xzdv)(w, dt3p, t3psize, t3p)
-  call N(xzdv)(w, dr13, r13size, r13)
   call xzdiv2(w, jotri, npo, no, otri)
   call xzdiv(w, jopgrp, npo, opgrp)
   call xzdi1v2(w, josgn, npo, no, osgn)
   call zc_vzero_d(NW * t12size, w(dt12))
   call zc_vzero_d(NW * t3psize, w(dt3p))
-  call zc_vzero_d(NW * r13size, w(dr13))
   ! T12: the triples J of group k as [e][J][(cd)]
   do k = 0, n3c - 1
     nj = dnJ(k)
@@ -221,23 +223,6 @@ subroutine N(xzdt3)(w)
         if (s == 0d0) cycle
         jj = otri(pq, i)
         t3p(o + r * nk:o + (r + 1) * nk - 1) = s * t3(boff(kk) + (jj - otoff(kk)) * nk:boff(kk) + (jj - otoff(kk) + 1) * nk - 1)
-      end do
-    end do
-  end do
-  ! R13: the rows t(m kl; K) of the m of class mu (Xv below them: N(xzdxv))
-  !$omp parallel do private(mu, o, kk, nk, m, r, s, jj) schedule(dynamic)
-  do pq = 0, npo - 1
-    do mu = 0, ncls - 1
-      o = r13off(pq, mu)
-      if (o < 0) cycle
-      kk = opgrp(pq) + mu
-      nk = dnK(kk)
-      do m = ocoff(mu), ocoff(mu + 1) - 1
-        r = m - ocoff(mu)
-        s = osgn(pq, m)
-        if (s == 0d0) cycle
-        jj = otri(pq, m)
-        r13(o + r * nk:o + (r + 1) * nk - 1) = s * t3(boff(kk) + (jj - otoff(kk)) * nk:boff(kk) + (jj - otoff(kk) + 1) * nk - 1)
       end do
     end do
   end do
@@ -365,8 +350,9 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
   integer(8), intent(in) :: kvo, kwrb, kmx, koa
   integer(8), pointer :: opa(:), opb(:), opgrp(:), otri(:, :), vpidx(:, :)
   integer(1), pointer :: osgn(:, :)
-  ZT, pointer :: vo(:), wrb(:), oa(:), edv(:), weff(:), ooovd(:)
-  integer(8) :: m, mu, ka, ph, c, o, e, d, f, ee, dd, ff, pq, k, l, kp, kk, nk, a, b, nb, be, jj, kj, ne, nt
+  ZT, pointer :: vo(:), wrb(:), oa(:), edv(:), weff(:), ooovd(:), t3(:), r13(:)
+  integer(8) :: m, mu, ka, ph, c, o, e, d, f, ee, dd, ff, pq, k, l, kp, kk, nk, a, b, nb, be, jj, kj, ne, nt, kb, r
+  integer :: ios
   integer(8), allocatable :: row(:), xoff(:, :), s1(:, :), s2(:, :), blk(:, :)
   real(8), allocatable :: sg(:)
   real(8) :: sgn
@@ -386,6 +372,8 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
   call N(xzdv)(w, ed, no * nv * nvp, edv)
   call N(xzdv)(w, eweff, no * nv * nv * no, weff)
   call N(xzdv)(w, eooovd, no * no * no * nv, ooovd)
+  call N(xzdv)(w, jt3, n3, t3)
+  if (.not. dxvfile) call zc_vzero_d(NW * r13loc, w(dr13))
   ! <dm||ef> = - <md||ef> as [e of mu][d of ka][f of ph], Wr(c, d, e, m) as [e][d][c]
   !$omp parallel do collapse(3) private(ph, c, o, ee, dd, ff, e, d, f)
   do m = 0, no - 1
@@ -440,11 +428,39 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
   end do
   ! the targets (mu, ka) of the products of one pair, for the parallel loop
   allocate(blk(2, ncls * ncls))
-  do pq = 0, npo - 1
+  ! (the pairs of this rank; the chunk of a pair at kb: in the work array, or
+  ! in the buffer that goes to the file XZDXV)
+  do pq = dq0, dq1 - 1
     k = opa(pq)
     l = opb(pq)
     kp = opgrp(pq)
-    if (mxsize(kp) == 0 .and. all(r13off(pq, :) < 0)) cycle
+    if (dxvfile) then
+      kb = dr13 - NW * r13p(pq)
+      call zc_vzero_d(NW * (r13p(pq + 1) - r13p(pq)), w(dr13))
+    else
+      kb = dr13 - NW * r13p(dq0)
+    end if
+    ! the rows t(m kl; K) of the m of class mu
+    call N(xzdv)(w, dr13, merge(r13pmax, r13loc, dxvfile), r13)
+    !$omp parallel do private(o, kk, nk, m, r, sgn, jj)
+    do mu = 0, ncls - 1
+      o = r13off(pq, mu)
+      if (o < 0) cycle
+      o = o - merge(r13p(pq), r13p(dq0), dxvfile)
+      kk = kp + mu
+      nk = dnK(kk)
+      do m = ocoff(mu), ocoff(mu + 1) - 1
+        r = m - ocoff(mu)
+        sgn = osgn(pq, m)
+        if (sgn == 0d0) cycle
+        jj = otri(pq, m)
+        r13(o + r * nk:o + (r + 1) * nk - 1) = sgn * t3(boff(kk) + (jj - otoff(kk)) * nk:boff(kk) + (jj - otoff(kk) + 1) * nk - 1)
+      end do
+    end do
+    if (mxsize(kp) == 0 .and. all(r13off(pq, :) < 0)) then
+      call write_pair()
+      cycle
+    end if
     ! - P(kl) sum_{m<n} <mn||el> t(mnk, bcd): into the Xv rows directly
     do mu = 0, ncls - 1
       if (r13off(pq, mu) < 0 .or. dnV(mu) == 0) cycle
@@ -465,10 +481,13 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
         if (t3poff(b, c) < 0) cycle
         call N(zc_gemm)(0_4, 0_4, dnV(mu), nk, dnO2(c), alpha, w(koa + NW * ((a * nv + vcoff(mu)) * npo + opoff(c))), &
                         npo, w(dt3p + NW * t3poff(b, c)), nk, one, &
-                        w(dr13 + NW * (r13off(pq, mu) + dnO(mu) * nk)), nk)
+                        w(kb + NW * (r13off(pq, mu) + dnO(mu) * nk)), nk)
       end do
     end do
-    if (mxsize(kp) == 0) cycle
+    if (mxsize(kp) == 0) then
+      call write_pair()
+      cycle
+    end if
     call zc_vzero_d(NW * 2 * mxsize(kp), w(kmx))
     nt = 0
     do mu = 0, ncls - 1
@@ -552,9 +571,22 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
           s2(ka, ne + e) = ne * dnV(ka)
         end do
       end do
-      call N(xzdx12)(w, 1, dr13 + NW * (r13off(pq, mu) + dnO(mu) * nk), nk, kk, 2 * ne, row, sg, xoff, s1, s2, kmx)
+      call N(xzdx12)(w, 1, kb + NW * (r13off(pq, mu) + dnO(mu) * nk), nk, kk, 2 * ne, row, sg, xoff, s1, s2, kmx)
       deallocate(row, sg, xoff, s1, s2)
     end do
+    call write_pair()
   end do
   deallocate(blk)
+
+contains
+
+  ! the chunk of the pair pq to the file XZDXV (dxvfile)
+  subroutine write_pair()
+    if (.not. dxvfile) return
+    write(81, pos=1 + 8 * NW * (r13p(pq) - r13p(dq0)), iostat=ios) w(dr13:dr13 + NW * (r13p(pq + 1) - r13p(pq)) - 1)
+    if (ios /= 0) then
+      write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZDXV of Xv failed (iostat ', ios, '): disk full?'
+      call xzerrex
+    end if
+  end subroutine
 end subroutine

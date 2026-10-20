@@ -35,42 +35,60 @@ subroutine N(xzdea)(w, ecorr)
 
   zz = 0
   m0 = xzmark()
-  call N(xzeomkeep)()
   call xzdglay(w)
   call xzdquadn()
-  call N(xzdkeep)()
   call xzeomstep()
-
+  ! the pairs of every rank (the same for all targets) - their rows of r4 and
+  ! their part of R13 (the rows of T3 and Xv); one rank: all
+  allocate(guess(max(dnt, 1_8)))
+  nsel = 0
+  do it = 1, dnt
+    call problem(it, s, nroot, ok)
+    if (.not. ok) cycle
+    nsel = nsel + 1
+    guess(nsel) = s
+  end do
+  call xzdranges(w, nsel, guess)
+  deallocate(guess)
+  ! R13 in the work array if all of EOM-DEA fits there with it (with the
+  ! smallest batches and the smallest subspace), else in the file XZDXV
+  ! (XZDXV.<rank>), read once per sigma vector; option deaxv m / f: the one or the other
+  call xzoptget('deaxv', arg, larg)
+  if (larg > 0) then
+    dxvfile = arg(1:1) == 'f' .or. arg(1:1) == 'F'
+  else
+    dxvfile = .false.
+    if (xzdry) then
+      k = xzmark()
+      peak = xzpeak
+      xzpeak = xztop
+      call allocs()
+      t = xzpeak
+      call xzrel(k)
+      xzpeak = peak
+    else
+      call xzdry_begin()
+      call allocs()
+      call xzdry_end(t)
+    end if
+    dxvfile = t > xzsize
+  end if
   if (xzdry) then
     ! (the plan: the intermediates, and every problem with the smallest
     ! batches and the smallest subspace that can run)
-    call N(xzeomim)(w)
-    call N(xzdim)(w)
-    do it = 1, dnt
-      call problem(it, s, nroot, ok)
-      if (.not. ok) cycle
-      call xzdsec(s)
-      dbatch = 1
-      nlen = dn2 + dsz3 + dsz4
-      ms = xzmark()
-      call N(xzdwq2)(w)
-      kxa = xzget(NW * nlen, 'DEA: a vector')
-      kxb = xzget(NW * nlen, 'DEA: its sigma vector')
-      msub = subspace(nroot)
-      k = xzget(msub * NW * min(nlen, 1048576_8) + 64, 'DEA: the subspace (the buffer of its files)')
-      call N(xzdsig)(w, kxa, kxb)
-      call N(xzdprec)(w, kxa, zz)
-      call xzrel(ms)
-    end do
+    call allocs()
     call xzrel(m0)
     return
   end if
+  call N(xzeomkeep)()
+  call N(xzdkeep)()
 
   ! more than one rank (docs/native.md, section 20.6): every rank makes the
   ! intermediates and holds its rows of r4 of every vector; rank 0 runs the
   ! solver, the other ranks carry out its commands (N(xzeserve))
   dist = nrank > 1
   call xzdrdpar()
+  if (dxvfile) call xvfile('o')
   t0 = omp_get_wtime()
   if (dist) then
     call xzmpi_bcast_w(w(jt1), NW * no * nv)
@@ -93,7 +111,9 @@ subroutine N(xzdea)(w, ecorr)
     edist = .false.
     ddist = .false.
     write(6, '(a,i6,a)') '   ', nsig, ' sigma vectors'
-    write(6, '(a,8f8.2)') '   seconds of them: intermediates, pp, ring, hh, rows, 3p1h, 2p, MPI ', tdpart(1:7), tdpart(12)
+    write(6, '(a,8f8.2)') '   seconds of them: intermediates, pp, ring, hh, rows, 3p1h, 2p, MPI and XZDXV ', tdpart(1:7), &
+      tdpart(12)
+    if (dxvfile) call xvfile('c')
     call xzrel(m0)
     return
   end if
@@ -101,9 +121,16 @@ subroutine N(xzdea)(w, ecorr)
   write(6, '(a)') '  ' // repeat('-', 98)
   write(6, '(a,f10.2,a,f10.2,a)') '   intermediates of the ground state: ', tdeaim, ' s (those of EOM-EE ', t1 - t0, &
     ' s, then Xv and the forms of T3)'
-  write(6, '(a,f10.1,a,f10.1,a,f10.1,a,f10.1,a)') '   of them (MB): Xv with the rows of T3 ', 8d-6 * NW * r13size, &
+  write(6, '(a,f10.1,a,f10.1,a,f10.1,a,f10.1,a)') '   of them (MB): Xv with the rows of T3 ', 8d-6 * NW * r13loc, &
     ', T3 on (e | cd) ', 8d-6 * NW * t12size, ', T3 by an index and a pair ', 8d-6 * NW * t3psize, ', W_pp blocks ', &
     8d-6 * NW * (nvv + wbsize)
+  if (dxvfile) then
+    write(6, '(a)') '   Xv with the rows of T3: in the file XZDXV (it does not fit in the work array with the rest), ' // &
+      'read pair by pair in every sigma vector'
+  else
+    write(6, '(a)') '   Xv with the rows of T3: in the work array'
+  end if
+  if (dist) write(6, '(a,i4,a)') '   over ', nrank, ' ranks: every rank Xv of its pairs (its rows of r4)'
   write(6, '(a,es9.2,a,i4,a)') '   convergence: the largest element of a residual below ', ethr, &
     ' (ESTATE_CONV, %eomthrs);  at most ', emaxcyc, ' iterations (ESTATE_MAXCYC)'
   if (dtpar >= 0) then
@@ -160,6 +187,7 @@ subroutine N(xzdea)(w, ecorr)
     else
       call N(xzdsig)(w, kxa, kxb)
     end if
+    if (dxvfile) call xvfile('c')
     edea = .false.
     write(6, '(a,f10.3,a,i12,a,i12,a,i14,a)') '   option deasig: a sigma vector in ', omp_get_wtime() - t0, ' s (2p ', dn2, &
       ', 3p1h ', dsz3, ', 4p2h ', dsz4, ' elements)'
@@ -347,9 +375,67 @@ subroutine N(xzdea)(w, ecorr)
     call xzrel(ms)
   end do
   if (dist) call xzecmd(op_end)
+  if (dxvfile) call xvfile('c')
   call xzrel(m0)
 
 contains
+
+  ! the allocations of EOM-DEA (a dry run): the arrays of the ground state,
+  ! then every target with the smallest batches and the smallest subspace
+  subroutine allocs()
+    integer(8) :: mk, mp, kk
+    mk = xzmark()
+    call N(xzeomkeep)()
+    call N(xzdkeep)()
+    call N(xzeomim)(w)
+    call N(xzdim)(w)
+    do it = 1, dnt
+      call problem(it, s, nroot, ok)
+      if (.not. ok) cycle
+      call xzdsec(s)
+      if (nrank > 1) then
+        call xzdslices(int(NW, 8))
+        ddist = .true.
+      end if
+      dbatch = 1
+      nlen = dn2 + dsz3 + dsz4
+      mp = xzmark()
+      call N(xzdwq2)(w)
+      kk = xzget(NW * nlen, 'DEA: a vector')
+      kk = xzget(NW * nlen, 'DEA: its sigma vector')
+      msub = subspace(nroot)
+      kk = xzget(msub * NW * min(nlen, 1048576_8) + 64, 'DEA: the subspace (the buffer of its files)')
+      call N(xzdsig)(w, kk, kk)
+      call N(xzdprec)(w, kk, zz)
+      ddist = .false.
+      call xzrel(mp)
+    end do
+    call xzrel(mk)
+  end subroutine
+
+  ! the file XZDXV of R13 ('o': opened, 'c': closed and deleted)
+  subroutine xvfile(how)
+    character, intent(in) :: how
+    character(len=16) :: fname
+    integer(8) :: free_bytes
+    fname = 'XZDXV'
+    if (myrank > 0) write(fname, '(a,i4.4)') 'XZDXV.', myrank
+    if (how == 'c') then
+      close(81, status='delete')
+      return
+    end if
+    free_bytes = xz_free_disk('.' // c_null_char)
+    if (free_bytes >= 0 .and. 8d0 * NW * r13loc > dble(free_bytes) - 1073741824d0) then
+      write(6, '(/,a,f12.1,a,f12.1,a)') ' @XZCCSDT-F, the disk of the run directory does not hold the file XZDXV of Xv (', &
+        8d-6 * NW * r13loc, ' MB; free: ', 1d-6 * free_bytes, ' MB), and the work array does not hold it either.'
+      call xzerrex
+    end if
+    open(unit=81, file=trim(fname), form='unformatted', access='stream', status='replace', iostat=ios)
+    if (ios /= 0) then
+      write(6, '(/,a,a)') ' @XZCCSDT-F, the file of Xv cannot be opened: ', trim(fname)
+      call xzerrex
+    end if
+  end subroutine
 
   ! the target number ip: its shift in classes, its roots; good: it can be done
   subroutine problem(ip, sc, nr, good)

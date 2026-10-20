@@ -69,6 +69,14 @@ module xzdead
   integer(8) :: dkv = 0, dposv = 0, dposq = 0, dpos3 = 0, dtri = 0, dquads = 0
   integer(8) :: dwvat = 0, dla13 = 0, dt12 = 0, dt3p = 0, dr13 = 0, dwq4 = 0, dwb = 0, dwh = 0, dwr2 = 0
   integer(8) :: dvo = 0                     ! <dm||ef> in the blocks of vooff
+  ! R13 (the rows of T3 and Xv) of the pairs dq0 .. dq1 - 1 of this rank -
+  ! all pairs with one rank - in the work array (dxvfile false: at dr13) or in
+  ! the file XZDXV (XZDXV.<rank>; dr13 a buffer of the largest pair); r13p(P)
+  ! the first element of the pair P in the layout of r13off
+  logical :: dxvfile = .false.
+  integer(8) :: dq0 = 0, dq1 = 0
+  integer(8), allocatable :: r13p(:), dqb(:)
+  integer(8) :: r13loc = 0, r13pmax = 0
   integer(8) :: dwq2 = 0                    ! the 2p ladder operator of the problem in hand
 
   ! ---- the sector of the problem in hand (xzdsec)
@@ -393,7 +401,11 @@ contains
     t3psize = n
     r13off = -1
     n = 0
+    if (allocated(r13p)) deallocate(r13p)
+    allocate(r13p(0:max(npo, 1_8)))
+    r13pmax = 0
     do pq = 0, npo - 1
+      r13p(pq) = n
       do mu = 0, ncls - 1
         k = opgrp(pq) + mu
         if (dnO(mu) + dnV(mu) > 0 .and. dnK(k) > 0) then
@@ -403,6 +415,13 @@ contains
       end do
     end do
     r13size = n
+    r13p(npo) = n
+    do pq = 0, npo - 1
+      r13pmax = max(r13pmax, r13p(pq + 1) - r13p(pq))
+    end do
+    dq0 = 0
+    dq1 = npo
+    r13loc = r13size
     mxoff = -1
     mxmax = 0
     do kp = 0, n2c - 1
@@ -693,19 +712,8 @@ contains
     end do
     nsd = dn2 + dsz3
     tot = nsd + dsz4
-    pb(0) = 0
-    do r = 1, nrank - 1
-      t = (r * tot) / nrank
-      pb(r) = npo
-      do p = 0, npo - 1
-        if (nsd + cum(p) >= t) then
-          pb(r) = p
-          exit
-        end if
-      end do
-      pb(r) = max(pb(r), pb(r - 1))
-    end do
-    pb(nrank) = npo
+    ! (the pairs of the ranks are those of their parts of R13, the same for all targets: xzdranges)
+    pb(0:nrank) = dqb(0:nrank)
     esmax = 0
     do r = 0, nrank
       esoff(r) = cum(pb(r))
@@ -718,6 +726,49 @@ contains
     dp1 = pb(myrank + 1)
     deallocate(pb, cum)
   end subroutine xzdslices
+
+  ! The pairs of every rank, the same for all targets (more than one rank):
+  ! ranges in the order of the pairs, of about equal sums of the elements of
+  ! their rows of r4 over the shifts sh(1:nsh) of the targets; dq0, dq1 those
+  ! of this rank, r13loc the elements of R13 that it holds.  One rank: all.
+  subroutine xzdranges(w, nsh, sh)
+    use xzdata
+    use xzpar, only: myrank, nrank
+    real(8), target :: w(*)
+    integer(8), intent(in) :: nsh, sh(*)
+    integer(8), pointer :: opgrp(:)
+    real(8), allocatable :: cum(:)
+    integer(8) :: r, p, t, m
+    real(8) :: x
+    call xzdiv(w, jopgrp, npo, opgrp)
+    if (allocated(dqb)) deallocate(dqb)
+    allocate(dqb(0:nrank), cum(0:max(npo, 1_8)))
+    cum(0) = 0d0
+    do p = 0, npo - 1
+      x = 0d0
+      do t = 1, nsh
+        m = opgrp(p) + sh(t)
+        if (m >= 0 .and. m < n4c) x = x + dble(nqa(m))
+      end do
+      cum(p + 1) = cum(p) + x
+    end do
+    dqb(0) = 0
+    do r = 1, nrank - 1
+      dqb(r) = npo
+      do p = 0, npo - 1
+        if (cum(p) >= dble(r) * cum(npo) / dble(nrank)) then
+          dqb(r) = p
+          exit
+        end if
+      end do
+      dqb(r) = max(dqb(r), dqb(r - 1))
+    end do
+    dqb(nrank) = npo
+    dq0 = dqb(myrank)
+    dq1 = dqb(myrank + 1)
+    r13loc = r13p(dq1) - r13p(dq0)
+    deallocate(cum)
+  end subroutine xzdranges
 
   ! the rows a <= r < b of the block M (of the pairs of group M - ds) that
   ! this rank makes

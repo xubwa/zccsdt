@@ -4,7 +4,7 @@ the same integral files and the same amplitudes (the file XZAMPS that the
 native program wrote): a random vector of the first target of %xzdea.
 
 usage: python native_check.py <rundir> <xzccsdt binary> [--only pieces] [--batch n] [--seed n] [--threads n]
-                               [--target t] [--complex]
+                               [--target t] [--complex] [--xz 'line of %xzccsdt' ...]
   rundir: made by native_rundir.py, with XZAMPS of a native CCSDT run in it
   --only: pieces of the sigma vector (pp hh ring x22 x13 row3 row2), as Engine.sigma(only=...)
   --batch: option deabatch of the native run (elements of an operand of a batch; small: many batches)
@@ -61,6 +61,11 @@ def main():
     cplx = '--complex' in args
     if cplx:
         args.remove('--complex')
+    extra = []
+    while '--xz' in args:
+        k = args.index('--xz')
+        extra.append(args[k + 1])
+        del args[k:k + 2]
     for key in list(opt):
         if key in args:
             k = args.index(key)
@@ -127,7 +132,7 @@ def main():
         print('masks of the parity %s applied' % m.group(1))
     vec = os.path.join(rundir, 'deavec.bin')
     np.concatenate(x).astype(dtype).tofile(vec)
-    lines = ['deasig deavec.bin']
+    lines = ['deasig deavec.bin'] + extra
     if cplx:
         lines.append('real 0')
     if only:
