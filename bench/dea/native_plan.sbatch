@@ -38,6 +38,8 @@ for f in "$rdir"/*; do
   esac
 done
 cp "$rdir/JOBARC" "$rdir/JAINDX" "$plan/"
+# (the memory is read from joda's flags in JOBARC, flag 36, words)
+python -u "$snap/bench/dea/jobarc_flags.py" "$plan" 36=$((memgb * 125000000))
 sed "s/MEMORY_SIZE=[0-9]*/MEMORY_SIZE=$memgb/" "$rdir/ZMAT" > "$plan/ZMAT"
 printf '%%xzccsdt\ndeaplan %s\n\n' "$ranks" >> "$plan/ZMAT"
 cd "$plan" || exit 1
