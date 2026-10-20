@@ -546,7 +546,7 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
   integer(8) :: ne, e, l, ci, nc, nr, r, a, cc, nw2, nit, it, rk
   integer(8) :: kin, kout, ktmp, ntmp, ptot, pmax, rowmax, nround, kr, jme, nsp, q, nj, r0
   integer(8), allocatable :: bd(:), bkk(:), bnc(:), bnr(:), bfov(:), bro(:), brv(:), mbase(:, :), ibase(:, :)
-  real(8), allocatable :: icost(:), rload(:), scost(:), rtot(:)
+  real(8), allocatable :: icost(:), rload(:), scost(:), rtot(:), rl0(:)
   integer(8), allocatable :: ij(:), ib(:), sord(:), sround(:), rcnt(:), rspec(:, :), njr(:), js(:), lrow(:), jb0(:)
   logical, allocatable :: mine(:, :)
   integer(8), allocatable :: bfirst(:), bmo(:), bxo(:), rcode(:), ccode(:)
@@ -554,7 +554,7 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
   real(8), allocatable :: esg(:)
   integer(8), pointer :: opidx(:, :)
   ZT, pointer :: s3(:), xb(:), z(:)
-  real(8) :: t0, ta, best
+  real(8) :: t0, ta, best, rsum
   logical :: wring
   ZT :: one, zero
   one = 1
@@ -683,7 +683,10 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
     rspec = -1
     rload = 0d0
     mine = .false.
+    rsum = 0d0
+    allocate(rl0(0:nrank-1))
     do kr = 1, nround
+      rl0 = rload
       nj = 0
       do q = 1, nsp
         if (sround(sord(q)) /= kr) cycle
@@ -719,7 +722,15 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
         end do
         r0 = r0 + njr(j)
       end do
+      ! (the cost of the round: of its rank with the most)
+      rsum = rsum + maxval(rload - rl0)
     end do
+    if (myrank == 0 .and. ndeasig == 0) then
+      write(6, '(a,i4,a,i4,a,f8.3,a)') '   the ring over the ranks: ', nsp, ' spectators in ', nround, &
+        ' rounds; the sum over the rounds of the largest cost of a rank is ', rsum / max(sum(rload) / nrank, 1d-300), &
+        ' x the mean cost of a rank'
+      flush(6)
+    end if
   end if
   do kr = 1, nround
     jme = -1
@@ -733,6 +744,7 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
       end if
       call rows_io(.false.)
       tdpart(12) = tdpart(12) + omp_get_wtime() - ta
+      tdpart(13) = tdpart(13) + omp_get_wtime() - ta
     end if
     do j = 0, no - 1
       if (ddist .and. j /= jme) cycle
@@ -833,6 +845,7 @@ subroutine N(xzdring)(w, k4, ks3, ks4, kz)
       ta = omp_get_wtime()
       call rows_io(.true.)
       tdpart(12) = tdpart(12) + omp_get_wtime() - ta
+      tdpart(13) = tdpart(13) + omp_get_wtime() - ta
     end if
   end do
   deallocate(rcode, ccode, erow, exoff, es1, es2, em, sel, esg, mine)
@@ -1079,6 +1092,7 @@ subroutine N(xzdhh)(w, k4, ks4)
       end do
       call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, 0_8, w, 0_8)
       tdpart(12) = tdpart(12) + omp_get_wtime() - ta
+      tdpart(14) = tdpart(14) + omp_get_wtime() - ta
       call N(zc_gemm)(1_4, 0_4, rb - ra, ncol, nr, one, w(dwh + NW * (p0 * npo + p0 + ra)), npo, w(kb), ncol, one, &
                       w(ks4 + NW * (off4(mm) + ra * nqa(mm) + c0)), nqa(mm))
     end do

@@ -128,6 +128,7 @@ subroutine N(xzdea)(w, ecorr)
     write(6, '(a,i6,a)') '   ', nsig, ' sigma vectors'
     write(6, '(a,8f8.2)') '   seconds of them: intermediates, pp, ring, hh, rows, 3p1h, 2p, MPI and XZDXV ', tdpart(1:7), &
       tdpart(12)
+    write(6, '(a,2f8.2)') '   of MPI: the rows exchanged by the ring, by the hh ladder ', tdpart(13:14)
     call xz_rss(kbr)
     write(6, '(a,i14,a,f10.1,a,f10.1,a,f10.1,a)') '   work array used: ', xzpeak, ' words = ', 8d-6 * xzpeak, &
       ' MB of ', 8d-6 * xzsize, ' MB;  peak resident memory of the process: ', 1d-3 * kbr(1), ' MB'
@@ -345,8 +346,9 @@ subroutine N(xzdea)(w, ecorr)
       write(6, '(a,f8.2,a,f8.2,a,f8.2,a,f8.2,a)') '     (of them: the expansions and reductions ', tdpart(8) / max(ndeasig, 1_8), &
         ', the products of the pp ladder ', tdpart(9) / max(ndeasig, 1_8), ', the products of the rows [(ab),(cd)] ', &
         tdpart(10) / max(ndeasig, 1_8), ', [a,(bcd)] ', tdpart(11) / max(ndeasig, 1_8), ')'
-      if (dist) write(6, '(a,f8.2,a)') '     (the vector to the ranks and the sums over them: ', &
-        tdpart(12) / max(ndeasig, 1_8), ' s per sigma vector)'
+      if (dist) write(6, '(a,f8.2,a,f8.2,a,f8.2,a)') '     (the transfers and the sums over the ranks: ', &
+        tdpart(12) / max(ndeasig, 1_8), ' s per sigma vector; of them the rows exchanged by the ring ', &
+        tdpart(13) / max(ndeasig, 1_8), ', by the hh ladder ', tdpart(14) / max(ndeasig, 1_8), ')'
       tdeasig = tdeasig + sum(tdpart(1:7))
       write(6, '(/,a)') '   root        omega / Eh            eV            cm-1    max |r|      |r|   cycle    2p   3p1h   4p2h' // &
                         '          total energy / Eh'

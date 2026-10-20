@@ -5449,13 +5449,15 @@ memory plan of section 4, then the dry runs of EOM-DEA for every rank of
 every n - with R13 of the pairs of that rank and its rows of r4 - prints a
 line per rank and stops; nothing is computed, 24 s for cc-pV5Z-X2C-TP).
 The columns: the arrays of the ground state that stay (with R13 of the
-rank), the transient of making them, the two whole vectors with the 2p
-operator, a sigma vector with batches of 1 GB and of one element, the part
-of a vector that the rank holds, and the totals with the subspace (the
-default 23 vectors) in the work array or in files, also with R13 in
-`XZDXV`.  **cc-pV5Z-X2C-TP** (10 + 350, 12 classes, real; a vector 2.55e9
-elements, 20.4 GB; R13 84.5 GB in all; `pv5z_run`, 2026-10-20), GB of the
-rank that takes the most:
+rank), the transient of making them, the parts of the two vectors that the
+rank holds (r2, r3 and its rows of r4, 20.6) with the 2p operator - two
+whole vectors until 2026-10-20 -, a sigma vector with batches of 1 GB and
+of one element, the part of a vector that the rank holds, and the totals
+with the subspace (the default 23 vectors) in the work array or in files,
+also with R13 in `XZDXV`.  **cc-pV5Z-X2C-TP** (10 + 350, 12 classes, real;
+a vector 2.55e9 elements, 20.4 GB; R13 84.5 GB in all; `pv5z_run`,
+2026-10-20), GB of the rank that takes the most, with two whole vectors on
+every rank (the program before the vectors were distributed):
 
 | ranks | R13 of a rank | stays, with it | part of a vector | subspace in files (the floor) | vectors of the subspace that fit in 120 / 170 GB |
 |---|---|---|---|---|---|
@@ -5489,6 +5491,35 @@ run (12 ranks, `MEMORY_SIZE` 154.9 GB - the least `MemAvailable` of its
 nodes less 6 GB -, job 32272434): 14 and 15 vectors in the work array; rank
 0 used 153 297 MB (resident 151 150 MB), the largest other rank 153 691 of
 154 871 MB (resident 151 518 MB), the smallest 135 353 MB.
+
+**With the vectors distributed** (20.6; 2026-10-20) a rank holds its part
+of the two vectors instead of the two whole vectors, and a sigma vector
+takes the two buffers of the rows of a spectator of the ring more (2 x 5.4
+GB at cc-pwCVQZ-X2C-TP).  **cc-pwCVQZ-X2C-TP, all electrons** (14 + 322 =
+336 spinors, 12 classes, real; a vector 4.56e9 elements, 36.5 GB;
+`deaplan`, the plan directory of `o2cv/pwcvqz/run_ae`), GB of the rank that
+takes the most:
+
+| ranks | R13 of a rank | stays, with it | the two parts | a sigma vector | part of a vector | subspace in files (the floor) | before: two whole vectors (73.5 GB), sigma 19.4 GB | vectors of the subspace that fit in 142 / 155 GB |
+|---|---|---|---|---|---|---|---|---|
+| 4 | 39.2 | 74.3 | 19.3 | 30.2 | 9.3 | 131.6 | - | 0 / 1 |
+| 8 | 20.2 | 55.3 | 10.3 | 30.2 | 4.8 | 103.7 | - | 4 / 5 |
+| 12 | 14.1 | 49.2 | 7.4 | 30.2 | 3.3 | 94.6 | - | 7 / 9 |
+| 16 | 10.6 | 45.6 | 5.8 | 30.2 | 2.5 | 89.4 | - | 10 / 13 |
+| 24 | 7.1 | 42.1 | 4.1 | 30.2 | 1.7 | 84.2 | 142.9 | 17 / 21 |
+| 32 | 5.1 | 40.1 | 3.2 | 30.2 | 1.3 | 81.3 | 141.2 | 23 / 23 |
+
+(The floor of the earlier program, at least 137.6 GB with R13 in `XZDXV`,
+left no subspace in the work array of a parallel node, 146 - 149 GB
+`MemAvailable`; with the subspace on GPFS a sigma vector took 8.2 min on
+32 nodes.)  The production run (16 ranks x 48 threads, `MEMORY_SIZE` 155.7
+GB, job 32291868; 20.7): 13 vectors in the work array (56.7 GB of rank 0's
+part, 64.3 GB for the second target); rank 0 used 151 391 MB (resident 149
+464 MB), the other ranks 139 846 - 154 278 MB of 155 725 MB (resident 138
+- 152 GB).  Two ranks per node (32 ranks, 74 GB each) do not fit: the floor
+of a rank is 80 - 81 GB, of it 42.7 GB that every rank holds whatever their
+number (the integrals and amplitudes 7.7, the arrays of the ground state
+without R13 35.1) and the sigma vector 30.2 GB.
 
 ### 20.5 Validation
 
@@ -5547,6 +5578,29 @@ differences are those of the two Hamiltonian files (11.10: integrals to
 1e-10 on the largest element of the residual, by another path: 1.3e-11 and
 1.5e-11 from the reference.)
 
+**The vectors distributed over the ranks** (20.6; 2026-10-20).  The sigma
+vector against `dea_sector` (`native_check.py`, the MPI binary through a
+wrapper `mpirun -np n`): DYVDZ (the `.npz` file), targets 0 and 2, 3 and 4
+ranks, batches of 1 GB and of 50 elements (many pieces of the hh ladder,
+many batches of the ring): 6.6e-14, 1.2e-13, 2.1e-13 in 2p, 3p1h, 4p2h (as
+before the change); 26 spinors with phases (complex), the same: 4.8e-15,
+1e-14.  The roots against the binary of master (c1d8df3) on the same
+nodes, the same run directories (from the block files; CC_CONV=10,
+ESTATE_CONV=10; 1 rank x 48 threads, 2 ranks x 48 on two nodes, 4 ranks x
+24 on two nodes; jobs 32291726, 32291727):
+
+| case | master: E(2 Omega = 0), E(2) over 1 / 2 / 4 ranks | the branch | difference |
+|---|---|---|---|
+| DYVDZ | -150.08744260782476, -150.08742672224628 (all three) | the same digits, all three | 0 |
+| TZ | -150.21709561323649, -150.21707919864451 (all three) | the same digits, all three | 0 |
+| cc-pVQZ-X2C-TP | 1 rank -150.26441254320349, -150.26439571882486; 2 and 4 ranks -150.26441254319735, -150.26439571882480 | the same digits at every number of ranks | 0 |
+| cc-pwCVTZ-X2C-TP, 16 electrons (14 + 158) | 1 rank -150.33918005110073, -150.33916313538737 (the production run, `pwcvtz_ae.json`); 2 and 4 ranks -150.33918005110070, -150.33916313538734 | the same digits at every number of ranks | 0 |
+
+(The reference of cc-pVQZ-X2C-TP, the Python sector: -150.26441254319857,
+-150.26439571882986; the runs of 1 and of 2 or 4 ranks differ by 6e-12 in
+E(2 Omega = 0) in either binary: the paths of the solver.)
+`cfour/merge/test/run.sh`: PASS with the serial and with the MPI binary.
+
 ### 20.6 Over MPI ranks
 
 The rows of r4 are dealt to the ranks by occupied pairs: one range of
@@ -5556,35 +5610,74 @@ r4 a range of pairs is a range of elements (20.2), so that every rank
 holds one slice of every vector - rank 0 with r2 and r3 in front, as the
 singles and doubles of EOM-EE (16.7) - and the vector operations of the
 solver are the commands of 16.7 on these slices (`N(xzeserve)`; the
-`op_shift` of a target sets up its sector, the batches of rank 0 and two
-whole vectors on the other ranks, `N(xzdshift)`).
+`op_shift` of a target sets up its sector and the batches of rank 0,
+`N(xzdshift)`).
 
-A sigma vector (`N(xzdsig)` on every rank): r2 and r3 of rank 0 and the
-rows of every rank go to all ranks (`xzmpi_bcast_w`, `xzmpi_slices_put`);
-the small intermediates are sums over an occupied index of r3, split by
-that index over the ranks (mod(index, ranks)): YR and ZR are summed at
-once, XoR and XvR stay partial sums until the passes over r4 have added to
-them; every rank makes the rows of sigma4 of its pairs in the pp ladder,
-the hh ladder (its rows from all rows of the block) and the six-index
-products; the thin products of the pp ladder are summed with XoR (on all
-ranks; sigma2 and the 3p1h parts on rank 0).  The ring
-writes rows of other owners - the product of a spectator j has the rows
-(i, j) of all i - so its work items are the batches of the serial code
-(spectator, batch of blocks), dealt to the ranks by a cost that counts the
-products, the elements moved by the expansion and the reduction, and the
-walks through the quadruples of the rows (m, j) (the largest first to the
-least loaded rank, the same deal on every rank; items of single blocks
-walked the quadruple lists once per block, and the ring of one rank took
-2.5 times that of another, job 32268203); a rank expands, multiplies and reduces its batches into
-the rows of all ranks, and sigma4 is summed by slices at the end (`xzmpi_slices_add`: every rank the sum of its own
-slice); the thin rows of sigma3 and XvR are summed too.  The 3p1h and 2p
-rows are rank 0's.  Every rank makes R13 (Xv) of its pairs only, so that
-the largest array is divided too.  The other ranks take as many words as
-rank 0 (`MEMORY_SIZE`): they hold what rank 0 holds but r2 and r3.
-Per sigma vector the transfers are the vector to all ranks and sigma4 by
-slices (each about one vector per rank), and the small sums.
+**Every rank holds only its part of a vector** (2026-10-20; until then
+every rank held two whole vectors, the trial vector and its sigma vector:
+2 x 36.5 GB at cc-pwCVQZ-X2C-TP whatever the number of ranks, 20.4).  The
+two vectors of the solver and of a sigma vector are on every rank r2, r3
+(rank 0's; a copy on the other ranks, which the sigma vector reads and to
+which it adds partial sums) and the rows of r4 of the rank (`xzdpart`);
+the addresses of the vectors are those that whole vectors would have
+(`ekx = start - esoff(rank)`, as for R13 in `XZDXV`), of which the solver
+and the sigma vector touch only the rows of the rank.  The subspace holds
+the same parts (16.7).  The test hook `deasig` sends the rows of the vector
+of its file from rank 0 to their owners and collects sigma4 from them
+(`N(xzepslices)`).
 
-Measured (one job each, two nodes of 2 x Xeon Gold 6248R, `-N 2
+A sigma vector (`N(xzdsig)` on every rank): r2 and r3 of rank 0 go to all
+ranks (`xzmpi_bcast_w`); the small intermediates are sums over an occupied
+index of r3, split by that index over the ranks (mod(index, ranks)): YR and
+ZR are summed at once, XoR and XvR stay partial sums until the passes over
+r4 have added to them; every rank makes the rows of sigma4 of its pairs in
+the pp ladder and the six-index products from its own rows; the thin
+products of the pp ladder are summed with XoR (on all ranks; sigma2 and the
+3p1h parts on rank 0).  Two passes need rows of other ranks:
+
+- **the hh ladder** makes the rows of a block from all rows of the block:
+  if other ranks hold some of them, the block goes in pieces of columns (at
+  most `dbatch` elements, the same pieces on all ranks), each piece of every
+  row of the block sent to the other ranks that hold rows of it;
+- **the ring** of a spectator j reads the rows (m, j) of all m and writes
+  the rows (i, j) of all i.  Its work items are the batches of the serial
+  code (spectator, batch of blocks) with a cost that counts the products,
+  the elements moved by the expansion and the reduction, and the walks
+  through the quadruples of the rows (m, j).  The spectators go to the ranks
+  in rounds: the largest first to the round with the least cost that has
+  fewer spectators than ranks (one round if there are at least as many
+  ranks as spectators); in a round every spectator has one rank, the ranks
+  left go one by one to the spectator with the largest cost per rank, and
+  the batches of a spectator, the largest first, to the least loaded of its
+  ranks (the same deal on every rank; the output prints the cost of the
+  deal, the sum over the rounds of the largest cost of a rank against the
+  mean: 1.15 and 1.20 at cc-pwCVQZ-X2C-TP over 16 ranks, 14 spectators).  In
+  a round a rank takes the rows (m, j) of its spectator from their owners
+  into a buffer, makes its batches into the rows (i, j) of a second buffer,
+  and gives these back to their owners, who add them to their rows of
+  sigma4 (two buffers of the rows of the spectator with the most: 10.8 GB
+  at cc-pwCVQZ-X2C-TP); the thin rows of sigma3 and XvR are summed
+  afterwards.
+
+The exchanges are point to point (`xzmpi_segs` of `xzmpi.c`: a list of
+segments of the work array to and from other ranks, all sends posted
+first, then the receives - stored in place, or added through a few
+buffers of one message each -, in messages of at most `mpichunk` words).
+The 3p1h and 2p rows are rank 0's.  Every rank makes R13 (Xv) of its pairs
+only.  The other ranks take as many words as rank 0 (`MEMORY_SIZE`).  Per
+sigma vector a rank receives r2 and r3, the rows of the blocks that it
+shares with other ranks (hh), the rows (m, j) of its spectator in every
+round and the rows of sigma4 of its pairs that the rings of the other ranks
+made - at cc-pwCVQZ-X2C-TP over 16 ranks about 5 GB for the ring and a few
+GB for the hh ladder, where a rank received a whole vector (36.5 GB) and
+sent its sum by slices (36.5 GB) before.  The output gives the seconds of
+the exchanges of the ring and of the hh ladder (in them the waiting for
+the other ranks: the ring of a rank gives its rows back when the rings of
+the ranks that hold its rows are done).
+
+Measured with the earlier program - two whole vectors on every rank, the
+vector to all ranks and sigma4 summed by slices (`xzmpi_slices_put`,
+`xzmpi_slices_add`) in every sigma vector - (one job each, two nodes of 2 x Xeon Gold 6248R, `-N 2
 --ntasks-per-node=1 -c 32`, `mpirun -ppn`; CCSDT once; `%eomthrs 1e-10`; the
 same numbers of sigma vectors and the same roots, to all digits printed, in
 every run; `bench/dea/native_mpi.sbatch`):
@@ -5606,6 +5699,27 @@ every run; `bench/dea/native_mpi.sbatch`):
 | 1 rank x 32 threads (job 32265420, c301) | 29.9, 29.2 | 0.7, 9.9, 10.2, 5.0; - | 2483 | 99 800 / 98 500 |
 | 4 x 16, two nodes, the ring by blocks (93164be) | 15.22, 15.12 | 1.19, 3.58, 5.90, 1.55; 1.55 | 1085 | 48 963 |
 | 4 x 16, two nodes, the ring by batches (fceb0a9) | 13.09, 13.14 | 1.21, 3.58, 3.77, 1.55; 1.55 | 941 | 48 963 |
+
+**Before and after the distribution of the vectors**, the same nodes (two
+nodes of 48 cores each, `--exclusive`; the binary of master c1d8df3 and the
+branch; job 32291726, c193/c194, and job 32291727, c196/c197):
+
+| case, ranks x threads | a sigma vector with the solver, targets 0 / 2 (s): master, branch | the transfers and sums, master, branch (s) | work array used, rank 0 (MB): master, branch | the other ranks (MB): master, branch |
+|---|---|---|---|---|
+| cc-pVQZ-X2C-TP, 1 x 48 (the same code) | 30.7 / 28.3, 28.1 / 27.9 | - | 151 080, 151 080 | |
+| 2 x 48, two nodes | 16.4 / 17.3, 15.5 / 15.3 | 0.67 / 0.53, 0.72 / 0.63 | 84 832, 83 217 | 86 712, 84 484 |
+| 4 x 24, two nodes (two per node) | 10.7 / 10.8, 9.8 / 9.9 | 1.61 / 1.64, 1.27 / 1.08 | 53 274, 50 407 | 50 094 - 51 245, 43 509 - 47 605 |
+| cc-pwCVTZ-X2C-TP 16 e, 1 x 48 | 19.3 / 18.9, 19.8 / 19.6 | - | 136 732, 136 732 | |
+| 2 x 48, two nodes | 11.3 / 11.3, 11.6 / 11.2 | 1.38 / 1.42, 1.12 / 0.84 | 73 990, 71 792 | |
+| 4 x 24, two nodes | 8.0 / 7.9, 7.6 / 7.3 | 1.40 / 1.43, 1.22 / 0.92 | 45 107, 41 767 | |
+
+At these sizes the vectors are small next to the rest (2.8 GB for
+cc-pVQZ-X2C-TP), and the two programs take about the same time: the ring
+and the hh ladder now move the rows they need where the earlier program
+moved whole vectors; two ranks of 24 threads per node, which fitted before
+at cc-pVQZ-X2C-TP, are again 1.5 - 1.6 times one rank of 48 per node.  The
+change matters where the vectors are large: cc-pwCVQZ-X2C-TP (36.5 GB a
+vector, 20.4, 20.7).
 
 The pp ladder, the ring, the rows of sigma4 and the hh ladder are divided;
 the small intermediates were made by every rank in the first runs of the table (0.1 s
@@ -5637,8 +5751,9 @@ the dry runs of all ranks alike (the pairs of a rank are known to all,
 `xzdranges`; `asrank` in `xzdeam.inc` puts a rank in the place of rank r
 for a dry run): R13 goes to `XZDXV` on all ranks if one rank does not hold
 it; the batches are bisected on the largest sigma vector of any rank plus
-what that rank holds of R13 more than rank 0; and the words of the subspace
-are those of the rank that holds the fewest vectors of its part (`ranksub`).
+what that rank holds of R13 and of the parts of the two vectors more than
+rank 0 (`r13more`, `vecmore`); and the words of the subspace are those of
+the rank that holds the fewest vectors of its part (`ranksub`).
 TZ over 3 ranks with `maxcor 500000000`: 9 vectors, the largest rank uses
 3941 of 4000 MB (resident 4190 MB); the ranks other than 0 now print their
 work array used and peak resident set at the end.
@@ -5737,6 +5852,38 @@ transfers 18.8); EOM-DEA 4281 s, the run 4305 s (12 x 1.2 node-hours).
 E(CCSDT) of 5Z -148.916391284243; the weights of 2p, 3p1h, 4p2h 0.8405,
 0.1462, 0.0133.)
 
+**cc-pwCVQZ-X2C-TP, all electrons** (14 + 322; the vectors distributed,
+20.6; 2026-10-20): 16 ranks x 48 threads on 16 nodes, `MEMORY_SIZE` 155.7
+GB, the CCSDT amplitudes of the run directory (`XZAMPS`, E(CCSDT) =
+-149.026251166161), job 32291868: the intermediates 57 s; target 0: 40 sigma
+vectors (38 cycles, 13 vectors of the subspace), 2064 s, 51.6 s per sigma
+vector with the solver (intermediates 2.1, pp 11.9, ring 11.7, rows 4.1,
+3p1h 0.9; the transfers and the sums over the ranks 19.6); target 2: 37
+sigma vectors, 1857 s, 50.2 s (pp 14.2, ring 11.5, rows 4.8; the transfers
+15.7); EOM-DEA 3921 s, the run 67 min (16 x 1.1 node-hours).  The
+earlier program did not fit the nodes with a subspace in the work array
+(20.4).  Of the transfers most is waiting: the per-rank sums of a timing
+run on other 16 nodes (job 32303635, three iterations per target) give the
+pp ladder of the ranks 9.0 - 14.7 s per sigma vector and the rows of
+sigma4 2.8 - 4.7 s, with ranks of the same rows of r4 (the same blocks,
+the same elements) 1.4 times apart (the pp ladder 142 and 205 s on two
+ranks of 299 294 490 + 262 495 068 elements, 126 and 177 s on two of
+260 567 780 + 249 412 075), so that the fast ranks wait in the exchanges of the ring (2 -
+9 s per sigma vector) and of the hh ladder (0.7 - 3.5 s) and in the sums
+that follow the passes; ranges cut by an estimated cost of the rows instead
+of their elements moved the cuts by one pair and changed nothing.
+
+| | E(2 Omega = 0) / Eh | E(2 Omega = 2) / Eh | split / Eh | cm-1 |
+|---|---|---|---|---|
+| cc-pwCVQZ-X2C-TP, 16 electrons (14 + 322), 16 x 48 | -150.38831805949553 | -150.38830096789087 | 1.7091604661e-05 | 3.75117 |
+| the same, 1s frozen (12 electrons, 10 + 322; 10 ranks, earlier program) | -150.26877691671027 | -150.26876014093125 | 1.6775779017e-05 | 3.68186 |
+
+(Residuals 9.8e-11, 3.8e-11; the weights of 2p, 3p1h, 4p2h 0.8429,
+0.1441, 0.0130.)  The O 1s contribution to the splitting with
+cc-pwCVQZ-X2C-TP: 3.15825644e-07 Eh = 0.06932 cm-1 (cc-pwCVTZ-X2C-TP:
+0.05339 cm-1); the files in `o2zfs_coord/zccsdt_results/o2_1s_pwcv`
+(`pwcvqz_ae.json`, `summary.json`).
+
 ### 20.8 Not done
 
 - R to 5p3h; the T of CCSDTQ / CC4 in the sector; DIP; left-hand vectors;
@@ -5744,26 +5891,21 @@ E(CCSDT) of 5Z -148.916391284243; the weights of 2p, 3p1h, 4p2h 0.8405,
 - Only the elements of the parity of the target are needed (half of the
   vector): the masks are applied to a vector of both parities, as in the
   Python program.
-- Over ranks: the vector to the ranks and sigma4 by slices are synchronous
-  transfers (0.4 - 0.6 s for 168 spinors, 1.6 s for DYVQZ); two nodes give
-  2.2 - 2.6 times one rank.  At DYVQZ the ring of the ranks of the first node takes twice as long as that
-  of the second (the same pair of nodes in both runs; the cause is
-  not known).  The rows of the six-index products
-  are reduced row by row (one entry per call of the kernel).
+- Over ranks: the exchanges of the ring and of the hh ladder and the sums
+  over the ranks are synchronous; nothing overlaps them with the products.
+  The deal of the ranges and of the ring is static: nodes of one job that
+  differ by 1.4 times in the same work (cc-pwCVQZ-X2C-TP, 20.7; at DYVQZ the
+  ring of the ranks of the first node of a pair took twice as long) make
+  the others wait, a third of a sigma vector at 16 ranks.  The rows of the
+  six-index products are reduced row by row (one entry per call of the
+  kernel).
 - The subspace in files reads it about seven times per new vector (16.4):
   168 spinors under 16 GB, 50 s per sigma vector with the solver instead of
   8 s.  A subspace smaller than 3 roots + 4 vectors in the work array is not
   tried.
-- **Every rank holds two whole vectors** (41 GB at cc-pV5Z-X2C-TP) and the
-  whole small intermediates of a sigma vector (U, XvR: 7.5 GB), with the
-  arrays of the ground state 92 GB per rank before its part (20.4): two
-  ranks do not fit a node, although two ranks of 24 threads are 1.5 times
-  one of 48 (QZ, 20.7), and a node of 120 GB holds a rank with its subspace
-  only from 16 ranks on.  The hh ladder needs the rows of all ranks of a
-  block and the ring reads and writes the rows (m, j) of all m; holding only
-  the own rows needs those rows sent per block (hh) and per spectator
-  (ring) instead of the whole vector and the sum by slices.  The table of
-  the quadruples of the classes (4.9 GB) is on every rank as well.
-- At cc-pV5Z-X2C-TP over 8 ranks the transfers (the vector to the ranks,
-  sigma4 by slices: 20 GB each) take 24 - 43 s of a sigma vector of 66 -
-  87 s.
+- Every rank holds the whole small intermediates of a sigma vector (U,
+  XvR), the two buffers of the rows of a spectator of the ring (10.8 GB at
+  cc-pwCVQZ-X2C-TP) and the arrays of the ground state but R13 - 73 GB of a
+  rank at cc-pwCVQZ-X2C-TP before its part (20.4), so that two ranks do not
+  fit a node there; the table of the quadruples of the classes is on every
+  rank as well.

@@ -109,7 +109,8 @@ module xzdead
   logical :: dres_cv(dmaxres) = .false.
   real(8) :: tdeaim = 0d0, tdeasig = 0d0
   integer(8) :: ndeasig = 0
-  real(8) :: tdpart(12) = 0d0               ! seconds of the pieces of the sigma vectors
+  real(8) :: tdpart(14) = 0d0               ! seconds of the pieces of the sigma vectors (13, 14: the
+                                            ! rows exchanged by the ring, by the hh ladder; in 12 too)
   integer(8) :: dbatch = 0                  ! elements of an operand of a batch of the passes over r4
 
 contains
