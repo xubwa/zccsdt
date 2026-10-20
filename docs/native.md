@@ -5394,6 +5394,8 @@ pairs only (20.6).
 | the same, `maxcor 500000000` (4 GB) | 4 GB | 3 677 | 3 868 | in files (10.4 GB); the same roots (4e-11) |
 | the same, `maxcor 400000000` (3.2 GB; three iterations) | 3.2 GB | 3 190 | 3 197 | in files; the batches 323 and 340 MB (bisected), the iterations those of the run above |
 | 168 spinors, MEMORY_SIZE 100 GB | 100 GB | 68 807 | 68 078 | 23 vectors in the work array (55 GB) |
+| the same, `maxcor 2000000000` (16 GB; job 32265685) | 16 GB | 13 431 | 13 800 | in files (52.6 GB); the roots identical to 14 decimals (52 s per sigma vector with the solver: the files) |
+| DYVQZ-SOG (216 spinors), MEMORY_SIZE 100 GB | 100 GB | 99 755 | 98 478 | 13 vectors in the work array (73 GB) |
 
 The resident set follows the words of the work array that are used (MKL
 and the OpenMP runtime add 0.2 - 0.4 GB).
@@ -5448,10 +5450,13 @@ whole vectors on the other ranks, `N(xzdshift)`).
 
 A sigma vector (`N(xzdsig)` on every rank): r2 and r3 of rank 0 and the
 rows of every rank go to all ranks (`xzmpi_bcast_w`, `xzmpi_slices_put`);
-every rank makes the small intermediates and the rows of sigma4 of its
-pairs in the pp ladder, the hh ladder (its rows from all rows of the
-block) and the six-index products; the thin products of the pp ladder are
-summed (XoR on all ranks, sigma2 and the 3p1h parts on rank 0).  The ring
+the small intermediates are sums over an occupied index of r3, split by
+that index over the ranks (mod(index, ranks)): YR and ZR are summed at
+once, XoR and XvR stay partial sums until the passes over r4 have added to
+them; every rank makes the rows of sigma4 of its pairs in the pp ladder,
+the hh ladder (its rows from all rows of the block) and the six-index
+products; the thin products of the pp ladder are summed with XoR (on all
+ranks; sigma2 and the 3p1h parts on rank 0).  The ring
 writes rows of other owners - the product of a spectator j has the rows
 (i, j) of all i - so its work items are the blocks (spectator, class
 difference), dealt to the ranks by their cost (the largest first to the
