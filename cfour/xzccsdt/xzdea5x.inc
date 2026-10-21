@@ -15,7 +15,7 @@
 !   X[a, (bcde)] per class p of a: E1 Wo(m, a, xy) | r4(m z; bcde),
 !     E2 W2(mn; ijk; a) | r4(mn; bcde)
 !   each reduced once into the row (E1x: N(xzd5zx)).
-subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kz4, kxvr5, ky4, kxor5, kxorp, ks5v)
+subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, ks5v)
   use xzdata
   use xzmem
   use xzkern
@@ -24,10 +24,11 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kz4, kxvr5, ky4, kxor5, kxorp, ks5v)
   use omp_lib
   implicit none
   real(8), target :: w(*)
-  integer(8), intent(in) :: k3, kr4f, kx3r, kz4, kxvr5, ky4, kxor5, kxorp, ks5v
+  integer(8), intent(in) :: k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, ks5v
   integer(8) :: m0, kx23, kx14, klt, krc, klc, krc3, kx4t, k23max, k14max, nkmax, na4max, mm, c, ra, rb, r, i, ki
   integer(8) :: q, nc, nq, kr, rr, x, pyz, ph, mu, k3b, o2, cc, m, sj, jj, kj, p, na, ksum, z, pxy, a, e, mt, ii, pm
-  integer(8) :: n2omax, aa, m4
+  integer(8) :: n2omax, aa, m4, kz4, z4max, zslot(0:2), zx3, zs, kz4x(0:2)
+  logical :: zuse(0:2)
   integer(8), allocatable :: rows(:)
   integer(1), allocatable :: rsg(:)
   integer(8), pointer :: opa(:), opb(:), opgrp(:), ofree(:, :), opair(:, :), otri(:, :), opidx(:, :)
@@ -70,10 +71,19 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kz4, kxvr5, ky4, kxor5, kxorp, ks5v)
   klc = xzget(NW * nvcmax * k14max, 'DEA5: stacked operand')
   krc3 = xzget(NW * k14max * na4max, 'DEA5: stacked operand')
   kx4t = xzget(NW * 3 * max(x4max, 1_8), 'DEA5: the rows of r4 of the pairs of a triple on (h | cde)')
+  ! Z4 of the three indices of a triple (made here; the slabs of the triple before kept)
+  z4max = 1
+  do i = 0, no - 1
+    z4max = max(z4max, z4k(i + 1) - z4k(i))
+  end do
+  kz4 = xzget(NW * 3 * z4max, 'DEA5: Z4 of the indices of a triple')
   if (xzdry) then
+    ! (the transient of making a slab)
+    call N(xzd5z4k)(w, kr4f, 0_8, kz4)
     call xzrel(m0)
     return
   end if
+  zslot = -1
   t0 = omp_get_wtime()
   call xzdiv(w, jopa, max(npo, 1_8), opa)
   call xzdiv(w, jopb, max(npo, 1_8), opb)
@@ -98,6 +108,31 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kz4, kxvr5, ky4, kxor5, kxorp, ks5v)
       do rr = 0, 2
         call N(xzd5x4row)(w, kr4f, opair(i, rr), kx4t + NW * rr * max(x4max, 1_8))
       end do
+      ! Z4 of its three indices: kept slabs, the others made in the slots not in use
+      if (n23(mm) > 0 .and. xzdwant('x23') .and. wd(4)) then
+        zuse = .false.
+        do rr = 0, 2
+          zx3 = ofree(i, rr)
+          kz4x(rr) = -1
+          do zs = 0, 2
+            if (zslot(zs) == zx3) then
+              kz4x(rr) = kz4 + NW * zs * z4max
+              zuse(zs) = .true.
+            end if
+          end do
+        end do
+        do rr = 0, 2
+          if (kz4x(rr) >= 0) cycle
+          zx3 = ofree(i, rr)
+          do zs = 0, 2
+            if (.not. zuse(zs)) exit
+          end do
+          zuse(zs) = .true.
+          zslot(zs) = zx3
+          kz4x(rr) = kz4 + NW * zs * z4max
+          call N(xzd5z4k)(w, kr4f, zx3, kz4x(rr))
+        end do
+      end if
       if (n23(mm) > 0 .and. xzdwant('x23')) then
         ta = omp_get_wtime()
         do q = 0, npg - 1
@@ -199,6 +234,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kz4, kxvr5, ky4, kxor5, kxorp, ks5v)
               if (ph < 0 .or. ph >= ncls) cycle
               if (dnV(ph) == 0 .or. t12off(kj, ph) < 0) cycle
               if (z4off(x, ocls(m), ph) < 0) cycle
+              ! (the slab of x: the index of the split, kz4x(rr))
               do e = 0, dnV(ph) - 1
                 rows(e) = e * dnJ(kj) + jj - otoff(kj)
               end do
@@ -206,8 +242,8 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kz4, kxvr5, ky4, kxor5, kxorp, ks5v)
               do e = 0, dnV(ph) - 1
                 rows(e) = e
               end do
-              call N(xzdgrow)(w, kz4 + NW * (z4off(x, ocls(m), ph) + (m - ocoff(ocls(m))) * dnV(ph) * nc), nc, dnV(ph), rows, 1, &
-                              0_8, nc, krc + NW * kr * nc, nc)
+              call N(xzdgrow)(w, kz4x(rr) + NW * (z4off(x, ocls(m), ph) - z4k(x) + (m - ocoff(ocls(m))) * dnV(ph) * nc), nc, &
+                              dnV(ph), rows, 1, 0_8, nc, krc + NW * kr * nc, nc)
               kr = kr + dnV(ph)
             end do
           end do

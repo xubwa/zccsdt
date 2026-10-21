@@ -22,7 +22,7 @@ subroutine N(xzd5sig)(w, k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c)
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c
-  integer(8) :: m0, kr5, ks5, kr5v, ks5v, kr4f, ks4f, ks3x, kg, kg3, kg2, kg5, kd3r, kxorp, kxor5, ky4, kz4, kxvr5
+  integer(8) :: m0, kr5, ks5, kr5v, ks5v, kr4f, ks4f, ks3x, kg, kg3, kg2, kg5, kd3r, kxorp, kxor5, ky4, kxvr5
   integer(8) :: kx4s, nx4s, pq, m4, ktmp, ntmp, nown5
   integer(8), allocatable :: x4sloc(:), woff(:)
   integer(8) :: row(1), xo(ncls), y1(ncls), y2(ncls), p, r
@@ -54,7 +54,6 @@ subroutine N(xzd5sig)(w, k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c)
   kxorp = xzget(NW * max(no * no * nvp, 1_8), 'DEA5: XoRp')
   kxor5 = xzget(NW * max(xr5size, 1_8), 'DEA5: XoR5')
   ky4 = xzget(NW * max(y4size, 1_8), 'DEA5: Y4')
-  kz4 = xzget(NW * max(z4size, 1_8), 'DEA5: Z4')
   kxvr5 = xzget(NW * max(zsize, 1_8), 'DEA5: XvR5')
   kx4s = xzget(NW * max(nx4s, 1_8), 'DEA5: the terms of r5 in sigma4 on (a | bcd)')
   ntmp = 4 * min(xzmpi_chunk(), NW * max(dsz4, 1_8))
@@ -79,8 +78,6 @@ subroutine N(xzd5sig)(w, k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c)
   end if
   ! the small intermediates
   call N(xzd5g)(w, kr2, kx3r, kwhr, kg, kg3, kg2, kg5, kd3r, kxorp)
-  call N(xzd5z4)(w, kr4f, kz4)
-  if (.not. xzdry) call dump('dea5dump', kz4, z4size)
   call N(xzd5xvr)(w, kz, kr2, kxvr5)
   call N(xzd5pairs)(w, kr4f, kr2, kx3r, kyr, kg, kg3, kg2, kxorp, kxor5, ky4)
   ! the pp ladder with its thin products (XoR5, sigma3, sigma4 on (a | bcd))
@@ -94,7 +91,7 @@ subroutine N(xzd5sig)(w, k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c)
   end if
   call N(xzd5ring)(w, kr5v, ks5v, ks4f)
   call N(xzd5hh)(w, kr5v, ks5v)
-  call N(xzd5rows)(w, k3, kr4f, kx3r, kz4, kxvr5, ky4, kxor5, kxorp, ks5v)
+  call N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, ks5v)
   call N(xzd5zx)(w, kr4f, kr5v, ks5v, kg5)
   if (.not. xzdry) then
     t0 = omp_get_wtime()
@@ -334,23 +331,21 @@ subroutine N(xzd5g)(w, kr2, kx3r, kwhr, kg, kg3, kg2, kg5, kd3r, kxorp)
 end subroutine
 
 ! ---------------------------------------------------------------------------
-! Z4(mf; k; cde) = sum_{lh} <ml||fh> r4(lk; h cde) (dea5_sector.Engine5._z4),
-! as [m][f][K] per (k, class of m, class of f); over the ranks every rank
-! makes the k of a range (k-major: a range of Z4), then all of it to all
-! ranks
-subroutine N(xzd5z4)(w, kr4f, kz4)
+! Z4(mf; k; cde) = sum_{lh} <ml||fh> r4(lk; h cde) (dea5_sector.Engine5._z4)
+! of one k: [m][f][K] per (class of m, class of f) at kout + (z4off(k, mu, fe)
+! - z4k(k)).  Made where it is used (the rows of sigma5, family D4): the
+! slabs of all k (o^2 v^4 / classes) are not held.
+subroutine N(xzd5z4k)(w, kr4f, k, kout)
   use xzdata
   use xzmem
   use xzkern
   use xzdead
   use xzdead5
-  use xzpar, only: myrank, nrank, xzmpi_slices_put
   use omp_lib
   implicit none
   real(8), target :: w(*)
-  integer(8), intent(in) :: kr4f, kz4
-  integer(8) :: m0, kx4, ka, k, l, pl, m4, ph, mu, fe, nk, kk0, kk1, r, mm, f, h
-  integer(8), allocatable :: woff(:)
+  integer(8), intent(in) :: kr4f, k, kout
+  integer(8) :: m0, kx4, ka, l, pl, m4, ph, mu, fe, nk, mm, f, h
   integer(8), pointer :: opidx(:, :)
   ZT, pointer :: av(:), oovv(:)
   real(8) :: t0
@@ -367,51 +362,36 @@ subroutine N(xzd5z4)(w, kr4f, kz4)
   call xzdiv2(w, jopidx, no, no, opidx)
   call N(xzdv)(w, ka, max(nocmax * nvcmax * nvcmax, 1_8), av)
   call N(xzdv)(w, joovv, no * no * nv * nv, oovv)
-  kk0 = 0
-  kk1 = no
-  if (ddist) then
-    kk0 = (myrank * no) / nrank
-    kk1 = ((myrank + 1) * no) / nrank
-  end if
-  if (z4k(kk1) > z4k(kk0)) call zc_vzero_d(NW * (z4k(kk1) - z4k(kk0)), w(kz4 + NW * z4k(kk0)))
-  do k = kk0, kk1 - 1
-    do l = 0, no - 1
-      if (l == k) cycle
-      pl = opidx(max(l, k), min(l, k))
-      m4 = blk4(pl)
-      if (m4 < 0) cycle
-      call N(xzd5x4row)(w, kr4f, pl, kx4)
-      alpha = merge(1d0, -1d0, l < k)
-      do ph = 0, ncls - 1
-        if (off13(m4, ph) < 0) cycle
-        nk = dnK(m4 - ph)
-        do mu = 0, ncls - 1
-          fe = mu + ocls(l) - ph
-          if (dnO(mu) == 0 .or. dnV(fe) == 0) cycle
-          if (z4off(k, mu, fe) < 0) cycle
-          ! A[(m f)][h] = <ml||fh>
-          do mm = 0, dnO(mu) - 1
-            do f = 0, dnV(fe) - 1
-              do h = 0, dnV(ph) - 1
-                av((mm * dnV(fe) + f) * dnV(ph) + h) = &
-                  oovv((((ocoff(mu) + mm) * no + l) * nv + vcoff(fe) + f) * nv + vcoff(ph) + h)
-              end do
+  if (z4k(k + 1) > z4k(k)) call zc_vzero_d(NW * (z4k(k + 1) - z4k(k)), w(kout))
+  do l = 0, no - 1
+    if (l == k) cycle
+    pl = opidx(max(l, k), min(l, k))
+    m4 = blk4(pl)
+    if (m4 < 0) cycle
+    call N(xzd5x4row)(w, kr4f, pl, kx4)
+    alpha = merge(1d0, -1d0, l < k)
+    do ph = 0, ncls - 1
+      if (off13(m4, ph) < 0) cycle
+      nk = dnK(m4 - ph)
+      do mu = 0, ncls - 1
+        fe = mu + ocls(l) - ph
+        if (dnO(mu) == 0 .or. dnV(fe) == 0) cycle
+        if (z4off(k, mu, fe) < 0) cycle
+        ! A[(m f)][h] = <ml||fh>
+        !$omp parallel do private(f, h)
+        do mm = 0, dnO(mu) - 1
+          do f = 0, dnV(fe) - 1
+            do h = 0, dnV(ph) - 1
+              av((mm * dnV(fe) + f) * dnV(ph) + h) = &
+                oovv((((ocoff(mu) + mm) * no + l) * nv + vcoff(fe) + f) * nv + vcoff(ph) + h)
             end do
           end do
-          call N(zc_gemm)(0_4, 0_4, dnO(mu) * dnV(fe), nk, dnV(ph), alpha, w(ka), dnV(ph), w(kx4 + NW * off13(m4, ph)), nk, &
-                          one, w(kz4 + NW * z4off(k, mu, fe)), nk)
         end do
+        call N(zc_gemm)(0_4, 0_4, dnO(mu) * dnV(fe), nk, dnV(ph), alpha, w(ka), dnV(ph), w(kx4 + NW * off13(m4, ph)), nk, &
+                        one, w(kout + NW * (z4off(k, mu, fe) - z4k(k))), nk)
       end do
     end do
   end do
-  if (ddist) then
-    allocate(woff(0:nrank))
-    do r = 0, nrank
-      woff(r) = NW * z4k((r * no) / nrank)
-    end do
-    call xzmpi_slices_put(w(kz4), woff)
-    deallocate(woff)
-  end if
   td5(4) = td5(4) + omp_get_wtime() - t0
   call xzrel(m0)
 end subroutine
