@@ -5,7 +5,9 @@
 
 ! ---------------------------------------------------------------------------
 ! The ring of the 5p3h row: per spectator pair (u, w) the rows (m, u, w) of r5
-! on [(m e)][(bcde)] (zc_t5s_x14), grouped by d = class(m) - class(e), times
+! on [(m e)][(bcde)] (zc_t5s_x14p), grouped by d = class(m) - class(e) and by
+! the parity of the quadruples (the parity of the row less that of e: two
+! products of a quarter of the work and half the size instead of one), times
 ! the stacked operator [Wr rows (i a) | f_ov | <mu||ei'> | - <mw||ei'>]: the
 ! ring term of sigma5 and the terms of r5 in sigma4 (Engine5._ring_pass; the
 ! term of r5 in Xv5 goes with Xv5, N(xzd5zx)).
@@ -27,12 +29,13 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
   integer(8), intent(in) :: k5o, s5o, ks4f
   integer(8) :: m0, kmb, kxb, kwg, pq, u, wq, kp, nbk, nbat, t, b, mbmax, xbmax, wgmax, mo, xo, nk, c, i, x, mm
   integer(8) :: e, ci, nc, nr, a, nw2, nit, it, rk, kin, kout, ktmp, ntmp, ptot, pmax, nround, kr, jme, nsp, q, nj, r0, r
-  integer(8) :: pt, ia, kk
-  integer(8), allocatable :: bd(:), bkk(:), bnc(:), bnr(:), bfov(:), bru(:), brw(:), mbase(:, :), ibase(:, :)
+  integer(8) :: pt, ia, kk, pp, pe, nap, rc, ixo
+  integer(8), allocatable :: bd(:), bkk(:), bnc(:, :), bnr(:, :), nxr(:, :), xcode(:, :, :), mbase(:, :, :), ibase(:, :, :)
   real(8), allocatable :: icost(:), rload(:), scost(:), rtot(:), rl0(:)
   integer(8), allocatable :: ij(:), ib(:), sord(:), sround(:), rcnt(:), rspec(:, :), njr(:), js(:), lrow(:)
   logical, allocatable :: mine(:, :)
-  integer(8), allocatable :: bfirst(:), bmo(:), bxo(:), rcode(:), ccode(:)
+  integer(8), allocatable :: bfirst(:), bmo(:, :), bxo(:, :), rcode(:), ccode(:)
+  integer(4), pointer :: ix4(:), q4(:)
   integer(8), pointer :: opidx(:, :), opa(:), opb(:), opgrp(:), otri(:, :)
   integer(1), pointer :: osgn(:, :)
   real(8) :: t0, ta, best, rsum, cf
@@ -40,8 +43,9 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
   ZT :: one, zero, alpha
   one = 1
   zero = 0
-  allocate(bd(2 * ncls), bkk(2 * ncls), bnc(2 * ncls), bnr(2 * ncls), bfov(2 * ncls), bru(2 * ncls), brw(2 * ncls), &
-           mbase(0:no-1, 2 * ncls), ibase(0:no-1, 2 * ncls), bfirst(2 * ncls + 1), bmo(2 * ncls), bxo(2 * ncls), lrow(0:no-1))
+  allocate(bd(2 * ncls), bkk(2 * ncls), bnc(0:1, 2 * ncls), bnr(0:1, 2 * ncls), nxr(0:1, 2 * ncls), &
+           xcode(0:2*no, 0:1, 2 * ncls), mbase(0:no-1, 0:1, 2 * ncls), ibase(0:no-1, 0:1, 2 * ncls), bfirst(2 * ncls + 1), &
+           bmo(0:1, 2 * ncls), bxo(0:1, 2 * ncls), lrow(0:no-1))
   call xzdiv(w, jopa, max(npo, 1_8), opa)
   call xzdiv(w, jopb, max(npo, 1_8), opb)
   call xzdiv(w, jopgrp, max(npo, 1_8), opgrp)
@@ -53,7 +57,7 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
   wgmax = 1
   pmax = 1
   do pq = 0, npo - 1
-    call xzd5ringblk(pq, opa(pq), opb(pq), opgrp(pq), nbk, bd, bkk, bnc, bnr, bfov, bru, brw, mbase, ibase)
+    call xzd5ringblk(w, pq, opa(pq), opb(pq), opgrp(pq), nbk, bd, bkk, bnc, bnr, mbase, ibase, nxr, xcode)
     if (nbk == 0) cycle
     call xzd5ringbat(dbatch, nbk, bkk, bnc, bnr, nbat, bfirst, mbmax, xbmax, wgmax)
     call xzd5ringlay(w, pq, lrow, ptot)
@@ -71,9 +75,11 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
   end if
   if (xzdry) then
     call xzrel(m0)
-    deallocate(bd, bkk, bnc, bnr, bfov, bru, brw, mbase, ibase, bfirst, bmo, bxo, lrow)
+    deallocate(bd, bkk, bnc, bnr, nxr, xcode, mbase, ibase, bfirst, bmo, bxo, lrow)
     return
   end if
+  call c_f_pointer(c_loc(w(dix4p)), q4, [max(nqall, 1_8)])
+  ix4(0:max(nqall, 1_8)-1) => q4
   t0 = omp_get_wtime()
   wring = xzdwant('ring')
   nw2 = no * nv
@@ -90,7 +96,7 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
     nit = 0
     scost = 0d0
     do pq = 0, npo - 1
-      call xzd5ringblk(pq, opa(pq), opb(pq), opgrp(pq), nbk, bd, bkk, bnc, bnr, bfov, bru, brw, mbase, ibase)
+      call xzd5ringblk(w, pq, opa(pq), opb(pq), opgrp(pq), nbk, bd, bkk, bnc, bnr, mbase, ibase, nxr, xcode)
       if (nbk == 0) cycle
       mbmax = 0
       xbmax = 0
@@ -102,8 +108,10 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
         ib(nit) = t
         icost(nit) = 0d0
         do b = bfirst(t), bfirst(t + 1) - 1
-          icost(nit) = icost(nit) + dble(bnc(b)) * dble(bnr(b)) * dble(d5nA4(bkk(b))) + &
-                       64d0 * dble(bnc(b) + bnr(b)) * dble(d5nA4(bkk(b)))
+          do pp = 0, 1
+            icost(nit) = icost(nit) + dble(bnc(pp, b)) * dble(bnr(pp, b)) * dble(na4p(bkk(b), pp)) + &
+                         64d0 * dble(bnc(pp, b) + bnr(pp, b)) * dble(na4p(bkk(b), pp))
+          end do
         end do
         do mm = 0, no - 1
           if (osgn(pq, mm) == 0) cycle
@@ -221,7 +229,7 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
       u = opa(pq)
       wq = opb(pq)
       kp = opgrp(pq)
-      call xzd5ringblk(pq, u, wq, kp, nbk, bd, bkk, bnc, bnr, bfov, bru, brw, mbase, ibase)
+      call xzd5ringblk(w, pq, u, wq, kp, nbk, bd, bkk, bnc, bnr, mbase, ibase, nxr, xcode)
       if (nbk == 0) cycle
       mbmax = 0
       xbmax = 0
@@ -232,10 +240,12 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
         mo = 0
         xo = 0
         do b = bfirst(t), bfirst(t + 1) - 1
-          bmo(b) = mo
-          bxo(b) = xo
-          mo = mo + bnc(b) * d5nA4(bkk(b))
-          xo = xo + bnr(b) * d5nA4(bkk(b))
+          do pp = 0, 1
+            bmo(pp, b) = mo
+            bxo(pp, b) = xo
+            mo = mo + bnc(pp, b) * na4p(bkk(b), pp)
+            xo = xo + bnr(pp, b) * na4p(bkk(b), pp)
+          end do
         end do
         call zc_vzero_d(NW * mo, w(kmb))
         ta = omp_get_wtime()
@@ -243,39 +253,33 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
         td5(17) = td5(17) + omp_get_wtime() - ta
         ta = omp_get_wtime()
         do b = bfirst(t), bfirst(t + 1) - 1
-          nk = d5nA4(bkk(b))
-          nc = bnc(b)
-          nr = bnr(b)
-          if (nr == 0) cycle
-          do mm = 0, no - 1
-            if (mbase(mm, b) < 0) cycle
-            c = ocls(mm) - bd(b)
-            do e = 0, dnV(c) - 1
-              ccode(mbase(mm, b) + e) = mm * nv + vcoff(c) + e
+          do pp = 0, 1
+            nap = na4p(bkk(b), pp)
+            nc = bnc(pp, b)
+            nr = bnr(pp, b)
+            if (nr == 0 .or. nc == 0 .or. nap == 0) cycle
+            ! the codes of the columns (m nv + e) and of the rows of the stacked operator
+            do mm = 0, no - 1
+              if (mbase(mm, pp, b) < 0) cycle
+              c = ocls(mm) - bd(b)
+              pe = mod(r5lp(otri(pq, mm)) + pp, 2_8)
+              do e = 0, nvp5(c, pe) - 1
+                ccode(mbase(mm, pp, b) + e) = mm * nv + d5vl(vlo5(c, pe) + e)
+              end do
             end do
+            do i = 0, no - 1
+              if (ibase(i, pp, b) < 0) cycle
+              c = ocls(i) - bd(b)
+              pe = mod(r5lp(otri(pq, i)) + pp, 2_8)
+              do e = 0, nvp5(c, pe) - 1
+                rcode(ibase(i, pp, b) + e) = i * nv + d5vl(vlo5(c, pe) + e)
+              end do
+            end do
+            rcode(nr - nxr(pp, b):nr - 1) = xcode(0:nxr(pp, b) - 1, pp, b)
+            call N(xzd5wgat)(w, u, wq, nr, nc, rcode, ccode, kwg)
+            call N(zc_gemm)(0_4, 0_4, nr, nap, nc, one, w(kwg), nc, w(kmb + NW * bmo(pp, b)), nap, zero, &
+                            w(kxb + NW * bxo(pp, b)), nap)
           end do
-          do i = 0, no - 1
-            if (ibase(i, b) < 0) cycle
-            c = ocls(i) - bd(b)
-            do e = 0, dnV(c) - 1
-              rcode(ibase(i, b) + e) = i * nv + vcoff(c) + e
-            end do
-          end do
-          if (bfov(b) >= 0) rcode(bfov(b)) = nw2
-          if (bru(b) >= 0) then
-            ci = ocls(u) + bd(b)
-            do x = 0, dnO(ci) - 1
-              rcode(bru(b) + x) = nw2 + 1 + ocoff(ci) + x
-            end do
-          end if
-          if (brw(b) >= 0) then
-            ci = ocls(wq) + bd(b)
-            do x = 0, dnO(ci) - 1
-              rcode(brw(b) + x) = nw2 + 1 + no + ocoff(ci) + x
-            end do
-          end if
-          call N(xzd5wgat)(w, u, wq, nr, nc, rcode, ccode, kwg)
-          call N(zc_gemm)(0_4, 0_4, nr, nk, nc, one, w(kwg), nc, w(kmb + NW * bmo(b)), nk, zero, w(kxb + NW * bxo(b)), nk)
         end do
         td5(19) = td5(19) + omp_get_wtime() - ta
         if (wring) then
@@ -283,32 +287,33 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
           call entries(.false.)
           td5(17) = td5(17) + omp_get_wtime() - ta
         end if
-        ! the rows of sigma4: f_ov (the pair u, w), <mu||ei'> (the pairs i', w), - <mw||ei'> (i', u)
+        ! the rows of sigma4: f_ov (the pair u, w), <mu||ei'> (the pairs i', w), - <mw||ei'> (i', u), on the
+        ! quadruples of one parity (their places in the class: dix4p)
         do b = bfirst(t), bfirst(t + 1) - 1
-          nk = d5nA4(bkk(b))
           kk = bkk(b)
-          if (bfov(b) >= 0 .and. blk4(pq) == kk) &
-            call N(xzeaxpyc)(nk, one, w(kxb + NW * (bxo(b) + bfov(b) * nk)), w(ks4f + NW * (off4(kk) + pos4(pq) * nk)))
-          do ia = 1, 2
-            if (ia == 1) then
-              if (bru(b) < 0) cycle
-              ci = ocls(u) + bd(b)
-              r0 = bru(b)
-              a = wq
-            else
-              if (brw(b) < 0) cycle
-              ci = ocls(wq) + bd(b)
-              r0 = brw(b)
-              a = u
-            end if
-            do x = 0, dnO(ci) - 1
-              i = ocoff(ci) + x
-              if (i == a) cycle
-              pt = opidx(max(i, a), min(i, a))
+          nk = d5nA4(kk)
+          do pp = 0, 1
+            nap = na4p(kk, pp)
+            nr = bnr(pp, b)
+            if (nap == 0 .or. bnc(pp, b) == 0) cycle
+            ixo = ix4off(kk, pp)
+            do x = 0, nxr(pp, b) - 1
+              rc = xcode(x, pp, b) - nw2
+              if (rc == 0) then
+                pt = pq
+                cf = 1d0
+              else if (rc <= no) then
+                i = rc - 1
+                pt = opidx(max(i, wq), min(i, wq))
+                cf = merge(-0.5d0, 0.5d0, i < wq)
+              else
+                i = rc - 1 - no
+                pt = opidx(max(i, u), min(i, u))
+                cf = merge(-0.5d0, 0.5d0, i < u)
+              end if
               if (blk4(pt) /= kk) cycle
-              cf = merge(-0.5d0, 0.5d0, i < a)
-              alpha = cf
-              call N(xzeaxpyc)(nk, alpha, w(kxb + NW * (bxo(b) + (r0 + x) * nk)), w(ks4f + NW * (off4(kk) + pos4(pt) * nk)))
+              call scat4(kxb + NW * (bxo(pp, b) + (nr - nxr(pp, b) + x) * nap), ks4f + NW * (off4(kk) + pos4(pt) * nk), &
+                         nap, ixo, cf)
             end do
           end do
         end do
@@ -321,7 +326,7 @@ subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
     end if
   end do
   deallocate(rcode, ccode, mine)
-  deallocate(bd, bkk, bnc, bnr, bfov, bru, brw, mbase, ibase, bfirst, bmo, bxo, lrow)
+  deallocate(bd, bkk, bnc, bnr, nxr, xcode, mbase, ibase, bfirst, bmo, bxo, lrow)
   td5(7) = td5(7) + omp_get_wtime() - t0
   call xzrel(m0)
 
@@ -376,15 +381,31 @@ contains
     call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, merge(1_8, 0_8, back), w(ktmp), ntmp)
   end subroutine
 
-  ! the rows (m, u, w) of r5 expanded into the operand (the blocks of mbase)
-  ! or the product reduced into the rows (i, u, w) (ibase): one call per block
-  ! and parity of the quintuples (the rows of one list, equally long: in the
-  ! part of this rank, or one after the other in the buffers of the pair over
-  ! the ranks)
+  ! y[ix[ixo + k]] += cf x[k], k < n: a row of a product on the quadruples of
+  ! one parity added to a row of sigma4 (all quadruples of the class)
+  subroutine scat4(kxr, kyr, n, ixo_, cf_)
+    integer(8), intent(in) :: kxr, kyr, n, ixo_
+    real(8), intent(in) :: cf_
+    ZT, pointer :: xr(:), yr(:)
+    integer(8) :: k
+    call N(xzdv)(w, kxr, n, xr)
+    call N(xzdv)(w, kyr, nqall, yr)
+    !$omp parallel do
+    do k = 0, n - 1
+      yr(ix4(ixo_ + k)) = yr(ix4(ixo_ + k)) + cf_ * xr(k)
+    end do
+  end subroutine
+
+  ! the rows (m, u, w) of r5 expanded into the operands (the blocks of mbase:
+  ! per class of e and parity of e, the quadruples of the parity of the row
+  ! less that of e) or the products reduced into the rows (i, u, w) (ibase):
+  ! one call per block and parity of the quintuples (the rows of one list,
+  ! equally long: in the part of this rank, or one after the other in the
+  ! buffers of the pair over the ranks)
   subroutine entries(expand)
     logical, intent(in) :: expand
-    integer(8) :: mmb, base, bb, mx, ii, lx, kr_, m1, ne, mfirst, lp, i1
-    integer(8) :: rr(no), xx(ncls, no), y1(ncls, no), y2(ncls, no)
+    integer(8) :: mmb, base, bb, mx, ii, lx, kr_, m1, ne, mfirst, lp, i1, pq_, pe_
+    integer(8) :: rr(no), xx(2 * ncls, no), y1(2 * ncls, no), y2(2 * ncls, no)
     real(8) :: gg(no)
     do m1 = 0, no - 1
       if (osgn(pq, m1) == 0) cycle
@@ -408,19 +429,23 @@ contains
         y1(:, ne + 1) = 1
         y2(:, ne + 1) = 1
         do bb = bfirst(t), bfirst(t + 1) - 1
-          if (expand) then
-            base = mbase(mmb, bb)
-          else
-            base = ibase(mmb, bb)
-          end if
-          if (base < 0) cycle
           lx = ocls(mmb) - bd(bb)
-          if (expand) then
-            xx(lx + 1, ne + 1) = bmo(bb) + base * d5nA4(bkk(bb))
-          else
-            xx(lx + 1, ne + 1) = bxo(bb) + base * d5nA4(bkk(bb))
-          end if
-          y1(lx + 1, ne + 1) = d5nA4(bkk(bb))
+          do pq_ = 0, 1
+            ! (pq_: the parity of the quadruples; e has the parity of the row less it)
+            pe_ = mod(lp + pq_, 2_8)
+            if (expand) then
+              base = mbase(mmb, pq_, bb)
+            else
+              base = ibase(mmb, pq_, bb)
+            end if
+            if (base < 0) cycle
+            if (expand) then
+              xx(2 * lx + pe_ + 1, ne + 1) = bmo(pq_, bb) + base * na4p(bkk(bb), pq_)
+            else
+              xx(2 * lx + pe_ + 1, ne + 1) = bxo(pq_, bb) + base * na4p(bkk(bb), pq_)
+            end if
+            y1(2 * lx + pe_ + 1, ne + 1) = na4p(bkk(bb), pq_)
+          end do
         end do
         if (all(xx(:, ne + 1) < 0)) cycle
         ne = ne + 1
@@ -455,9 +480,9 @@ contains
         end do
       end if
       if (expand) then
-        call N(xzd5x14)(w, 0, kr_, max(r5w(i1), 1_8), mx, lp, ne, rr, gg, xx, y1, y2, kmb)
+        call N(xzd5x14p)(w, 0, kr_, max(r5w(i1), 1_8), mx, lp, ne, rr, gg, xx, y1, y2, kmb)
       else
-        call N(xzd5x14)(w, 1, kr_, max(r5w(i1), 1_8), mx, lp, ne, rr, gg, xx, y1, y2, kxb)
+        call N(xzd5x14p)(w, 1, kr_, max(r5w(i1), 1_8), mx, lp, ne, rr, gg, xx, y1, y2, kxb)
       end if
     end do
   end subroutine

@@ -481,3 +481,12 @@
       integer(c_int64_t), value :: ldr, na, nent
       type(*), dimension(*) :: r, quints, row, sgn, xoff, s1, s2, kv, posv, pos4, x
     end subroutine
+
+    ! the same split by the parity of a (xoff, s1, s2 per entry by 2 label + parity)
+    subroutine N(zc_t5s_x14p)(mode, r, ldr, quints, na, nent, row, sgn, xoff, s1, s2, ncls, n, kv, par, posvp, pos4p, x) &
+        bind(C)
+      import
+      integer(c_int), value :: mode, ncls, n
+      integer(c_int64_t), value :: ldr, na, nent
+      type(*), dimension(*) :: r, quints, row, sgn, xoff, s1, s2, kv, par, posvp, pos4p, x
+    end subroutine

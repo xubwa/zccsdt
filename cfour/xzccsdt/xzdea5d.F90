@@ -54,6 +54,15 @@ module xzdead5
   integer(8) :: q5size = 0                      ! words of all lists
   integer(8) :: q5pool = 0, q5cap = 0, q5top = 0, q5tick = 0, q5made = 0
   integer(4), allocatable, target :: d5pv(:)    ! (0:nv-1) the parity of a virtual spinor (the kernel of the lists)
+  ! the products of the ring split by parity (the quadruples of one parity):
+  ! the virtual spinors of a class and a parity (nvp5; d5vl from vlo5, their
+  ! places d5posvp), the quadruples of a class and a parity (na4p; their
+  ! places in the class from ix4off in the table dix4p, int32; their places
+  ! among those of their class and parity: dpos4p, int32 by the rank of the
+  ! quadruple).  Without a parity everything has the parity 0.
+  integer(8), allocatable :: nvp5(:, :), vlo5(:, :), d5vl(:), na4p(:, :), ix4off(:, :)
+  integer(4), allocatable, target :: d5posvp(:), d5pvz(:)
+  integer(8) :: dpos4p = 0, dix4p = 0
 
   ! ---- the rows of r5 over the ranks (xzd5ranges, xzd5slices)
   integer(8), allocatable :: dtb(:)             ! (0:nrank) the triples of every rank
@@ -153,6 +162,94 @@ contains
       end do
     end if
     nv4 = nv * (nv - 1) * (nv - 2) * (nv - 3) / 24
+  end subroutine
+
+  ! The tables of the products of the ring split by parity (module header):
+  ! with exact (the parities read, dquads, dpos4p and dix4p in place) all of
+  ! them; otherwise the numbers only, half of every class (the plan)
+  subroutine xzd5ptabs(w, exact)
+    use xzdata
+    use xzdead
+    use iso_c_binding
+    real(8), target :: w(*)
+    logical, intent(in) :: exact
+    integer(8) :: c, pp, a, k, t, mq, n
+    integer(2), pointer :: quads(:, :)
+    integer(4), pointer :: p4(:), ix(:), q4(:)
+    if (allocated(nvp5)) deallocate(nvp5, vlo5, d5vl, d5posvp, d5pvz, na4p, ix4off)
+    allocate(nvp5(0:ncls-1, 0:1), vlo5(0:ncls-1, 0:1), d5vl(0:max(nv, 1_8)-1), d5posvp(0:max(nv, 1_8)-1), &
+             d5pvz(0:max(nv, 1_8)-1), na4p(0:n4c-1, 0:1), ix4off(0:n4c-1, 0:1))
+    nvp5 = 0
+    na4p = 0
+    d5pvz = 0
+    if (.not. exact .or. dtpar < 0 .or. .not. allocated(dpv)) then
+      do c = 0, ncls - 1
+        nvp5(c, 0) = dnV(c)
+        if (dtpar >= 0) then
+          nvp5(c, 0) = (dnV(c) + 1) / 2
+          nvp5(c, 1) = (dnV(c) + 1) / 2
+        end if
+      end do
+      do a = 0, n4c - 1
+        na4p(a, 0) = nqa(a)
+        if (dtpar >= 0) then
+          na4p(a, 0) = (nqa(a) + 1) / 2
+          na4p(a, 1) = (nqa(a) + 1) / 2
+        end if
+      end do
+      if (.not. exact) return
+    else
+      do k = 0, nv - 1
+        d5pvz(k) = int(dpv(k), 4)
+        nvp5(vcls(k), dpv(k)) = nvp5(vcls(k), dpv(k)) + 1
+      end do
+    end if
+    ! the virtual spinors by class, parity and index; their places
+    n = 0
+    do c = 0, ncls - 1
+      do pp = 0, 1
+        vlo5(c, pp) = n
+        do k = vcoff(c), vcoff(c + 1) - 1
+          if (d5pvz(k) /= pp) cycle
+          d5posvp(k) = int(n - vlo5(c, pp), 4)
+          d5vl(n) = k
+          n = n + 1
+        end do
+      end do
+    end do
+    ! the quadruples of every class by parity: their places in the class, among those of their parity
+    call xzdi2v2(w, dquads, 4_8, max(nqall, 1_8), quads)
+    call c_f_pointer(c_loc(w(dpos4p)), q4, [max(nv4, 1_8)])
+    p4(0:max(nv4, 1_8)-1) => q4
+    call c_f_pointer(c_loc(w(dix4p)), q4, [max(nqall, 1_8)])
+    ix(0:max(nqall, 1_8)-1) => q4
+    na4p = 0
+    do a = 0, n4c - 1
+      do t = 0, nqa(a) - 1
+        mq = mod(d5pvz(quads(0, qa0(a) + t)) + d5pvz(quads(1, qa0(a) + t)) + d5pvz(quads(2, qa0(a) + t)) + &
+                 d5pvz(quads(3, qa0(a) + t)), 2)
+        na4p(a, mq) = na4p(a, mq) + 1
+      end do
+      ix4off(a, 0) = qa0(a)
+      ix4off(a, 1) = qa0(a) + na4p(a, 0)
+      k = 0
+      n = 0
+      do t = 0, nqa(a) - 1
+        mq = mod(d5pvz(quads(0, qa0(a) + t)) + d5pvz(quads(1, qa0(a) + t)) + d5pvz(quads(2, qa0(a) + t)) + &
+                 d5pvz(quads(3, qa0(a) + t)), 2)
+        if (mq == 0) then
+          ix(ix4off(a, 0) + k) = int(t, 4)
+          p4(xzd5qrank(int(quads(0, qa0(a) + t), 8), int(quads(1, qa0(a) + t), 8), int(quads(2, qa0(a) + t), 8), &
+                       int(quads(3, qa0(a) + t), 8), nv)) = int(k, 4)
+          k = k + 1
+        else
+          ix(ix4off(a, 1) + n) = int(t, 4)
+          p4(xzd5qrank(int(quads(0, qa0(a) + t), 8), int(quads(1, qa0(a) + t), 8), int(quads(2, qa0(a) + t), 8), &
+                       int(quads(3, qa0(a) + t), 8), nv)) = int(n, 4)
+          n = n + 1
+        end if
+      end do
+    end do
   end subroutine
 
   ! The 5p3h blocks of the sector of the shift ds (after xzdsec) and the
@@ -539,85 +636,128 @@ contains
     if (b < a) b = a
   end subroutine
 
-  ! The blocks of the ring of the spectator pair pq = (u, w) of r5
-  ! (dea5_sector.Engine5.ring_tables): for every d = class(m) - class(e)
-  ! with quadruples of the class kk = s + group(pq) + d, the columns (m, e) of
-  ! the operand - m not u, w; e of class class(m) - d; mbase(m, b) the first
-  ! of m (-1: none) - and the rows of the stacked operator: (i, a) as the
-  ! columns (ibase), the row of f_ov (d = 0: bfov), the rows i' of <m u||e i'>
-  ! for the occupied i' of class class(u) + d (bru) and of - <m w||e i'> for
-  ! those of class class(w) + d (brw); -1: none.
-  subroutine xzd5ringblk(pq, u, wq, kp, nbk, bd, bkk, bnc, bnr, bfov, bru, brw, mbase, ibase)
+  ! The blocks of the ring of the spectator pair pq = (u, w) of r5, split by
+  ! the parity pp of the quadruples (dea5_sector.Engine5.ring_tables): for
+  ! every d = class(m) - class(e) with quadruples of the class kk = s +
+  ! group(pq) + d, the columns (m, e) of the operand - the m whose row
+  ! (m, u, w) of r5 is there, e of class class(m) - d and of the parity that
+  ! the parity of the row and pp leave; mbase(m, pp, b) the first of m (-1:
+  ! none) - and the rows of the product: (i, a) likewise (ibase), then nxr of
+  ! codes xcode: no nv the row of f_ov (d = 0, if the row (u, w) of r4 has the
+  ! quadruples of the parity pp), no nv + 1 + i' the row of <m u||e i'> (the
+  ! occupied i' of class class(u) + d whose row (i', w) of r4 has the parity
+  ! pp), no nv + 1 + no + i' of - <m w||e i'> (class class(w) + d, the rows
+  ! (i', u)).
+  subroutine xzd5ringblk(w, pq, u, wq, kp, nbk, bd, bkk, bnc, bnr, mbase, ibase, nxr, xcode)
     use xzdata
     use xzdead
+    real(8), target :: w(*)
     integer(8), intent(in) :: pq, u, wq, kp
-    integer(8), intent(out) :: nbk
-    integer(8), intent(out) :: bd(*), bkk(*), bnc(*), bnr(*), bfov(*), bru(*), brw(*)
-    integer(8), intent(out) :: mbase(0:no-1, *), ibase(0:no-1, *)
-    integer(8) :: d, kk, m, c, nc, nr, ci
+    integer(8), intent(out) :: nbk, bd(*), bkk(*), bnc(0:1, *), bnr(0:1, *), nxr(0:1, *)
+    integer(8), intent(out) :: mbase(0:no-1, 0:1, *), ibase(0:no-1, 0:1, *), xcode(0:2*no, 0:1, *)
+    integer(8), pointer :: otri(:, :)
+    integer(1), pointer :: osgn(:, :)
+    integer(8) :: d, kk, m, c, nc, nr, ci, pp, pe, lpm(0:no-1), x, k, nb
+    logical :: any
+    call xzdiv2(w, jotri, max(npo, 1_8), no, otri)
+    call xzdi1v2(w, josgn, max(npo, 1_8), no, osgn)
+    do m = 0, no - 1
+      lpm(m) = -1
+      if (osgn(pq, m) == 0) cycle
+      if (blk5(otri(pq, m)) < 0) cycle
+      lpm(m) = r5lp(otri(pq, m))
+    end do
     nbk = 0
     do d = 1 - ncls, ncls - 1
       kk = ds + kp + d
       if (d5nA4(kk) == 0) cycle
-      nc = 0
-      do m = 0, no - 1
-        mbase(m, nbk + 1) = -1
-        c = ocls(m) - d
-        if (m == u .or. m == wq .or. dnV(c) == 0) cycle
-        mbase(m, nbk + 1) = nc
-        nc = nc + dnV(c)
+      nb = nbk + 1
+      any = .false.
+      do pp = 0, 1
+        nc = 0
+        do m = 0, no - 1
+          mbase(m, pp, nb) = -1
+          c = ocls(m) - d
+          if (lpm(m) < 0 .or. c < 0 .or. c >= ncls) cycle
+          pe = mod(lpm(m) + pp, 2_8)
+          if (nvp5(c, pe) == 0) cycle
+          mbase(m, pp, nb) = nc
+          nc = nc + nvp5(c, pe)
+        end do
+        nr = 0
+        do m = 0, no - 1
+          ibase(m, pp, nb) = -1
+          c = ocls(m) - d
+          if (lpm(m) < 0 .or. c < 0 .or. c >= ncls) cycle
+          pe = mod(lpm(m) + pp, 2_8)
+          if (nvp5(c, pe) == 0) cycle
+          ibase(m, pp, nb) = nr
+          nr = nr + nvp5(c, pe)
+        end do
+        x = 0
+        if (d == 0 .and. r4par(u, wq) == pp) then
+          xcode(x, pp, nb) = no * nv
+          x = x + 1
+        end if
+        ci = ocls(u) + d
+        if (ci >= 0 .and. ci < ncls) then
+          do k = ocoff(ci), ocoff(ci + 1) - 1
+            if (k == wq .or. r4par(k, wq) /= pp) cycle
+            xcode(x, pp, nb) = no * nv + 1 + k
+            x = x + 1
+          end do
+        end if
+        ci = ocls(wq) + d
+        if (ci >= 0 .and. ci < ncls) then
+          do k = ocoff(ci), ocoff(ci + 1) - 1
+            if (k == u .or. r4par(k, u) /= pp) cycle
+            xcode(x, pp, nb) = no * nv + 1 + no + k
+            x = x + 1
+          end do
+        end if
+        nxr(pp, nb) = x
+        bnc(pp, nb) = nc
+        bnr(pp, nb) = nr + x
+        if (na4p(kk, pp) == 0) then
+          bnc(pp, nb) = 0
+          bnr(pp, nb) = 0
+        end if
+        if (bnc(pp, nb) > 0 .and. bnr(pp, nb) > 0) any = .true.
       end do
-      if (nc == 0) cycle
-      nbk = nbk + 1
-      nr = 0
-      do m = 0, no - 1
-        ibase(m, nbk) = -1
-        c = ocls(m) - d
-        if (m == u .or. m == wq .or. dnV(c) == 0) cycle
-        ibase(m, nbk) = nr
-        nr = nr + dnV(c)
-      end do
-      bfov(nbk) = -1
-      if (d == 0) then
-        bfov(nbk) = nr
-        nr = nr + 1
-      end if
-      bru(nbk) = -1
-      ci = ocls(u) + d
-      if (dnO(ci) > 0) then
-        bru(nbk) = nr
-        nr = nr + dnO(ci)
-      end if
-      brw(nbk) = -1
-      ci = ocls(wq) + d
-      if (dnO(ci) > 0) then
-        brw(nbk) = nr
-        nr = nr + dnO(ci)
-      end if
+      if (.not. any) cycle
+      nbk = nb
       bd(nbk) = d
       bkk(nbk) = kk
-      bnc(nbk) = nc
-      bnr(nbk) = nr
     end do
-    if (pq < 0) return
+  contains
+    ! the parity of the quadruples of the row (k, l) of r4 (0 without a parity)
+    integer(8) function r4par(k, l)
+      integer(8), intent(in) :: k, l
+      r4par = 0
+      if (dtpar >= 0 .and. allocated(dpo)) r4par = mod(dpo(k) + dpo(l) + dtpar, 2_8)
+    end function
   end subroutine
 
   ! The batches of the blocks of the ring of a spectator pair: a block after
-  ! the other while the operand and the product of the batch hold at most
-  ! nbatch elements (at least one block); bfirst(t) the first block of batch
-  ! t; the most that the operand, the product and a gathered operator of a
-  ! batch take (mbmax, xbmax, wgmax: maxima so far, updated)
+  ! the other while the operands and the products of the batch (both
+  ! parities) hold at most nbatch elements (at least one block); bfirst(t) the
+  ! first block of batch t; the most that the operands, the products and a
+  ! gathered operator of a batch take (mbmax, xbmax, wgmax: maxima so far,
+  ! updated)
   subroutine xzd5ringbat(nbatch, nbk, bkk, bnc, bnr, nbat, bfirst, mbmax, xbmax, wgmax)
-    integer(8), intent(in) :: nbatch, nbk, bkk(*), bnc(*), bnr(*)
+    integer(8), intent(in) :: nbatch, nbk, bkk(*), bnc(0:1, *), bnr(0:1, *)
     integer(8), intent(out) :: nbat, bfirst(*)
     integer(8), intent(inout) :: mbmax, xbmax, wgmax
-    integer(8) :: b, tot, sz, mt, xt
+    integer(8) :: b, tot, sz, mt, xt, pp
     nbat = 0
     tot = 0
     mt = 0
     xt = 0
     do b = 1, nbk
-      sz = (bnc(b) + bnr(b)) * d5nA4(bkk(b))
+      sz = 0
+      do pp = 0, 1
+        sz = sz + (bnc(pp, b) + bnr(pp, b)) * na4p(bkk(b), pp)
+      end do
       if (nbat > 0 .and. b > bfirst(max(nbat, 1_8)) .and. tot + sz > nbatch) then
         mbmax = max(mbmax, mt)
         xbmax = max(xbmax, xt)
@@ -631,9 +771,11 @@ contains
         bfirst(1) = 1
       end if
       tot = tot + sz
-      mt = mt + bnc(b) * d5nA4(bkk(b))
-      xt = xt + bnr(b) * d5nA4(bkk(b))
-      wgmax = max(wgmax, bnc(b) * bnr(b))
+      do pp = 0, 1
+        mt = mt + bnc(pp, b) * na4p(bkk(b), pp)
+        xt = xt + bnr(pp, b) * na4p(bkk(b), pp)
+        wgmax = max(wgmax, bnc(pp, b) * bnr(pp, b))
+      end do
     end do
     mbmax = max(mbmax, mt)
     xbmax = max(xbmax, xt)

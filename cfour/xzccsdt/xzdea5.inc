@@ -45,6 +45,8 @@ subroutine N(xzd5keep)()
   use xzdead5
   implicit none
   dpos4 = xzget(nv4 / 2 + 1, 'DEA5: the places of the quadruples in their classes')
+  dpos4p = xzget(nv4 / 2 + 1, 'DEA5: the places of the quadruples among those of their class and parity')
+  dix4p = xzget(nqall / 2 + 1, 'DEA5: the quadruples of a class by parity')
   dwq5 = xzget(NW * nvv, 'DEA5: the pp operator of the 5p3h row')
   dh3 = xzget(NW * max(h3size, 1_8), 'DEA5: the operators on the occupied triples')
   dxo3 = xzget(NW * max(nto * no * nvp, 1_8), 'DEA5: Xo3')
@@ -114,10 +116,12 @@ subroutine N(xzd5im)(w)
   kmx = xzget(NW * 2 * mxmax, 'DEA5: the products of Xv of one pair')
   koa2 = xzget(NW * no * nv * npo, 'DEA5: <mn||el> as [l][e][(mn)]')
   if (xzdry) then
+    call xzd5ptabs(w, .false.)
     call xzrel(m0)
     return
   end if
   call N(xzd5pos4)(w)
+  call xzd5ptabs(w, .true.)
   ! Wq5 = (the pp operator of the T3 equation, Wpp + F_vv / 2) - F_vv / 4
   do h = 0, npg - 1
     lo = vpoff(h)
@@ -485,6 +489,23 @@ subroutine N(xzd5x14)(w, mode, kr, ldr, m, lp, nent, row, sg, xoff, s1, s2, kx)
   call xzd5q5(w, m, lp)
   call N(zc_t5s_x14)(int(mode, c_int), w(kr), ldr, w(q5at(2 * m + lp)), q5n(lp, m), nent, row, sg, xoff, s1, s2, &
                      int(ncls, c_int), int(nv, c_int), w(dkv), w(dposv), w(dpos4), w(kx))
+end subroutine
+
+! the parity-split zc_t5s_x14p (xoff, s1, s2 per entry by 2 label + parity of a)
+subroutine N(xzd5x14p)(w, mode, kr, ldr, m, lp, nent, row, sg, xoff, s1, s2, kx)
+  use xzdata
+  use xzkern
+  use xzdead
+  use xzdead5
+  implicit none
+  real(8), target :: w(*)
+  integer, intent(in) :: mode
+  integer(8), intent(in) :: kr, ldr, m, lp, nent, row(*), xoff(*), s1(*), s2(*), kx
+  real(8), intent(in) :: sg(*)
+  if (nent == 0 .or. q5n(lp, m) == 0) return
+  call xzd5q5(w, m, lp)
+  call N(zc_t5s_x14p)(int(mode, c_int), w(kr), ldr, w(q5at(2 * m + lp)), q5n(lp, m), nent, row, sg, xoff, s1, s2, &
+                      int(ncls, c_int), int(nv, c_int), w(dkv), d5pvz, d5posvp, w(dpos4p), w(kx))
 end subroutine
 
 ! the row (sign sgn) of the triple i of r5 at kr into X[a of p][(bcde)] at kx
