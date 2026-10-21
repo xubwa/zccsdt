@@ -43,9 +43,14 @@ module xzdead5
   integer(8), allocatable :: x4off(:)           ! (0:npo) a row of r4 on (h | cde): its place in X4 (the sizes)
   integer(8), allocatable :: r5c(:), r5w(:)     ! (0:nto) the stored row of a triple: first element, elements
   integer(8) :: dsz5 = 0, dsz5c = 0, n23max = 0, n14max = 0, n13amax = 0, nq5max = 0, x4max = 0
-  integer(8), allocatable :: q5at(:)            ! (0:n5c-1) the quintuple list of block M (word address; 0: none)
+  integer(8), allocatable :: q5at(:)            ! (0:n5c-1) the quintuple list of block M (word address; 0: not there)
   integer(8), allocatable :: p5at(:)            ! the parity bits of its columns (word address; 0: none)
   integer(8) :: q5size = 0, p5size = 0          ! words of all lists, of all bits
+  ! the quintuple lists are made when they are used (xzd5q5), in a pool of
+  ! q5cap words at q5pool (the least recently used go when it is full; with
+  ! q5cap at least q5size all of them stay)
+  integer(8) :: q5pool = 0, q5cap = 0, q5top = 0, q5tick = 0, q5made = 0
+  integer(8), allocatable :: q5len(:), q5lru(:)
 
   ! ---- the rows of r5 over the ranks (xzd5ranges, xzd5slices)
   integer(8), allocatable :: dtb(:)             ! (0:nrank) the triples of every rank
@@ -156,10 +161,11 @@ contains
     use xzdead
     integer(8) :: m, c, p, q, n, a, i, pq
     if (allocated(off5)) deallocate(off5, blk5, pos5r, inblk5, off23, n23, off14, n14, off13a, n13a, x4off, r5c, r5w, &
-                                    q5at, p5at)
+                                    q5at, p5at, q5len, q5lru)
     allocate(off5(0:n5c), blk5(0:max(nto, 1_8)-1), pos5r(0:max(nto, 1_8)-1), inblk5(0:n5c-1), off23(0:n5c-1, 0:n2c-1), &
              n23(0:n5c-1), off14(0:n5c-1, 0:ncls-1), n14(0:n5c-1), off13a(0:n4c-1, 0:ncls-1), n13a(0:n4c-1), &
-             x4off(0:max(npo, 1_8)), r5c(0:max(nto, 1_8)), r5w(0:max(nto, 1_8)), q5at(0:n5c-1), p5at(0:n5c-1))
+             x4off(0:max(npo, 1_8)), r5c(0:max(nto, 1_8)), r5w(0:max(nto, 1_8)), q5at(0:n5c-1), p5at(0:n5c-1), &
+             q5len(0:n5c-1), q5lru(0:n5c-1))
     off5(0) = 0
     blk5 = -1
     pos5r = -1
@@ -233,6 +239,100 @@ contains
     end do
     q5at = 0
     p5at = 0
+    q5lru = 0
+    q5size = 0
+    do m = 0, n5c - 1
+      q5len(m) = 0
+      if (inblk5(m)) q5len(m) = (10 * nq5(m) + 7) / 8
+      q5size = q5size + q5len(m)
+    end do
+  end subroutine
+
+  ! The quintuple list of the block m in the pool (made there if it is not:
+  ! the least recently used lists go first when the pool is full, the others
+  ! are moved together); q5at(m) its address until the next call
+  subroutine xzd5q5(w, m)
+    use xzdata, only: nv
+    use xzdead, only: dkv
+    use xzkern
+    use iso_c_binding
+    real(8), target :: w(*)
+    integer(8), intent(in) :: m
+    integer(8) :: used, k, mm, best, dst, n
+    integer(8), allocatable :: ord(:), cnt(:)
+    integer(8), pointer :: wi(:)
+    q5tick = q5tick + 1
+    if (q5at(m) /= 0) then
+      q5lru(m) = q5tick
+      return
+    end if
+    if (q5top + q5len(m) > q5pool + q5cap) then
+      used = 0
+      do mm = 0, n5c - 1
+        if (q5at(mm) /= 0) used = used + q5len(mm)
+      end do
+      do while (used + q5len(m) > q5cap)
+        best = -1
+        do mm = 0, n5c - 1
+          if (q5at(mm) == 0) cycle
+          if (best < 0) then
+            best = mm
+          else if (q5lru(mm) < q5lru(best)) then
+            best = mm
+          end if
+        end do
+        if (best < 0) exit
+        q5at(best) = 0
+        used = used - q5len(best)
+      end do
+      ! the lists that stay, in the order of their places, to the front of the pool
+      allocate(ord(0:n5c-1))
+      k = 0
+      do mm = 0, n5c - 1
+        if (q5at(mm) == 0) cycle
+        ord(k) = mm
+        k = k + 1
+      end do
+      call sortby(ord, k)
+      call c_f_pointer(c_loc(w(q5pool)), wi, [max(q5cap, 1_8)])
+      dst = q5pool
+      do n = 0, k - 1
+        mm = ord(n)
+        if (q5at(mm) /= dst) wi(dst - q5pool + 1:dst - q5pool + q5len(mm)) = &
+                                  wi(q5at(mm) - q5pool + 1:q5at(mm) - q5pool + q5len(mm))
+        q5at(mm) = dst
+        dst = dst + q5len(mm)
+      end do
+      q5top = dst
+      deallocate(ord)
+    end if
+    if (q5top + q5len(m) > q5pool + q5cap) then
+      write(6, '(/,a)') ' @XZCCSDT-F, DEA5: the pool of the quintuple lists is shorter than one list.'
+      call xzerrex
+    end if
+    q5at(m) = q5top
+    q5top = q5top + q5len(m)
+    q5lru(m) = q5tick
+    allocate(cnt(0:nv))
+    n = zc_t5s_quints_par(int(nv, 4), w(dkv), int(m, 4), int(loc(w(q5at(m))), c_intptr_t), cnt)
+    deallocate(cnt)
+    q5made = q5made + 1
+  contains
+    subroutine sortby(o, nn)
+      integer(8), intent(inout) :: o(0:*)
+      integer(8), intent(in) :: nn
+      integer(8) :: i, j, t
+      do i = 1, nn - 1
+        t = o(i)
+        j = i - 1
+        do while (j >= 0)
+          if (q5at(o(j)) <= q5at(t)) exit
+          o(j + 1) = o(j)
+          j = j - 1
+        end do
+        o(j + 1) = t
+      end do
+    end subroutine
   end subroutine
 
   ! The stored 5p3h part (the columns of the parity of every row), from the

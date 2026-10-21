@@ -27,7 +27,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, ks5v)
   integer(8), intent(in) :: k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, ks5v
   integer(8) :: m0, kx23, kx14, klt, krc, klc, krc3, kx4t, k23max, k14max, nkmax, na4max, mm, c, ra, rb, r, i, ki
   integer(8) :: q, nc, nq, kr, rr, x, pyz, ph, mu, k3b, o2, cc, m, sj, jj, kj, p, na, ksum, z, pxy, a, e, mt, ii, pm
-  integer(8) :: n2omax, aa, m4, kz4, z4max, zslot(0:2), zx3, zs, kz4x(0:2)
+  integer(8) :: n2omax, aa, m4, kz4, z4max, zslot(0:2), zx3, zs, kz4x(0:2), xlim, qp0, qp1, base, psz, bsz
   logical :: zuse(0:2)
   integer(8), allocatable :: rows(:)
   integer(1), allocatable :: rsg(:)
@@ -64,8 +64,17 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, ks5v)
   k23max = 3 * (2 * nvcmax + 2 * nocmax + n2omax + no * nvcmax) + nvcmax + nocmax
   k14max = 3 * nocmax + n2omax
   m0 = xzmark()
-  kx23 = xzget(NW * max(n23max, 1_8), 'DEA5: X[(ab), (cde)] of a row')
-  kx14 = xzget(NW * max(n14max, 1_8), 'DEA5: X[a, (bcde)] of a row')
+  ! X[(ab), (cde)] of a row in parts of the groups of (ab) of at most n14max elements
+  ! (each part reduced on its own), then X[a, (bcde)], in one buffer
+  xlim = max(n14max, 1_8)
+  do mm = 0, n5c - 1
+    if (.not. inblk5(mm)) cycle
+    do q = 0, npg - 1
+      if (off23(mm, q) >= 0) xlim = max(xlim, dnQ(q) * dnK(mm - q))
+    end do
+  end do
+  kx23 = xzget(NW * xlim, 'DEA5: X[(ab), (cde)] (a part) or X[a, (bcde)] of a row')
+  kx14 = kx23
   klt = xzget(NW * k23max * nqmax, 'DEA5: stacked operand')
   krc = xzget(NW * k23max * nkmax, 'DEA5: stacked operand')
   klc = xzget(NW * nvcmax * k14max, 'DEA5: stacked operand')
@@ -134,8 +143,24 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, ks5v)
         end do
       end if
       if (n23(mm) > 0 .and. xzdwant('x23')) then
+        qp0 = 0
+        do while (qp0 < npg)
+        ! (the part: the groups q from qp0 while their blocks fit in xlim, at least one)
+        base = -1
+        psz = 0
+        qp1 = qp0
+        do while (qp1 < npg)
+          if (off23(mm, qp1) >= 0) then
+            bsz = dnQ(qp1) * dnK(mm - qp1)
+            if (base >= 0 .and. psz + bsz > xlim) exit
+            if (base < 0) base = off23(mm, qp1)
+            psz = psz + bsz
+          end if
+          qp1 = qp1 + 1
+        end do
+        if (base < 0) exit
         ta = omp_get_wtime()
-        do q = 0, npg - 1
+        do q = qp0, qp1 - 1
           if (off23(mm, q) < 0) cycle
           nc = dnK(mm - q)
           nq = dnQ(q)
@@ -281,15 +306,17 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, ks5v)
             end if
           end if
           if (kr == 0) then
-            call zc_vzero_d(NW * nq * nc, w(kx23 + NW * off23(mm, q)))
+            call zc_vzero_d(NW * nq * nc, w(kx23 + NW * (off23(mm, q) - base)))
           else
-            call N(zc_gemm)(1_4, 0_4, nq, nc, kr, one, w(klt), nq, w(krc), nc, zero, w(kx23 + NW * off23(mm, q)), nc)
+            call N(zc_gemm)(1_4, 0_4, nq, nc, kr, one, w(klt), nq, w(krc), nc, zero, w(kx23 + NW * (off23(mm, q) - base)), nc)
           end if
         end do
         td5(10) = td5(10) + omp_get_wtime() - ta
         ta = omp_get_wtime()
-        call N(xzd5row23)(w, 1, ks5v + NW * off5(mm), mm, r, 1d0, kx23)
+        call N(xzd5row23p)(w, 1, ks5v + NW * off5(mm), mm, r, 1d0, kx23, qp0, qp1, base)
         td5(17) = td5(17) + omp_get_wtime() - ta
+        qp0 = qp1
+        end do
       end if
       if (n14(mm) > 0 .and. xzdwant('x14')) then
         ta = omp_get_wtime()

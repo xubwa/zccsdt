@@ -49,6 +49,16 @@ module xzkern
       integer(c_int64_t) :: cnt
     end function
 
+    ! the same on all threads (cnt: work, n + 1 integers)
+    function zc_t5s_quints_par(n, kv, m, out, cnt) bind(C) result(c)
+      import
+      integer(c_int), value :: n, m
+      type(*), dimension(*) :: kv
+      integer(c_intptr_t), value :: out
+      integer(c_int64_t) :: cnt(*)
+      integer(c_int64_t) :: c
+    end function
+
     subroutine zc_tn_zero(p, nbytes) bind(C)
       import
       type(*), dimension(*) :: p

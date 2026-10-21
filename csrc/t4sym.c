@@ -426,3 +426,46 @@ void zc_t5s_x14_##SFX(int mode, T *R, int64_t ldR, const int16_t *quints,      \
 
 DEFINE_T5S(double, d)
 DEFINE_T5S(double complex, z)
+
+/* zc_t5s_quints on all threads (the native program makes the lists of the
+ * blocks of r5 when it uses them, cfour/xzccsdt/xzdea5.inc): the quintuples
+ * of each first index a counted, then written at their places; the same
+ * list as zc_t5s_quints.  cnt: work, n + 1 integers. */
+static int64_t t5s_from(int n, const int32_t *kv, int M, int a, int16_t *out)
+{
+    int64_t c = 0;
+    for (int b = a + 1; b < n - 3; b++)
+    for (int cc = b + 1; cc < n - 2; cc++)
+    for (int d = cc + 1; d < n - 1; d++) {
+        const int ke = M - kv[a] - kv[b] - kv[cc] - kv[d];
+        if (ke < kv[d + 1] || ke > kv[n - 1]) continue;
+        int lo = d + 1, hi = n;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (kv[mid] >= ke) hi = mid; else lo = mid + 1;
+        }
+        for (int e = lo; e < n && kv[e] == ke; e++) {
+            if (out) {
+                int16_t *o = out + 5 * c;
+                o[0] = (int16_t)a; o[1] = (int16_t)b; o[2] = (int16_t)cc;
+                o[3] = (int16_t)d; o[4] = (int16_t)e;
+            }
+            c++;
+        }
+    }
+    return c;
+}
+
+int64_t zc_t5s_quints_par(int n, const int32_t *kv, int M, int16_t *out, int64_t *cnt)
+{
+    if (n < 5) return 0;
+    cnt[0] = 0;
+    _Pragma("omp parallel for schedule(dynamic)")
+    for (int a = 0; a < n - 4; a++) cnt[a + 1] = t5s_from(n, kv, M, a, NULL);
+    for (int a = 0; a < n - 4; a++) cnt[a + 1] += cnt[a];
+    if (out) {
+        _Pragma("omp parallel for schedule(dynamic)")
+        for (int a = 0; a < n - 4; a++) t5s_from(n, kv, M, a, out + 5 * cnt[a]);
+    }
+    return cnt[n - 4];
+}

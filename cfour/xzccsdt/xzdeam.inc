@@ -274,8 +274,8 @@ subroutine N(xzdea)(w, ecorr)
       nlen = nlen + dvec5
       write(6, '(a,i16,a,i16,a,f12.1,a)') '   5p3h: ', dsz5, ' elements in the blocks, ', dvec5, ' stored (the parity) = ', &
         8d-6 * NW * dvec5, ' MB of a vector'
-      write(6, '(a,f10.1,a,i6,a)') '   the quintuple lists of the blocks: ', 8d-6 * (q5size + p5size), ' MB; Xv5 of one k at most ', &
-        nint(8d-6 * NW * xv5max), ' MB'
+      write(6, '(a,f10.1,a,f10.1,a,f10.1,a,i6,a)') '   the quintuple lists of the blocks: ', 8d-6 * q5size, ' MB (a pool of ', &
+        8d-6 * q5cap, ' MB), their parities ', 8d-6 * p5size, ' MB; Xv5 of one k at most ', nint(8d-6 * NW * xv5max), ' MB'
     end if
     ! (over the ranks: the rows of r4 of every rank, before the vectors and the
     ! batches - a rank holds its part of a vector, and a sigma vector of a

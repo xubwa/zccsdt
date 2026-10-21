@@ -383,20 +383,48 @@ subroutine N(xzd5secw)(w)
   use iso_c_binding
   implicit none
   real(8), target :: w(*)
-  integer(8) :: m, n, a, cnt(0:1, 0:n5c-1), nb
-  integer(4) :: kv(0:max(nv, 1_8)-1)
+  integer(8) :: m, n, a, cnt(0:1, 0:n5c-1), nb, i, own, big(10), k
   integer(2), pointer :: q5(:, :)
   integer(8), pointer :: bits(:)
   integer(8) :: pc
-  q5size = 0
+  character(len=32) :: arg
+  integer :: larg
+  logical :: mine(0:n5c-1)
+  ! the pool of the quintuple lists: the lists of the blocks of the rows of this
+  ! rank and the ten largest others (all of them if that is not less); option
+  ! dea5pool: its words
+  mine = .false.
+  do i = dt0, dt1 - 1
+    if (blk5(i) >= 0) mine(blk5(i)) = .true.
+  end do
+  own = 0
+  big = 0
+  do m = 0, n5c - 1
+    if (mine(m)) then
+      own = own + q5len(m)
+    else
+      do k = 1, 10
+        if (q5len(m) > big(k)) then
+          big(k + 1:10) = big(k:9)
+          big(k) = q5len(m)
+          exit
+        end if
+      end do
+    end if
+  end do
+  q5cap = min(q5size, own + sum(big))
+  call xzoptget('dea5pool', arg, larg)
+  if (larg > 0) read(arg(1:larg), *) q5cap
+  q5cap = max(q5cap, maxval(q5len))
+  q5pool = xzget(max(q5cap, 1_8), 'DEA5: the quintuple lists of the blocks of r5 (a pool)')
+  q5top = q5pool
+  q5tick = 0
+  q5made = 0
   p5size = 0
   do m = 0, n5c - 1
     q5at(m) = 0
     p5at(m) = 0
     if (.not. inblk5(m)) cycle
-    n = (10 * nq5(m) + 7) / 8
-    q5at(m) = xzget(n, 'DEA5: the quintuples of a block of r5')
-    q5size = q5size + n
     if (dtpar >= 0) then
       nb = (nq5(m) + 63) / 64
       p5at(m) = xzget(nb, 'DEA5: the parities of the quintuples of a block of r5')
@@ -417,18 +445,11 @@ subroutine N(xzd5secw)(w)
     call xzd5lay(w)
     return
   end if
-  do m = 0, nv - 1
-    kv(m) = int(vcls(m), 4)
-  end do
-  !$omp parallel do schedule(dynamic) private(n)
-  do m = 0, n5c - 1
-    if (q5at(m) == 0) cycle
-    n = zc_t5s_quints(int(nv, 4), kv, int(m, 4), int(loc(w(q5at(m))), c_intptr_t))
-  end do
   cnt = 0
   do m = 0, n5c - 1
     cnt(0, m) = nq5(m)
-    if (q5at(m) == 0 .or. dtpar < 0) cycle
+    if (.not. inblk5(m) .or. dtpar < 0) cycle
+    call xzd5q5(w, m)
     call xzdi2v2(w, q5at(m), 5_8, max(nq5(m), 1_8), q5)
     call xzdiv(w, p5at(m), (nq5(m) + 63) / 64, bits)
     bits = 0
@@ -465,6 +486,7 @@ subroutine N(xzd5x23)(w, mode, kr, ldr, m, nent, row, sg, xoff, s1, s2, kx)
   integer(8), intent(in) :: kr, ldr, m, nent, row(*), xoff(*), s1(*), s2(*), kx
   real(8), intent(in) :: sg(*)
   if (nent == 0 .or. nq5(m) == 0) return
+  call xzd5q5(w, m)
   call N(zc_t5s_x23)(int(mode, c_int), w(kr), ldr, w(q5at(m)), nq5(m), nent, row, sg, xoff, s1, s2, &
                      int(npg, c_int), int(nv, c_int), w(dkv), w(dposq), w(dpos3), w(kx))
 end subroutine
@@ -480,6 +502,7 @@ subroutine N(xzd5x14)(w, mode, kr, ldr, m, nent, row, sg, xoff, s1, s2, kx)
   integer(8), intent(in) :: kr, ldr, m, nent, row(*), xoff(*), s1(*), s2(*), kx
   real(8), intent(in) :: sg(*)
   if (nent == 0 .or. nq5(m) == 0) return
+  call xzd5q5(w, m)
   call N(zc_t5s_x14)(int(mode, c_int), w(kr), ldr, w(q5at(m)), nq5(m), nent, row, sg, xoff, s1, s2, &
                      int(ncls, c_int), int(nv, c_int), w(dkv), w(dposv), w(dpos4), w(kx))
 end subroutine
@@ -523,6 +546,30 @@ subroutine N(xzd5row23)(w, mode, kr, m, r, sgn, kx)
   sg(1) = sgn
   do q = 0, npg - 1
     xo(q + 1) = off23(m, q)
+    y1(q + 1) = max(dnK(m - q), 1_8)
+    y2(q + 1) = 1
+  end do
+  call N(xzd5x23)(w, mode, kr, nq5(m), m, 1_8, row, sg, xo, y1, y2, kx)
+end subroutine
+
+! one row of the block m as X[(ab) of q][(cde)] of the groups q0 <= q < q1
+! (their blocks at kx + off23 - base; the others left out)
+subroutine N(xzd5row23p)(w, mode, kr, m, r, sgn, kx, q0, q1, base)
+  use xzdata
+  use xzdead
+  use xzdead5
+  implicit none
+  real(8), target :: w(*)
+  integer, intent(in) :: mode
+  integer(8), intent(in) :: kr, m, r, kx, q0, q1, base
+  real(8), intent(in) :: sgn
+  integer(8) :: row(1), xo(npg), y1(npg), y2(npg), q
+  real(8) :: sg(1)
+  row(1) = r
+  sg(1) = sgn
+  do q = 0, npg - 1
+    xo(q + 1) = -1
+    if (q >= q0 .and. q < q1 .and. off23(m, q) >= 0) xo(q + 1) = off23(m, q) - base
     y1(q + 1) = max(dnK(m - q), 1_8)
     y2(q + 1) = 1
   end do
@@ -653,6 +700,7 @@ subroutine N(xzd5prec)(w, kc, omega)
     if (m < 0 .or. r5w(i) == 0) cycle
     n = nq5(m)
     eo(1) = eps(xzd5free(i, 0)) + eps(xzd5free(i, 1)) + eps(xzd5free(i, 2))
+    call xzd5q5(w, m)
     call xzdi2v2(w, q5at(m), 5_8, max(n, 1_8), q5)
     b = xzd5rpar(i)
     if (b >= 0) call xzdiv(w, p5at(m), (n + 63) / 64, bits)
