@@ -521,13 +521,16 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
   use xzkern
   use xzdead
   use xzdead5
-  use xzpar, only: myrank, nrank, xzmpi_segs, xzmpi_chunk, xzmpi_sub_allsum_w
+  use xzpar, only: myrank, nrank, xzmpi_segs, xzmpi_chunk, xzmpi_sub_allsum_w, xzmpi_allsum_w
   use omp_lib
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: kr4f, k5o, s5o, kg5, kxva
   integer(8) :: m0, kxv, ku, kx4z, kx14, kin, kout, ktmp, ntmp, z, fe, aa, p, o, nk, l, pl, m4, ph, cc, f, kz, slot, nslot
-  integer(8) :: mrow, nb, nrmax, zq, kxz, tt, xvz(0:no)
+  integer(8) :: mrow, nb, nrmax, zq, kxz, tt, xvz(0:no), zmy(0:no), nzmy, nset, lmax
+  logical :: zset
+  real(8) :: zflag(1)
+  integer(8), allocatable :: tset(:, :), nts(:)
   character(len=256) :: barg
   integer :: lbarg
   integer(8) :: ip, l1, l2, i, mx, r, rowt, sgt, nr, g, ng, gme, n13x, nround, ir, it, t3i, x, y, zi, pxy, mu, nitem
@@ -541,8 +544,32 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
   one = 1
   ntmp = 4 * min(xzmpi_chunk(), NW * max(maxval(r5w), 1_8))
   m0 = xzmark()
+  ! over fewer ranks than occupied spinors: the k of a rank (k mod ranks)
+  ! at once if their slabs fit (zset): every row with one of them taken
+  ! once, walked once for the term of r5 and once for E1x; else slot by slot
+  zset = .false.
+  zmy = -1
+  nzmy = 0
+  if (ddist .and. nrank < no) then
+    do z = 0, no - 1
+      if (mod(z, int(nrank, 8)) /= myrank) cycle
+      zmy(z) = nzmy
+      nzmy = nzmy + xv5k(z)
+    end do
+    zset = NW * (nzmy + 2 * max(maxval(r5w), 1_8) + max(nvcmax * n13amax, 1_8) + no * max(x4max, 1_8) + &
+                 max(n14max, 1_8)) + ntmp + 256 <= xzroom()
+    call xzoptget('dea5xb', barg, lbarg)
+    if (lbarg > 0) zset = .false.
+    if (.not. xzdry) then
+      zflag(1) = merge(1d0, 0d0, zset)
+      call xzmpi_allsum_w(zflag, 1_8)
+      zset = nint(zflag(1)) == nrank
+    end if
+  end if
   if (kxva >= 0) then
     kxv = kxva
+  else if (zset) then
+    kxv = xzget(NW * max(nzmy, 1_8), 'DEA5: Xv5 of the k of this rank')
   else
     kxv = xzget(NW * max(xv5max, 1_8), 'DEA5: Xv5 of one k')
   end if
@@ -555,6 +582,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
     mrow = max(maxval(r5w), 1_8)
     nitem = (no - 1) * (no - 2) / 2
     nrmax = nitem
+    if (zset) nrmax = nto
     if (nrank >= no) then
       nrmax = 0
       do zq = 0, no - 1
@@ -593,7 +621,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
   allocate(zlist(no), plist(2, max(npo, 1_8)))
   nitem = (no - 1) * (no - 2) / 2
   nslot = 1
-  if (ddist .and. nrank < no) nslot = (no + nrank - 1) / nrank
+  if (ddist .and. nrank < no .and. .not. zset) nslot = (no + nrank - 1) / nrank
   do slot = 1, nslot
     kz = -1
     ng = 1
@@ -609,9 +637,14 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
       end if
     end if
     do z = 0, no - 1
-      if (ddist .and. z /= kz) cycle
+      if (zset) then
+        if (zmy(z) < 0) cycle
+      else if (ddist .and. z /= kz) then
+        cycle
+      end if
       kxz = kxv
       if (kxva >= 0) kxz = kxv + NW * xvz(z)
+      if (zset) kxz = kxv + NW * zmy(z)
       call zc_vzero_d(NW * max(xv5k(z), 1_8), w(kxz))
       ! the rows (l, z) of r4 on (h | cde)
       do l = 0, no - 1
@@ -697,7 +730,24 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
         call one_e1x(it, .true., 0_8)
       end do
     end do
-    if (ddist) then
+    if (zset) then
+      ! (the k of this rank at once) the rows with one of them: lists per rank
+      lmax = 0
+      allocate(nts(0:nrank - 1), tset(max(nto, 1_8), 0:nrank - 1))
+      nts = 0
+      do tt = 0, nto - 1
+        if (blk5(tt) < 0 .or. r5w(tt) == 0) cycle
+        do r = 0, nrank - 1
+          if (mod(xzd5free(tt, 0_8), int(nrank, 8)) == r .or. mod(xzd5free(tt, 1_8), int(nrank, 8)) == r .or. &
+              mod(xzd5free(tt, 2_8), int(nrank, 8)) == r) then
+            nts(r) = nts(r) + 1
+            tset(nts(r), r) = tt
+          end if
+        end do
+      end do
+      call set_rounds()
+      deallocate(nts, tset)
+    else if (ddist) then
       ! (over the ranks: every rank takes part in the rounds, with or without a z of this slot)
       z = kz
       call r5_rounds()
@@ -811,6 +861,125 @@ contains
     else
       call N(xzd5row14)(w, 1, kd, t_, 1d0, kx14)
     end if
+  end subroutine
+
+  ! (the k of this rank at once) the rounds of its rows: in round ir the
+  ! ir-th row of the list of every rank, from its owner; the term of r5 of
+  ! the rows of this rank, then E1x into rows sent back to their owners
+  subroutine set_rounds()
+    integer(8) :: ir_, ir0, rr, t_, o_, kb, pass
+    integer(8) :: nr_
+    nr_ = maxval(nts)
+    do pass = 1, 2
+      do ir0 = 1, nr_, nb
+        if (pass == 2) then
+          do ir_ = ir0, min(nr_, ir0 + nb - 1)
+            if (ir_ <= nts(myrank)) call one_e1xset(tset(ir_, myrank), kout + NW * mrow * (ir_ - ir0))
+          end do
+        end if
+        ta = omp_get_wtime()
+        dsn = 0
+        do ir_ = ir0, min(nr_, ir0 + nb - 1)
+          kb = merge(kin, kout, pass == 1) + NW * mrow * (ir_ - ir0)
+          do rr = 0, nrank - 1
+            if (ir_ > nts(rr)) cycle
+            t_ = tset(ir_, rr)
+            o_ = xzd5owner(t_)
+            if (rr /= myrank .and. o_ /= myrank) cycle
+            if (pass == 1) then
+              if (rr == myrank .and. o_ == myrank) then
+                call N(xzecopy)(r5w(t_), w(k5o + NW * r5own(t_)), w(kb))
+              else if (rr == myrank) then
+                call xzdseg(o_, kb, NW * r5w(t_), 1_8)
+              else
+                call xzdseg(rr, k5o + NW * r5own(t_), NW * r5w(t_), 0_8)
+              end if
+            else
+              if (rr == myrank .and. o_ == myrank) then
+                call N(xzeaxpyc)(r5w(t_), one, w(kb), w(s5o + NW * r5own(t_)))
+              else if (rr == myrank) then
+                call xzdseg(o_, kb, NW * r5w(t_), 0_8)
+              else
+                call xzdseg(rr, s5o + NW * r5own(t_), NW * r5w(t_), 1_8)
+              end if
+            end if
+          end do
+        end do
+        if (pass == 1) then
+          call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, 0_8, w, 0_8)
+        else
+          call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, 1_8, w(ktmp), ntmp)
+        end if
+        td5(16) = td5(16) + omp_get_wtime() - ta
+        if (pass == 1) then
+          do ir_ = ir0, min(nr_, ir0 + nb - 1)
+            if (ir_ <= nts(myrank)) call one_r5set(kin + NW * mrow * (ir_ - ir0), tset(ir_, myrank))
+          end do
+        end if
+      end do
+    end do
+  end subroutine
+
+  ! (the k of this rank at once) Xv5(f; z; bcde) += sgn sum_h <l1 l2||fh>
+  ! r5(T; h bcde) for the splits (z | l1 l2) of T with z of this rank, the
+  ! row at kr expanded once
+  subroutine one_r5set(kr, t)
+    integer(8), intent(in) :: kr, t
+    integer(8) :: mx_, p_, fe_, a_, r_, z_, a1, a2, pq_
+    ZT :: al
+    mx_ = blk5(t)
+    call zc_vzero_d(NW * max(n14(mx_), 1_8), w(kx14))
+    call N(xzd5row14)(w, 0, kr, t, 1d0, kx14)
+    if (.not. zx) return
+    do r_ = 0, 2
+      z_ = xzd5free(t, r_)
+      if (zmy(z_) < 0) cycle
+      a1 = xzd5free(t, merge(1_8, 0_8, r_ == 0))
+      a2 = xzd5free(t, merge(1_8, 2_8, r_ == 2))
+      pq_ = opidx(a2, a1)
+      if (osgn(pq_, z_) == 0) cycle
+      al = dble(osgn(pq_, z_))
+      do p_ = 0, ncls - 1
+        if (off14(mx_, p_) < 0) cycle
+        a_ = mx_ - p_
+        fe_ = a_ - ds - ocls(z_)
+        if (fe_ < 0 .or. fe_ >= ncls) cycle
+        if (xv5off(z_, fe_) < 0) cycle
+        call N(zc_gemm)(0_4, 0_4, dnV(fe_), d5nA4(a_), dnV(p_), al, &
+                        w(joovv + NW * (((a1 * no + a2) * nv + vcoff(fe_)) * nv + vcoff(p_))), nv, &
+                        w(kx14 + NW * off14(mx_, p_)), d5nA4(a_), one, w(kxv + NW * (zmy(z_) + xv5off(z_, fe_))), d5nA4(a_))
+      end do
+    end do
+  end subroutine
+
+  ! (the k of this rank at once) E1x of the splits (z | xy) of T with z of
+  ! this rank, into one row on (a | bcde), reduced once into the row at kd
+  subroutine one_e1xset(t, kd)
+    integer(8), intent(in) :: t, kd
+    integer(8) :: mx_, p_, mu_, a_, r_, z_, pxy_
+    ZT :: al
+    mx_ = blk5(t)
+    call zc_vzero_d(NW * max(r5w(t), 1_8), w(kd))
+    if (.not. xzdwant('e1x')) return
+    call zc_vzero_d(NW * max(n14(mx_), 1_8), w(kx14))
+    do r_ = 0, 2
+      z_ = xzd5free(t, r_)
+      if (zmy(z_) < 0) cycle
+      pxy_ = opidx(xzd5free(t, merge(1_8, 2_8, r_ == 2)), xzd5free(t, merge(1_8, 0_8, r_ == 0)))
+      ! the sign of the split (z | xy): +, -, + for z first, second, third
+      al = merge(-1d0, 1d0, r_ == 1)
+      do p_ = 0, ncls - 1
+        if (off14(mx_, p_) < 0) cycle
+        mu_ = opgrp(pxy_) - p_
+        if (mu_ < 0 .or. mu_ >= ncls) cycle
+        if (dnV(mu_) == 0 .or. xv5off(z_, mu_) < 0) cycle
+        a_ = mx_ - p_
+        call N(zc_gemm)(0_4, 0_4, dnV(p_), d5nA4(a_), dnV(mu_), al, &
+                        w(dla13 + NW * ((pxy_ * nv + vcoff(p_)) * (no + nv) + mix0(mu_) + dnO(mu_))), no + nv, &
+                        w(kxv + NW * (zmy(z_) + xv5off(z_, mu_))), d5nA4(a_), one, w(kx14 + NW * off14(mx_, p_)), d5nA4(a_))
+      end do
+    end do
+    call N(xzd5row14)(w, 1, kd, t, 1d0, kx14)
   end subroutine
 
   ! (over the ranks) the rows (l, n, z) of the items of this rank, one per

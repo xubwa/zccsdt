@@ -48,4 +48,10 @@ grep -h "work array used" xzccsdt.r0* 2> /dev/null | sort -k5 -n | tail -3
 grep "^ *[-0-9]" XZDEA 2> /dev/null
 grep "Elapsed\|Maximum resident" "xzccsdt.$tag.time"
 cp XZDEA "XZDEA.$tag" 2> /dev/null
+# (the directory of option eomvdir on every node: empty after the run - the program deletes its files)
+for o in "$@"; do
+  case $o in
+    eomvdir\ *) srun -N $nn --ntasks-per-node=1 rmdir "${o#eomvdir }" 2> /dev/null ;;
+  esac
+done
 echo "done $(date)"
