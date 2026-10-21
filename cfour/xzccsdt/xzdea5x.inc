@@ -583,7 +583,8 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
     nitem = (no - 1) * (no - 2) / 2
     nrmax = nitem
     if (zset) nrmax = nto
-    if (nrank >= no) then
+    ! (zn: the ranks of every k, xzd5zgroups; not in the plan of other numbers of ranks)
+    if (nrank >= no .and. allocated(zn)) then
       nrmax = 0
       do zq = 0, no - 1
         nrmax = max(nrmax, (nitem + zn(zq) - 1) / zn(zq))
