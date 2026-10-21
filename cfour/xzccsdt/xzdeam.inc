@@ -271,9 +271,9 @@ subroutine N(xzdea)(w, ecorr)
     if (dlev == 5) then
       ! the quintuple lists of the blocks of r5, the stored layout
       call N(xzd5secw)(w)
-      nlen = nlen + dvec5
-      write(6, '(a,i16,a,i16,a,f12.1,a)') '   5p3h: ', dsz5, ' elements in the blocks, ', dvec5, ' stored (the parity) = ', &
-        8d-6 * NW * dvec5, ' MB of a vector'
+      nlen = nlen + dsz5c
+      write(6, '(a,i16,a,i16,a,f12.1,a)') '   5p3h: ', dsz5, ' elements in the blocks, ', dsz5c, ' stored (the parity) = ', &
+        8d-6 * NW * dsz5c, ' MB of a vector'
       write(6, '(a,f10.1,a,f10.1,a,i6,a)') '   the quintuple lists of the blocks: ', 8d-6 * q5size, ' MB (a pool of ', &
         8d-6 * q5cap, ' MB); Xv5 of one k at most ', nint(8d-6 * NW * xv5max), ' MB'
     end if
