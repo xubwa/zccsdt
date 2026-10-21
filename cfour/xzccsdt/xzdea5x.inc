@@ -15,7 +15,8 @@
 !   X[a, (bcde)] per class p of a: E1 Wo(m, a, xy) | r4(m z; bcde),
 !     E2 W2(mn; ijk; a) | r4(mn; bcde)
 !   each reduced once into the row (E1x: N(xzd5zx)).
-subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
+!   kxva >= 0: Xv5 of all k there (N(xzd5zx) before), E1x in the products of E1
+subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o, kxva)
   use xzdata
   use xzmem
   use xzkern
@@ -24,7 +25,8 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
   use omp_lib
   implicit none
   real(8), target :: w(*)
-  integer(8), intent(in) :: k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o
+  integer(8), intent(in) :: k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o, kxva
+  integer(8), allocatable :: xvz(:)
   integer(8) :: m0, kx23, kx14, klt, krc, klc, krc3, kx4t, k23max, k14max, nkmax, na4max, mm, c, ra, rb, r, i, ki
   integer(8) :: q, nc, nq, kr, rr, x, pyz, ph, mu, k3b, o2, cc, m, sj, jj, kj, p, na, ksum, z, pxy, a, e, mt, ii, pm
   integer(8) :: n2omax, aa, m4, kz4, z4max, zx3, zs, kz4x(0:2), xlim, qp0, qp1, base, psz, bsz, nzs, ndist, zbud, ztick
@@ -66,6 +68,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
   end do
   k23max = 3 * (2 * nvcmax + 2 * nocmax + n2omax + no * nvcmax) + nvcmax + nocmax
   k14max = 3 * nocmax + n2omax
+  if (kxva >= 0) k14max = k14max + 3 * nvcmax
   m0 = xzmark()
   ! X[(ab), (cde)] of a row in parts of the groups of (ab) of at most n14max elements
   ! (each part reduced on its own), then X[a, (bcde)], in one buffer
@@ -137,6 +140,11 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
   call N(xzdv)(w, dla13, max(npo * nv * (no + nv), 1_8), la13)
   call N(xzdv)(w, dw2, max(nto * nv * npo, 1_8), w2)
   allocate(rows(0:max(k23max, k14max, nvcmax, nocmax) - 1), rsg(0:max(nocmax, 1_8) - 1))
+  allocate(xvz(0:max(no, 1_8)))
+  xvz(0) = 0
+  do i = 0, no - 1
+    xvz(i + 1) = xvz(i) + xv5k(i)
+  end do
   do mm = 0, n5c - 1
     if (.not. inblk5(mm)) cycle
     c = mm - ds
@@ -362,7 +370,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
         qp0 = qp1
         end do
       end if
-      if (n14(mm) > 0 .and. xzdwant('x14')) then
+      if (n14(mm) > 0 .and. (xzdwant('x14') .or. (kxva >= 0 .and. xzdwant('e1x')))) then
         ta = omp_get_wtime()
         do p = 0, ncls - 1
           if (off14(mm, p) < 0) cycle
@@ -375,7 +383,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
             sgn = merge(-1d0, 1d0, rr == 1)
             mu = opgrp(pxy) - p
             if (mu < 0 .or. mu >= ncls) cycle
-            if (dnO(mu) == 0) cycle
+            if (dnO(mu) == 0 .and. kxva < 0) cycle
             aa = ds + ocls(z) + mu
             mt = 0
             do e = 0, dnO(mu) - 1
@@ -390,13 +398,26 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
               end do
               mt = mt + 1
             end do
-            if (mt == 0) cycle
-            call N(zc_tn_rows)(w(kr4f + NW * off4(aa)), nqa(aa), rows, rsg, mt, 0_8, na, w(krc3 + NW * ksum * na), na)
-            ksum = ksum + mt
+            if (mt > 0 .and. xzdwant('x14')) then
+              call N(zc_tn_rows)(w(kr4f + NW * off4(aa)), nqa(aa), rows, rsg, mt, 0_8, na, w(krc3 + NW * ksum * na), na)
+              ksum = ksum + mt
+            end if
+            ! E1x: sg t2(xy; a f) with Xv5(f; z; bcde), f of class mu (the columns of la13 after the m)
+            if (kxva >= 0 .and. xzdwant('e1x')) then
+              if (dnV(mu) > 0 .and. xv5off(z, mu) >= 0) then
+                do a = 0, dnV(p) - 1
+                  do e = 0, dnV(mu) - 1
+                    lc(a * k14max + ksum + e) = sgn * la13((pxy * nv + vcoff(p) + a) * (no + nv) + mix0(mu) + dnO(mu) + e)
+                  end do
+                end do
+                call N(xzecopy)(dnV(mu) * na, w(kxva + NW * (xvz(z) + xv5off(z, mu))), w(krc3 + NW * ksum * na))
+                ksum = ksum + dnV(mu)
+              end if
+            end if
           end do
           ! E2: W2(mn; ijk; a) with r4(mn; bcde), (mn) of group mm - p - s
           cc = mm - p - ds
-          if (cc >= 0 .and. cc < n2c) then
+          if (cc >= 0 .and. cc < n2c .and. xzdwant('x14')) then
             if (dnO2(cc) > 0) then
               if (blk4(opoff(cc)) == mm - p) then
                 do a = 0, dnV(p) - 1
@@ -422,7 +443,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
       end if
     end do
   end do
-  deallocate(rows, rsg, zslot, zlast, zuse)
+  deallocate(rows, rsg, zslot, zlast, zuse, xvz)
   td5(9) = td5(9) + omp_get_wtime() - t0
   call xzrel(m0)
 end subroutine
@@ -439,7 +460,7 @@ end subroutine
 ! k share the pairs (l, n) of the term of r5 and the pairs (x, y) of E1x,
 ! Xv5(.; k) is summed over them; a rank takes the rows (l, n, k) from their
 ! owners and gives its rows (x, y, k) of sigma5 to theirs, one row per round.
-subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
+subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
   use xzdata
   use xzmem
   use xzkern
@@ -449,9 +470,9 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
   use omp_lib
   implicit none
   real(8), target :: w(*)
-  integer(8), intent(in) :: kr4f, k5o, s5o, kg5
+  integer(8), intent(in) :: kr4f, k5o, s5o, kg5, kxva
   integer(8) :: m0, kxv, ku, kx4z, kx14, kin, kout, ktmp, ntmp, z, fe, aa, p, o, nk, l, pl, m4, ph, cc, f, kz, slot, nslot
-  integer(8) :: mrow, nb, nrmax, zq
+  integer(8) :: mrow, nb, nrmax, zq, kxz, tt, xvz(0:no)
   character(len=256) :: barg
   integer :: lbarg
   integer(8) :: ip, l1, l2, i, mx, r, rowt, sgt, nr, g, ng, gme, n13x, nround, ir, it, t3i, x, y, zi, pxy, mu, nitem
@@ -465,7 +486,11 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
   one = 1
   ntmp = 4 * min(xzmpi_chunk(), NW * max(maxval(r5w), 1_8))
   m0 = xzmark()
-  kxv = xzget(NW * max(xv5max, 1_8), 'DEA5: Xv5 of one k')
+  if (kxva >= 0) then
+    kxv = kxva
+  else
+    kxv = xzget(NW * max(xv5max, 1_8), 'DEA5: Xv5 of one k')
+  end if
   ku = xzget(NW * max(nvcmax * n13amax, 1_8), 'DEA5: U of Xv5 on (b | cde)')
   kx4z = xzget(NW * no * max(x4max, 1_8), 'DEA5: the rows (l, k) of r4 on (h | cde)')
   kx14 = xzget(NW * max(n14max, 1_8), 'DEA5: a row of r5 on (a | bcde)')
@@ -503,6 +528,10 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
   call xzdiv2(w, jotri, max(npo, 1_8), no, otri)
   call xzdi1v2(w, josgn, max(npo, 1_8), no, osgn)
   zx = xzdwant('xv5')
+  xvz(0) = 0
+  do z = 0, no - 1
+    xvz(z + 1) = xvz(z) + xv5k(z)
+  end do
   allocate(row(0:nvcmax), sg(0:nvcmax), xoff(0:ncls-1, 0:nvcmax), s1(0:ncls-1, 0:nvcmax), s2(0:ncls-1, 0:nvcmax))
   ! the k of this rank, slot by slot (every rank the same number of slots)
   allocate(zlist(no), plist(2, max(npo, 1_8)))
@@ -525,7 +554,9 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
     end if
     do z = 0, no - 1
       if (ddist .and. z /= kz) cycle
-      call zc_vzero_d(NW * max(xv5k(z), 1_8), w(kxv))
+      kxz = kxv
+      if (kxva >= 0) kxz = kxv + NW * xvz(z)
+      call zc_vzero_d(NW * max(xv5k(z), 1_8), w(kxz))
       ! the rows (l, z) of r4 on (h | cde)
       do l = 0, no - 1
         if (l == z) cycle
@@ -582,7 +613,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
             end if
           end do
         end do
-        call N(xzdx13)(w, 1, kxv + NW * xv5off(z, fe), nqa(aa), aa, dnV(fe), row, sg, xoff, s1, s2, ku)
+        call N(xzdx13)(w, 1, kxz + NW * xv5off(z, fe), nqa(aa), aa, dnV(fe), row, sg, xoff, s1, s2, ku)
       end do
       ! the pairs (l < n) without z: of the term of r5 and of E1x
       it = 0
@@ -594,7 +625,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
           plist(2, it) = l2
         end do
       end do
-      if (ddist) cycle
+      if (ddist .or. kxva >= 0) cycle
       ! (one rank) the term of r5, then E1x
       do it = 1, nitem
         l1 = plist(1, it)
@@ -622,11 +653,48 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
       call e1x_rounds()
     end if
   end do
+  if (kxva >= 0) then
+    ! (Xv5 of all k) the term of r5: every row once, into the slabs of its three indices
+    do tt = dt0, dt1 - 1
+      if (blk5(tt) < 0 .or. r5w(tt) == 0) cycle
+      call one_r5all(k5o + NW * r5own(tt), tt)
+    end do
+  end if
   deallocate(row, sg, xoff, s1, s2, zlist, plist)
   td5(12) = td5(12) + omp_get_wtime() - t0
   call xzrel(m0)
 
 contains
+
+  ! (Xv5 of all k) Xv5(f; z; bcde) += sgn sum_h <l1 l2||fh> r5(T; h bcde) for
+  ! the three splits (z | l1 l2) of the triple T, its row at kr expanded once
+  subroutine one_r5all(kr, t)
+    integer(8), intent(in) :: kr, t
+    integer(8) :: mx_, p_, fe_, a_, r_, z_, a1, a2, pq_
+    ZT :: al
+    mx_ = blk5(t)
+    call zc_vzero_d(NW * max(n14(mx_), 1_8), w(kx14))
+    call N(xzd5row14)(w, 0, kr, t, 1d0, kx14)
+    if (.not. zx) return
+    do r_ = 0, 2
+      z_ = xzd5free(t, r_)
+      a1 = xzd5free(t, merge(1_8, 0_8, r_ == 0))
+      a2 = xzd5free(t, merge(1_8, 2_8, r_ == 2))
+      pq_ = opidx(a2, a1)
+      if (osgn(pq_, z_) == 0) cycle
+      al = dble(osgn(pq_, z_))
+      do p_ = 0, ncls - 1
+        if (off14(mx_, p_) < 0) cycle
+        a_ = mx_ - p_
+        fe_ = a_ - ds - ocls(z_)
+        if (fe_ < 0 .or. fe_ >= ncls) cycle
+        if (xv5off(z_, fe_) < 0) cycle
+        call N(zc_gemm)(0_4, 0_4, dnV(fe_), d5nA4(a_), dnV(p_), al, &
+                        w(joovv + NW * (((a1 * no + a2) * nv + vcoff(fe_)) * nv + vcoff(p_))), nv, &
+                        w(kx14 + NW * off14(mx_, p_)), d5nA4(a_), one, w(kxv + NW * (xvz(z_) + xv5off(z_, fe_))), d5nA4(a_))
+      end do
+    end do
+  end subroutine
 
   ! Xv5(f; z; bcde) += sgn sum_h <l1 l2||fh> r5(T; h bcde) from the row of T at kr
   subroutine one_r5(kr, t, a1, a2, sgn_)
@@ -644,7 +712,7 @@ contains
       if (xv5off(z, fe_) < 0 .or. .not. zx) cycle
       call N(zc_gemm)(0_4, 0_4, dnV(fe_), d5nA4(a_), dnV(p_), one, &
                       w(joovv + NW * (((a1 * no + a2) * nv + vcoff(fe_)) * nv + vcoff(p_))), nv, &
-                      w(kx14 + NW * off14(mx_, p_)), d5nA4(a_), one, w(kxv + NW * xv5off(z, fe_)), d5nA4(a_))
+                      w(kx14 + NW * off14(mx_, p_)), d5nA4(a_), one, w(kxz + NW * xv5off(z, fe_)), d5nA4(a_))
     end do
   end subroutine
 
@@ -680,7 +748,7 @@ contains
       al = sg_
       call N(zc_gemm)(0_4, 0_4, dnV(p_), d5nA4(a_), dnV(mu_), al, &
                       w(dla13 + NW * ((pxy_ * nv + vcoff(p_)) * (no + nv) + mix0(mu_) + dnO(mu_))), no + nv, &
-                      w(kxv + NW * xv5off(z, mu_)), d5nA4(a_), one, w(kx14 + NW * off14(mx_, p_)), d5nA4(a_))
+                      w(kxz + NW * xv5off(z, mu_)), d5nA4(a_), one, w(kx14 + NW * off14(mx_, p_)), d5nA4(a_))
     end do
     if (direct) then
       call N(xzd5row14)(w, 1, s5o + NW * r5own(t_), t_, 1d0, kx14)
