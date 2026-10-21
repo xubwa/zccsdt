@@ -4459,6 +4459,7 @@ needs no option.
 | `hh pair` | op | the hh ladder of dense T3 through occupied pairs (section 12) |
 | `qmap 0` | 1 | (Q): T3 in the work array of every rank instead of the mapped `XZAMPS` (section 5) |
 | `eomvec f` | work array | EOM: the vectors of the subspace in files (16.4) |
+| `eomvdir dir` | the run directory | EOM: the files of the subspace in `dir` (made if it is not there), e.g. a node-local disk; over ranks every rank its part (21.1) |
 | `slices 0` | 1 | iterations over ranks without slices of T3 (section 15) |
 | `bpr n` | 8 | batches per rank at least |
 | `rebal x` | 0.03 | the batches are dealt again when the last rank is this fraction behind the mean (0: never) |
@@ -4508,7 +4509,11 @@ package):
 | `eomtest seed` | the sigma vector against the derivative of the amplitude step (16.5); one rank |
 | `deasig file`, `deaonly pieces`, `deabatch n` | EOM-DEA: the sigma vector of the vector of a file (the first target) to `file.out`; only the pieces named (pp hh ring x22 x13 row3 row2, as `dea_sector.Engine.sigma(only=...)`); batches of n elements (20.5); over ranks too |
 | `deaxv m` / `deaxv f` | EOM-DEA: R13 (Xv) in the work array / in the file `XZDXV`, whatever fits (20.4) |
-| `deaplan n1 n2 ...` | EOM-DEA: the memory of every rank for n1, n2, ... ranks from dry runs, then the program stops (one rank; 20.4) |
+| `deaplan n1 n2 ...` | EOM-DEA: the memory of every rank for n1, n2, ... ranks from dry runs, then the program stops (one rank; 20.4, 21.5) |
+| `dea5pool n` | EOM-DEA 5p3h: the pool of the quintuple lists in words (21.2) |
+| `dea5z4 n` | EOM-DEA 5p3h: at most n slots of Z4 on every rank, not made over the ranks (21.3) |
+| `dea5xb n` | EOM-DEA 5p3h over ranks: at most n rounds of the rows of Xv5 and E1x in one exchange (21.4) |
+| `dea5xa 0` / `1` | EOM-DEA 5p3h on one rank: Xv5 k by k / of all k (21.3) |
 | `eomsig file`, `eomsd` | the sigma vector of the vector of a file; its singles-doubles block (16.5); over ranks too (16.7) |
 | `mpitest n` | the chunked transfers on arrays of n words (15.2) |
 | `qsample x`, `qstop n` | (Q): a sample of the quadruples; stop after n tasks (restart test, section 5) |
@@ -5248,9 +5253,9 @@ reductions of `csrc/t4sym.c` (`zc_t4s_x22`, `zc_t4s_x13`, `zc_t4s_x12`,
 `zc_t4s_quads`, added to `KERNELS` of the Makefile), `zc_tn_rows`
 (tnpack.c), `zc_pair_one_body_add`, `zc_vprecond` (t3pack.c), `zc_gemm`.
 
-Not here: R to 5p3h (the folded or complete 5p3h row of docs/eom.md 11.3,
-11.8), the T of CCSDTQ or CC4 (the two T4 terms of 11.9), DIP, left-hand
-vectors, the file of the root vectors.
+R to complete 5p3h (`level 5p3h`): section 21.  Not here: the folded 5p3h
+row of docs/eom.md 11.3, the T of CCSDTQ or CC4 (the two T4 terms of
+11.9), DIP, left-hand vectors, the file of the root vectors.
 
 ### 20.1 Input and output
 
@@ -5886,8 +5891,8 @@ cc-pwCVQZ-X2C-TP: 3.15825644e-07 Eh = 0.06932 cm-1 (cc-pwCVTZ-X2C-TP:
 
 ### 20.8 Not done
 
-- R to 5p3h; the T of CCSDTQ / CC4 in the sector; DIP; left-hand vectors;
-  the vectors of the roots in a file.
+- The folded 5p3h row (complete 5p3h: section 21); the T of CCSDTQ / CC4
+  in the sector; DIP; left-hand vectors; the vectors of the roots in a file.
 - Only the elements of the parity of the target are needed (half of the
   vector): the masks are applied to a vector of both parities, as in the
   Python program.

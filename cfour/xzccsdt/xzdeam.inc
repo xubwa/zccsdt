@@ -300,10 +300,12 @@ subroutine N(xzdea)(w, ecorr)
     kxb = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)')
     msub = subspace(nroot)
     ! the batches of the passes over r4: as large as the work array leaves them
-    ! (at most 1 GB of an operand) next to the buffer of the subspace in files
-    ! - the batches first, as for the DIIS vectors and the EOM-EE subspace
+    ! (at most 1 GB of an operand; with 5p3h 4 GB: a batch of the ring walks
+    ! all rows of its spectator pair) next to the buffer of the subspace in
+    ! files - the batches first, as for the DIIS vectors and the EOM-EE subspace
     reserve = msub * NW * min(nlen, 1048576_8) + 64
     btarget = 1073741824_8 / (8 * NW)
+    if (dlev == 5) btarget = 4 * btarget
     call xzoptget('deabatch', arg, larg)
     if (larg > 0) then
       read(arg(1:larg), *) btarget

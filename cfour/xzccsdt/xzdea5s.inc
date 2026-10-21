@@ -126,22 +126,6 @@ subroutine N(xzd5sig)(w, k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c)
   end if
   deallocate(x4sloc)
   call xzrel(m0)
-
-contains
-
-  ! (a test hook: option name file) the array at k of n elements to the file
-  subroutine dump(name, k, n)
-    use xzopt
-    character(len=*), intent(in) :: name
-    integer(8), intent(in) :: k, n
-    character(len=256) :: arg
-    integer :: larg
-    call xzoptget(name, arg, larg)
-    if (larg <= 0) return
-    open(unit=75, file=arg(1:larg), form='unformatted', access='stream', status='replace')
-    write(75) w(k:k + NW * n - 1)
-    close(75)
-  end subroutine
 end subroutine
 
 ! the places of the rows of the pairs of the triples of this rank in X4s

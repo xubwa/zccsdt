@@ -25,7 +25,7 @@ module xzopt
   implicit none
   private
   public :: xzoptget
-  integer, parameter :: nuser = 28, ndev = 31, nopt = nuser + ndev
+  integer, parameter :: nuser = 28, ndev = 30, nopt = nuser + ndev
   ! the user options first, then the developer and test options
   character(len=10), parameter :: oname(nopt) = [character(len=10) :: &
     'labtol', 'imagtol', 'focktol', 'omegatol', 'foldwin', 'real', 'labels', 'cc3', 'start', 'hh', &
@@ -33,7 +33,7 @@ module xzopt
     'qtasks', 'qranks', 'cc4', 'cc4micro', 'cc4eom', 'cc4acc', 'lsolver', 'eomvdir', &
     'ncyc', 'maxcor', 'debug', 'ddebug', 'ldebug', 'qdebug', 'den_active', 'wfail', 'eomtest', 'eomsig', &
     'eomsd', 'mpitest', 'qsample', 'qstop', 'qcost', 'bcost', 'r0load', 'cc4stop', 'lkry', 'lritz', 'lprec', 'deasig', 'deaonly', 'deabatch', 'deaxv', &
-    'deaplan', 'dea5dump', 'dea5pool', 'dea5z4', 'dea5xb', 'dea5xa']
+    'deaplan', 'dea5pool', 'dea5z4', 'dea5xb', 'dea5xa']
   character(len=256) :: oval(nopt) = ' '
   logical :: oset(nopt) = .false.
   logical :: oread = .false.
