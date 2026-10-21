@@ -451,6 +451,9 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
   real(8), target :: w(*)
   integer(8), intent(in) :: kr4f, k5o, s5o, kg5
   integer(8) :: m0, kxv, ku, kx4z, kx14, kin, kout, ktmp, ntmp, z, fe, aa, p, o, nk, l, pl, m4, ph, cc, f, kz, slot, nslot
+  integer(8) :: mrow, nb, nrmax, zq
+  character(len=256) :: barg
+  integer :: lbarg
   integer(8) :: ip, l1, l2, i, mx, r, rowt, sgt, nr, g, ng, gme, n13x, nround, ir, it, t3i, x, y, zi, pxy, mu, nitem
   integer(8), allocatable :: row(:), xoff(:, :), s1(:, :), s2(:, :), zlist(:), plist(:, :)
   real(8), allocatable :: sg(:)
@@ -467,8 +470,27 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
   kx4z = xzget(NW * no * max(x4max, 1_8), 'DEA5: the rows (l, k) of r4 on (h | cde)')
   kx14 = xzget(NW * max(n14max, 1_8), 'DEA5: a row of r5 on (a | bcde)')
   if (ddist) then
-    kin = xzget(NW * max(maxval(r5w), 1_8), 'DEA5: a row (l, n, k) of r5 from its owner')
-    kout = xzget(NW * max(maxval(r5w), 1_8), 'DEA5: a row (x, y, k) of sigma5 to its owner')
+    ! the rounds of the exchanges in batches of nb rounds: nb rows in and nb
+    ! rows out at once, as many as fit below the peak so far (the ring pass)
+    mrow = max(maxval(r5w), 1_8)
+    nitem = (no - 1) * (no - 2) / 2
+    nrmax = nitem
+    if (nrank >= no) then
+      nrmax = 0
+      do zq = 0, no - 1
+        nrmax = max(nrmax, (nitem + zn(zq) - 1) / zn(zq))
+      end do
+    end if
+    nb = (xzpeak - xztop - ntmp - 64) / (2 * NW * mrow)
+    nb = max(1_8, min(nb, nrmax))
+    ! (option dea5xb: at most that many rounds in a batch)
+    call xzoptget('dea5xb', barg, lbarg)
+    if (lbarg > 0) then
+      read(barg(1:lbarg), *) zq
+      nb = max(1_8, min(nb, zq))
+    end if
+    kin = xzget(NW * mrow * nb, 'DEA5: the rows (l, n, k) of r5 from their owners (a batch of rounds)')
+    kout = xzget(NW * mrow * nb, 'DEA5: the rows (x, y, k) of sigma5 to their owners (a batch of rounds)')
     ktmp = xzget(ntmp, 'DEA5: buffer of the sums of the rows of sigma5')
   end if
   if (xzdry) then
@@ -585,7 +607,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5)
         call one_r5(k5o + NW * r5own(t3i), t3i, l1, l2, dble(osgn(pl, z)))
       end do
       do it = 1, nitem
-        call one_e1x(it, .true.)
+        call one_e1x(it, .true., 0_8)
       end do
     end do
     if (ddist) then
@@ -627,9 +649,9 @@ contains
   end subroutine
 
   ! E1x of the item it (the pair (x, y) of plist) into the row of its triple:
-  ! added to sigma5 directly (direct) or made in kout (over the ranks)
-  subroutine one_e1x(it_, direct)
-    integer(8), intent(in) :: it_
+  ! added to sigma5 directly (direct) or made at kd (over the ranks)
+  subroutine one_e1x(it_, direct, kd)
+    integer(8), intent(in) :: it_, kd
     logical, intent(in) :: direct
     integer(8) :: x_, y_, pxy_, t_, mx_, zi_, p_, mu_, a_
     real(8) :: sg_
@@ -646,7 +668,7 @@ contains
     if (z > x_) zi_ = 1
     if (z > y_) zi_ = 2
     sg_ = merge(-1d0, 1d0, zi_ == 1)
-    if (.not. direct) call zc_vzero_d(NW * max(r5w(t_), 1_8), w(kout))
+    if (.not. direct) call zc_vzero_d(NW * max(r5w(t_), 1_8), w(kd))
     if (.not. xzdwant('e1x')) return
     call zc_vzero_d(NW * max(n14(mx_), 1_8), w(kx14))
     do p_ = 0, ncls - 1
@@ -663,115 +685,124 @@ contains
     if (direct) then
       call N(xzd5row14)(w, 1, s5o + NW * r5own(t_), t_, 1d0, kx14)
     else
-      call N(xzd5row14)(w, 1, kout, t_, 1d0, kx14)
+      call N(xzd5row14)(w, 1, kd, t_, 1d0, kx14)
     end if
   end subroutine
 
   ! (over the ranks) the rows (l, n, z) of the items of this rank, one per
-  ! round, from their owners
+  ! round, from their owners; nb rounds at a time
   subroutine r5_rounds()
-    integer(8) :: ir_, rr, zr, ngr, gr, ii, jt, a1, a2, pq_, t_, mx_, o_, cnt
+    integer(8) :: ir_, ir0, ib, rr, zr, ngr, gr, jt, a1, a2, pq_, t_, mx_, o_, kb
     integer(8) :: nr_
     nr_ = 0
     do zr = 0, no - 1
       nr_ = max(nr_, (nitem + zn(zr) - 1) / zn(zr))
     end do
     if (nrank < no) nr_ = nitem
-    do ir_ = 1, nr_
+    do ir0 = 1, nr_, nb
       ta = omp_get_wtime()
       dsn = 0
-      cnt = 0
-      do rr = 0, nrank - 1
-        ! the item of rank rr in this round: its z, its pair
-        if (nrank >= no) then
-          zr = mod(rr, int(no, 8))
-          ngr = zn(zr)
-          gr = rr / no
-        else
-          zr = kz_of(rr)
-          ngr = 1
-          gr = 0
-        end if
-        if (zr < 0) cycle
-        jt = gr + 1 + (ir_ - 1) * ngr
-        if (jt > nitem) cycle
-        call item_pair(zr, jt, a1, a2)
-        pq_ = opidx(a2, a1)
-        if (osgn(pq_, zr) == 0) cycle
-        t_ = otri(pq_, zr)
-        mx_ = blk5(t_)
-        if (mx_ < 0) cycle
-        o_ = xzd5owner(t_)
-        if (rr /= myrank .and. o_ /= myrank) cycle
-        if (rr == myrank .and. o_ == myrank) then
-          call N(xzecopy)(r5w(t_), w(k5o + NW * r5own(t_)), w(kin))
-        else if (rr == myrank) then
-          call xzdseg(o_, kin, NW * r5w(t_), 1_8)
-        else
-          call xzdseg(rr, k5o + NW * r5own(t_), NW * r5w(t_), 0_8)
-        end if
+      do ir_ = ir0, min(nr_, ir0 + nb - 1)
+        kb = kin + NW * mrow * (ir_ - ir0)
+        do rr = 0, nrank - 1
+          ! the item of rank rr in this round: its z, its pair
+          if (nrank >= no) then
+            zr = mod(rr, int(no, 8))
+            ngr = zn(zr)
+            gr = rr / no
+          else
+            zr = kz_of(rr)
+            ngr = 1
+            gr = 0
+          end if
+          if (zr < 0) cycle
+          jt = gr + 1 + (ir_ - 1) * ngr
+          if (jt > nitem) cycle
+          call item_pair(zr, jt, a1, a2)
+          pq_ = opidx(a2, a1)
+          if (osgn(pq_, zr) == 0) cycle
+          t_ = otri(pq_, zr)
+          mx_ = blk5(t_)
+          if (mx_ < 0) cycle
+          o_ = xzd5owner(t_)
+          if (rr /= myrank .and. o_ /= myrank) cycle
+          if (rr == myrank .and. o_ == myrank) then
+            call N(xzecopy)(r5w(t_), w(k5o + NW * r5own(t_)), w(kb))
+          else if (rr == myrank) then
+            call xzdseg(o_, kb, NW * r5w(t_), 1_8)
+          else
+            call xzdseg(rr, k5o + NW * r5own(t_), NW * r5w(t_), 0_8)
+          end if
+        end do
       end do
       call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, 0_8, w, 0_8)
       td5(16) = td5(16) + omp_get_wtime() - ta
-      ! this rank's item
+      ! this rank's items
       if (kz < 0) cycle
-      jt = gme + 1 + (ir_ - 1) * ng
-      if (jt > nitem) cycle
-      a1 = plist(1, jt)
-      a2 = plist(2, jt)
-      pq_ = opidx(a2, a1)
-      if (osgn(pq_, kz) == 0) cycle
-      t_ = otri(pq_, kz)
-      if (blk5(t_) < 0) cycle
-      call one_r5(kin, t_, a1, a2, dble(osgn(pq_, kz)))
+      do ir_ = ir0, min(nr_, ir0 + nb - 1)
+        jt = gme + 1 + (ir_ - 1) * ng
+        if (jt > nitem) cycle
+        a1 = plist(1, jt)
+        a2 = plist(2, jt)
+        pq_ = opidx(a2, a1)
+        if (osgn(pq_, kz) == 0) cycle
+        t_ = otri(pq_, kz)
+        if (blk5(t_) < 0) cycle
+        call one_r5(kin + NW * mrow * (ir_ - ir0), t_, a1, a2, dble(osgn(pq_, kz)))
+      end do
     end do
   end subroutine
 
   ! (over the ranks) the rows (x, y, z) of E1x of this rank, one per round,
-  ! to their owners (added there)
+  ! to their owners (added there); nb rounds at a time
   subroutine e1x_rounds()
-    integer(8) :: ir_, rr, zr, ngr, gr, jt, a1, a2, pq_, t_, mx_, o_, nr_
+    integer(8) :: ir_, ir0, rr, zr, ngr, gr, jt, a1, a2, pq_, t_, mx_, o_, nr_, kb
     nr_ = 0
     do zr = 0, no - 1
       nr_ = max(nr_, (nitem + zn(zr) - 1) / zn(zr))
     end do
     if (nrank < no) nr_ = nitem
-    do ir_ = 1, nr_
-      ! this rank's row
+    do ir0 = 1, nr_, nb
+      ! this rank's rows
       if (kz >= 0) then
-        jt = gme + 1 + (ir_ - 1) * ng
-        if (jt <= nitem) call one_e1x(jt, .false.)
+        do ir_ = ir0, min(nr_, ir0 + nb - 1)
+          jt = gme + 1 + (ir_ - 1) * ng
+          if (jt <= nitem) call one_e1x(jt, .false., kout + NW * mrow * (ir_ - ir0))
+        end do
       end if
       ta = omp_get_wtime()
       dsn = 0
-      do rr = 0, nrank - 1
-        if (nrank >= no) then
-          zr = mod(rr, int(no, 8))
-          ngr = zn(zr)
-          gr = rr / no
-        else
-          zr = kz_of(rr)
-          ngr = 1
-          gr = 0
-        end if
-        if (zr < 0) cycle
-        jt = gr + 1 + (ir_ - 1) * ngr
-        if (jt > nitem) cycle
-        call item_pair(zr, jt, a1, a2)
-        pq_ = opidx(a2, a1)
-        if (osgn(pq_, zr) == 0) cycle
-        t_ = otri(pq_, zr)
-        mx_ = blk5(t_)
-        if (mx_ < 0) cycle
-        o_ = xzd5owner(t_)
-        if (rr /= myrank .and. o_ /= myrank) cycle
-        if (rr == myrank .and. o_ == myrank) then
-          call N(xzeaxpyc)(r5w(t_), one, w(kout), w(s5o + NW * r5own(t_)))
-        else if (rr == myrank) then
-          call xzdseg(o_, kout, NW * r5w(t_), 0_8)
-        else
-          call xzdseg(rr, s5o + NW * r5own(t_), NW * r5w(t_), 1_8)
-        end if
+      do ir_ = ir0, min(nr_, ir0 + nb - 1)
+        kb = kout + NW * mrow * (ir_ - ir0)
+        do rr = 0, nrank - 1
+          if (nrank >= no) then
+            zr = mod(rr, int(no, 8))
+            ngr = zn(zr)
+            gr = rr / no
+          else
+            zr = kz_of(rr)
+            ngr = 1
+            gr = 0
+          end if
+          if (zr < 0) cycle
+          jt = gr + 1 + (ir_ - 1) * ngr
+          if (jt > nitem) cycle
+          call item_pair(zr, jt, a1, a2)
+          pq_ = opidx(a2, a1)
+          if (osgn(pq_, zr) == 0) cycle
+          t_ = otri(pq_, zr)
+          mx_ = blk5(t_)
+          if (mx_ < 0) cycle
+          o_ = xzd5owner(t_)
+          if (rr /= myrank .and. o_ /= myrank) cycle
+          if (rr == myrank .and. o_ == myrank) then
+            call N(xzeaxpyc)(r5w(t_), one, w(kb), w(s5o + NW * r5own(t_)))
+          else if (rr == myrank) then
+            call xzdseg(o_, kb, NW * r5w(t_), 0_8)
+          else
+            call xzdseg(rr, s5o + NW * r5own(t_), NW * r5w(t_), 1_8)
+          end if
+        end do
       end do
       call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, 1_8, w(ktmp), ntmp)
       td5(16) = td5(16) + omp_get_wtime() - ta
