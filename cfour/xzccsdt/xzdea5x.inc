@@ -116,8 +116,9 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o, kxva)
     zs = zs + 1
   end do
   ! over the ranks: the slabs made once over all ranks (N(xzd5z4sh)) when the
-  ! slabs of every rank fit below its peak so far (the ring pass) with the
-  ! rows (l, k) of r4 and the blocks it makes for others; else (and with one
+  ! slabs of every rank fit in its work array (xzroom: in the plan below the
+  ! peak so far) with the rows (l, k) of r4 and the blocks it makes for
+  ! others; else (and with one
   ! rank) made where needed: as many slots as there are indices in the
   ! triples of this rank if they fit, at least three (the slabs of a triple),
   ! the least recently used slab replaced
@@ -128,7 +129,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o, kxva)
     call N(xzd5z4own)(zneed, znb, zbk, zbmu, zbfe, zbown, nst)
     deallocate(zbk, zbmu, zbfe, zbown)
     zrq = NW * (ndist * z4max + max(nst, 1_8) + no * max(x4max, 1_8) + max(nocmax * nvcmax * nvcmax, 1_8)) + 256
-    zsh = zrq <= xzpeak - xztop
+    zsh = zrq <= xzroom()
     ! (option dea5z4: the slots of the ranks, not shared)
     call xzoptget('dea5z4', zarg, lzarg)
     if (lzarg > 0) zsh = .false.
@@ -145,7 +146,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o, kxva)
     kst = xzget(NW * max(nst, 1_8), 'DEA5: the blocks of Z4 made for other ranks')
     kx4z = xzget(NW * no * max(x4max, 1_8), 'DEA5: the rows (l, k) of r4 on (h | cde) for Z4')
   else
-    zbud = xzpeak - xztop - NW * (max(x4max, 1_8) + max(nocmax * nvcmax * nvcmax, 1_8)) - 64
+    zbud = xzroom() - NW * (max(x4max, 1_8) + max(nocmax * nvcmax * nvcmax, 1_8)) - 64
     nzs = min(max(ndist, 3_8), max(3_8, zbud / (NW * z4max)))
     ! (option dea5z4: at most that many slots, a test of the replacement)
     call xzoptget('dea5z4', zarg, lzarg)
@@ -550,7 +551,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
   kx14 = xzget(NW * max(n14max, 1_8), 'DEA5: a row of r5 on (a | bcde)')
   if (ddist) then
     ! the rounds of the exchanges in batches of nb rounds: nb rows in and nb
-    ! rows out at once, as many as fit below the peak so far (the ring pass)
+    ! rows out at once, as many as the work array has room for (xzroom)
     mrow = max(maxval(r5w), 1_8)
     nitem = (no - 1) * (no - 2) / 2
     nrmax = nitem
@@ -560,7 +561,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
         nrmax = max(nrmax, (nitem + zn(zq) - 1) / zn(zq))
       end do
     end if
-    nb = (xzpeak - xztop - ntmp - 64) / (2 * NW * mrow)
+    nb = (xzroom() - ntmp - 64) / (2 * NW * mrow)
     nb = max(1_8, min(nb, nrmax))
     ! (option dea5xb: at most that many rounds in a batch)
     call xzoptget('dea5xb', barg, lbarg)

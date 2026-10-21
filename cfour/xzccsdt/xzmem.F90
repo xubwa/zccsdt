@@ -87,6 +87,17 @@ contains
     xzmark = xztop
   end function
 
+  ! the words that a transient region may take: in a dry run those below
+  ! the peak so far (the plan does not grow by it), in a real run what the
+  ! work array has left (less 64 MB), at least those below the peak
+  integer(8) function xzroom()
+    if (xzdry) then
+      xzroom = xzpeak - xztop
+    else
+      xzroom = max(xzpeak, xzsize - 8388608_8) - xztop
+    end if
+  end function
+
   subroutine xzrel(mark)
     integer(8), intent(in) :: mark
     xztop = mark
