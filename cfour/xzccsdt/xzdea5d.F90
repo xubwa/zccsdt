@@ -99,6 +99,8 @@ module xzdead5
 
   ! ---- seconds of the pieces of the 5p3h part of the sigma vectors
   real(8) :: td5(20) = 0d0
+  integer(8) :: d5zs = 0, d5zd = 0, d5zm = 0             ! Z4: slots, indices of the triples of the rank, slabs made (last sigma vector)
+  integer(8) :: d5xb = 0                                  ! (over the ranks) rounds of Xv5 and E1x in a batch
 
 contains
 

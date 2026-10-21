@@ -400,6 +400,197 @@ subroutine N(xzd5z4k)(w, kr4f, k, kout)
   call xzrel(m0)
 end subroutine
 
+! (over the ranks) Z4 of the indices of the triples of every rank, made once
+! over all ranks: the blocks (k, mu, fe) of the slabs that some rank needs go
+! to the ranks by their cost (the largest first to the least loaded rank),
+! a rank makes its blocks - from the rows (l, k) of r4 on (h | cde), made
+! once per k - and sends each to the ranks that need its slab; a rank holds
+! the slabs of its indices in the slots kz4 + zsl(k) z4max (zsl(k) < 0: not
+! needed).  kst: room for the blocks of slabs this rank does not need
+! (nst words, from N(xzd5z4plan)); kx4: no rows of r4 on (h | cde).
+subroutine N(xzd5z4sh)(w, kr4f, kz4, z4max, zsl, need, kst, kx4)
+  use xzdata
+  use xzmem
+  use xzkern
+  use xzdead
+  use xzdead5
+  use xzpar, only: myrank, nrank, xzmpi_segs
+  use omp_lib
+  implicit none
+  real(8), target :: w(*)
+  integer(8), intent(in) :: kr4f, kz4, z4max, zsl(0:no-1), kst, kx4
+  logical, intent(in) :: need(0:nrank-1, 0:no-1)
+  integer(8) :: k, mu, fe, l, pl, m4, ph, nk, mm, f, h, ka, m0, o, r, kd, sto, nb, b
+  integer(8), allocatable :: bk(:), bmu(:), bfe(:), bown(:), bat(:)
+  integer(8), pointer :: opidx(:, :)
+  ZT, pointer :: av(:), oovv(:)
+  real(8) :: t0, ta
+  ZT :: one, alpha
+  one = 1
+  m0 = xzmark()
+  ka = xzget(NW * max(nocmax * nvcmax * nvcmax, 1_8), 'DEA5: <ml||fh> of a block')
+  t0 = omp_get_wtime()
+  call xzdiv2(w, jopidx, no, no, opidx)
+  call N(xzdv)(w, ka, max(nocmax * nvcmax * nvcmax, 1_8), av)
+  call N(xzdv)(w, joovv, no * no * nv * nv, oovv)
+  allocate(bk(no * ncls * ncls), bmu(no * ncls * ncls), bfe(no * ncls * ncls), bown(no * ncls * ncls))
+  call N(xzd5z4own)(need, nb, bk, bmu, bfe, bown, sto)
+  ! the place of a block of this rank: its slot, or the room kst
+  allocate(bat(nb))
+  sto = 0
+  do b = 1, nb
+    k = bk(b)
+    bat(b) = -1
+    if (bown(b) /= myrank) cycle
+    if (zsl(k) >= 0) then
+      bat(b) = kz4 + NW * (zsl(k) * z4max + z4off(k, bmu(b), bfe(b)) - z4k(k))
+    else
+      bat(b) = kst + NW * sto
+      sto = sto + dnO(bmu(b)) * dnV(bfe(b)) * dnK(ds + ocls(k) + bfe(b) - bmu(b))
+    end if
+  end do
+  ! the blocks of this rank, k by k
+  do k = 0, no - 1
+    if (.not. any(bown(1:nb) == myrank .and. bk(1:nb) == k)) cycle
+    do l = 0, no - 1
+      if (l == k) cycle
+      call N(xzd5x4row)(w, kr4f, opidx(max(l, k), min(l, k)), kx4 + NW * l * max(x4max, 1_8))
+    end do
+    do b = 1, nb
+      if (bown(b) /= myrank .or. bk(b) /= k) cycle
+      mu = bmu(b)
+      fe = bfe(b)
+      kd = bat(b)
+      nk = dnK(ds + ocls(k) + fe - mu)
+      call zc_vzero_d(NW * dnO(mu) * dnV(fe) * nk, w(kd))
+      do l = 0, no - 1
+        if (l == k) cycle
+        pl = opidx(max(l, k), min(l, k))
+        m4 = blk4(pl)
+        if (m4 < 0) cycle
+        ph = mu + ocls(l) - fe
+        if (ph < 0 .or. ph >= ncls) cycle
+        if (dnV(ph) == 0 .or. off13(m4, ph) < 0) cycle
+        if (dnK(m4 - ph) /= nk) cycle
+        alpha = merge(1d0, -1d0, l < k)
+        ! A[(m f)][h] = <ml||fh>
+        !$omp parallel do private(f, h)
+        do mm = 0, dnO(mu) - 1
+          do f = 0, dnV(fe) - 1
+            do h = 0, dnV(ph) - 1
+              av((mm * dnV(fe) + f) * dnV(ph) + h) = &
+                oovv((((ocoff(mu) + mm) * no + l) * nv + vcoff(fe) + f) * nv + vcoff(ph) + h)
+            end do
+          end do
+        end do
+        call N(zc_gemm)(0_4, 0_4, dnO(mu) * dnV(fe), nk, dnV(ph), alpha, w(ka), dnV(ph), &
+                        w(kx4 + NW * (l * max(x4max, 1_8) + off13(m4, ph))), nk, one, w(kd), nk)
+      end do
+    end do
+  end do
+  td5(4) = td5(4) + omp_get_wtime() - t0
+  ! every block to the ranks that need its slab
+  ta = omp_get_wtime()
+  dsn = 0
+  do b = 1, nb
+    k = bk(b)
+    o = bown(b)
+    nk = dnK(ds + ocls(k) + bfe(b) - bmu(b))
+    do r = 0, nrank - 1
+      if (r == o .or. .not. need(r, k)) cycle
+      if (myrank == o) then
+        call xzdseg(r, bat(b), NW * dnO(bmu(b)) * dnV(bfe(b)) * nk, 0_8)
+      else if (myrank == r) then
+        call xzdseg(o, kz4 + NW * (zsl(k) * z4max + z4off(k, bmu(b), bfe(b)) - z4k(k)), &
+                    NW * dnO(bmu(b)) * dnV(bfe(b)) * nk, 1_8)
+      end if
+    end do
+  end do
+  call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, 0_8, w, 0_8)
+  td5(20) = td5(20) + omp_get_wtime() - ta
+  deallocate(bk, bmu, bfe, bown, bat)
+  call xzrel(m0)
+end subroutine
+
+! (over the ranks) the blocks (k, mu, fe) of the slabs of Z4 that some rank
+! needs and the rank that makes each (the same on every rank); and the words
+! of the blocks of this rank of slabs it does not need (nst)
+subroutine N(xzd5z4own)(need, nb, bk, bmu, bfe, bown, nst)
+  use xzdata
+  use xzdead
+  use xzdead5
+  use xzpar, only: myrank, nrank
+  implicit none
+  logical, intent(in) :: need(0:nrank-1, 0:no-1)
+  integer(8), intent(out) :: nb, bk(*), bmu(*), bfe(*), bown(*), nst
+  integer(8) :: k, mu, fe, l, ph, kk, b, r, best, i, j
+  real(8), allocatable :: cost(:), load(:)
+  integer(8), allocatable :: ord(:)
+  nb = 0
+  do k = 0, no - 1
+    if (.not. any(need(:, k))) cycle
+    do mu = 0, ncls - 1
+      do fe = 0, ncls - 1
+        if (z4off(k, mu, fe) >= 0) nb = nb + 1
+      end do
+    end do
+  end do
+  allocate(cost(max(nb, 1_8)), ord(max(nb, 1_8)), load(0:nrank-1))
+  b = 0
+  do k = 0, no - 1
+    if (.not. any(need(:, k))) cycle
+    do mu = 0, ncls - 1
+      do fe = 0, ncls - 1
+        if (z4off(k, mu, fe) < 0) cycle
+        b = b + 1
+        bk(b) = k
+        bmu(b) = mu
+        bfe(b) = fe
+        kk = ds + ocls(k) + fe - mu
+        ! the products: the block times the summed dimension, plus the gathers
+        cost(b) = 0d0
+        do l = 0, no - 1
+          if (l == k) cycle
+          ph = mu + ocls(l) - fe
+          if (ph < 0 .or. ph >= ncls) cycle
+          cost(b) = cost(b) + dble(dnV(ph)) + 4d0
+        end do
+        cost(b) = cost(b) * dble(dnO(mu)) * dble(dnV(fe)) * dble(dnK(kk))
+      end do
+    end do
+  end do
+  ! the largest first, each to the least loaded rank (ties: the lowest rank)
+  do i = 1, nb
+    ord(i) = i
+  end do
+  do i = 2, nb
+    j = i
+    do while (j > 1)
+      if (cost(ord(j - 1)) >= cost(ord(j))) exit
+      b = ord(j)
+      ord(j) = ord(j - 1)
+      ord(j - 1) = b
+      j = j - 1
+    end do
+  end do
+  load = 0d0
+  do i = 1, nb
+    b = ord(i)
+    best = 0
+    do r = 1, nrank - 1
+      if (load(r) < load(best)) best = r
+    end do
+    bown(b) = best
+    load(best) = load(best) + cost(b)
+  end do
+  nst = 0
+  do b = 1, nb
+    if (bown(b) /= myrank .or. need(myrank, bk(b))) cycle
+    nst = nst + dnO(bmu(b)) * dnV(bfe(b)) * dnK(ds + ocls(bk(b)) + bfe(b) - bmu(b))
+  end do
+  deallocate(cost, ord, load)
+end subroutine
+
 ! XvR5 = XvR (kz, its term of Wpp once) + P(d/bc) 1/2 sum_f Wpp(bc, ef) r2(fd)
 ! once more (dea5_sector.Engine5._xvr5), in the layout of XvR (zoffk)
 subroutine N(xzd5xvr)(w, kz, kr2, kxvr5)

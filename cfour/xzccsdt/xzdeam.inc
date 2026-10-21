@@ -792,6 +792,14 @@ contains
       '; sigma4, sigma5 back ', f * td5(2), ')'
     if (nrank > 1) write(6, '(a,4f8.2,a)') '       (over the ranks: the rows of the ring, of the hh ladder, of Xv5 and E1x, ' // &
       'the sums of the intermediates ', f * td5(13), f * td5(14), f * td5(16), f * td5(15), ')'
+    if (d5zm >= 0) then
+      write(6, '(a,i4,a,i4,a,i6,a)') '       (Z4: ', d5zs, ' slots for the ', d5zd, ' indices of the triples of the rank, ', d5zm, &
+        ' slabs made in the last sigma vector)'
+    else
+      write(6, '(a,i4,a,f8.2,a)') '       (Z4: the slabs of the ', d5zd, ' indices of the triples of the rank, made once over ' // &
+        'the ranks; their transfers ', f * td5(20), ' s)'
+    end if
+    if (nrank > 1) write(6, '(a,i6,a)') '       (Xv5 and E1x: ', d5xb, ' rounds of the exchanges at once)'
     flush(6)
   end subroutine
 end subroutine
