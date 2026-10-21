@@ -48,7 +48,7 @@ def main():
     targets = (0, 2)
     if '--targets' in args:
         k = args.index('--targets')
-        targets = tuple(int(x) for x in args[k + 1:k + 3])
+        targets = tuple(dict.fromkeys(int(x) for x in args[k + 1:k + 3]))      # (one target: --targets t t)
         del args[k:k + 3]
     path, out = args[0], args[1]
     t0 = time.time()

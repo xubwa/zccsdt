@@ -455,7 +455,32 @@ class Engine5:
                 oc = lay.O2cls[c]
                 self.oovv_cc[c] = _c(g.oovv[i2[oc], j2[oc]][:, lay.va[self.qs(c)], lay.vb[self.qs(c)]], dtype)
         self._ring = {}
+        self._ws = {}
         self.nsigma = 0
+
+    def buf(self, name, n, zero=False):
+        '''A work array of n elements kept from one sigma vector to the next
+        (no fresh pages - and no page faults - for the large temporaries).'''
+        a = self._ws.get(name)
+        if a is None or a.size < n:
+            self._ws.pop(name, None)
+            a = np.empty(max(int(n), 1), dtype=self.dtype)
+            self._ws[name] = a
+        a = a[:n]
+        return P.zero(a) if zero else a
+
+    @staticmethod
+    def _stack(parts, out):
+        """The row blocks ``parts`` one below the other in ``out`` (large ones on all threads)."""
+        r0 = 0
+        for a in parts:
+            n = len(a)
+            if n * a.shape[1] > 1 << 16 and a.flags.c_contiguous:
+                P.tn_rows(out[r0:r0 + n], a, np.arange(n), np.ones(n))
+            else:
+                out[r0:r0 + n] = a
+            r0 += n
+        return out
 
     # ---------------------------------------------------------------- views
     def qs(self, q):
@@ -508,7 +533,7 @@ class Engine5:
             s3[:] = 0
             s4[:] = 0
         imds = self.eng4.imds
-        s5 = np.zeros(sec5.size5, dtype=dtype)
+        s5 = self.buf('s5', sec5.size5, zero=True)
         with timer('dea5.small'):
             with timer('dea5.x4r'):
                 X4r = self._x4r(r4)
@@ -520,7 +545,7 @@ class Engine5:
                 Y4, XoR5, XoRp = self._pair_imds(r4, X4r, imds)
             with timer('dea5.xv5'):
                 Xv5 = self._xv5(X4r, imds['r2'])
-        X4s = np.zeros(int(self.x4off[-1]), dtype=dtype)
+        X4s = self.buf('x4s', int(self.x4off[-1]), zero=True)
         isz = np.dtype(dtype).itemsize
         with timer('dea5.pp'):
             for M in sec5.blocks5:
@@ -531,13 +556,13 @@ class Engine5:
                 for r0, r1 in _batches(len(sec5.rows5[M]), self.batch_bytes // (isz * n23)):
                     nb = r1 - r0
                     ent = sec5.ent_pp(M, r0, r1)
-                    Tv = P.zero(np.empty(nb * n23, dtype=dtype))
+                    Tv = self.buf('tv', nb * n23, zero=True)
                     with timer('dea5.expand'):
                         sec5.x23(0, R, M, ent, Tv)
                     with timer('dea5.thin'):
                         self._pp_thin(M, r0, r1, Tv, s3, X4s, XoR5)
                     if want('pp'):
-                        X = np.empty(nb * n23, dtype=dtype)
+                        X = self.buf('tx', nb * n23)
                         for q in range(lay.n2):
                             o = sec5.off23[M, q]
                             if o < 0:
@@ -573,7 +598,7 @@ class Engine5:
     # ---------------------------------------------------------------- intermediates of the sector
     def _x4r(self, r4):
         sec, lay, dtype = self.sec, self.lay, self.dtype
-        X4r = P.zero(np.empty(max(int(self.x4off[-1]), 1), dtype=dtype))
+        X4r = self.buf('x4r', max(int(self.x4off[-1]), 1), zero=True)
         for M4 in sec.blocks4:
             rows = sec.rows4[M4]
             ok = sec.off13[M4] >= 0
@@ -588,7 +613,11 @@ class Engine5:
         '''Z4(mf; k; cde) = sum_{lh} <ml||fh> r4(lk; h cde): (k, class of m, class of f) -> [m, f, K].'''
         sec, lay, g, dtype = self.sec, self.lay, self.g, self.dtype
         no, ncls, ko, nO, nV = lay.no, lay.ncls, lay.ko, lay.nO, lay.nV
-        Z4 = {}
+        if not hasattr(self, '_z4d'):
+            self._z4d = {}
+        Z4 = self._z4d
+        for z in Z4.values():
+            P.zero(z)
         for k in range(no):
             for l in range(no):
                 if l == k:
@@ -603,13 +632,11 @@ class Engine5:
                         fe = mu + ko[l] - ph
                         if not (nO[mu] and self.vkc(fe)):
                             continue
-                        A = g.oovv[self.ocls(mu), l][:, self.cls(fe), self.cls(ph)]
-                        z = (A.reshape(nO[mu] * nV[fe], nV[ph]) @ G).reshape(nO[mu], nV[fe], G.shape[1])
+                        A = _c(g.oovv[self.ocls(mu), l][:, self.cls(fe), self.cls(ph)].reshape(nO[mu] * nV[fe], nV[ph]), dtype)
                         key = (k, mu, fe)
-                        if key in Z4:
-                            Z4[key] += sl * z
-                        else:
-                            Z4[key] = sl * z
+                        if key not in Z4:
+                            Z4[key] = np.zeros((nO[mu], nV[fe], G.shape[1]), dtype=dtype)
+                        gemm(A, G, Z4[key].reshape(nO[mu] * nV[fe], G.shape[1]), alpha=sl, beta=1.0)
         return Z4
 
     def _xvr5(self, Z, r2):
@@ -672,7 +699,11 @@ class Engine5:
         G = E('mlhy,ch->mlyc', oovo, r2)                       # G(ml; y; c) = <ml||hy> r2(ch)
         G3 = E('mlhg,ch->mlcg', oovv, r2)                      # G3(ml; c, g)
         G2 = E('cmhg,dh->mcdg', vovv, r2)                      # G2(m; c, d, g) = <cm||hg> r2(dh)
-        XoR5 = {K: np.zeros((n, nK[K]), dtype=dtype) for K, n in self.xr5n.items()}
+        if not hasattr(self, '_xor5'):
+            self._xor5 = {K: np.empty((n, nK[K]), dtype=dtype) for K, n in self.xr5n.items()}
+        XoR5 = self._xor5
+        for z in XoR5.values():
+            P.zero(z)
         Y4 = {}
         nP = self.nP
         X22 = np.empty(max(int(sec.n22.max(initial=0)), 1), dtype=dtype)
@@ -790,20 +821,30 @@ class Engine5:
         cls = self.cls
         i2, j2 = lay.o2[:, 0], lay.o2[:, 1]
         G5 = D._E('Phf,bh->Pfb', g.oovv[i2, j2], r2)          # G5(ln; f, b) = <ln||hf> r2(bh)
-        Xv5 = {}
+        if not hasattr(self, '_xv5d'):
+            self._xv5d = {}
+            for k, fe in self.xv5keys:
+                self._xv5d[(k, fe)] = np.empty((nV[fe], sec5.nA4[s + ko[k] + fe]), dtype=dtype)
+        Xv5 = self._xv5d
         for k, fe in self.xv5keys:
             A = s + ko[k] + fe
             n13 = int(sec5.n13[A])
-            Xv5[(k, fe)] = np.zeros((nV[fe], sec5.nA4[A]), dtype=dtype)
+            P.zero(Xv5[(k, fe)])
             if not n13:
                 continue
-            U = np.zeros((nV[fe], n13), dtype=dtype)
+            # U[(b of class p) block: f, b, (cde)] contiguous per class p
+            U = self.buf('xv5u', nV[fe] * n13, zero=True)
+            xoff = np.full((nV[fe], ncls), -1, dtype=np.int64)
+            s1 = np.ones((nV[fe], ncls), dtype=np.int64)
             for p in range(ncls):
                 o = sec5.off13[A, p]
                 if o < 0:
                     continue
                 nk = int(nK[A - p])
-                blk = U[:, o:o + nV[p] * nk].reshape(nV[fe], nV[p], nk)
+                base = nV[fe] * o
+                xoff[:, p] = base + np.arange(nV[fe]) * nV[p] * nk
+                s1[:, p] = nk
+                blk = U[base:base + nV[fe] * nV[p] * nk].reshape(nV[fe] * nV[p], nk)
                 for l in range(no):
                     if l == k:
                         continue
@@ -813,15 +854,16 @@ class Engine5:
                     Gx = self.x4(X4r, Pl, ph)
                     if Gx is None or Gx.shape[1] != nk:
                         continue
-                    W = g.vovv[cls(p), l][:, cls(fe), cls(ph)].transpose(1, 0, 2).reshape(nV[fe] * nV[p], nV[ph])
-                    blk += sl * (W @ Gx).reshape(nV[fe], nV[p], nk)
+                    W = _c(g.vovv[cls(p), l][:, cls(fe), cls(ph)].transpose(1, 0, 2).reshape(nV[fe] * nV[p], nV[ph]), dtype)
+                    gemm(W, Gx, blk, alpha=sl, beta=1.0)
                 c = A - p - ko[k]
                 if 0 <= c < lay.n2 and nO2[c] and lay.t3poff[k, c] >= 0:
                     o3 = lay.t3poff[k, c]
                     T = g.T3P[o3:o3 + nO2[c] * nk].reshape(nO2[c], nk)
-                    W = G5[lay.O2cls[c]][:, cls(fe), cls(p)].transpose(1, 2, 0).reshape(nV[fe] * nV[p], nO2[c])
-                    blk += (W @ T).reshape(nV[fe], nV[p], nk)
-            sec5.x13q(1, Xv5[(k, fe)], A, sec5.ent_x13(A, nV[fe]), U)
+                    W = _c(G5[lay.O2cls[c]][:, cls(fe), cls(p)].transpose(1, 2, 0).reshape(nV[fe] * nV[p], nO2[c]), dtype)
+                    gemm(W, T, blk, beta=1.0)
+            ent = (np.arange(nV[fe], dtype=np.int64), np.ones(nV[fe]), xoff, s1, np.ones(xoff.shape, dtype=np.int64))
+            sec5.x13q(1, Xv5[(k, fe)], A, ent, U)
         return Xv5
 
     # ---------------------------------------------------------------- the passes over r5
@@ -975,8 +1017,8 @@ class Engine5:
                     xo.append(x0)
                     m0 += len(b['cols']) * b['nA']
                     x0 += len(b['rows']) * b['nA']
-                Mb = P.zero(np.empty(m0, dtype=dtype))
-                Xb = np.empty(x0, dtype=dtype)
+                Mb = self.buf('mb', m0, zero=True)
+                Xb = self.buf('xb', x0)
                 em, ex = self.ring_entries(P_, bl, mo, xo)
                 with timer('dea5.expand'):
                     for M, ent in em.items():
@@ -1048,7 +1090,7 @@ class Engine5:
                 t = [int(v) for v in lay.o3[I]]
                 kI = lay.kO3[I]
                 if sec5.n23[M]:
-                    X23 = np.empty(int(sec5.n23[M]), dtype=dtype)
+                    X23 = self.buf('x23', int(sec5.n23[M]))
                     for q in range(lay.n2):
                         o = sec5.off23[M, q]
                         if o < 0:
@@ -1135,14 +1177,15 @@ class Engine5:
                             Xq[...] = 0
                             continue
                         with timer('dea5.rows.stack'):
-                            Lc = _c(np.concatenate(Ls, axis=0), dtype)
-                            Rc = _c(np.concatenate(Rs, axis=0), dtype)
+                            k_ = sum(len(a) for a in Ls)
+                            Lc = np.concatenate(Ls, axis=0, out=self.buf('lc', k_ * nq).reshape(k_, nq))
+                            Rc = self._stack(Rs, self.buf('rc', k_ * nc).reshape(k_, nc))
                         with timer('dea5.rows.gemm'):
                             gemm(Lc.T, Rc, Xq)
                     with timer('dea5.rows.reduce'):
                         sec5.x23(1, out, M, sec5.ent_row(M, r, '23'), X23)
                 if sec5.n14[M]:
-                    X14 = np.empty(int(sec5.n14[M]), dtype=dtype)
+                    X14 = self.buf('x14', int(sec5.n14[M]))
                     for p in range(ncls):
                         o = sec5.off14[M, p]
                         if o < 0:
@@ -1171,8 +1214,9 @@ class Engine5:
                             Xp[...] = 0
                             continue
                         with timer('dea5.rows.stack'):
-                            Lc = _c(np.concatenate(Ls, axis=1), dtype)
-                            Rc = _c(np.concatenate(Rs, axis=0), dtype)
+                            k_ = sum(a.shape[1] for a in Ls)
+                            Lc = np.concatenate(Ls, axis=1, out=self.buf('lc', nV[p] * k_).reshape(nV[p], k_))
+                            Rc = self._stack(Rs, self.buf('rc', k_ * nA).reshape(k_, nA))
                         with timer('dea5.rows.gemm'):
                             gemm(Lc, Rc, Xp)
                     with timer('dea5.rows.reduce'):
@@ -1412,9 +1456,9 @@ class ProblemSector5:
                     yield M, r, cols, slice(off + r0 * n, off + (r0 + len(r)) * n)
                 off += len(rows) * n
 
-    def unpack5(self, c):
+    def unpack5(self, c, out=None):
         """The 5p3h part in the blocks of Sector5 (zeros where the parity does not go) of the stored one."""
-        out = np.zeros(self.sec5.size5, dtype=self.dtype)
+        out = np.zeros(self.sec5.size5, dtype=self.dtype) if out is None else P.zero(out)
         for M, r, cols, sl in self._parts5():
             blk = self.sec5.block5(out, M)
             blk[np.ix_(r, cols)] = np.asarray(c[sl]).reshape(len(r), len(cols))
@@ -1437,7 +1481,7 @@ class ProblemSector5:
     def sigma(self, x, y, only=None):
         t0 = time.perf_counter()
         with timer('dea5.unpack'):
-            x5 = self.unpack5(x[3])
+            x5 = self.unpack5(x[3], self.eng.buf('x5', self.sec5.size5))
         s2, s3, s4, s5 = self.eng.sigma(x[0], x[1], x[2], x5, only=only)
         del x5
         y[0][:] = s2
