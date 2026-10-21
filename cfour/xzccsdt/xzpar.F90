@@ -116,6 +116,17 @@ module xzpar
       integer(c_int64_t), value :: n, add, ntmp
       integer(c_int64_t) :: peer(*), pos(*), len(*), dir(*)
     end subroutine
+    ! the ranks of one colour (a sub-communicator; EOM-DEA with 5p3h): made by all
+    ! ranks; a sum over its ranks
+    subroutine xzmpi_sub_split(color) bind(C)
+      import
+      integer(c_int64_t), value :: color
+    end subroutine
+    subroutine xzmpi_sub_allsum_w(buf, n) bind(C)
+      import
+      type(*), dimension(*) :: buf
+      integer(c_int64_t), value :: n
+    end subroutine
     subroutine xzmpi_set_chunk(n) bind(C)
       import
       integer(c_int64_t), value :: n

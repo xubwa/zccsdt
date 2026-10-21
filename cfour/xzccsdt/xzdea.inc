@@ -344,6 +344,7 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
   use xzdata
   use xzkern
   use xzdead
+  use xzdead5, only: x2loc, dx2
   use omp_lib
   implicit none
   real(8), target :: w(*)
@@ -356,10 +357,14 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
   integer(8), allocatable :: row(:), xoff(:, :), s1(:, :), s2(:, :), blk(:, :)
   real(8), allocatable :: sg(:)
   real(8) :: sgn
-  ZT :: one, half, alpha
+  ZT :: one, half, alpha, hw
   logical :: anyb
+  integer(8) :: pb, pof
   one = 1
   half = 0.5d0
+  ! (dxv2: Xv2 of the pairs of x2loc for the 5p3h row - the term of Wpp counted twice - into dx2)
+  hw = half
+  if (dxv2) hw = one
   call xzdiv(w, jopa, npo, opa)
   call xzdiv(w, jopb, npo, opb)
   call xzdiv(w, jopgrp, npo, opgrp)
@@ -373,7 +378,7 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
   call N(xzdv)(w, eweff, no * nv * nv * no, weff)
   call N(xzdv)(w, eooovd, no * no * no * nv, ooovd)
   call N(xzdv)(w, jt3, n3, t3)
-  if (.not. dxvfile) call zc_vzero_d(NW * r13loc, w(dr13))
+  if (.not. dxvfile .and. .not. dxv2) call zc_vzero_d(NW * r13loc, w(dr13))
   ! <dm||ef> = - <md||ef> as [e of mu][d of ka][f of ph], Wr(c, d, e, m) as [e][d][c]
   !$omp parallel do collapse(3) private(ph, c, o, ee, dd, ff, e, d, f)
   do m = 0, no - 1
@@ -430,23 +435,34 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
   allocate(blk(2, ncls * ncls))
   ! (the pairs of this rank; the chunk of a pair at kb: in the work array, or
   ! in the buffer that goes to the file XZDXV)
-  do pq = dq0, dq1 - 1
+  do pq = merge(0_8, dq0, dxv2), merge(npo, dq1, dxv2) - 1
+    if (dxv2) then
+      if (x2loc(pq) < 0) cycle
+    end if
     k = opa(pq)
     l = opb(pq)
     kp = opgrp(pq)
-    if (dxvfile) then
-      kb = dr13 - NW * r13p(pq)
+    ! pb: the first word of the chunk of the pair, pof: the element of R13 there
+    if (dxv2) then
+      pb = dx2 + NW * x2loc(pq)
+      pof = r13p(pq)
+      call zc_vzero_d(NW * (r13p(pq + 1) - r13p(pq)), w(pb))
+    else if (dxvfile) then
+      pb = dr13
+      pof = r13p(pq)
       call zc_vzero_d(NW * (r13p(pq + 1) - r13p(pq)), w(dr13))
     else
-      kb = dr13 - NW * r13p(dq0)
+      pb = dr13 + NW * (r13p(pq) - r13p(dq0))
+      pof = r13p(pq)
     end if
+    kb = pb - NW * pof
     ! the rows t(m kl; K) of the m of class mu
-    call N(xzdv)(w, dr13, merge(r13pmax, r13loc, dxvfile), r13)
+    call N(xzdv)(w, pb, max(r13p(pq + 1) - r13p(pq), 1_8), r13)
     !$omp parallel do private(o, kk, nk, m, r, sgn, jj)
     do mu = 0, ncls - 1
       o = r13off(pq, mu)
       if (o < 0) cycle
-      o = o - merge(r13p(pq), r13p(dq0), dxvfile)
+      o = o - pof
       kk = kp + mu
       nk = dnK(kk)
       do m = ocoff(mu), ocoff(mu + 1) - 1
@@ -536,7 +552,7 @@ subroutine N(xzdxv)(w, kvo, kwrb, kmx, koa)
       ph = be - mu
       if (ph >= 0 .and. ph < ncls) then
         if (wboff(be, mu) >= 0) then
-          call N(zc_gemm)(0_4, 0_4, dnQ(be) * dnV(mu), dnV(ka), dnV(ph), half, w(dwb + NW * wboff(be, mu)), dnV(ph), &
+          call N(zc_gemm)(0_4, 0_4, dnQ(be) * dnV(mu), dnV(ka), dnV(ph), hw, w(dwb + NW * wboff(be, mu)), dnV(ph), &
                           w(jt2 + NW * (((k * no + l) * nv + vcoff(ph)) * nv + vcoff(ka))), nv, one, &
                           w(kmx + NW * (mxsize(kp) + o)), dnV(ka))
         end if
@@ -582,7 +598,7 @@ contains
 
   ! the chunk of the pair pq to the file XZDXV (dxvfile)
   subroutine write_pair()
-    if (.not. dxvfile) return
+    if (.not. dxvfile .or. dxv2) return
     write(81, pos=1 + 8 * NW * (r13p(pq) - r13p(dq0)), iostat=ios) w(dr13:dr13 + NW * (r13p(pq + 1) - r13p(pq)) - 1)
     if (ios /= 0) then
       write(6, '(/,a,i8,a)') ' @XZCCSDT-F, writing the file XZDXV of Xv failed (iostat ', ios, '): disk full?'

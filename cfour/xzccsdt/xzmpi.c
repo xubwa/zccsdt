@@ -295,6 +295,32 @@ void xzmpi_node(char *name, int64_t len)
     name[n] = 0;
 }
 
+/* ---- A sub-communicator of the ranks of one colour (EOM-DEA with 5p3h: the
+ * ranks that share an index of Xv5): xzmpi_sub_split makes it (every rank
+ * calls it, colour >= 0; a later call replaces it), xzmpi_sub_allsum_w sums
+ * buf over its ranks, in place, in chunks. */
+static MPI_Comm xz_sub = MPI_COMM_NULL;
+
+void xzmpi_sub_split(int64_t color)
+{
+    int r;
+    if (xz_sub != MPI_COMM_NULL) MPI_Comm_free(&xz_sub);
+    MPI_Comm_rank(MPI_COMM_WORLD, &r);
+    MPI_Comm_split(MPI_COMM_WORLD, (int)color, r, &xz_sub);
+}
+
+void xzmpi_sub_allsum_w(double *buf, int64_t n)
+{
+    int np;
+    if (xz_sub == MPI_COMM_NULL) return;
+    MPI_Comm_size(xz_sub, &np);
+    if (np < 2) return;
+    for (int64_t off = 0; off < n; off += xz_chunk) {
+        int m = (int)(n - off < xz_chunk ? n - off : xz_chunk);
+        MPI_Allreduce(MPI_IN_PLACE, buf + off, m, MPI_DOUBLE, MPI_SUM, xz_sub);
+    }
+}
+
 void xzmpi_finalize(void) { MPI_Finalize(); }
 
 void xzmpi_abort(int64_t code) { MPI_Abort(MPI_COMM_WORLD, (int)code); }
@@ -321,6 +347,8 @@ void xzmpi_slices_put(double *buf, const int64_t *off) { (void)buf; (void)off; }
 void xzmpi_segs(double *w, int64_t n, const int64_t *peer, const int64_t *pos, const int64_t *len,
                 const int64_t *dir, int64_t add, double *tmp, int64_t ntmp)
 { (void)w; (void)n; (void)peer; (void)pos; (void)len; (void)dir; (void)add; (void)tmp; (void)ntmp; }
+void xzmpi_sub_split(int64_t color) { (void)color; }
+void xzmpi_sub_allsum_w(double *buf, int64_t n) { (void)buf; (void)n; }
 void xzmpi_finalize(void) {}
 void xzmpi_abort(int64_t code) { exit((int)code); }
 

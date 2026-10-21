@@ -21,6 +21,8 @@
 !                                of the SCF, the format of xzlabels without the modulus)
 !     guess n                    (optional) unit vectors on the n lowest pairs (a<b)
 !                                to start from; default max(4, roots + 2)
+!     level 5p3h                 (optional) R with complete 5p3h (+ r5[(i<j<k), (a<b<c<d<e)];
+!                                xzdea5.inc, docs/native.md, section 21); default level 4p2h
 !   (an empty line or a line that starts with % ends it); the thresholds as
 !   for EOM-EE: ESTATE_CONV (or %eomthrs), ESTATE_MAXCYC, %eomnroot (the roots
 !   of a target without a number), %eomndav0 (vectors of the subspace).
@@ -45,6 +47,7 @@ module xzdead
   integer(8) :: dnr(dmaxt) = 0              ! roots of each (0: %eomnroot)
   integer(8) :: dtpar = -1                  ! parity of the states: -1 all, 0 g, 1 u
   integer(8) :: dnguess = 0                 ! unit vectors to start from (0: default)
+  integer(8) :: dlev = 4                    ! the rank of R: 4 (to 4p2h) or 5 (complete 5p3h, xzdea5.inc)
   integer(8), allocatable :: dpo(:), dpv(:) ! parity of the active occupied, virtual spinors (order here)
 
   ! ---- the layout of the intermediates of the ground state (offsets in
@@ -74,6 +77,7 @@ module xzdead
   ! the file XZDXV (XZDXV.<rank>; dr13 a buffer of the largest pair); r13p(P)
   ! the first element of the pair P in the layout of r13off
   logical :: dxvfile = .false.
+  logical :: dxv2 = .false.                 ! N(xzdxv) makes Xv2 of the 5p3h row (xzdea5.inc) instead
   integer(8) :: dq0 = 0, dq1 = 0
   integer(8), allocatable :: r13p(:), dqb(:)
   integer(8) :: r13loc = 0, r13pmax = 0
@@ -112,6 +116,7 @@ module xzdead
   real(8) :: tdpart(14) = 0d0               ! seconds of the pieces of the sigma vectors (13, 14: the
                                             ! rows exchanged by the ring, by the hh ladder; in 12 too)
   integer(8) :: dbatch = 0                  ! elements of an operand of a batch of the passes over r4
+  integer(8) :: dvec5 = 0                   ! (level 5p3h) stored elements of r5 of a vector (xzdea5d.F90)
 
 contains
 
@@ -246,6 +251,7 @@ contains
     dnt = 0
     dtpar = -1
     dnguess = 0
+    dlev = 4
     inquire(file='ZMAT', exist=there)
     if (.not. there) return
     open(unit=32, file='ZMAT', form='formatted', status='old', action='read', iostat=ios)
@@ -280,6 +286,16 @@ contains
             write(6, '(/,a,a,a)') ' @XZCCSDT-F, %xzdea: parity "', trim(tag), '"; g, u or none.'
             call xzerrex
           end if
+        else if (tag(1:5) == 'level') then
+          tag = adjustl(tag(6:))
+          if (tag(1:4) == '5p3h' .or. tag(1:1) == '5') then
+            dlev = 5
+          else if (tag(1:4) == '4p2h' .or. tag(1:1) == '4') then
+            dlev = 4
+          else
+            write(6, '(/,a,a,a)') ' @XZCCSDT-F, %xzdea: level "', trim(tag), '"; 4p2h or 5p3h.'
+            call xzerrex
+          end if
         else if (tag(1:5) == 'guess') then
           read(tag(6:), *, iostat=ios2) dnguess
           if (ios2 /= 0) then
@@ -295,7 +311,8 @@ contains
             read(tag, *, iostat=ios2) a
           end if
           if (ios2 /= 0) then
-            write(6, '(/,a,a)') ' @XZCCSDT-F, %xzdea: a line that is not "target [roots]", "parity g|u" or "guess n": ', &
+            write(6, '(/,a,a)') ' @XZCCSDT-F, %xzdea: a line that is not "target [roots]", "parity g|u", "guess n" or ' // &
+              '"level 4p2h|5p3h": ', &
               trim(line)
             call xzerrex
           end if
@@ -585,6 +602,7 @@ contains
     dp0 = 0
     dp1 = npo
     ddist = .false.
+    dvec5 = 0
     ! r3: the block K has the occupied of class K - s
     off3(0) = 0
     blk3 = -1
@@ -874,11 +892,12 @@ contains
 
   ! the elements of a vector that this rank holds: r2, r3 (rank 0's; a copy
   ! on the other ranks, for the sigma vector) and its rows of r4 (all with
-  ! one rank)
+  ! one rank; level 5p3h: and its stored rows of r5, esoff the rank-major
+  ! parts of xzd5slices)
   integer(8) function xzdpart()
     use xzpar, only: myrank
     use xzeomd, only: esoff
-    xzdpart = dn2 + dsz3 + dsz4
+    xzdpart = dn2 + dsz3 + dsz4 + dvec5
     if (ddist) xzdpart = dn2 + dsz3 + esoff(myrank + 1) - esoff(myrank)
   end function
 

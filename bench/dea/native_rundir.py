@@ -23,7 +23,7 @@ xzread.F90, xzvvhdr): one block per sum of the labels of a pair, made
 group by group from the blocks of the file (write_vvvv_blocks).
 
 usage: python bench/dea/native_rundir.py <file.npz | file.h5> <outdir> [--freeze n] [--targets 0,2] [--roots 1]
-           [--cc-conv 10] [--estate-conv 9] [--mem-gb 8] [--section text] [--cfour-bin dir]
+           [--cc-conv 10] [--estate-conv 9] [--mem-gb 8] [--section text] [--cfour-bin dir] [--level 5p3h]
   --freeze n      the first n spinors of the reference frozen (their mean field folded in; common.load)
   --targets       2 Omega of the two attached electrons, one problem each (default 0,2)
   --roots         roots per target (default 1)
@@ -31,6 +31,7 @@ usage: python bench/dea/native_rundir.py <file.npz | file.h5> <outdir> [--freeze
   --estate-conv   ESTATE_CONV: the largest element of a residual below 10^-N (default 9)
   --mem-gb        MEMORY_SIZE in GB (default 8)
   --xz line       a line of the section %xzccsdt (repeatable)
+  --level 5p3h    the line "level 5p3h" in %xzdea: R with complete 5p3h (docs/native.md, section 21)
   --phases seed   every spinor multiplied by a phase exp(i x), x random with this seed: complex
                   integrals with the same labels (a test of the complex arithmetic)
   --moinpppp      a block file written as before: the full container (common.load_blocks) and
@@ -67,7 +68,7 @@ H:6-31G
 
 %xzdea
 {targets}
-parity g
+parity g{level}
 {extra}
 '''
 
@@ -150,7 +151,7 @@ def write_vvvv_blocks(path, bf, vpos, verbose=True):
 def main():
     args = sys.argv[1:]
     opt = {'--freeze': '0', '--targets': '0,2', '--roots': '1', '--cc-conv': '10', '--estate-conv': '9',
-           '--mem-gb': '8', '--cfour-bin': BIN, '--phases': None}
+           '--mem-gb': '8', '--cfour-bin': BIN, '--phases': None, '--level': None}
     xz = []
     while '--xz' in args:
         k = args.index('--xz')
@@ -199,7 +200,8 @@ def main():
     extra = ('%xzccsdt\n' + '\n'.join(xz) + '\n') if xz else ''
     with open(os.path.join(out, 'ZMAT'), 'w') as fz:
         fz.write(ZMAT.format(src=os.path.basename(path), cc=opt['--cc-conv'], es=opt['--estate-conv'],
-                             mem=opt['--mem-gb'], targets=targets, extra=extra))
+                             mem=opt['--mem-gb'], targets=targets, extra=extra,
+                             level='' if opt['--level'] is None else '\nlevel ' + opt['--level']))
     shutil.copy(os.path.join(TEST, 'GENBAS'), out)
     with open(os.path.join(out, 'xjoda.out'), 'w') as log:
         subprocess.run([os.path.join(opt['--cfour-bin'], 'xjoda')], cwd=out, stdout=log, stderr=subprocess.STDOUT,

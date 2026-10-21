@@ -39,6 +39,16 @@ module xzkern
       integer(c_int64_t) :: cnt
     end function
 
+    ! the quintuples a<b<c<d<e of n indices with labels summing to m (csrc/t4sym.c):
+    ! their number, written to out[.][5] (16-bit integers; the address) unless it is 0
+    function zc_t5s_quints(n, kv, m, out) bind(C) result(cnt)
+      import
+      integer(c_int), value :: n, m
+      type(*), dimension(*) :: kv
+      integer(c_intptr_t), value :: out
+      integer(c_int64_t) :: cnt
+    end function
+
     subroutine zc_tn_zero(p, nbytes) bind(C)
       import
       type(*), dimension(*) :: p

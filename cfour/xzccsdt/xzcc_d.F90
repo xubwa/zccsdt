@@ -20,3 +20,7 @@
 #include "xzdea.inc"
 #include "xzdeas.inc"
 #include "xzdeam.inc"
+#include "xzdea5.inc"
+#include "xzdea5s.inc"
+#include "xzdea5r.inc"
+#include "xzdea5x.inc"
