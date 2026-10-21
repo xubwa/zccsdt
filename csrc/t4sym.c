@@ -430,8 +430,11 @@ DEFINE_T5S(double complex, z)
 /* zc_t5s_quints on all threads (the native program makes the lists of the
  * blocks of r5 when it uses them, cfour/xzccsdt/xzdea5.inc): the quintuples
  * of each first index a counted, then written at their places; the same
- * list as zc_t5s_quints.  cnt: work, n + 1 integers. */
-static int64_t t5s_from(int n, const int32_t *kv, int M, int a, int16_t *out)
+ * list as zc_t5s_quints - or, with par (a parity 0 / 1 per index; not
+ * NULL), its quintuples whose parities add to the parity want, in the same
+ * order (the columns of r5 that a row of one parity has).  cnt: work, n + 1
+ * integers. */
+static int64_t t5s_from(int n, const int32_t *kv, int M, int a, const int32_t *par, int want, int16_t *out)
 {
     int64_t c = 0;
     for (int b = a + 1; b < n - 3; b++)
@@ -444,7 +447,9 @@ static int64_t t5s_from(int n, const int32_t *kv, int M, int a, int16_t *out)
             int mid = (lo + hi) / 2;
             if (kv[mid] >= ke) hi = mid; else lo = mid + 1;
         }
+        const int p4 = par ? par[a] + par[b] + par[cc] + par[d] : 0;
         for (int e = lo; e < n && kv[e] == ke; e++) {
+            if (par && ((p4 + par[e]) & 1) != want) continue;
             if (out) {
                 int16_t *o = out + 5 * c;
                 o[0] = (int16_t)a; o[1] = (int16_t)b; o[2] = (int16_t)cc;
@@ -456,16 +461,17 @@ static int64_t t5s_from(int n, const int32_t *kv, int M, int a, int16_t *out)
     return c;
 }
 
-int64_t zc_t5s_quints_par(int n, const int32_t *kv, int M, int16_t *out, int64_t *cnt)
+int64_t zc_t5s_quints_par(int n, const int32_t *kv, int M, int16_t *out, int64_t *cnt, const int32_t *par,
+                          int want)
 {
     if (n < 5) return 0;
     cnt[0] = 0;
     _Pragma("omp parallel for schedule(dynamic)")
-    for (int a = 0; a < n - 4; a++) cnt[a + 1] = t5s_from(n, kv, M, a, NULL);
+    for (int a = 0; a < n - 4; a++) cnt[a + 1] = t5s_from(n, kv, M, a, par, want, NULL);
     for (int a = 0; a < n - 4; a++) cnt[a + 1] += cnt[a];
     if (out) {
         _Pragma("omp parallel for schedule(dynamic)")
-        for (int a = 0; a < n - 4; a++) t5s_from(n, kv, M, a, out + 5 * cnt[a]);
+        for (int a = 0; a < n - 4; a++) t5s_from(n, kv, M, a, par, want, out + 5 * cnt[a]);
     }
     return cnt[n - 4];
 }

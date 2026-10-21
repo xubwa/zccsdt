@@ -24,6 +24,24 @@ int64_t xz_free_disk(const char *path)
     return (int64_t)s.f_bavail * (int64_t)s.f_frsize;
 }
 
+/* the directory `path' and those above it, as mkdir -p (0: it is there) */
+int64_t xz_mkdir(const char *path)
+{
+    char buf[4096];
+    size_t n = strlen(path);
+    if (n == 0 || n >= sizeof(buf)) return 1;
+    memcpy(buf, path, n + 1);
+    for (size_t i = 1; i < n; i++) {
+        if (buf[i] != '/') continue;
+        buf[i] = 0;
+        mkdir(buf, 0755);
+        buf[i] = '/';
+    }
+    mkdir(buf, 0755);
+    struct stat st;
+    return stat(buf, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : 1;
+}
+
 /* the file `from' takes the name `to', replacing a file of that name (0: done) */
 int64_t xz_rename(const char *from, const char *to)
 {

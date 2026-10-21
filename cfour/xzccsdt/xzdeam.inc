@@ -274,8 +274,8 @@ subroutine N(xzdea)(w, ecorr)
       nlen = nlen + dvec5
       write(6, '(a,i16,a,i16,a,f12.1,a)') '   5p3h: ', dsz5, ' elements in the blocks, ', dvec5, ' stored (the parity) = ', &
         8d-6 * NW * dvec5, ' MB of a vector'
-      write(6, '(a,f10.1,a,f10.1,a,f10.1,a,i6,a)') '   the quintuple lists of the blocks: ', 8d-6 * q5size, ' MB (a pool of ', &
-        8d-6 * q5cap, ' MB), their parities ', 8d-6 * p5size, ' MB; Xv5 of one k at most ', nint(8d-6 * NW * xv5max), ' MB'
+      write(6, '(a,f10.1,a,f10.1,a,i6,a)') '   the quintuple lists of the blocks: ', 8d-6 * q5size, ' MB (a pool of ', &
+        8d-6 * q5cap, ' MB); Xv5 of one k at most ', nint(8d-6 * NW * xv5max), ' MB'
     end if
     ! (over the ranks: the rows of r4 of every rank, before the vectors and the
     ! batches - a rank holds its part of a vector, and a sigma vector of a
@@ -528,16 +528,22 @@ contains
       do rr = 0, n - 1
         myrank = rr
         call xzdranges(w, nsel, sh)
+        if (dlev == 5) then
+          call xzd5ranges(nsel, sh)
+          call N(xzd5glay)(w)
+        end if
         dxvfile = .false.
         mk = xzmark()
         call N(xzeomkeep)()
         call N(xzdkeep)()
+        if (dlev == 5) call N(xzd5keep)()
         kept = xztop - mk
         r13w = NW * r13loc
         r13f = NW * r13pmax
         xzpeak = xztop
         call N(xzeomim)(w)
         call N(xzdim)(w)
+        if (dlev == 5) call N(xzd5im)(w)
         pim = xzpeak - xztop
         wvec = 0
         wsg1 = 0
@@ -550,19 +556,22 @@ contains
           call problem(it, s, nroot, ok)
           if (.not. ok) cycle
           call xzdsec(s)
+          if (dlev == 5) call xzd5sec()
           ddist = .false.
+          mp = xzmark()
+          call N(xzdwq2)(w)
+          if (dlev == 5) call N(xzd5secw)(w)
           if (n > 1) then
             call xzdslices(int(NW, 8))
             ddist = .true.
           end if
-          nlen = dn2 + dsz3 + dsz4
+          if (dlev == 5) call xzd5slices(int(NW, 8))
+          nlen = dn2 + dsz3 + dsz4 + dvec5
           own = nlen
           if (n > 1) then
             own = esoff(rr + 1) - esoff(rr)
             if (rr == 0) own = own + dn2 + dsz3
           end if
-          mp = xzmark()
-          call N(xzdwq2)(w)
           kk = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)')
           kk = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)')
           vec = xztop - mp
@@ -576,6 +585,12 @@ contains
           call N(xzdsig)(w, kk, kk)
           call N(xzdprec)(w, kk, zz)
           sg1 = xzpeak - xztop
+          ! (the regions at the peak of the sigma vector of the last rank: the largest)
+          if (rr == n - 1 .and. dlev == 5) then
+            write(6, '(a,i5,a,i4,a)') '   the largest regions at the peak of a sigma vector of rank ', rr, ' of ', n, &
+              ' (batches of 1 GB):'
+            call xzpeaklist(125000000_8)
+          end if
           msub = subspace(nroot)
           wvec = max(wvec, vec)
           wsg1 = max(wsg1, sg1)
@@ -598,6 +613,10 @@ contains
     myrank = mr0
     dbatch = 0
     call xzdranges(w, nsel, sh)
+    if (dlev == 5) then
+      call xzd5ranges(nsel, sh)
+      call N(xzd5glay)(w)
+    end if
     deallocate(sh)
   end subroutine
 
@@ -791,7 +810,7 @@ subroutine N(xzd5natural)(w, kx, back)
   real(8), target :: w(*)
   integer(8), intent(in) :: kx
   logical, intent(in) :: back
-  integer(8) :: m0, kt, nb, r, k0
+  integer(8) :: m0, kt, nb, r, k0, i, o
   if (myrank /= 0) return
   nb = dsz4 + dvec5
   m0 = xzmark()
@@ -801,10 +820,18 @@ subroutine N(xzd5natural)(w, kx, back)
   do r = 0, nrank - 1
     if (back) then
       call N(xzecopy)(d4e(r + 1) - d4e(r), w(kt + NW * esoff(r)), w(k0 + NW * d4e(r)))
-      call N(xzecopy)(d5e(r + 1) - d5e(r), w(kt + NW * (esoff(r) + d4e(r + 1) - d4e(r))), w(k0 + NW * (dsz4 + d5e(r))))
     else
       call N(xzecopy)(d4e(r + 1) - d4e(r), w(kt + NW * d4e(r)), w(k0 + NW * esoff(r)))
-      call N(xzecopy)(d5e(r + 1) - d5e(r), w(kt + NW * (dsz4 + d5e(r))), w(k0 + NW * (esoff(r) + d4e(r + 1) - d4e(r))))
+    end if
+  end do
+  ! (the rows of r5: natural r5c, in the part of the owner r5own)
+  do i = 0, nto - 1
+    if (blk5(i) < 0 .or. r5w(i) == 0) cycle
+    o = xzd5owner(i)
+    if (back) then
+      call N(xzecopy)(r5w(i), w(kt + NW * (esoff(o) + d4e(o + 1) - d4e(o) + r5own(i))), w(k0 + NW * (dsz4 + r5c(i))))
+    else
+      call N(xzecopy)(r5w(i), w(kt + NW * (dsz4 + r5c(i))), w(k0 + NW * (esoff(o) + d4e(o + 1) - d4e(o) + r5own(i))))
     end if
   end do
   call xzrel(m0)

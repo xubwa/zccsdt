@@ -5,23 +5,22 @@
 ! 5p3h blocks of a sector vector, of the intermediates of a sigma vector, the
 ! distribution of the rows of r5 over the ranks.
 !
-! The 5p3h part of a sector vector of the shift s:
-!   r5   one block per class M of the virtual quintuples: rows the occupied
-!        triples of group M - s (in their order), columns the quintuples
-!        a<b<c<d<e of class M, lexicographic (csrc/t4sym.c: zc_t5s_quints) -
-!        the blocks of zccsdt.cc.dea5_sector.Sector5, held in full while a
-!        sigma vector is made;
-!   the stored part (the vectors of the solver): of every row of a block only
-!        the columns whose quintuple has the parity of the target with the
-!        triple (%xzdea parity g|u; all columns without a parity), the rows in
-!        their order - so that a range of triples is a range of the stored
-!        part as of the blocks (r5c, r5w).  Half of r5 with a parity.
-! Since the triples are numbered by groups and the blocks go by classes, the
-! rows of the blocks in their order are the triples in their order: a range
-! of triples is a range of r5.  Over the ranks every rank holds one range of
-! triples (dtb; the same for all targets), and its part of a vector is its
-! rows of r4 followed by its rows of the stored r5 (the rank-major layout of
-! the solver, esoff of xzeomd; rank 0 with r2 and r3 in front).
+! The 5p3h part of a sector vector of the shift s: one block per class M of
+! the virtual quintuples (zccsdt.cc.dea5_sector.Sector5), rows the occupied
+! triples of group M - s, columns the quintuples a<b<c<d<e of class M
+! (lexicographic, csrc/t4sym.c: zc_t5s_quints) - of a row only the
+! quintuples whose parity goes with that of the triple and of the target
+! (%xzdea parity g|u; all of them without a parity).  The rows are held so,
+! everywhere: in the vectors of the solver and in the passes of a sigma
+! vector, whose kernels take the quintuple list of the parity of the row
+! (the lists of the pairs (block, parity), made when used: xzd5q5).  The
+! natural layout (the test hook deasig; dea5_sector.ProblemSector5.pack5):
+! per block the rows of the triples of parity 0 in their order, then those
+! of parity 1.  Over the ranks every rank holds one range of triples (dtb;
+! the same for all targets) and its part of a vector is its rows of r4
+! followed by its rows of r5 - per block its rows of parity 0, then of
+! parity 1 (r5own) -: the rank-major layout of the solver (esoff of xzeomd;
+! rank 0 with r2 and r3 in front).
 !
 module xzdead5
   implicit none
@@ -41,24 +40,27 @@ module xzdead5
   integer(8), allocatable :: off14(:, :), n14(:)  ! as X[a of class p][(bcde)]: (M, p)
   integer(8), allocatable :: off13a(:, :), n13a(:) ! a row of the quadruples of any class A as X[b of p][(cde)]
   integer(8), allocatable :: x4off(:)           ! (0:npo) a row of r4 on (h | cde): its place in X4 (the sizes)
-  integer(8), allocatable :: r5c(:), r5w(:)     ! (0:nto) the stored row of a triple: first element, elements
+  ! a row of r5: the triple's parity group g (0, 1; the order of the rows in a
+  ! block), the parity of its quintuples lp (the list), its elements, its first
+  ! element in the natural layout and in the part of the rank that holds it
+  integer(8), allocatable :: r5g(:), r5lp(:), r5w(:), r5c(:), r5own(:)
+  integer(8), allocatable :: q5n(:, :)          ! (0:1, 0:n5c-1) the quintuples of the parity lp of the block M
   integer(8) :: dsz5 = 0, dsz5c = 0, n23max = 0, n14max = 0, n13amax = 0, nq5max = 0, x4max = 0
-  integer(8), allocatable :: q5at(:)            ! (0:n5c-1) the quintuple list of block M (word address; 0: not there)
-  integer(8), allocatable :: p5at(:)            ! the parity bits of its columns (word address; 0: none)
-  integer(8) :: q5size = 0, p5size = 0          ! words of all lists, of all bits
-  ! the quintuple lists are made when they are used (xzd5q5), in a pool of
-  ! q5cap words at q5pool (the least recently used go when it is full; with
-  ! q5cap at least q5size all of them stay)
+  ! the quintuple lists of the pairs (block M, parity lp), k = 2 M + lp: made
+  ! when they are used (xzd5q5), in a pool of q5cap words at q5pool (the least
+  ! recently used go when it is full; with q5cap at least q5size all stay)
+  integer(8), allocatable :: q5at(:)            ! (0:2 n5c-1) the address of the list k (0: not there)
+  integer(8), allocatable :: q5len(:), q5lru(:) ! its words, its last use
+  integer(8) :: q5size = 0                      ! words of all lists
   integer(8) :: q5pool = 0, q5cap = 0, q5top = 0, q5tick = 0, q5made = 0
-  integer(8), allocatable :: q5len(:), q5lru(:)
+  integer(4), allocatable, target :: d5pv(:)    ! (0:nv-1) the parity of a virtual spinor (the kernel of the lists)
 
   ! ---- the rows of r5 over the ranks (xzd5ranges, xzd5slices)
   integer(8), allocatable :: dtb(:)             ! (0:nrank) the triples of every rank
   integer(8) :: dt0 = 0, dt1 = 0                ! of this rank
   integer(8), allocatable :: d4e(:)             ! (0:nrank) first element of r4 of every rank (r4)
-  integer(8), allocatable :: d5e(:)             ! (0:nrank) first stored element of r5 of every rank
-  integer(8), allocatable :: d5f(:)             ! (0:nrank) first element of the full r5 of every rank
-  integer(8) :: d5own = 0, d4own = 0            ! of this rank: stored elements of r5, elements of r4
+  integer(8), allocatable :: d5e(:)             ! (0:nrank) the elements of r5 of the ranks before
+  integer(8) :: d5own = 0, d4own = 0            ! of this rank: elements of r5, of r4
 
   ! ---- the intermediates of the ground state (N(xzd5im))
   integer(8) :: dwq5 = 0                        ! Wq5 = Wpp + F_vv / 4 on pairs (the blocks of <vv||vv>)
@@ -161,11 +163,12 @@ contains
     use xzdead
     integer(8) :: m, c, p, q, n, a, i, pq
     if (allocated(off5)) deallocate(off5, blk5, pos5r, inblk5, off23, n23, off14, n14, off13a, n13a, x4off, r5c, r5w, &
-                                    q5at, p5at, q5len, q5lru)
+                                    r5g, r5lp, r5own, q5n, q5at, q5len, q5lru)
     allocate(off5(0:n5c), blk5(0:max(nto, 1_8)-1), pos5r(0:max(nto, 1_8)-1), inblk5(0:n5c-1), off23(0:n5c-1, 0:n2c-1), &
              n23(0:n5c-1), off14(0:n5c-1, 0:ncls-1), n14(0:n5c-1), off13a(0:n4c-1, 0:ncls-1), n13a(0:n4c-1), &
-             x4off(0:max(npo, 1_8)), r5c(0:max(nto, 1_8)), r5w(0:max(nto, 1_8)), q5at(0:n5c-1), p5at(0:n5c-1), &
-             q5len(0:n5c-1), q5lru(0:n5c-1))
+             x4off(0:max(npo, 1_8)), r5c(0:max(nto, 1_8)), r5w(0:max(nto, 1_8)), r5g(0:max(nto, 1_8)), &
+             r5lp(0:max(nto, 1_8)), r5own(0:max(nto, 1_8)), q5n(0:1, 0:n5c-1), q5at(0:2*n5c-1), q5len(0:2*n5c-1), &
+             q5lru(0:2*n5c-1))
     off5(0) = 0
     blk5 = -1
     pos5r = -1
@@ -238,29 +241,34 @@ contains
       x4max = max(x4max, n)
     end do
     q5at = 0
-    p5at = 0
     q5lru = 0
+    q5len = 0
     q5size = 0
-    do m = 0, n5c - 1
-      q5len(m) = 0
-      if (inblk5(m)) q5len(m) = (10 * nq5(m) + 7) / 8
-      q5size = q5size + q5len(m)
-    end do
+    q5n = 0
+    r5g = 0
+    r5lp = 0
+    r5w = 0
+    r5c = 0
+    r5own = 0
   end subroutine
 
-  ! The quintuple list of the block m in the pool (made there if it is not:
-  ! the least recently used lists go first when the pool is full, the others
-  ! are moved together); q5at(m) its address until the next call
-  subroutine xzd5q5(w, m)
+  ! The quintuple list of the block m and the parity lp in the pool (made there
+  ! if it is not: the least recently used lists go first when the pool is
+  ! full, the others are moved together); q5at(2 m + lp) its address until
+  ! the next call
+  subroutine xzd5q5(w, mb, lp)
     use xzdata, only: nv
-    use xzdead, only: dkv
+    use xzdead, only: dkv, dtpar
     use xzkern
     use iso_c_binding
     real(8), target :: w(*)
-    integer(8), intent(in) :: m
-    integer(8) :: used, k, mm, best, dst, n
+    integer(8), intent(in) :: mb, lp
+    integer(8) :: used, k, mm, best, dst, n, m, n2
+    integer(c_intptr_t) :: ppar
     integer(8), allocatable :: ord(:), cnt(:)
     integer(8), pointer :: wi(:)
+    m = 2 * mb + lp
+    n2 = 2 * n5c
     q5tick = q5tick + 1
     if (q5at(m) /= 0) then
       q5lru(m) = q5tick
@@ -268,12 +276,12 @@ contains
     end if
     if (q5top + q5len(m) > q5pool + q5cap) then
       used = 0
-      do mm = 0, n5c - 1
+      do mm = 0, n2 - 1
         if (q5at(mm) /= 0) used = used + q5len(mm)
       end do
       do while (used + q5len(m) > q5cap)
         best = -1
-        do mm = 0, n5c - 1
+        do mm = 0, n2 - 1
           if (q5at(mm) == 0) cycle
           if (best < 0) then
             best = mm
@@ -286,9 +294,9 @@ contains
         used = used - q5len(best)
       end do
       ! the lists that stay, in the order of their places, to the front of the pool
-      allocate(ord(0:n5c-1))
+      allocate(ord(0:n2-1))
       k = 0
-      do mm = 0, n5c - 1
+      do mm = 0, n2 - 1
         if (q5at(mm) == 0) cycle
         ord(k) = mm
         k = k + 1
@@ -314,7 +322,9 @@ contains
     q5top = q5top + q5len(m)
     q5lru(m) = q5tick
     allocate(cnt(0:nv))
-    n = zc_t5s_quints_par(int(nv, 4), w(dkv), int(m, 4), int(loc(w(q5at(m))), c_intptr_t), cnt)
+    ppar = 0
+    if (dtpar >= 0) ppar = loc(d5pv)
+    n = zc_t5s_quints_par(int(nv, 4), w(dkv), int(mb, 4), int(loc(w(q5at(m))), c_intptr_t), cnt, ppar, int(lp, 4))
     deallocate(cnt)
     q5made = q5made + 1
   contains
@@ -335,43 +345,50 @@ contains
     end subroutine
   end subroutine
 
-  ! The stored 5p3h part (the columns of the parity of every row), from the
-  ! counts of the columns of each parity of every block (cnt(0:1, M): with
-  ! no parity cnt(0, M) = all, cnt(1, M) = 0)
-  subroutine xzd5store(cnt)
+  ! The rows of r5 (after xzd5sec, the counts q5n of the quintuples of each
+  ! parity of every block; no parity: q5n(0, M) all): the group g of the
+  ! parity of every triple, the parity lp of its quintuples, its elements, its
+  ! first element in the natural layout (per block the rows of g = 0, then
+  ! those of g = 1); the words of the lists
+  subroutine xzd5store()
     use xzdata, only: nto, otoff
     use xzdead
-    integer(8), intent(in) :: cnt(0:1, 0:n5c-1)
-    integer(8) :: i, m, b
-    r5c(0) = 0
+    integer(8) :: i, m, g, c, cur
     do i = 0, nto - 1
-      m = blk5(i)
+      r5g(i) = 0
+      r5lp(i) = 0
       r5w(i) = 0
-      if (m >= 0) then
-        if (dtpar < 0) then
-          r5w(i) = nq5(m)
-        else if (.not. allocated(dpo)) then
-          ! (the plan, before the parities are read: the counts of the plan)
-          r5w(i) = cnt(0, m)
-        else
-          b = mod(dpo(xzd5free(i, 0)) + dpo(xzd5free(i, 1)) + dpo(xzd5free(i, 2)) + dtpar, 2_8)
-          r5w(i) = cnt(b, m)
-        end if
+      m = blk5(i)
+      if (m < 0) cycle
+      if (dtpar >= 0 .and. allocated(dpo)) then
+        r5g(i) = mod(dpo(xzd5free(i, 0)) + dpo(xzd5free(i, 1)) + dpo(xzd5free(i, 2)), 2_8)
+        r5lp(i) = mod(r5g(i) + dtpar, 2_8)
       end if
-      r5c(i + 1) = r5c(i) + r5w(i)
+      r5w(i) = q5n(r5lp(i), m)
     end do
-    dsz5c = r5c(nto)
+    cur = 0
+    r5c = 0
+    do m = 0, n5c - 1
+      if (.not. inblk5(m)) cycle
+      c = m - ds
+      do g = 0, 1
+        do i = otoff(c), otoff(c + 1) - 1
+          if (r5g(i) /= g) cycle
+          r5c(i) = cur
+          cur = cur + r5w(i)
+        end do
+      end do
+    end do
+    dsz5c = cur
+    q5size = 0
+    do m = 0, n5c - 1
+      do g = 0, 1
+        q5len(2 * m + g) = 0
+        if (inblk5(m)) q5len(2 * m + g) = (10 * q5n(g, m) + 7) / 8
+        q5size = q5size + q5len(2 * m + g)
+      end do
+    end do
   end subroutine
-
-  ! the column parity (0, 1) that the row of the triple i keeps: the parity of
-  ! the triple and of the target (-1: all columns)
-  integer(8) function xzd5rpar(i)
-    use xzdead, only: dtpar, dpo
-    integer(8), intent(in) :: i
-    xzd5rpar = -1
-    if (dtpar < 0) return
-    xzd5rpar = mod(dpo(xzd5free(i, 0)) + dpo(xzd5free(i, 1)) + dpo(xzd5free(i, 2)) + dtpar, 2_8)
-  end function
 
   ! the group of the occupied triple i
   integer(8) function xzd5tgrp(i)
@@ -441,29 +458,45 @@ contains
   end function
 
   ! The parts of the vectors of the sector in hand (after xzdslices): of every
-  ! rank its rows of r4 and of the stored r5, one after the other - esoff
-  ! (xzeomd) becomes the rank-major place of these parts behind r2 and r3;
-  ! d4e, d5e the first element of r4, of the stored r5 of every rank (in r4,
-  ! in the stored r5); d5f the same in the full r5.  One rank: [r2|r3|r4|r5].
+  ! rank its rows of r4 and of r5, one after the other - esoff (xzeomd)
+  ! becomes the rank-major place of these parts behind r2 and r3; d4e the
+  ! first element of r4 of every rank (in r4), d5e the elements of r5 of the
+  ! ranks before; r5own the first element of the row of a triple in the part
+  ! of its rank (per block its rows of g = 0, then of g = 1).  One rank:
+  ! [r2 | r3 | r4 | r5] in the natural layout.
   subroutine xzd5slices(nw)
     use xzdata
     use xzpar, only: myrank, nrank
     use xzeomd, only: esoff, eswoff, esmax
     use xzdead
     integer(8), intent(in) :: nw
-    integer(8) :: r
-    if (allocated(d4e)) deallocate(d4e, d5e, d5f)
-    allocate(d4e(0:nrank), d5e(0:nrank), d5f(0:nrank))
+    integer(8) :: r, m, g, i, c, cur
+    if (allocated(d4e)) deallocate(d4e, d5e)
+    allocate(d4e(0:nrank), d5e(0:nrank))
     if (.not. allocated(esoff)) allocate(esoff(0:nrank), eswoff(0:nrank))
     if (.not. allocated(dqb)) then
       allocate(dqb(0:nrank))
       dqb = 0
       dqb(nrank) = npo
     end if
+    d5e(0) = 0
+    do r = 0, nrank - 1
+      cur = 0
+      do m = 0, n5c - 1
+        if (.not. inblk5(m)) cycle
+        c = m - ds
+        do g = 0, 1
+          do i = max(dtb(r), otoff(c)), min(dtb(r + 1), otoff(c + 1)) - 1
+            if (r5g(i) /= g) cycle
+            r5own(i) = cur
+            cur = cur + r5w(i)
+          end do
+        end do
+      end do
+      d5e(r + 1) = d5e(r) + cur
+    end do
     do r = 0, nrank
       d4e(r) = d5rowoff4(dqb(r))
-      d5e(r) = r5c(dtb(r))
-      d5f(r) = d5rowoff5(dtb(r))
     end do
     esoff(0) = 0
     esmax = 0
@@ -487,20 +520,6 @@ contains
     do q = p, npo - 1
       if (blk4(q) >= 0) then
         d5rowoff4 = off4(blk4(q)) + pos4(q) * nqa(blk4(q))
-        return
-      end if
-    end do
-  end function
-
-  ! the first element of the full r5 of the triples from i on
-  integer(8) function d5rowoff5(i)
-    use xzdata, only: nto
-    integer(8), intent(in) :: i
-    integer(8) :: q
-    d5rowoff5 = dsz5
-    do q = i, nto - 1
-      if (blk5(q) >= 0) then
-        d5rowoff5 = off5(blk5(q)) + pos5r(q) * nq5(blk5(q))
         return
       end if
     end do
@@ -622,8 +641,10 @@ contains
   end subroutine
 
   ! the rows (m, u, w) of r5 of the spectator pair pq as a rank takes them for
-  ! the ring over the ranks: one after the other in the order of m; lrow(m)
-  ! the first element of the row of m (-1: none), tot all elements
+  ! the ring over the ranks: one after the other, by block and by the parity
+  ! of their quintuples (so that the rows of one list are equally long and
+  ! one after the other), in the order of m inside; lrow(m) the first element
+  ! of the row of m (-1: none), tot all elements
   subroutine xzd5ringlay(w, pq, lrow, tot)
     use xzdata
     use xzdead, only: xzdiv2
@@ -632,17 +653,21 @@ contains
     integer(8), intent(out) :: lrow(0:no-1), tot
     integer(8), pointer :: otri(:, :)
     integer(1), pointer :: osgn(:, :)
-    integer(8) :: m, i
+    integer(8) :: m, i, mb, lp
     call xzdiv2(w, jotri, max(npo, 1_8), no, otri)
     call xzdi1v2_(w, josgn, max(npo, 1_8), no, osgn)
     tot = 0
     lrow = -1
-    do m = 0, no - 1
-      if (osgn(pq, m) == 0) cycle
-      i = otri(pq, m)
-      if (blk5(i) < 0) cycle
-      lrow(m) = tot
-      tot = tot + nq5(blk5(i))
+    do mb = 0, n5c - 1
+      do lp = 0, 1
+        do m = 0, no - 1
+          if (osgn(pq, m) == 0) cycle
+          i = otri(pq, m)
+          if (blk5(i) /= mb .or. r5lp(i) /= lp) cycle
+          lrow(m) = tot
+          tot = tot + r5w(i)
+        end do
+      end do
     end do
   contains
     subroutine xzdi1v2_(w, k, n1, n2, p)

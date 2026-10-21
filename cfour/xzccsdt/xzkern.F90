@@ -49,12 +49,13 @@ module xzkern
       integer(c_int64_t) :: cnt
     end function
 
-    ! the same on all threads (cnt: work, n + 1 integers)
-    function zc_t5s_quints_par(n, kv, m, out, cnt) bind(C) result(c)
+    ! the same on all threads (cnt: work, n + 1 integers); par (the address of a
+    ! parity 0 / 1 per index; 0: all quintuples): those whose parities add to want
+    function zc_t5s_quints_par(n, kv, m, out, cnt, par, want) bind(C) result(c)
       import
-      integer(c_int), value :: n, m
+      integer(c_int), value :: n, m, want
       type(*), dimension(*) :: kv
-      integer(c_intptr_t), value :: out
+      integer(c_intptr_t), value :: out, par
       integer(c_int64_t) :: cnt(*)
       integer(c_int64_t) :: c
     end function
@@ -73,6 +74,13 @@ module xzkern
     end subroutine
 
     ! bytes that the file system of the directory `path' has free (-1: unknown)
+    ! the directory path (and those above it), as mkdir -p: 0 if it is there
+    function xz_mkdir(path) bind(C) result(r)
+      import
+      character(kind=c_char) :: path(*)
+      integer(c_int64_t) :: r
+    end function
+
     function xz_free_disk(path) bind(C) result(nbytes)
       import
       character(kind=c_char) :: path(*)

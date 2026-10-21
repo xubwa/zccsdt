@@ -12,8 +12,9 @@ usage: python native_check5.py <rundir> <xzccsdt binary> [--batch n] [--seed n] 
   --piece: only this piece of the 5p3h row (pp ring hh x23 x14 e1x; the native option deaonly,
            Engine5.sigma(only=...)); the rows to 4p2h are not compared then
 The 5p3h part of the vector of the native program is stored as the parity
-keeps it: per block of r5, per row (occupied triple) in their order, the
-quintuples of the parity of the row (all of them without a parity).
+keeps it (dea5_sector.ProblemSector5.pack5): per block of r5 the rows of the
+triples of parity 0, then those of parity 1, each on the quintuples of the
+parity that goes with it (all rows and quintuples without a parity).
 '''
 import os
 import re
@@ -100,18 +101,22 @@ def main():
             pr = lay.o2[sec.rows4[M]]
             mk = (pv[qd].sum(axis=1)[None, :] - po[pr].sum(axis=1)[:, None] - tp) % 2 == 0
             masks[2][sec.off4[M]:sec.off4[M + 1]] = mk.ravel()
-    # the stored r5: per block, per row, the columns of the parity of the row
+    # the stored r5 (ProblemSector5.pack5): per block the rows of the triples of parity 0, then those
+    # of parity 1, each on the quintuples of the parity that goes with it
     sel5 = []                 # (start in the full r5, column indices) per row, in the order of the stored part
     for M in sec5.blocks5:
         qn = sec5.quints[M].astype(np.int64)
         pc = pv[qn].sum(axis=1) % 2 if tp is not None else None
-        for r, I in enumerate(sec5.rows5[M]):
-            if tp is None:
-                cols = np.arange(len(qn))
-            else:
-                prow = po[lay.o3[I]].sum() % 2
-                cols = np.flatnonzero((pc - prow - tp) % 2 == 0)
-            sel5.append((sec5.off5[M] + r * len(qn), cols))
+        for grp in ((0, 1) if tp is not None else (0,)):
+            for r, I in enumerate(sec5.rows5[M]):
+                if tp is None:
+                    cols = np.arange(len(qn))
+                else:
+                    prow = po[lay.o3[I]].sum() % 2
+                    if prow != grp:
+                        continue
+                    cols = np.flatnonzero((pc - prow - tp) % 2 == 0)
+                sel5.append((sec5.off5[M] + r * len(qn), cols))
     n5c = sum(len(c) for _, c in sel5)
 
     def pack5(full):

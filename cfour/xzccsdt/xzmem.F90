@@ -23,6 +23,12 @@ module xzmem
   integer(8) :: xzpeak = 0                  ! the most that was ever taken
   logical :: xzdry = .false.
   integer(8), private :: save_top, save_peak
+  ! the regions that are taken (their names and sizes), and those at the
+  ! peak (xzpeaklist: what the largest regions at the peak were)
+  integer, parameter, private :: nstk = 512
+  character(len=64), private :: stk_name(nstk), pk_name(nstk)
+  integer(8), private :: stk_at(nstk), stk_n(nstk), pk_n(nstk)
+  integer, private :: nst = 0, npk = 0
 contains
 
   ! addr: the address of w(1); maxcor: its length in double words
@@ -52,9 +58,30 @@ contains
       write(6, '(a)') '   This is an error of the memory plan, not of the input.'
       call xzerrex
     end if
+    if (nst < nstk) then
+      nst = nst + 1
+      stk_name(nst) = what
+      stk_at(nst) = xztop
+      stk_n(nst) = m
+    end if
     xztop = xztop + m
+    if (xztop > xzpeak) then
+      npk = nst
+      pk_name(1:nst) = stk_name(1:nst)
+      pk_n(1:nst) = stk_n(1:nst)
+    end if
     xzpeak = max(xzpeak, xztop)
   end function
+
+  ! the regions taken at the peak of at least nmin words (since the last
+  ! reset of the peak): their names and sizes in MB
+  subroutine xzpeaklist(nmin)
+    integer(8), intent(in) :: nmin
+    integer :: i
+    do i = 1, npk
+      if (pk_n(i) >= nmin) write(6, '(a,f12.1,a,a)') '      ', 8d-6 * pk_n(i), ' MB  ', trim(pk_name(i))
+    end do
+  end subroutine
 
   integer(8) function xzmark()
     xzmark = xztop
@@ -63,6 +90,15 @@ contains
   subroutine xzrel(mark)
     integer(8), intent(in) :: mark
     xztop = mark
+    call stkpop()
+  end subroutine
+
+  ! (the list of the regions: those above the top go)
+  subroutine stkpop()
+    do while (nst > 0)
+      if (stk_at(nst) < xztop) exit
+      nst = nst - 1
+    end do
   end subroutine
 
   ! a dry run starts from the present top (or from the mark `start'); xzdry_end
@@ -73,7 +109,9 @@ contains
     save_top = xztop
     save_peak = xzpeak
     if (present(start)) xztop = start
+    call stkpop()
     xzpeak = xztop
+    npk = 0
     xzdry = .true.
   end subroutine
 
@@ -82,6 +120,7 @@ contains
     peak = xzpeak
     xztop = save_top
     xzpeak = save_peak
+    call stkpop()
     xzdry = .false.
   end subroutine
 end module xzmem

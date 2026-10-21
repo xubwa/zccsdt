@@ -14,7 +14,7 @@
 ! (m, u, w) of its pair from their owners, makes its batches into the rows
 ! (i, u, w) of a buffer and gives these back to their owners, who add them;
 ! the rows of sigma4 go to ks4f (all rows, summed over the ranks later).
-subroutine N(xzd5ring)(w, kr5v, ks5v, ks4f)
+subroutine N(xzd5ring)(w, k5o, s5o, ks4f)
   use xzdata
   use xzmem
   use xzkern
@@ -24,7 +24,7 @@ subroutine N(xzd5ring)(w, kr5v, ks5v, ks4f)
   use omp_lib
   implicit none
   real(8), target :: w(*)
-  integer(8), intent(in) :: kr5v, ks5v, ks4f
+  integer(8), intent(in) :: k5o, s5o, ks4f
   integer(8) :: m0, kmb, kxb, kwg, pq, u, wq, kp, nbk, nbat, t, b, mbmax, xbmax, wgmax, mo, xo, nk, c, i, x, mm
   integer(8) :: e, ci, nc, nr, a, nw2, nit, it, rk, kin, kout, ktmp, ntmp, ptot, pmax, nround, kr, jme, nsp, q, nj, r0, r
   integer(8) :: pt, ia, kk
@@ -59,7 +59,7 @@ subroutine N(xzd5ring)(w, kr5v, ks5v, ks4f)
     call xzd5ringlay(w, pq, lrow, ptot)
     pmax = max(pmax, ptot)
   end do
-  ntmp = 4 * min(xzmpi_chunk(), NW * max(nq5max, 1_8))
+  ntmp = 4 * min(xzmpi_chunk(), NW * max(maxval(r5w), 1_8))
   m0 = xzmark()
   kmb = xzget(NW * mbmax, 'DEA5: a batch of r5 of the ring')
   kxb = xzget(NW * xbmax, 'DEA5: its product')
@@ -107,7 +107,7 @@ subroutine N(xzd5ring)(w, kr5v, ks5v, ks4f)
         end do
         do mm = 0, no - 1
           if (osgn(pq, mm) == 0) cycle
-          if (blk5(otri(pq, mm)) >= 0) icost(nit) = icost(nit) + 2d0 * 20d0 * dble(nq5(blk5(otri(pq, mm))))
+          if (blk5(otri(pq, mm)) >= 0) icost(nit) = icost(nit) + 2d0 * 20d0 * dble(r5w(otri(pq, mm)))
         end do
         scost(pq) = scost(pq) + icost(nit)
       end do
@@ -349,14 +349,14 @@ contains
         if (mx < 0) cycle
         o = xzd5owner(ii)
         if (rr /= myrank .and. o /= myrank) cycle
-        len = nq5(mx)
-        go = NW * (off5(mx) + pos5r(ii) * len)
+        len = r5w(ii)
+        go = NW * r5own(ii)
         lo = NW * lr(m)
         if (rr == myrank .and. o == myrank) then
           if (back) then
-            call N(xzeaxpyc)(len, one, w(kout + lo), w(ks5v + go))
+            call N(xzeaxpyc)(len, one, w(kout + lo), w(s5o + go))
           else
-            call N(xzecopy)(len, w(kr5v + go), w(kin + lo))
+            call N(xzecopy)(len, w(k5o + go), w(kin + lo))
           end if
         else if (rr == myrank) then
           if (back) then
@@ -366,9 +366,9 @@ contains
           end if
         else
           if (back) then
-            call xzdseg(rr, ks5v + go, NW * len, 1_8)
+            call xzdseg(rr, s5o + go, NW * len, 1_8)
           else
-            call xzdseg(rr, kr5v + go, NW * len, 0_8)
+            call xzdseg(rr, k5o + go, NW * len, 0_8)
           end if
         end if
       end do
@@ -377,54 +377,87 @@ contains
   end subroutine
 
   ! the rows (m, u, w) of r5 expanded into the operand (the blocks of mbase)
-  ! or the product reduced into the rows (i, u, w) (ibase), one row at a time
+  ! or the product reduced into the rows (i, u, w) (ibase): one call per block
+  ! and parity of the quintuples (the rows of one list, equally long: in the
+  ! part of this rank, or one after the other in the buffers of the pair over
+  ! the ranks)
   subroutine entries(expand)
     logical, intent(in) :: expand
-    integer(8) :: mmb, base, bb, mx, ii, lx, kr_, rr(1), xx(ncls), y1(ncls), y2(ncls)
-    real(8) :: gg(1)
-    do mmb = 0, no - 1
-      if (osgn(pq, mmb) == 0) cycle
-      ii = otri(pq, mmb)
-      mx = blk5(ii)
+    integer(8) :: mmb, base, bb, mx, ii, lx, kr_, m1, ne, mfirst, lp, i1
+    integer(8) :: rr(no), xx(ncls, no), y1(ncls, no), y2(ncls, no)
+    real(8) :: gg(no)
+    do m1 = 0, no - 1
+      if (osgn(pq, m1) == 0) cycle
+      i1 = otri(pq, m1)
+      mx = blk5(i1)
       if (mx < 0) cycle
-      xx = -1
-      y1 = 1
-      y2 = 1
-      do bb = bfirst(t), bfirst(t + 1) - 1
-        if (expand) then
-          base = mbase(mmb, bb)
-        else
-          base = ibase(mmb, bb)
-        end if
-        if (base < 0) cycle
-        lx = ocls(mmb) - bd(bb)
-        if (expand) then
-          xx(lx + 1) = bmo(bb) + base * d5nA4(bkk(bb))
-        else
-          xx(lx + 1) = bxo(bb) + base * d5nA4(bkk(bb))
-        end if
-        y1(lx + 1) = d5nA4(bkk(bb))
+      lp = r5lp(i1)
+      ! (the first m of the block and the parity: the others have been done with it)
+      mfirst = -1
+      do mmb = 0, m1 - 1
+        if (osgn(pq, mmb) == 0) cycle
+        if (blk5(otri(pq, mmb)) == mx .and. r5lp(otri(pq, mmb)) == lp) mfirst = mmb
       end do
-      if (all(xx < 0)) cycle
-      rr(1) = 0
-      gg(1) = osgn(pq, mmb)
+      if (mfirst >= 0) cycle
+      ne = 0
+      do mmb = m1, no - 1
+        if (osgn(pq, mmb) == 0) cycle
+        ii = otri(pq, mmb)
+        if (blk5(ii) /= mx .or. r5lp(ii) /= lp) cycle
+        xx(:, ne + 1) = -1
+        y1(:, ne + 1) = 1
+        y2(:, ne + 1) = 1
+        do bb = bfirst(t), bfirst(t + 1) - 1
+          if (expand) then
+            base = mbase(mmb, bb)
+          else
+            base = ibase(mmb, bb)
+          end if
+          if (base < 0) cycle
+          lx = ocls(mmb) - bd(bb)
+          if (expand) then
+            xx(lx + 1, ne + 1) = bmo(bb) + base * d5nA4(bkk(bb))
+          else
+            xx(lx + 1, ne + 1) = bxo(bb) + base * d5nA4(bkk(bb))
+          end if
+          y1(lx + 1, ne + 1) = d5nA4(bkk(bb))
+        end do
+        if (all(xx(:, ne + 1) < 0)) cycle
+        ne = ne + 1
+        gg(ne) = osgn(pq, mmb)
+        if (ddist) then
+          rr(ne) = (lrow(mmb) - lrow(m1)) / max(r5w(i1), 1_8)
+        else
+          rr(ne) = (r5own(ii) - r5own(i1)) / max(r5w(i1), 1_8)
+        end if
+      end do
+      if (ne == 0) cycle
       if (ddist) then
         if (expand) then
-          kr_ = kin + NW * lrow(mmb)
+          kr_ = kin + NW * lrow(m1)
         else
-          kr_ = kout + NW * lrow(mmb)
+          kr_ = kout + NW * lrow(m1)
         end if
       else
         if (expand) then
-          kr_ = kr5v + NW * (off5(mx) + pos5r(ii) * nq5(mx))
+          kr_ = k5o + NW * r5own(i1)
         else
-          kr_ = ks5v + NW * (off5(mx) + pos5r(ii) * nq5(mx))
+          kr_ = s5o + NW * r5own(i1)
         end if
       end if
+      ! (the rows of the list before the first m of it, in the part of this rank: negative rows)
+      if (.not. ddist) then
+        do mmb = 1, ne
+          if (rr(mmb) < 0) then
+            kr_ = kr_ + NW * rr(mmb) * r5w(i1)
+            rr(1:ne) = rr(1:ne) - rr(mmb)
+          end if
+        end do
+      end if
       if (expand) then
-        call N(xzd5x14)(w, 0, kr_, nq5(mx), mx, 1_8, rr, gg, xx, y1, y2, kmb)
+        call N(xzd5x14)(w, 0, kr_, max(r5w(i1), 1_8), mx, lp, ne, rr, gg, xx, y1, y2, kmb)
       else
-        call N(xzd5x14)(w, 1, kr_, nq5(mx), mx, 1_8, rr, gg, xx, y1, y2, kxb)
+        call N(xzd5x14)(w, 1, kr_, max(r5w(i1), 1_8), mx, lp, ne, rr, gg, xx, y1, y2, kxb)
       end if
     end do
   end subroutine
@@ -475,79 +508,130 @@ subroutine N(xzd5wgat)(w, u, wq, nr, nc, rcode, ccode, kwg)
 end subroutine
 
 ! ---------------------------------------------------------------------------
-! The hh ladder of the 5p3h row: per block one product with the operator on
-! the occupied triples of the block.  Over the ranks a rank makes its rows of
-! the block from all rows of it: if other ranks hold some of them, in pieces
-! of columns sent to the other ranks that hold rows of it (N(xzdhh)).
-subroutine N(xzd5hh)(w, kr5v, ks5v)
+! The hh ladder of the 5p3h row: per block and parity group of the triples
+! (the operator on the occupied triples conserves the parity) one product
+! with the operator on the triples of the group.  Over the ranks a rank makes
+! its rows from all rows of the block and the group: if other ranks hold some
+! of them, in pieces of columns sent to the other ranks that hold rows of it
+! (N(xzdhh)).
+subroutine N(xzd5hh)(w, k5o, s5o)
   use xzdata
   use xzmem
   use xzkern
   use xzdead
   use xzdead5
-  use xzpar, only: myrank, xzmpi_segs
+  use xzpar, only: myrank, nrank, xzmpi_segs
   use omp_lib
   implicit none
   real(8), target :: w(*)
-  integer(8), intent(in) :: kr5v, ks5v
-  integer(8) :: mm, c, p0, nr, ra, rb, m0, kb, nbuf, wc, c0, ncol, r, q, qq, q0, q1
+  integer(8), intent(in) :: k5o, s5o
+  integer(8) :: mm, c, nr, m0, kb, kh, nbuf, wc, c0, ncol, r, q, qq, g, ld, na, nm, x, y, nj, i, lp
+  integer(8), allocatable :: rows(:), own(:), rk(:)
+  logical, allocatable :: holds(:)
+  ZT, pointer :: hs(:), h3(:)
   real(8) :: t0, ta
   ZT :: one
   one = 1
   nbuf = 1
-  if (ddist) then
-    do mm = 0, n5c - 1
-      if (.not. inblk5(mm)) cycle
-      call xzd5own(mm, ra, rb)
-      nr = dnJ(mm - ds)
-      if (rb == ra .or. rb - ra == nr) cycle
-      nbuf = max(nbuf, nr * max(1_8, min(nq5(mm), dbatch / nr)))
+  do mm = 0, n5c - 1
+    if (.not. inblk5(mm)) cycle
+    do g = 0, 1
+      call grow(mm, g, na, nm)
+      if (nm == 0 .or. nm == na) cycle
+      nbuf = max(nbuf, na * max(1_8, min(maxval(r5w), dbatch / max(na, 1_8))))
     end do
-  end if
+  end do
   m0 = xzmark()
   kb = xzget(NW * nbuf, 'DEA5: the rows of a piece of a block of the hh ladder')
+  kh = xzget(NW * max(h3size, 1_8), 'DEA5: the operator of the rows of a group of a block')
   if (xzdry .or. .not. xzdwant('hh')) then
     call xzrel(m0)
     return
   end if
   t0 = omp_get_wtime()
+  call N(xzdv)(w, dh3, max(h3size, 1_8), h3)
+  allocate(rows(0:max(nto, 1_8)-1), own(0:max(nto, 1_8)-1), rk(0:max(nto, 1_8)-1), holds(0:nrank-1))
   do mm = 0, n5c - 1
     if (.not. inblk5(mm)) cycle
     c = mm - ds
-    p0 = otoff(c)
-    nr = dnJ(c)
-    call xzd5own(mm, ra, rb)
-    if (rb == ra) cycle
-    if (rb - ra == nr) then
-      call N(zc_gemm)(0_4, 0_4, rb - ra, nq5(mm), nr, one, w(dh3 + NW * (h3off(c) + ra * nr)), nr, w(kr5v + NW * off5(mm)), &
-                      nq5(mm), one, w(ks5v + NW * (off5(mm) + ra * nq5(mm))), nq5(mm))
-      cycle
-    end if
-    q0 = xzd5owner(p0)
-    q1 = xzd5owner(p0 + nr - 1)
-    wc = max(1_8, min(nq5(mm), dbatch / nr))
-    do c0 = 0, nq5(mm) - 1, wc
-      ncol = min(wc, nq5(mm) - c0)
-      ta = omp_get_wtime()
-      dsn = 0
-      do r = 0, nr - 1
-        q = xzd5owner(p0 + r)
-        if (q == myrank) then
-          call N(xzecopy)(ncol, w(kr5v + NW * (off5(mm) + r * nq5(mm) + c0)), w(kb + NW * r * ncol))
-          do qq = q0, q1
-            if (qq == myrank .or. dtb(qq + 1) == dtb(qq)) cycle
-            call xzdseg(qq, kr5v + NW * (off5(mm) + r * nq5(mm) + c0), NW * ncol, 0_8)
-          end do
-        else
-          call xzdseg(q, kb + NW * r * ncol, NW * ncol, 1_8)
+    nj = dnJ(c)
+    do g = 0, 1
+      ! the rows of the group: all of them (rows, their owners rk), those of this rank (own)
+      na = 0
+      nm = 0
+      do i = otoff(c), otoff(c + 1) - 1
+        if (r5g(i) /= g) cycle
+        rows(na) = i
+        rk(na) = xzd5owner(i)
+        if (i >= dt0 .and. i < dt1) then
+          own(nm) = na
+          nm = nm + 1
         end if
+        na = na + 1
       end do
-      call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, 0_8, w, 0_8)
-      td5(14) = td5(14) + omp_get_wtime() - ta
-      call N(zc_gemm)(0_4, 0_4, rb - ra, ncol, nr, one, w(dh3 + NW * (h3off(c) + ra * nr)), nr, w(kb), ncol, one, &
-                      w(ks5v + NW * (off5(mm) + ra * nq5(mm) + c0)), nq5(mm))
+      if (nm == 0) cycle
+      lp = r5lp(rows(0))
+      ld = r5w(rows(0))
+      if (ld == 0) cycle
+      ! the operator of the rows of this rank from all rows of the group
+      call N(xzdv)(w, kh, nm * na, hs)
+      do x = 0, nm - 1
+        do y = 0, na - 1
+          hs(x * na + y) = h3(h3off(c) + (rows(own(x)) - otoff(c)) * nj + rows(y) - otoff(c))
+        end do
+      end do
+      if (nm == na) then
+        ! (all rows here: one after the other in the part of this rank)
+        call N(zc_gemm)(0_4, 0_4, nm, ld, na, one, w(kh), na, w(k5o + NW * r5own(rows(0))), ld, one, &
+                        w(s5o + NW * r5own(rows(0))), ld)
+        cycle
+      end if
+      holds = .false.
+      do y = 0, na - 1
+        holds(rk(y)) = .true.
+      end do
+      wc = max(1_8, min(ld, dbatch / na))
+      do c0 = 0, ld - 1, wc
+        ncol = min(wc, ld - c0)
+        ta = omp_get_wtime()
+        dsn = 0
+        do y = 0, na - 1
+          q = rk(y)
+          if (q == myrank) then
+            call N(xzecopy)(ncol, w(k5o + NW * (r5own(rows(y)) + c0)), w(kb + NW * y * ncol))
+            do qq = 0, nrank - 1
+              if (qq == myrank .or. .not. holds(qq)) cycle
+              call xzdseg(qq, k5o + NW * (r5own(rows(y)) + c0), NW * ncol, 0_8)
+            end do
+          else
+            call xzdseg(q, kb + NW * y * ncol, NW * ncol, 1_8)
+          end if
+        end do
+        call xzmpi_segs(w, dsn, dsp, dspos, dslen, dsdir, 0_8, w, 0_8)
+        td5(14) = td5(14) + omp_get_wtime() - ta
+        call N(zc_gemm)(0_4, 0_4, nm, ncol, na, one, w(kh), na, w(kb), ncol, one, &
+                        w(s5o + NW * (r5own(rows(own(0))) + c0)), ld)
+      end do
     end do
   end do
+  deallocate(rows, own, rk, holds)
   td5(8) = td5(8) + omp_get_wtime() - t0
   call xzrel(m0)
+
+contains
+
+  ! the rows of the block m and the group gg: all of them, those of this rank
+  subroutine grow(m, gg, nall, nmine)
+    integer(8), intent(in) :: m, gg
+    integer(8), intent(out) :: nall, nmine
+    integer(8) :: ii, cc
+    cc = m - ds
+    nall = 0
+    nmine = 0
+    do ii = otoff(cc), otoff(cc + 1) - 1
+      if (r5g(ii) /= gg) cycle
+      nall = nall + 1
+      if (ii >= dt0 .and. ii < dt1) nmine = nmine + 1
+    end do
+  end subroutine
 end subroutine

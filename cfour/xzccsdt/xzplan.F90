@@ -37,6 +37,7 @@ integer(8) function xzpeak_cc(w)
   real(8) :: e
   logical :: c
   integer(8) :: n, peak, status, k, mlay
+  integer :: ldp
   call xzdry_begin(0_8)
   call xzlayout(w, status)
   mlay = xzmark()
@@ -72,8 +73,10 @@ integer(8) function xzpeak_cc(w)
       call xzeom_d(w, e)
     end if
   end if
-  ! EOM-DEA (one rank)
-  if (with_dea) then
+  ! EOM-DEA (one rank; not with option deaplan, whose plan per rank for other
+  ! numbers of ranks follows the plan of the amplitudes)
+  call xzoptget('deaplan', length=ldp)
+  if (with_dea .and. ldp <= 0) then
     if (nwe == 2) then
       call xzdea_z(w, e)
     else

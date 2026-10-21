@@ -26,7 +26,8 @@
 !
 ! The vectors of the subspace: in the work array if all of them fit there
 ! next to what a sigma vector takes, otherwise the files EOMCnnnn and
-! EOMHnnnn of the run directory (CFOUR's names), one vector each, read in
+! EOMHnnnn of the run directory (CFOUR's names; option eomvdir: of that
+! directory, e.g. a node-local disk), one vector each, read in
 ! chunks through a buffer of the work array; two vectors are in the work
 ! array in either case (the new vector and its sigma vector).
 !
@@ -90,7 +91,16 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
     if (ecmd) call N(xzevopenw)(msub)
     return
   end if
-  ! ---- files: the buffer, the disk
+  ! ---- files: the buffer, the disk (the directory of option eomvdir, e.g. a
+  !      node-local disk; made if it is not there; default the run directory)
+  call xzoptget('eomvdir', evdir, larg)
+  if (larg <= 0) evdir = ' '
+  if (len_trim(evdir) > 0) then
+    if (xz_mkdir(trim(evdir) // c_null_char) /= 0) then
+      write(6, '(/,a,a)') ' @XZCCSDT-F, option eomvdir: the directory cannot be made: ', trim(evdir)
+      call xzerrex
+    end if
+  end if
   evnch = min(nlen, 1048576_8, max(avail - 64, 0_8) / max(msub * NW, 1_8))
   if (evnch < min(nlen, 1024_8)) then
     write(6, '(/,a)') ' @XZCCSDT-F, the work array is too short for the buffer of the EOM vectors in files.'
@@ -98,9 +108,15 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
     call xzerrex
   end if
   per = 2 * 8 * NW * nlen
-  ! (over ranks: the ranks of a node may share the run directory - whole vectors)
+  ! (over ranks: the ranks of a node may share the run directory - whole vectors;
+  ! in the directory of eomvdir, one rank per node: the longest part of a rank)
   if (ecmd) per = 2 * 8 * NW * (xzensd() + xzenbig())
-  free_bytes = xz_free_disk('.' // c_null_char)
+  if (ecmd .and. len_trim(evdir) > 0) per = 2 * 8 * NW * (xzensd() + esmax)
+  if (len_trim(evdir) > 0) then
+    free_bytes = xz_free_disk(trim(evdir) // c_null_char)
+  else
+    free_bytes = xz_free_disk('.' // c_null_char)
+  end if
   if (free_bytes >= 0 .and. per * msub > free_bytes - 1073741824_8) then
     nfit = max(0_8, (free_bytes - 1073741824_8) / max(per, 1_8))
     if (nfit < nmin) then
@@ -125,10 +141,12 @@ end subroutine
 subroutine N(xzevopenw)(msub)
   use xzdata
   use xzmem
+  use xzkern
   use xzeomd
   use xzpar, only: myrank
   implicit none
   integer(8), intent(in) :: msub
+  integer :: larg
   if (myrank == 0) then
     call xzecmd(op_open, dble(msub), merge(1d0, 0d0, evfile), dble(evnch))
     return
@@ -139,6 +157,15 @@ subroutine N(xzevopenw)(msub)
   evnh = 0
   evcap = msub
   if (evfile) then
+    ! (the directory of the files, option eomvdir: every rank its own files there)
+    call xzoptget('eomvdir', evdir, larg)
+    if (larg <= 0) evdir = ' '
+    if (len_trim(evdir) > 0) then
+      if (xz_mkdir(trim(evdir) // c_null_char) /= 0) then
+        write(6, '(/,a,a)') ' @XZCCSDT-F, option eomvdir: the directory cannot be made: ', trim(evdir)
+        call xzerrex
+      end if
+    end if
     evnch = max(1_8, min(evnch, evlen))
     evbuf = xzget(msub * NW * evnch, 'EOM: buffer of the vectors in files')
   else
@@ -194,11 +221,11 @@ subroutine N(xzevput)(w, kind, j, kx)
   end if
   t0 = omp_get_wtime()
   u = xzevunit(kind, j)
-  open(unit=u, file=trim(xzevname(kind, j)), form='unformatted', access='stream', status='replace', iostat=ios)
+  open(unit=u, file=trim(xzevpath(kind, j)), form='unformatted', access='stream', status='replace', iostat=ios)
   if (ios == 0) write(u, iostat=ios) w(kl:kl + NW * evlen - 1)
   if (ios == 0) flush(u, iostat=ios)
   if (ios /= 0) then
-    write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', trim(xzevname(kind, j)), ' failed (iostat ', ios, '): disk full?'
+    write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', trim(xzevpath(kind, j)), ' failed (iostat ', ios, '): disk full?'
     write(6, '(a,f12.1,a)') '   a vector of the EOM subspace: ', 8d-6 * NW * evlen, ' MB'
     call xzerrex
   end if
@@ -231,7 +258,7 @@ subroutine N(xzevget)(w, kind, j, kx)
   t0 = omp_get_wtime()
   read(xzevunit(kind, j), pos=1, iostat=ios) w(kl:kl + NW * evlen - 1)
   if (ios /= 0) then
-    write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', trim(xzevname(kind, j)), ' failed, iostat ', ios
+    write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', trim(xzevpath(kind, j)), ' failed, iostat ', ios
     call xzerrex
   end if
   evio = evio + omp_get_wtime() - t0
@@ -265,7 +292,7 @@ subroutine N(xzevchunk)(w, kind, n, off, nc, ptr)
     k = evbuf + (j - 1) * NW * evnch
     read(xzevunit(kind, j), pos=1 + 8 * NW * off, iostat=ios) w(k:k + NW * nc - 1)
     if (ios /= 0) then
-      write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', trim(xzevname(kind, j)), ' failed, iostat ', ios
+      write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', trim(xzevpath(kind, j)), ' failed, iostat ', ios
       call xzerrex
     end if
     ptr(j) = loc(w(k))
@@ -383,7 +410,7 @@ subroutine N(xzevtrans)(w, n, m, q)
           k = evbuf + (j - 1) * NW * evnch
           write(xzevunit(kind, j), pos=1 + 8 * NW * off, iostat=ios) w(k:k + NW * nc - 1)
           if (ios /= 0) then
-            write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', trim(xzevname(kind, j)), ' failed (iostat ', ios, ')'
+            write(6, '(/,a,a,a,i8,a)') ' @XZCCSDT-F, writing the file ', trim(xzevpath(kind, j)), ' failed (iostat ', ios, ')'
             call xzerrex
           end if
         end do
@@ -1046,8 +1073,13 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
       ' ranks: every rank holds its rows of r4 of every vector (rank 0 with r2 and r3: ', &
       8d-6 * NW * nloc, ' MB of ', 8d-6 * NW * nlen, ' MB)'
     if (evfile) then
-      write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the files EOMCnnnn, ' // &
-        'EOMHnnnn of the run directory (', 16d-6 * NW * nloc * msub, ' MB),'
+      if (len_trim(evdir) > 0) then
+        write(6, '(a,i4,a,a,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the files ' // &
+          'EOMCnnnn, EOMHnnnn of ', trim(evdir), ' (option eomvdir; ', 16d-6 * NW * nloc * msub, ' MB on rank 0),'
+      else
+        write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the files EOMCnnnn, ' // &
+          'EOMHnnnn of the run directory (', 16d-6 * NW * nloc * msub, ' MB),'
+      end if
       write(6, '(a,i10,a)') '     read through a buffer of ', evnch, ' elements per vector'
     else
       write(6, '(a,i4,a,f10.1,a)') '   subspace: at most ', msub, ' vectors and their sigma vectors, in the work array (', &

@@ -371,9 +371,10 @@ subroutine N(xzd5b4)(w)
 end subroutine
 
 ! ---------------------------------------------------------------------------
-! The sector of a target (after xzdsec and xzd5sec): the quintuple lists of
-! the blocks of r5, the parity bits of their columns, the stored layout of
-! r5 (xzd5store), the layouts of the intermediates of a sigma vector.
+! The sector of a target (after xzdsec and xzd5sec): the numbers of the
+! quintuples of each parity of every block, the rows of r5 (xzd5store), the
+! pool of the quintuple lists, the layouts of the intermediates of a sigma
+! vector.
 subroutine N(xzd5secw)(w)
   use xzdata
   use xzmem
@@ -383,30 +384,56 @@ subroutine N(xzd5secw)(w)
   use iso_c_binding
   implicit none
   real(8), target :: w(*)
-  integer(8) :: m, n, a, cnt(0:1, 0:n5c-1), nb, i, own, big(10), k
-  integer(2), pointer :: q5(:, :)
-  integer(8), pointer :: bits(:)
-  integer(8) :: pc
+  integer(8) :: m, n, i, own, big(10), k, lp
+  integer(8), allocatable :: cnt(:)
   character(len=32) :: arg
   integer :: larg
-  logical :: mine(0:n5c-1)
-  ! the pool of the quintuple lists: the lists of the blocks of the rows of this
-  ! rank and the ten largest others (all of them if that is not less); option
-  ! dea5pool: its words
+  logical :: mine(0:2*n5c-1)
+  ! the numbers of the quintuples of each parity (the plan: half of each block)
+  q5n = 0
+  if (xzdry .or. .not. allocated(dpv)) then
+    do m = 0, n5c - 1
+      q5n(0, m) = nq5(m)
+      if (dtpar >= 0) then
+        q5n(0, m) = (nq5(m) + 1) / 2
+        q5n(1, m) = (nq5(m) + 1) / 2
+      end if
+    end do
+  else
+    if (allocated(d5pv)) deallocate(d5pv)
+    allocate(d5pv(0:max(nv, 1_8)-1))
+    do i = 0, nv - 1
+      d5pv(i) = int(dpv(i), 4)
+    end do
+    allocate(cnt(0:nv))
+    do m = 0, n5c - 1
+      if (.not. inblk5(m)) cycle
+      if (dtpar < 0) then
+        q5n(0, m) = nq5(m)
+      else
+        q5n(0, m) = zc_t5s_quints_par(int(nv, 4), w(dkv), int(m, 4), 0_c_intptr_t, cnt, loc(d5pv), 0_4)
+        q5n(1, m) = nq5(m) - q5n(0, m)
+      end if
+    end do
+    deallocate(cnt)
+  end if
+  call xzd5store()
+  ! the pool of the quintuple lists: the lists of the rows of this rank and the
+  ! ten largest others (all of them if that is not less); option dea5pool: its words
   mine = .false.
   do i = dt0, dt1 - 1
-    if (blk5(i) >= 0) mine(blk5(i)) = .true.
+    if (blk5(i) >= 0) mine(2 * blk5(i) + r5lp(i)) = .true.
   end do
   own = 0
   big = 0
-  do m = 0, n5c - 1
-    if (mine(m)) then
-      own = own + q5len(m)
+  do k = 0, 2 * n5c - 1
+    if (mine(k)) then
+      own = own + q5len(k)
     else
-      do k = 1, 10
-        if (q5len(m) > big(k)) then
-          big(k + 1:10) = big(k:9)
-          big(k) = q5len(m)
+      do lp = 1, 10
+        if (q5len(k) > big(lp)) then
+          big(lp + 1:10) = big(lp:9)
+          big(lp) = q5len(k)
           exit
         end if
       end do
@@ -420,62 +447,15 @@ subroutine N(xzd5secw)(w)
   q5top = q5pool
   q5tick = 0
   q5made = 0
-  p5size = 0
-  do m = 0, n5c - 1
-    q5at(m) = 0
-    p5at(m) = 0
-    if (.not. inblk5(m)) cycle
-    if (dtpar >= 0) then
-      nb = (nq5(m) + 63) / 64
-      p5at(m) = xzget(nb, 'DEA5: the parities of the quintuples of a block of r5')
-      p5size = p5size + nb
-    end if
-  end do
-  if (xzdry) then
-    ! (the sizes of the stored layout: half of every block, the plan's measure)
-    cnt = 0
-    do m = 0, n5c - 1
-      cnt(0, m) = nq5(m)
-      if (dtpar >= 0) then
-        cnt(0, m) = (nq5(m) + 1) / 2
-        cnt(1, m) = (nq5(m) + 1) / 2
-      end if
-    end do
-    call xzd5store(cnt)
-    call xzd5lay(w)
-    return
-  end if
-  cnt = 0
-  do m = 0, n5c - 1
-    cnt(0, m) = nq5(m)
-    if (.not. inblk5(m) .or. dtpar < 0) cycle
-    call xzd5q5(w, m)
-    call xzdi2v2(w, q5at(m), 5_8, max(nq5(m), 1_8), q5)
-    call xzdiv(w, p5at(m), (nq5(m) + 63) / 64, bits)
-    bits = 0
-    n = 0
-    !$omp parallel do private(a, pc) reduction(+:n)
-    do nb = 0, (nq5(m) + 63) / 64 - 1
-      do a = 64 * nb, min(nq5(m), 64 * nb + 64) - 1
-        pc = mod(dpv(q5(0, a)) + dpv(q5(1, a)) + dpv(q5(2, a)) + dpv(q5(3, a)) + dpv(q5(4, a)), 2_8)
-        if (pc == 1) then
-          bits(nb) = ibset(bits(nb), int(a - 64 * nb))
-          n = n + 1
-        end if
-      end do
-    end do
-    cnt(1, m) = n
-    cnt(0, m) = nq5(m) - n
-  end do
-  call xzd5store(cnt)
+  q5at = 0
   call xzd5lay(w)
 end subroutine
 
 ! ---------------------------------------------------------------------------
 ! The kernels of csrc/t4sym.c for rank 5 with the tables of the program: a
-! block of rows of the quintuples of class m (the array at the word address
-! kr, leading dimension ldr) and the products at kx
-subroutine N(xzd5x23)(w, mode, kr, ldr, m, nent, row, sg, xoff, s1, s2, kx)
+! block of rows of the quintuples of class m and parity lp (the rows at the
+! word address kr, leading dimension ldr) and the products at kx
+subroutine N(xzd5x23)(w, mode, kr, ldr, m, lp, nent, row, sg, xoff, s1, s2, kx)
   use xzdata
   use xzkern
   use xzdead
@@ -483,15 +463,15 @@ subroutine N(xzd5x23)(w, mode, kr, ldr, m, nent, row, sg, xoff, s1, s2, kx)
   implicit none
   real(8), target :: w(*)
   integer, intent(in) :: mode
-  integer(8), intent(in) :: kr, ldr, m, nent, row(*), xoff(*), s1(*), s2(*), kx
+  integer(8), intent(in) :: kr, ldr, m, lp, nent, row(*), xoff(*), s1(*), s2(*), kx
   real(8), intent(in) :: sg(*)
-  if (nent == 0 .or. nq5(m) == 0) return
-  call xzd5q5(w, m)
-  call N(zc_t5s_x23)(int(mode, c_int), w(kr), ldr, w(q5at(m)), nq5(m), nent, row, sg, xoff, s1, s2, &
+  if (nent == 0 .or. q5n(lp, m) == 0) return
+  call xzd5q5(w, m, lp)
+  call N(zc_t5s_x23)(int(mode, c_int), w(kr), ldr, w(q5at(2 * m + lp)), q5n(lp, m), nent, row, sg, xoff, s1, s2, &
                      int(npg, c_int), int(nv, c_int), w(dkv), w(dposq), w(dpos3), w(kx))
 end subroutine
 
-subroutine N(xzd5x14)(w, mode, kr, ldr, m, nent, row, sg, xoff, s1, s2, kx)
+subroutine N(xzd5x14)(w, mode, kr, ldr, m, lp, nent, row, sg, xoff, s1, s2, kx)
   use xzdata
   use xzkern
   use xzdead
@@ -499,73 +479,53 @@ subroutine N(xzd5x14)(w, mode, kr, ldr, m, nent, row, sg, xoff, s1, s2, kx)
   implicit none
   real(8), target :: w(*)
   integer, intent(in) :: mode
-  integer(8), intent(in) :: kr, ldr, m, nent, row(*), xoff(*), s1(*), s2(*), kx
+  integer(8), intent(in) :: kr, ldr, m, lp, nent, row(*), xoff(*), s1(*), s2(*), kx
   real(8), intent(in) :: sg(*)
-  if (nent == 0 .or. nq5(m) == 0) return
-  call xzd5q5(w, m)
-  call N(zc_t5s_x14)(int(mode, c_int), w(kr), ldr, w(q5at(m)), nq5(m), nent, row, sg, xoff, s1, s2, &
+  if (nent == 0 .or. q5n(lp, m) == 0) return
+  call xzd5q5(w, m, lp)
+  call N(zc_t5s_x14)(int(mode, c_int), w(kr), ldr, w(q5at(2 * m + lp)), q5n(lp, m), nent, row, sg, xoff, s1, s2, &
                      int(ncls, c_int), int(nv, c_int), w(dkv), w(dposv), w(dpos4), w(kx))
 end subroutine
 
-! one row (sign sg) of the block m of r5 at kr into X[a of p][(bcde)] at kx
-! (mode 0), or back (mode 1): off14 / n14 of the block
-subroutine N(xzd5row14)(w, mode, kr, m, r, sgn, kx)
+! the row (sign sgn) of the triple i of r5 at kr into X[a of p][(bcde)] at kx
+! (mode 0), or back (mode 1): off14 / n14 of its block
+subroutine N(xzd5row14)(w, mode, kr, i, sgn, kx)
   use xzdata
   use xzdead
   use xzdead5
   implicit none
   real(8), target :: w(*)
   integer, intent(in) :: mode
-  integer(8), intent(in) :: kr, m, r, kx
+  integer(8), intent(in) :: kr, i, kx
   real(8), intent(in) :: sgn
-  integer(8) :: row(1), xo(ncls), y1(ncls), y2(ncls), p
+  integer(8) :: row(1), xo(ncls), y1(ncls), y2(ncls), p, m
   real(8) :: sg(1)
-  row(1) = r
+  m = blk5(i)
+  row(1) = 0
   sg(1) = sgn
   do p = 0, ncls - 1
     xo(p + 1) = off14(m, p)
     y1(p + 1) = max(d5nA4(m - p), 1_8)
     y2(p + 1) = 1
   end do
-  call N(xzd5x14)(w, mode, kr, nq5(m), m, 1_8, row, sg, xo, y1, y2, kx)
+  call N(xzd5x14)(w, mode, kr, max(r5w(i), 1_8), m, r5lp(i), 1_8, row, sg, xo, y1, y2, kx)
 end subroutine
 
-! one row of the block m as X[(ab) of q][(cde)] (off23)
-subroutine N(xzd5row23)(w, mode, kr, m, r, sgn, kx)
-  use xzdata
-  use xzdead
-  use xzdead5
-  implicit none
-  real(8), target :: w(*)
-  integer, intent(in) :: mode
-  integer(8), intent(in) :: kr, m, r, kx
-  real(8), intent(in) :: sgn
-  integer(8) :: row(1), xo(npg), y1(npg), y2(npg), q
-  real(8) :: sg(1)
-  row(1) = r
-  sg(1) = sgn
-  do q = 0, npg - 1
-    xo(q + 1) = off23(m, q)
-    y1(q + 1) = max(dnK(m - q), 1_8)
-    y2(q + 1) = 1
-  end do
-  call N(xzd5x23)(w, mode, kr, nq5(m), m, 1_8, row, sg, xo, y1, y2, kx)
-end subroutine
-
-! one row of the block m as X[(ab) of q][(cde)] of the groups q0 <= q < q1
+! the row of the triple i as X[(ab) of q][(cde)] of the groups q0 <= q < q1
 ! (their blocks at kx + off23 - base; the others left out)
-subroutine N(xzd5row23p)(w, mode, kr, m, r, sgn, kx, q0, q1, base)
+subroutine N(xzd5row23p)(w, mode, kr, i, sgn, kx, q0, q1, base)
   use xzdata
   use xzdead
   use xzdead5
   implicit none
   real(8), target :: w(*)
   integer, intent(in) :: mode
-  integer(8), intent(in) :: kr, m, r, kx, q0, q1, base
+  integer(8), intent(in) :: kr, i, kx, q0, q1, base
   real(8), intent(in) :: sgn
-  integer(8) :: row(1), xo(npg), y1(npg), y2(npg), q
+  integer(8) :: row(1), xo(npg), y1(npg), y2(npg), q, m
   real(8) :: sg(1)
-  row(1) = r
+  m = blk5(i)
+  row(1) = 0
   sg(1) = sgn
   do q = 0, npg - 1
     xo(q + 1) = -1
@@ -573,7 +533,7 @@ subroutine N(xzd5row23p)(w, mode, kr, m, r, sgn, kx, q0, q1, base)
     y1(q + 1) = max(dnK(m - q), 1_8)
     y2(q + 1) = 1
   end do
-  call N(xzd5x23)(w, mode, kr, nq5(m), m, 1_8, row, sg, xo, y1, y2, kx)
+  call N(xzd5x23)(w, mode, kr, max(r5w(i), 1_8), m, r5lp(i), 1_8, row, sg, xo, y1, y2, kx)
 end subroutine
 
 ! the row of the pair pq of r4 (at k4, whole r4) on (h | cde) into kx (the
@@ -602,125 +562,44 @@ subroutine N(xzd5x4row)(w, k4, pq, kx)
 end subroutine
 
 ! ---------------------------------------------------------------------------
-! The stored 5p3h part of the rows of this rank (at kc) into the blocks of
-! the full rows (at kf; whole-r5 addressing: the rows of this rank only),
-! zero where the parity does not go (unpack); or back (pack)
-subroutine N(xzd5pack)(w, kc, kf, unpack)
-  use xzdata
-  use xzkern
-  use xzdead
-  use xzdead5
-  use xzpar, only: myrank
-  implicit none
-  real(8), target :: w(*)
-  integer(8), intent(in) :: kc, kf
-  logical, intent(in) :: unpack
-  ZT, pointer :: c(:), f(:)
-  integer(8), pointer :: bits(:)
-  integer(8), allocatable :: pre(:)
-  integer(8) :: i, m, b, n, nw, ch, k, a, base, cb, nch
-  integer(8), parameter :: chw = 64            ! words of 64 columns per chunk
-  do i = dt0, dt1 - 1
-    m = blk5(i)
-    if (m < 0) cycle
-    n = nq5(m)
-    base = off5(m) + pos5r(i) * n
-    call N(xzdv)(w, kf + NW * base, n, f)
-    call N(xzdv)(w, kc + NW * (r5c(i) - d5e(myrank)), max(r5w(i), 1_8), c)
-    b = xzd5rpar(i)
-    if (b < 0) then
-      if (unpack) then
-        call N(xzecopy)(n, w(kc + NW * (r5c(i) - d5e(myrank))), w(kf + NW * base))
-      else
-        call N(xzecopy)(n, w(kf + NW * base), w(kc + NW * (r5c(i) - d5e(myrank))))
-      end if
-      cycle
-    end if
-    nw = (n + 63) / 64
-    call xzdiv(w, p5at(m), nw, bits)
-    nch = (nw + chw - 1) / chw
-    allocate(pre(0:nch))
-    pre(0) = 0
-    do ch = 0, nch - 1
-      cb = 0
-      do k = ch * chw, min(nw, ch * chw + chw) - 1
-        cb = cb + popcnt(bits(k))
-      end do
-      ! (the columns of parity b of the chunk)
-      if (b == 0) cb = min(64 * chw, n - 64 * chw * ch) - cb
-      pre(ch + 1) = pre(ch) + cb
-    end do
-    !$omp parallel do private(cb, a, k)
-    do ch = 0, nch - 1
-      cb = pre(ch)
-      do a = 64 * chw * ch, min(n, 64 * chw * (ch + 1)) - 1
-        k = a / 64
-        if (merge(1_8, 0_8, btest(bits(k), int(a - 64 * k))) /= b) then
-          if (unpack) f(a) = 0
-          cycle
-        end if
-        if (unpack) then
-          f(a) = c(cb)
-        else
-          c(cb) = f(a)
-        end if
-        cb = cb + 1
-      end do
-    end do
-    deallocate(pre)
-  end do
-end subroutine
-
-! The preconditioner of the stored 5p3h part of the rows of this rank (at
-! kc): x <- x / (omega - D), D the energies of the virtual spinors of the
+! The preconditioner of the rows of r5 of this rank (at kc, the part of the
+! rank): x <- x / (omega - D), D the energies of the virtual spinors of the
 ! element less those of the occupied ones, below 1e-3 replaced by 1e-3
 subroutine N(xzd5prec)(w, kc, omega)
   use xzdata
   use xzkern
   use xzdead
   use xzdead5
-  use xzpar, only: myrank
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: kc
   ZT, intent(in) :: omega
   real(8), pointer :: eps(:)
   integer(2), pointer :: q5(:, :)
-  integer(8), pointer :: bits(:)
-  integer(8) :: i, m, b, n, a, k, e0, cbeg, r0
+  integer(8) :: i, m, n, a, a0, a1, e0
   real(8) :: eo(1)
   real(8), allocatable :: ev(:)
   integer(8), parameter :: chunk = 1048576
   real(8), parameter :: floor = 1d-3
   call r8view(jeps, no + nv, eps)
-  r0 = d5e(myrank)
   allocate(ev(0:chunk-1))
+  e0 = no
   do i = dt0, dt1 - 1
     m = blk5(i)
     if (m < 0 .or. r5w(i) == 0) cycle
-    n = nq5(m)
+    n = r5w(i)
     eo(1) = eps(xzd5free(i, 0)) + eps(xzd5free(i, 1)) + eps(xzd5free(i, 2))
-    call xzd5q5(w, m)
-    call xzdi2v2(w, q5at(m), 5_8, max(n, 1_8), q5)
-    b = xzd5rpar(i)
-    if (b >= 0) call xzdiv(w, p5at(m), (n + 63) / 64, bits)
-    ! the stored columns in pieces of at most chunk, their energies, the divisions
-    k = 0
-    cbeg = 0
-    do a = 0, n - 1
-      if (b >= 0) then
-        if (merge(1_8, 0_8, btest(bits(a / 64), int(mod(a, 64_8)))) /= b) cycle
-      end if
-      e0 = no
-      ev(k) = eps(e0 + q5(0, a)) + eps(e0 + q5(1, a)) + eps(e0 + q5(2, a)) + eps(e0 + q5(3, a)) + eps(e0 + q5(4, a))
-      k = k + 1
-      if (k == chunk) then
-        call N(zc_vprecond)(w(kc + NW * (r5c(i) - r0 + cbeg)), 1_8, k, eo, ev, omega, floor)
-        cbeg = cbeg + k
-        k = 0
-      end if
+    call xzd5q5(w, m, r5lp(i))
+    call xzdi2v2(w, q5at(2 * m + r5lp(i)), 5_8, max(n, 1_8), q5)
+    ! the columns in pieces of at most chunk: their energies, the divisions
+    do a0 = 0, n - 1, chunk
+      a1 = min(n, a0 + chunk)
+      !$omp parallel do
+      do a = a0, a1 - 1
+        ev(a - a0) = eps(e0 + q5(0, a)) + eps(e0 + q5(1, a)) + eps(e0 + q5(2, a)) + eps(e0 + q5(3, a)) + eps(e0 + q5(4, a))
+      end do
+      call N(zc_vprecond)(w(kc + NW * (r5own(i) + a0)), 1_8, a1 - a0, eo, ev, omega, floor)
     end do
-    if (k > 0) call N(zc_vprecond)(w(kc + NW * (r5c(i) - r0 + cbeg)), 1_8, k, eo, ev, omega, floor)
   end do
   deallocate(ev)
 contains
