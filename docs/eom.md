@@ -998,11 +998,12 @@ the zero-field splitting of X 3Sigma_g-).
 |---|---|
 | the route through two ghost spinors, packed layout and label blocks | `src/zccsdt/cc/dea.py` (`Problem`, `ProblemSym`, `kernel`), `tests/test_dea.py` |
 | the sector itself in label blocks, no ghosts (the default in label blocks: R to 4p2h, T of CCSD, CCSDT, CCSDTQ; 11.9) | `src/zccsdt/cc/dea_sector.py`, the surviving terms `src/zccsdt/cc/dea_ref.py`, `tests/test_dea_sector.py` |
+| complete 5p3h on the sector (R to 5p3h, T of CCSDT; 11.11) | `src/zccsdt/cc/dea5_sector.py`, the terms and their families `src/zccsdt/cc/dea_ref.py`, `tests/test_dea5_sector.py` |
 | the 5p3h operators at lowest order, folded | `src/zccsdt/cc/dea5.py`, `tests/test_dea5.py` |
 | any rank on determinants (reference route) | `src/zccsdt/cc/dea_strings.py`, `tests/test_dea_strings.py` |
 | front end | `GCCSDT.eom_dea` (`docs/usage.md`) |
 | the native program (cfour/xzccsdt): the sector, R to 4p2h, T of CCSDT, over MPI ranks | `CALC=CCSDT` with `%xzdea`; docs/native.md, section 20 |
-| O2: SCF of O2(2+), Hamiltonian files, levels | `bench/dea/` (`o2_scf.py`, `o2_x2ccorr.py`, `common.py`, `o2_dea.py`, `o2_strings.py`, `o2_fold5.py`, `sizes.py`; the sector: `sector_bench.py`, `sector_check.py`, `sector_cost.py`) |
+| O2: SCF of O2(2+), Hamiltonian files, levels | `bench/dea/` (`o2_scf.py`, `o2_x2ccorr.py`, `common.py`, `o2_dea.py`, `o2_strings.py`, `o2_fold5.py`, `sizes.py`; the sector: `sector_bench.py`, `sector_check.py`, `sector_cost.py`; complete 5p3h: `o2_dea5.py`, `dea5_check.py`, `dea5_sizes.py`) |
 
 ### 11.1 Operators and levels
 
@@ -1026,7 +1027,7 @@ state, complete 5p3h as CCSDT does.
 | the same with the T of CCSDTQ or CC4 | .. + 4p2h | T1 .. T4 | CCSD-like |
 | "DEA-EOM-CC4" (`row4='cc4'`) | 4p2h row at lowest order | CC4 | doubles at lowest order (CC2-like one rank up) |
 | + 5p3h at lowest order, folded (`dea5`) | complete to 4p2h; `(omega - D5) r5 = <5p3h\| [V, R4] + [[V, T2], R3] + [[V, R2], T3] + 1/2 [[[V, T2], T2], R2] \|0>` | CCSDT or CCSDTQ | triples at lowest order on complete doubles (CC3-like) |
-| complete 5p3h (`dea_strings`, hmax 3) | .. + 5p3h | any | CCSDT-like |
+| complete 5p3h (`dea_strings`, hmax 3; on the sector with the T of CCSDT: `dea5_sector`, 11.11) | .. + 5p3h | any | CCSDT-like |
 | 6p4h (`dea_strings`, hmax 4) | .. + 6p4h | any | CCSDTQ-like |
 
 ### 11.2 Two ghost spinors: one residual per sigma vector
@@ -1325,12 +1326,9 @@ node: 39 s), 11.9.
 
 ### 11.8 Not done
 
-- The complete 5p3h row for large spaces: the R-linear terms of the
-  pentuples equation of CCSDTQP beyond the lowest order - the ladders and
-  the ring term on r5, the terms with one de-excitation line (V T2 R4,
-  V T3 R4, V T3 R3, V T4 R3, V T2 T2 R3, V T4 R2, V T2 T3 R2, V T2 R5) -
-  as tensor contractions in the sector.  The folded lowest-order row is
-  what exists (0.01 cm-1 of the complete one for O2).
+- The complete 5p3h row with the T of CCSDTQ (the terms V T4 R3, V T4 R2,
+  F T4 R2 and the T4 terms of the rows below): the sector of 11.11 has the
+  T of CCSDT only.
 - A sigma vector of the ghost route costs an iteration of the ground state
   with o + 2 occupied spinors: the engines work on the padded arrays, not
   on the sector (the passes over rows of T4 that hold a ghost and those
@@ -1732,6 +1730,226 @@ Not done:
   -150.27870443446366, E(2) = -150.27868757728118, split 1.6857182e-05 Eh
   = 3.6997 cm-1 (cc-pVQZ-X2C-TP: 1.6824372e-05 Eh = 3.6925 cm-1;
   E(CCSDT) = -148.916391284243).
+
+### 11.11 Complete 5p3h on the sector (`dea5_sector`)
+
+R = 2p + 3p1h + 4p2h + 5p3h on the CCSDT ground state (T1-dressed
+integrals, T2, T3): the level that describes the target states as CCSDT
+describes a ground state (11.1).  Before, complete 5p3h existed only on
+determinants (`dea_strings`, 11.4: 52 spinors in 40 h on 16 cores).
+
+**Which terms survive** (`dea_ref` with `rank=5`).  The table of
+`ccsdtq_terms` stops at rank 4 (and the pentuples of (P)).  The groups that
+a 5p3h vector reaches are derived with Wick's theorem (`wick.derive`), the
+contractions collected by a canonical form of their products
+(`dea_ref.canon`: every letter gets a key that does not depend on its name
+- external or summed, the antisymmetric groups it stands in, occupied or
+virtual -, the letters are renamed in the order of their keys and sorted
+inside their groups; letters with equal keys are interchangeable, the signs
+of the renaming and of the sorting cancel; amplitudes of equal kind are
+tried in every order, the smallest form is kept):
+
+- in the rows of rank 3 and 4: [V,T5] (rank 3), [F,T5] and [V,T5] (rank 4);
+- the 5p3h row, the T5 equation of CCSDTQP with at most one amplitude of
+  rank 4 or 5: [F,T5], [V,T5], [[V,T2],T5], [V,T4], [[F,T2],T4],
+  [[V,T2],T4], [[V,T3],T4], [[V,T2],T3], [[F,T3],T3], [[V,T3],T3],
+  1/2 [[[V,T2],T2],T3], 1/6 [[[V,T2],T2],T2] (`dea_ref.GROUPS5`; each group
+  has as many canonical terms as topologies).
+
+The canonical form reproduces every group of the table of `ccsdtq_terms`
+(rows 1 to 4 and (P), 29 groups, test).  With the rule of 11.9 (R carries
+both ghosts as external occupied letters) the sector has 7 terms in the 2p
+row, 20 in the 3p1h row (one with r5), 43 in the 4p2h row (three with r5)
+and 61 in the 5p3h row; `python -m zccsdt.cc.dea_ref --r5` prints them.
+
+**Factorized** (`dea_ref.FAMILIES5`, `ASSIGN5`).  Every term of the 5p3h row
+is written as F B: F a fixed factor (a template up to a relabeling), B the
+product of the other factors.  The terms with the same F add their B into
+one intermediate, antisymmetric in its external groups, and the family is
+S[F B'] - S the sum over the distinct splits of the external indices with
+their signs, B' = |O_F|! |V_F|! B (`family_split`, `family_B`,
+`family_value` evaluate this on dense arrays; every one of the 61 terms
+against its family alone and the sum of the families against the row:
+1e-15, test).  r5[(i<j<k), (a<b<c<d<e)], the ghosts implied:
+
+| Family | product | terms | the intermediate B' |
+|---|---|---|---|
+| pp | S(ab\|cde) sum_{f<g} Wq5(ab,fg) r5(ijk; fg cde) | 2, 5, 36, 37 | Wq5 = Wpp + F_vv on pairs / 4 |
+| hh | the occupied triples | 1, 3, 38, 41 | - S(i\|jk) F_oo(m,i) r5(mjk) + S(k\|ij) sum_{m<n} Whh(mn,ij) r5(mnk) |
+| ring | S(i\|jk) S(a\|bcde) sum_{mf} Wr(m,a,f,i) r5(mjk; f bcde) | 4, 39 | Wr of 11.9 |
+| D1 | S(i\|jk) S(ab\|cde) - sum_f Wv(ab,f,i) r4(jk; f cde) | 7, 14, 18, 22, 43 | Wv of the T4 equation |
+| D2 | S(i\|jk) S(ab\|cde) sum_m t2(im; ab) XoR5(m; jk; cde) | 20, 23, 33-35, 40, 53, 58, 59 | XoR5: r5, r4, r3, r2 (below) |
+| D3 | S(k\|ij) S(de\|abc) sum_g r3(k; g de) Xv2(g; ij; abc) | 9, 13, 26, 29, 51, 52 | Xv2 = the six-index Xv of 11.9 with its term of Wpp counted twice |
+| D4 | S(ij\|k) S(ab\|cde) sum_{mf} t3(ijm; f ab) Z4(mf; k; cde) | 46 | Z4 = sum_{lh} <ml\|\|fh> r4(lk; h cde) |
+| D5 | S(ab\|cde) sum_f t3(ijk; f ab) XvR5(f; cde) | 12, 30, 49, 50 | XvR of 11.9 with its term of Wpp counted twice |
+| D6 | S(ab\|cde) sum_m Xo3(m; ijk; ab) r3(m; cde) | 8, 11, 17, 27, 32, 55, 57 | Xo3 (ground state, below) |
+| D7 | S(i\|jk) S(de\|abc) sum_{m<n} t3(imn; abc) Y4(mn; jk; de) | 44 | Y4 = sum_{h<g} <mn\|\|hg> r4(jk; hg de) |
+| D8 | S(i\|jk) S(de\|abc) sum_m t3(jkm; abc) XoRp(m; i; de) | 10, 16, 28, 31, 47, 54, 56 | XoRp (below) |
+| E1 | S(ij\|k) S(a\|bcde) sum_m Wo(m,a,ij) r4(mk; bcde) | 6, 15, 19, 24, 45 | Wo of the T4 equation |
+| E1x | S(ij\|k) S(a\|bcde) sum_f t2(ij; af) Xv5(f; k; bcde) | 25, 42, 60, 61 | Xv5 (below) |
+| E2 | S(a\|bcde) sum_{m<n} W2(mn; ijk; a) r4(mn; bcde) | 21, 48 | W2 (ground state, below) |
+
+(term numbers in the order of `merged(sector_terms(5, 5), True)`).  The
+intermediates of the ground state (once per problem):
+
+    Xo3(m; ijk; ab) = P(k/ij) sum_l Whh(lm, ij) t2(kl; ab) - P(i/jk) P(ab) sum_h Wr(m,a,h,i) t2(jk; bh)
+                      - sum_h f_mh t3(ijk; h ab) + P(i/jk) sum_{lh} <ml||hi> t3(jkl; h ab)
+                      + P(ab) sum_{h<g} <am||hg> t3(ijk; b hg)
+    W2(mn; ijk; a)  = P(i/jk) sum_h <mn||hi> t2(jk; ah) + sum_{h<g} <mn||hg> t3(ijk; a hg)
+    B4(ml g; jk; c) = sum_h <ml||hg> t2(jk; ch)
+
+(the ground-state Xv, Wv, Wo, Wr, Wpp, Whh, F of 11.9 as they are; Xv2 and
+XvR5 differ from Xv and XvR of 11.9 by their terms of Wpp: in the 4p2h row
+the two placements of R in 1/2 [[[V,T2],T2],..] are one product, in the
+5p3h row r3 and t2 are different amplitudes), and those of the sector (per
+sigma vector, linear in R):
+
+    XoR5(m; jk; cde) = P(jk) sum_{lh} <ml||hj> r4(lk; h cde) + S(c|de) sum_{h<g} <cm||hg> r4(jk; hg de)
+                       + 1/2 P(jk) S(c|de) sum_l G(ml; j; c) t2(kl; de) - A(cde) sum_g G2(m; c, d, g) t2(jk; eg)
+                       + sum_l sum_{h<g} <ml||hg> r5(ljk; hg cde) - 1/2 P(jk) S(e|cd) sum_l t2(jl; cd) YR(ml; k; e)
+                       + S(c|de) sum_{lg} [ G3(ml; c, g) t3(jkl; g de) + B4(ml g; jk; c) r3(l; g de) ]
+    Xv5(f; k; bcde)  = S(b|cde) [ sum_{lh} <bl||fh> r4(lk; h cde) + sum_{l<n} G5(ln; f, b) t3(lnk; cde) ]
+                       + sum_{l<n} sum_h <ln||fh> r5(lnk; h bcde)
+    XoRp(m; i; de)   = P(de) [ - sum_h <md||hi> r2(eh) + sum_{h<g} <dm||hg> r3(i; hg e)
+                       - sum_{lhg} <lm||hg> r2(dh) t2(il; eg) ] - sum_h f_mh r3(i; h de)
+                       + sum_{lh} <ml||hi> r3(l; h de) - sum_l sum_{h<g} <ml||hg> r4(il; hg de) + sum_l WhR(lm) t2(il; de)
+    G = <ml||hj> r2(ch),  G2 = <cm||hg> r2(dh),  G3 = <ml||hg> r2(ch),  G5 = <ln||hf> r2(bh)  (summed over h)
+
+and in the rows below the four terms of r5:
+
+    sigma3(i; abc)  += sum_{m<n} sum_{e<f} <mn||ef> r5(imn; ef abc)
+    sigma4(ij; abcd) += sum_{me} f_me r5(mij; e abcd) - 1/2 P(ij) sum_{mne} <mn||ei> r5(mnj; e abcd)
+                        - S(a|bcd) sum_m sum_{e<f} <am||ef> r5(mij; ef bcd)
+
+The large-T2/T3-only intermediate that a naive order would make - v^6 per
+occupied pair for <mn||ef> r4(mn; ..) t3, or o^5 v^5 for the T2-R5 terms -
+does not occur: every product of the table has an order with intermediates
+of at most o^2 v^4 per class (Xv5: o v^5 in all, Z4: o^2 v^4) besides the
+ground-state Xv2 (v^4 per occupied pair, as Xv of 11.9).
+
+**The passes** (`Engine5.sigma`, after the rows to 4p2h of `dea_sector`):
+
+- pp: per block of r5 the rows in batches, expanded on (fg | cde)
+  (`zc_t5s_x23`, 10 splits), one product with Wq5 per class of (fg),
+  reduced; from the same view the thin products: XoR5 from r5, sigma3, and
+  sigma4 on (a | bcd) (reduced at the end);
+- ring: per occupied spectator pair (u, w) the rows (m, u, w) of r5 on (e |
+  bcde) (`zc_t5s_x14`, 5 splits), grouped by d = k_m - k_e, times the
+  stacked operator [Wr rows (i a) | f_ov | <mu||ei> | -<mw||ei> | 1/2 <mu||fe> |
+  -1/2 <mw||fe>] - the ring, sigma4 and Xv5 from r5 (the pair (l, n) of Xv5
+  is met from both of its members: 1/2);
+- hh: per block one product with the matrix of the occupied triples;
+- rows: per row (i<j<k) X[(ab), (cde)] per class of (ab) - the stacked
+  operands of D1 .. D8, gathered on all threads - and X[a, (bcde)] per
+  class of a (E1, E1x, E2), each one product, reduced once.
+
+**Operation counts** (multiply-adds, dense before the labels): pp
+o^3 v^7 / 144; D4 o^4 v^6 / 24, ring o^4 v^6 / 48 (D4 is a ring with two
+occupied splits more); D1, D3 o^3 v^6 / 24; E1x o^3 v^6 / 48; hh o^5 v^5 /
+480; per sigma vector Xv5 o^2 v^6 / 6, Z4 o^3 v^5 / 6.  PVTZ-X2C-TP (10 +
+106 spinors, 8 classes of 2 Omega), 2 Omega = 0: pp 1.15e13 in the label
+blocks (`dea5_sizes.py`).
+
+**Storage and memory** (`Sector5`, `memory5`).  r5: one block per class M
+of the virtual quintuples (a list, `zc_t5s_quints`), its rows the occupied
+triples of class M - shift; the quadruples of every class with their
+positions (`pos4`, C(v, 4) int32) for the splits (a | bcde).  The vector of
+the solver holds only the elements of parity g (per block the rows of each
+parity on the quintuples of the parity that goes with them; `pack5`,
+`unpack5`): half of r5.  The plan: fixed - the ground state of 11.9 with
+Xv, Xv2, Xo3, W2, B4, Wq5, the tables; per sigma vector - r5 and sigma5
+in blocks, X4r and X4s (r4 and sigma4 on (h | cde)), Z4, Xv5, XoR5, XvR5,
+the work arrays of the passes (kept from one sigma vector to the next: a
+fresh 1 GB array per row costs page faults that took longer than the
+products on 48 cores).  Xv and Xv2 go to scratch files and the 5p3h part of
+the Davidson subspace too when they do not fit.  PVTZ-X2C-TP: r5 1.37e9
+elements (10.9 GB; 5.5 GB stored), plan 5.7 GB fixed + 37 GB per sigma
+vector; PVQZ-X2C-TP (10 + 206): r5 3.36e10 (269 GB), pp 8.9e14, plan
+99 GB + 806 GB - not one node.
+
+**Validation** (`tests/test_dea5_sector.py`; `bench/dea/dea5_check.py`):
+
+| Check | Agreement |
+|---|---|
+| the derived groups against the table of ccsdtq_terms (29 groups) | identical |
+| the terms (rows 2p .. 5p3h, R to 5p3h) against dea_strings (hmax 3), LiH / STO-3G 4 + 8, T of CCSDT, random vector; per rank of R | 1.5e-13 of 18 |
+| the same against <mu\| exp(-T) [H, R] exp(T) \|0> in the Fock space, complex spin orbitals, random complex T1 .. T3 | 9e-15 of 6 |
+| every term against its family, the families against the row (dense, random) | 1e-15 |
+| the sector against the dense terms, LiH / STO-3G X2C in the blocks of 2 m_j, 2 m_j = 0 and 2, every element, per family | 1e-11 (the dense reference: elements forbidden by the labels 1e-11) |
+| the sector against dea_strings element by element, O2 n26 (10 + 16) X2Ccorr and spin-orbit only, 2 Omega = 0 and 2, parity g | 2.7e-12 of 19 |
+| the same, DYVDZ-SOG (10 + 42) X2Ccorr | 8.7e-13 of 86 |
+| roots, n26 X2Ccorr: E(0), E(2) / split | 2.5e-11, 1.7e-11 / 4.3e-11 Eh |
+| roots, DYVDZ-SOG X2Ccorr (reference: dea_strings, 40 h): E(0), E(2) / split | -150.09487156985 (-150.09487156982), -150.09485489743 (-150.09485489741) / 1.6672424e-05 (1.6672405e-05) Eh |
+| roots, DYVDZ-SOG spin-orbit only | -150.08663694518 (-150.08663694515), -150.08662709140 (-150.08662709139) / 9.8537751e-06 (9.8537675e-06) Eh |
+
+(both routes to the residual norm 1e-9; the splits agree to 2e-11 Eh,
+0.000004 cm-1.)
+
+**Measured** (one Slurm job per run, Xeon Gold 6248R; `o2_dea5.py`, the
+timings of single sigma vectors with `--sigmas`):
+
+| | sector (`dea5_sector`) | determinants (`dea_strings`, hmax 3) |
+|---|---|---|
+| O2 n26 (10 + 16), sigma vector | 1.1 s (8 cores) | 4 s |
+| DYVDZ-SOG (10 + 42), sigma vector | 7.5 s (8 or 24 cores: the Python of the small products) | 2000 - 2300 s (16 and 48 cores) |
+| DYVDZ-SOG, both roots (X2Ccorr) | 47 + 37 sigma vectors, 650 s on 24 cores | 40 h |
+| PVDZ-X2C-TP (10 + 42), both roots, residual 1e-10 | 52 + 40 sigma vectors, 707 s on 8 cores | (job 32321241: at residual 3e-5 after 12 h, E(0) within 7e-7 Eh) |
+| PVTZ-X2C-TP (10 + 106), sigma vector, 48 cores | 200 - 207 s, RssAnon 56 GB (plan 5.7 + 37 GB, the vector of the solver and its copy besides) | 3.4e12 intermediate determinants: not possible |
+| PVTZ-X2C-TP, the roots (one node per target, max_space 8, the subspace in memory) | 2 Omega = 0: 77 sigma vectors, 5.0 h; 2 Omega = 2: 48, 2.9 h; MaxRSS 134 GB | |
+
+A PVTZ-X2C-TP sigma vector by pieces (s): ring 70 (its products and
+expansions included), rows 44 (products 19, gathering of the stacked
+operands 14, reduction 8), pp 34, the expansion and reduction kernels of pp
+and ring 50, packing and unpacking of the parity-g vector 33, the small
+intermediates 15.  Before the work arrays were kept (and with the OpenBLAS
+build of the kernel library, whose threads competed with the OpenMP
+kernels) the same sigma vector took 720 - 1035 s, two thirds of it system
+time: page faults of fresh 1 GB temporaries on 48 threads.  The kernel
+library should be built with MKL (`-DZC_MKL_DIR`, CMakeLists).
+
+**O2, X2Ccorr, T of CCSDT, complete 5p3h** (2 Omega = 0 and 2, parity g;
+`zccsdt_results/dea5_xc_pvdz_x2c_tp.json`, `dea5_xc_pvtz_x2c_tp.json`):
+
+| basis | E(2 Omega = 0) | E(2 Omega = 2) | split / Eh | cm-1 |
+|---|---|---|---|---|
+| DYVDZ-SOG (52) | -150.09487156985 | -150.09485489743 | 1.6672424e-05 | 3.6592 |
+| cc-pVDZ-X2C-TP (52) | -150.09628929224 | -150.09627253975 | 1.6752489e-05 | 3.6768 |
+| cc-pVTZ-X2C-TP (116) | -150.22848882023 | -150.22847130708 | 1.7513154e-05 | 3.8437 |
+
+(the folded lowest-order 5p3h row of 11.3 gave 3.8445 cm-1 in DYVTZ-SOG.)
+
+**PVQZ-X2C-TP** (10 + 206): r5 3.36e10 elements per vector in the label
+blocks, pp 8.9e14 multiply-adds (77 times PVTZ), the plan 99 GB fixed and
+806 GB per sigma vector: about 4 h per sigma vector on one node if the
+memory were there (the PVTZ rates), some 60 - 80 sigma vectors per root -
+it needs the vectors and the passes over r5 distributed over 10 - 20 nodes,
+i.e. the native / MPI program below.
+
+**For the native program** (cfour/xzccsdt, which has the sector with R to
+4p2h over MPI ranks, docs/native.md 20), what this needs:
+
+- the vector: r5 in blocks [(i<j<k), quintuples of class M], the quintuple
+  lists and the (ab | cde), (a | bcde) expansions and reductions of
+  `t4sym.c` (`zc_t5s_*`, plain arrays and OpenMP: callable as they are);
+  the parity-compressed storage of the subspace;
+- the intermediates of the ground state beyond those of the 4p2h row: Xv2
+  (Xv with the doubled term of Wpp; a file when it does not fit, as Xv),
+  Xo3, W2, B4, Wq5 and the matrices of the occupied triples - all small but
+  Xv2;
+- per sigma vector: the small intermediates (Y4, XoRp, XoR5, Z4, XvR5),
+  Xv5 (o v^5 / ncls: the largest, 4.7 GB for PVTZ, 160 GB for PVQZ - by
+  rows k over the ranks), then the passes: pp by batches of rows of a block,
+  ring by spectator pair, the rows of sigma5 one occupied triple at a time;
+- MPI: the occupied triples (rows of r5, 120 for o = 10) are the natural
+  unit - pp and the rows by triples (each rank its rows of r5 and of
+  sigma5), the ring by spectator pairs (45: its products write rows (i, u,
+  w) of other owners, exchanged as the native 4p2h ring does; its operand
+  rows (m, u, w) fetched from their owners), Xo5 / Xv5 summed over the
+  ranks after the passes that make them from r5 (Xv5 distributed by k: the
+  rows pass of a triple (i, j, k) needs Xv5(.; i), (.; j), (.; k));
+- PVQZ: r5 of one vector 269 GB in blocks (134 GB stored), 900 GB per sigma
+  vector in the plan of this code, pp 8.9e14 multiply-adds - 10 to 20 nodes
+  of 180 GB with the vectors distributed by rows.
 
 ## 12. Left-hand eigenvectors (`zccsdt.cc.eom_left`)
 

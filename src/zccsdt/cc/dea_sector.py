@@ -497,6 +497,7 @@ class Engine:
         self._ring = {}
         self._u = {}
         self.nsigma = 0
+        self.keep, self.imds = False, None
 
     # ---------------------------------------------------------------- views
     def qs(self, q):
@@ -828,6 +829,9 @@ class Engine:
         else:
             s2[:] = 0
         self.nsigma += 1
+        if self.keep:
+            # for the 5p3h row (zccsdt.cc.dea5_sector)
+            self.imds = dict(r2=r2, X3r=X3r, WhR=WhR, YR=YR, Z=Z)
         return s2, s3, s4
 
     # ---------------------------------------------------------------- pieces
