@@ -27,8 +27,11 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
   integer(8), intent(in) :: k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o
   integer(8) :: m0, kx23, kx14, klt, krc, klc, krc3, kx4t, k23max, k14max, nkmax, na4max, mm, c, ra, rb, r, i, ki
   integer(8) :: q, nc, nq, kr, rr, x, pyz, ph, mu, k3b, o2, cc, m, sj, jj, kj, p, na, ksum, z, pxy, a, e, mt, ii, pm
-  integer(8) :: n2omax, aa, m4, kz4, z4max, zslot(0:2), zx3, zs, kz4x(0:2), xlim, qp0, qp1, base, psz, bsz
-  logical :: zuse(0:2)
+  integer(8) :: n2omax, aa, m4, kz4, z4max, zx3, zs, kz4x(0:2), xlim, qp0, qp1, base, psz, bsz, nzs, ndist, zbud, ztick
+  integer(8), allocatable :: zslot(:), zlast(:)
+  character(len=256) :: zarg
+  integer :: lzarg
+  logical, allocatable :: zuse(:), zhas(:)
   integer(8), allocatable :: rows(:)
   integer(1), allocatable :: rsg(:)
   integer(8), pointer :: opa(:), opb(:), opgrp(:), ofree(:, :), opair(:, :), otri(:, :), opidx(:, :)
@@ -85,14 +88,42 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
   do i = 0, no - 1
     z4max = max(z4max, z4k(i + 1) - z4k(i))
   end do
-  kz4 = xzget(NW * 3 * z4max, 'DEA5: Z4 of the indices of a triple')
+  ! as many slots as there are indices in the triples of this rank, if they fit
+  ! below the peak so far (the ring pass) with the transient of making one;
+  ! at least three, the slabs of a triple; the least recently used slab goes
+  allocate(zhas(0:max(no, 1_8) - 1))
+  zhas = .false.
+  do mm = 0, n5c - 1
+    if (.not. inblk5(mm)) cycle
+    call xzd5own(mm, ra, rb)
+    do r = ra, rb - 1
+      i = otoff(mm - ds) + r
+      do rr = 0, 2
+        zhas(xzd5free(i, rr)) = .true.
+      end do
+    end do
+  end do
+  ndist = count(zhas)
+  deallocate(zhas)
+  zbud = xzpeak - xztop - NW * (max(x4max, 1_8) + max(nocmax * nvcmax * nvcmax, 1_8)) - 64
+  nzs = min(max(ndist, 3_8), max(3_8, zbud / (NW * z4max)))
+  ! (option dea5z4: at most that many slots, a test of the replacement)
+  call xzoptget('dea5z4', zarg, lzarg)
+  if (lzarg > 0) then
+    read(zarg(1:lzarg), *) zs
+    nzs = max(3_8, min(nzs, zs))
+  end if
+  kz4 = xzget(NW * nzs * z4max, 'DEA5: Z4 of the indices of the triples (slots)')
   if (xzdry) then
     ! (the transient of making a slab)
     call N(xzd5z4k)(w, kr4f, 0_8, kz4)
     call xzrel(m0)
     return
   end if
+  allocate(zslot(0:nzs - 1), zlast(0:nzs - 1), zuse(0:nzs - 1))
   zslot = -1
+  zlast = 0
+  ztick = 0
   t0 = omp_get_wtime()
   call xzdiv(w, jopa, max(npo, 1_8), opa)
   call xzdiv(w, jopb, max(npo, 1_8), opb)
@@ -123,19 +154,32 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
         do rr = 0, 2
           zx3 = ofree(i, rr)
           kz4x(rr) = -1
-          do zs = 0, 2
+          do zs = 0, nzs - 1
             if (zslot(zs) == zx3) then
               kz4x(rr) = kz4 + NW * zs * z4max
               zuse(zs) = .true.
+              ztick = ztick + 1
+              zlast(zs) = ztick
             end if
           end do
         end do
         do rr = 0, 2
           if (kz4x(rr) >= 0) cycle
           zx3 = ofree(i, rr)
-          do zs = 0, 2
-            if (.not. zuse(zs)) exit
+          ! (a free slot, else the least recently used one not of this triple)
+          zs = -1
+          do x = 0, nzs - 1
+            if (zuse(x)) cycle
+            if (zs < 0) then
+              zs = x
+            else if (zslot(x) < 0 .and. zslot(zs) >= 0) then
+              zs = x
+            else if ((zslot(x) < 0) .eqv. (zslot(zs) < 0)) then
+              if (zlast(x) < zlast(zs)) zs = x
+            end if
           end do
+          ztick = ztick + 1
+          zlast(zs) = ztick
           zuse(zs) = .true.
           zslot(zs) = zx3
           kz4x(rr) = kz4 + NW * zs * z4max
@@ -378,7 +422,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o)
       end if
     end do
   end do
-  deallocate(rows, rsg)
+  deallocate(rows, rsg, zslot, zlast, zuse)
   td5(9) = td5(9) + omp_get_wtime() - t0
   call xzrel(m0)
 end subroutine
