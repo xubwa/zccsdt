@@ -53,6 +53,7 @@ module xzdead5
   integer(8), allocatable :: q5len(:), q5lru(:) ! its words, its last use
   integer(8) :: q5size = 0                      ! words of all lists
   integer(8) :: q5pool = 0, q5cap = 0, q5top = 0, q5tick = 0, q5made = 0
+  logical :: d5xall = .false.                   ! (one rank) Xv5 of all k in a sigma vector (N(xzd5secw))
   integer(4), allocatable, target :: d5pv(:)    ! (0:nv-1) the parity of a virtual spinor (the kernel of the lists)
   ! the products of the ring split by parity (the quadruples of one parity):
   ! the virtual spinors of a class and a parity (nvp5; d5vl from vlo5, their

@@ -23,10 +23,8 @@ subroutine N(xzd5sig)(w, k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c)
   real(8), target :: w(*)
   integer(8), intent(in) :: k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c
   integer(8) :: m0, kr4f, ks4f, ks3x, kg, kg3, kg2, kg5, kd3r, kxorp, kxor5, ky4, kxvr5
-  integer(8) :: kx4s, nx4s, pq, m4, ktmp, ntmp, kxva, xvtot, zxt, z4m, i
+  integer(8) :: kx4s, nx4s, pq, m4, ktmp, ntmp, kxva, xvtot
   logical :: xall
-  character(len=256) :: aarg
-  integer :: laarg
   integer(8), allocatable :: x4sloc(:), woff(:)
   integer(8) :: row(1), xo(ncls), y1(ncls), y2(ncls), p, r
   real(8) :: sg(1), t0, t1
@@ -87,25 +85,11 @@ subroutine N(xzd5sig)(w, k3, kr2, kx3r, kyr, kz, kwhr, k4, ks3, ks4, k5c, ks5c)
   end if
   call N(xzd5ring)(w, k5c, ks5c, ks4f)
   call N(xzd5hh)(w, k5c, ks5c)
-  ! Xv5 of all k at once (one rank, if it fits below the peak so far with
-  ! the transients of making it and of the rows): made before the rows, its
+  ! Xv5 of all k at once (one rank, N(xzd5secw)): made before the rows, its
   ! E1x then in the products of E1 (as Engine5); else k by k after the rows
-  xall = .false.
+  xall = d5xall .and. .not. ddist
   kxva = -1
-  if (.not. ddist) then
-    xvtot = sum(xv5k)
-    z4m = 1
-    do i = 0, no - 1
-      z4m = max(z4m, z4k(i + 1) - z4k(i))
-    end do
-    zxt = NW * (max(nvcmax * n13amax, 1_8) + no * max(x4max, 1_8) + max(n14max, 1_8))
-    xall = NW * xvtot + max(zxt, NW * 3 * z4m) + NW * max(n14max, 1_8) <= xzpeak - xztop
-    ! (option dea5xa 0: never)
-    call xzoptget('dea5xa', aarg, laarg)
-    if (laarg > 0) then
-      if (aarg(1:1) == '0') xall = .false.
-    end if
-  end if
+  xvtot = sum(xv5k)
   if (xall) then
     kxva = xzget(NW * max(xvtot, 1_8), 'DEA5: Xv5 of all k')
     call N(xzd5zx)(w, kr4f, k5c, ks5c, kg5, kxva)

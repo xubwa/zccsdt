@@ -276,6 +276,8 @@ subroutine N(xzdea)(w, ecorr)
         8d-6 * NW * dsz5c, ' MB of a vector'
       write(6, '(a,f10.1,a,f10.1,a,i6,a)') '   the quintuple lists of the blocks: ', 8d-6 * q5size, ' MB (a pool of ', &
         8d-6 * q5cap, ' MB); Xv5 of one k at most ', nint(8d-6 * NW * xv5max), ' MB'
+      if (d5xall .and. .not. ddist) write(6, '(a,f10.1,a)') '   Xv5 of all k in a sigma vector: ', 8d-6 * NW * sum(xv5k), &
+        ' MB (E1x in the products of E1)'
     end if
     ! (over the ranks: the rows of r4 of every rank, before the vectors and the
     ! batches - a rank holds its part of a vector, and a sigma vector of a

@@ -453,6 +453,12 @@ subroutine N(xzd5secw)(w)
   q5made = 0
   q5at = 0
   call xzd5lay(w)
+  ! one rank: Xv5 of all k in a sigma vector when it takes at most a quarter
+  ! of the free work array (N(xzd5sig); option dea5xa 0 / 1: never / always)
+  d5xall = .false.
+  if (.not. ddist) d5xall = NW * sum(xv5k) <= (xzsize - xztop) / 4
+  call xzoptget('dea5xa', arg, larg)
+  if (larg > 0 .and. .not. ddist) d5xall = arg(1:1) == '1'
 end subroutine
 
 ! ---------------------------------------------------------------------------
