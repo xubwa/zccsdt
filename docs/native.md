@@ -6079,6 +6079,15 @@ The peak of a sigma vector is the pp ladder at 16 ranks (a batch of 22 GB
 and its product), the ring from 24 ranks on (a batch 11 GB, its product 11
 GB, the rows of the spectator pair in and out 9 + 9 GB), on top of what
 stays (about 10 GB: B4, Xv2, r4 and the terms in sigma4 of all rows).
+Three things take more than the plan when the work array has room
+(`xzroom` of `xzmem.F90`: in a dry run only what is below the peak so far,
+so the plan holds their floor): the slots of Z4 (the floor three, or the
+slabs of the rank when made over the ranks), the rows of Xv5 and E1x in
+one exchange (the floor one) and, over fewer ranks than occupied spinors,
+Xv5 of all k of the rank; the work array is never exceeded, the resident
+set can be larger than the plan of a sigma vector (cc-pVTZ-X2C-TP on 4
+ranks: 82 GB of the work array used, 32 GB resident - the subspace of 23
+vectors not filled in two iterations).
 
 ### 21.6 Validation
 

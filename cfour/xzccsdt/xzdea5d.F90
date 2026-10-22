@@ -505,24 +505,37 @@ contains
 
   ! The triples of every rank (more than one rank): ranges in the order of the
   ! triples of about equal sums over the shifts sh(1:nsh) of the targets of
-  ! the elements of their rows of r5 (the same for all targets); dt0, dt1 of
-  ! this rank.  One rank: all.
+  ! the costs of their rows of r5 (the same for all targets); dt0, dt1 of
+  ! this rank.  One rank: all.  The cost of a row of the block M: its
+  ! elements (the expansions and reductions of the passes go by them) and
+  ! the multiply-adds of its pp ladder, sum_q nQ(q)^2 nK(M - q), at kappa
+  ! of them per element (cc-pVQZ-X2C-TP on 8 ranks: one rank had three
+  ! times the products of the pp ladder of the others with the elements
+  ! alone)
   subroutine xzd5ranges(nsh, sh)
     use xzdata
-    use xzdead, only: n3c
+    use xzdead, only: n3c, dnQ, dnK
     use xzpar, only: myrank, nrank
     integer(8), intent(in) :: nsh, sh(*)
-    real(8), allocatable :: cum(:)
-    integer(8) :: r, i, t, m, g
+    real(8), parameter :: kappa = 2d5
+    real(8), allocatable :: cum(:), wm(:)
+    integer(8) :: r, i, t, m, g, q
     if (allocated(dtb)) deallocate(dtb)
-    allocate(dtb(0:nrank), cum(0:max(nto, 1_8)))
+    allocate(dtb(0:nrank), cum(0:max(nto, 1_8)), wm(0:max(n5c, 1_8) - 1))
+    do m = 0, n5c - 1
+      wm(m) = 0d0
+      do q = 0, npg - 1
+        wm(m) = wm(m) + dble(dnQ(q))**2 * dble(dnK(m - q))
+      end do
+      wm(m) = dble(nq5(m)) + wm(m) / kappa
+    end do
     cum(0) = 0d0
     do g = 0, ntg - 1
       do i = otoff(g), otoff(g + 1) - 1
         cum(i + 1) = cum(i)
         do t = 1, nsh
           m = g + sh(t)
-          if (m >= 0 .and. m < n5c) cum(i + 1) = cum(i + 1) + dble(nq5(m))
+          if (m >= 0 .and. m < n5c) cum(i + 1) = cum(i + 1) + wm(m)
         end do
       end do
     end do
@@ -540,7 +553,7 @@ contains
     dtb(nrank) = nto
     dt0 = dtb(myrank)
     dt1 = dtb(myrank + 1)
-    deallocate(cum)
+    deallocate(cum, wm)
   end subroutine
 
   ! the rank that holds the row of r5 of the triple i
