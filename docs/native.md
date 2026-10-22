@@ -6162,7 +6162,32 @@ in the exchanges of Xv5; the same binary on two other nodes ran normally
 
 ### 21.8 O2 / cc-pVQZ-X2C-TP
 
+10 + 206 spinors, 9 classes, real; the block file `pvqz5`
+(`/scratch16/lcheng24/xwang405/x2cblk/pvqz5/o2_hf2plus_pvqz_x2c_tp_n216_x2ccorr.h5`,
+made again with this code: no parity adaption needed; h1 and the
+integrals equal those of the earlier file to 2.5e-11, 1.7e-11), 2 Omega =
+0: a vector of 2p .. 4p2h 3.5e8 elements (2.8 GB), r5 3.36e10 in the
+blocks, 1.68e10 stored (134 GB), the quintuple lists 16 GB, Xv5 of one k
+11.8 GB, Z4 25 GB.  CCSDT: 28 iterations, 2.5 s each on 8 nodes.
+
+**Timing runs** (`native5_mpi.sbatch`, one rank of 48 threads per node,
+`guess 2` and `ESTATE_MAXCYC 1`: three sigma vectors of 2 Omega = 0; the
+subspace in files on the node-local disks, `eomvdir /tmp/...`):
+
+| nodes | job | per sigma vector | pp | ring (exchanges) | rows | Xv5 and E1x (exchanges) | the sums after pp | resident per rank |
+|---|---|---|---|---|---|---|---|---|
+| 8 (ranges by elements) | 32335035 | 1537 s | 186 (rank 5: 559) | 247 (74 - 168) | 73 - 116 | 382 - 434 (216 - 323) | 366 - 417 (rank 5: 1) | 115 - 124 GB, the work array 142.5 GB used to 99.6 % |
 TODO
+
+On 8 ranks one rank (5) spent 559 s in the pp ladder, the others 146 -
+197 s: the ranges of triples balanced the elements of the rows, not the
+products of the pp ladder, which go by sum_q nQ(q)^2 nK(M - q) and differ
+between the blocks by a factor of about three per element; the others
+waited for it in the sums after the pp ladder (366 - 417 s).  The ranges
+now weigh both (`xzd5ranges`).  Xv5 and E1x on 8 ranks: two ranks hold two
+k, the others one (k mod 8), and take most rows; with as many ranks as a
+multiple of the occupied spinors (10, 20, 30, 40) every k has the same
+number of ranks, which share its pairs.
 
 ### 21.9 Not done
 

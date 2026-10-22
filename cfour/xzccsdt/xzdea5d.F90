@@ -98,7 +98,7 @@ module xzdead5
   logical, allocatable :: zmine(:)
 
   ! ---- seconds of the pieces of the 5p3h part of the sigma vectors
-  real(8) :: td5(20) = 0d0
+  real(8) :: td5(24) = 0d0                                ! (21: making quintuple lists, 22: of it moving the pool)
   integer(8) :: d5zs = 0, d5zd = 0, d5zm = 0             ! Z4: slots, indices of the triples of the rank, slabs made (last sigma vector)
   integer(8) :: d5xb = 0                                  ! (over the ranks) rounds of Xv5 and E1x in a batch
 
@@ -361,12 +361,14 @@ contains
     use xzdead, only: dkv, dtpar
     use xzkern
     use iso_c_binding
+    use omp_lib
     real(8), target :: w(*)
     integer(8), intent(in) :: mb, lp
     integer(8) :: used, k, mm, best, dst, n, m, n2
     integer(c_intptr_t) :: ppar
     integer(8), allocatable :: ord(:), cnt(:)
     integer(8), pointer :: wi(:)
+    real(8) :: t0, t1
     m = 2 * mb + lp
     n2 = 2 * n5c
     q5tick = q5tick + 1
@@ -374,6 +376,7 @@ contains
       q5lru(m) = q5tick
       return
     end if
+    t0 = omp_get_wtime()
     if (q5top + q5len(m) > q5pool + q5cap) then
       used = 0
       do mm = 0, n2 - 1
@@ -403,16 +406,17 @@ contains
       end do
       call sortby(ord, k)
       call c_f_pointer(c_loc(w(q5pool)), wi, [max(q5cap, 1_8)])
+      t1 = omp_get_wtime()
       dst = q5pool
       do n = 0, k - 1
         mm = ord(n)
-        if (q5at(mm) /= dst) wi(dst - q5pool + 1:dst - q5pool + q5len(mm)) = &
-                                  wi(q5at(mm) - q5pool + 1:q5at(mm) - q5pool + q5len(mm))
+        if (q5at(mm) /= dst) call moveto(wi, dst - q5pool + 1, q5at(mm) - q5pool + 1, q5len(mm))
         q5at(mm) = dst
         dst = dst + q5len(mm)
       end do
       q5top = dst
       deallocate(ord)
+      td5(22) = td5(22) + omp_get_wtime() - t1
     end if
     if (q5top + q5len(m) > q5pool + q5cap) then
       write(6, '(/,a)') ' @XZCCSDT-F, DEA5: the pool of the quintuple lists is shorter than one list.'
@@ -427,7 +431,23 @@ contains
     n = zc_t5s_quints_par(int(nv, 4), w(dkv), int(mb, 4), int(loc(w(q5at(m))), c_intptr_t), cnt, ppar, int(lp, 4))
     deallocate(cnt)
     q5made = q5made + 1
+    td5(21) = td5(21) + omp_get_wtime() - t0
   contains
+    ! x(d : d + n - 1) = x(s : s + n - 1), d < s, on all threads: blocks of
+    ! s - d words one after the other (each copied in parallel)
+    subroutine moveto(x, d, s0, n)
+      integer(8), intent(inout) :: x(*)
+      integer(8), intent(in) :: d, s0, n
+      integer(8) :: o, blk, nb, i
+      blk = max(s0 - d, 1_8)
+      do o = 0, n - 1, blk
+        nb = min(blk, n - o)
+        !$omp parallel do schedule(static)
+        do i = 0, nb - 1
+          x(d + o + i) = x(s0 + o + i)
+        end do
+      end do
+    end subroutine
     subroutine sortby(o, nn)
       integer(8), intent(inout) :: o(0:*)
       integer(8), intent(in) :: nn

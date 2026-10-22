@@ -802,6 +802,8 @@ contains
         'the ranks; their transfers ', f * td5(20), ' s)'
     end if
     if (nrank > 1) write(6, '(a,i6,a)') '       (Xv5 and E1x: ', d5xb, ' rounds of the exchanges at once)'
+    write(6, '(a,i8,a,f8.2,a,f8.2,a)') '       (quintuple lists made: ', q5made, ' in all; ', f * td5(21), &
+      ' s per sigma vector, of it moving the pool ', f * td5(22), ' s)'
     flush(6)
   end subroutine
 end subroutine
