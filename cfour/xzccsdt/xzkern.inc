@@ -465,3 +465,28 @@
       integer(c_int64_t), value :: ldr, nk, nent
       type(*), dimension(*) :: r, tri, row, sgn, xoff, s1, s2, kv, posv, posq, x
     end subroutine
+
+    ! ---- rank 5 (EOM-DEA with complete 5p3h): a block of rows of a quintuple list expanded
+    !      into the splits (ab | cde), (a | bcde) of a product (mode 0), or reduced back (mode 1)
+    subroutine N(zc_t5s_x23)(mode, r, ldr, quints, na, nent, row, sgn, xoff, s1, s2, nq, n, kv, posq, pos3, x) bind(C)
+      import
+      integer(c_int), value :: mode, nq, n
+      integer(c_int64_t), value :: ldr, na, nent
+      type(*), dimension(*) :: r, quints, row, sgn, xoff, s1, s2, kv, posq, pos3, x
+    end subroutine
+
+    subroutine N(zc_t5s_x14)(mode, r, ldr, quints, na, nent, row, sgn, xoff, s1, s2, ncls, n, kv, posv, pos4, x) bind(C)
+      import
+      integer(c_int), value :: mode, ncls, n
+      integer(c_int64_t), value :: ldr, na, nent
+      type(*), dimension(*) :: r, quints, row, sgn, xoff, s1, s2, kv, posv, pos4, x
+    end subroutine
+
+    ! the same split by the parity of a (xoff, s1, s2 per entry by 2 label + parity)
+    subroutine N(zc_t5s_x14p)(mode, r, ldr, quints, na, nent, row, sgn, xoff, s1, s2, ncls, n, kv, par, posvp, pos4p, x) &
+        bind(C)
+      import
+      integer(c_int), value :: mode, ncls, n
+      integer(c_int64_t), value :: ldr, na, nent
+      type(*), dimension(*) :: r, quints, row, sgn, xoff, s1, s2, kv, par, posvp, pos4p, x
+    end subroutine

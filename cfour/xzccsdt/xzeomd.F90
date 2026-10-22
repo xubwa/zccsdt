@@ -49,7 +49,9 @@ module xzeomd
   integer(8) :: evbuf = 0, evnch = 0        ! files: the buffer [vector][evnch elements]
   integer(8) :: evnc = 0, evnh = 0          ! files that are open
   real(8) :: evio = 0d0                     ! seconds in reading and writing them
+  character(len=256) :: evdir = ' '         ! the directory of the files (option eomvdir; blank: the run directory)
   real(8) :: evbytes = 0d0                  ! bytes read and written
+  integer(8), allocatable :: evfd(:, :)     ! (kind, j) the file opened for the parallel reads of the chunks (-1: not)
 
   ! ---- more than one rank (docs/native.md, section 16.7).  Rank 0 runs the
   !      solver; R3 and sigma_3 of a vector are cut into one slice of rows per
@@ -158,6 +160,14 @@ contains
       write(xzevname, '(a4,i4.4,a1,i4.4)') merge('EOMC', 'EOMH', kind == 1), j, '.', myrank
     end if
   end function xzevname
+
+  ! the file of vector j with the directory of the files (option eomvdir)
+  character(len=300) function xzevpath(kind, j)
+    integer, intent(in) :: kind
+    integer(8), intent(in) :: j
+    xzevpath = trim(xzevname(kind, j))
+    if (len_trim(evdir) > 0) xzevpath = trim(evdir) // '/' // trim(xzevname(kind, j))
+  end function xzevpath
 
   ! the first word of the vectors of a kind that are in the work array: the
   ! basis (1), its sigma vectors (2), q (3) and F (4) of EOM-CC4

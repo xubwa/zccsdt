@@ -1865,7 +1865,10 @@ products on 48 cores).  Xv and Xv2 go to scratch files and the 5p3h part of
 the Davidson subspace too when they do not fit.  PVTZ-X2C-TP: r5 1.37e9
 elements (10.9 GB; 5.5 GB stored), plan 5.7 GB fixed + 37 GB per sigma
 vector; PVQZ-X2C-TP (10 + 206): r5 3.36e10 (269 GB), pp 8.9e14, plan
-99 GB + 806 GB - not one node.
+99 GB + 806 GB - not one node.  The native program (docs/native.md,
+section 21; `%xzdea` `level 5p3h`) runs this level over MPI ranks, every
+array of the size of r5 distributed; the same sigma vector element by
+element and the same roots.
 
 **Validation** (`tests/test_dea5_sector.py`; `bench/dea/dea5_check.py`):
 

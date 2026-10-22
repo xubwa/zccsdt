@@ -13,13 +13,14 @@ subroutine N(xzdea)(w, ecorr)
   use xzkern
   use xzeomd
   use xzdead
-  use xzpar, only: myrank, nrank, xzmpi_bcast_w
+  use xzdead5
+  use xzpar, only: myrank, nrank, xzmpi_bcast_w, xzmpi_sub_split
   use omp_lib
   implicit none
   real(8), target :: w(*)
   real(8), intent(in) :: ecorr
   integer(8) :: m0, ms, it, s, nroot, nlen, kxa, kxb, msub, sigw, avail, nfound, nsig, nit, nst, k, r, a, b, q, t
-  integer(8) :: peak, blo, bhi, bmid, btarget, reserve, kpib, ng, nsel, nsh, myrank0, kbr(2)
+  integer(8) :: peak, blo, bhi, bmid, btarget, reserve, kpib, ng, nsel, nsh, myrank0, kbr(2), x2size0
   integer(8), allocatable :: guess(:), lead(:, :), cyc(:), shl(:)
   complex(8), allocatable :: ee(:)
   real(8), allocatable :: rmax(:), rnorm(:), wts(:, :), dg(:)
@@ -38,6 +39,7 @@ subroutine N(xzdea)(w, ecorr)
   call xzdglay(w)
   call xzdquadn()
   call xzeomstep()
+  if (dlev == 5) call xzd5counts(w)
   ! option deaplan: the memory per rank for some numbers of ranks, then back
   if (dplan) then
     call planranks()
@@ -55,6 +57,15 @@ subroutine N(xzdea)(w, ecorr)
     shl(nsh) = s
   end do
   call xzdranges(w, nsh, shl)
+  ! (level 5p3h: the triples of every rank - its rows of r5 -, the indices of
+  ! Xv5 of every rank, the pairs whose Xv2 a rank holds)
+  if (dlev == 5) then
+    call xzd5ranges(nsh, shl)
+    call xzd5zgroups()
+    call N(xzd5glay)(w)
+    if (nrank > 1 .and. nrank >= no .and. .not. xzdry) call xzmpi_sub_split(mod(int(myrank, 8), no))
+  end if
+  x2size0 = x2size
   ! R13 in the work array if all of EOM-DEA fits there with it (with the
   ! smallest batches and the smallest subspace), else in the file XZDXV
   ! (XZDXV.<rank>), read once per sigma vector; option deaxv m / f: the one or
@@ -97,6 +108,7 @@ subroutine N(xzdea)(w, ecorr)
   end if
   call N(xzeomkeep)()
   call N(xzdkeep)()
+  if (dlev == 5) call N(xzd5keep)()
 
   ! more than one rank (docs/native.md, section 20.6): every rank makes the
   ! intermediates and holds its rows of r4 of every vector; rank 0 runs the
@@ -113,6 +125,7 @@ subroutine N(xzdea)(w, ecorr)
   call N(xzeomim)(w)
   t1 = omp_get_wtime()
   call N(xzdim)(w)
+  if (dlev == 5) call N(xzd5im)(w)
   tdeaim = omp_get_wtime() - t0
   if (myrank > 0) then
     write(6, '(/,a)') '  EOM-DEA-CCSDT: the rows of r4 of this rank in the sigma vectors and the vectors of the solver'
@@ -121,6 +134,7 @@ subroutine N(xzdea)(w, ecorr)
     edea = .true.
     ndeasig = 0
     tdpart = 0d0
+    td5 = 0d0
     call N(xzeserve)(w, nsig)
     edea = .false.
     edist = .false.
@@ -129,6 +143,7 @@ subroutine N(xzdea)(w, ecorr)
     write(6, '(a,8f8.2)') '   seconds of them: intermediates, pp, ring, hh, rows, 3p1h, 2p, MPI and XZDXV ', tdpart(1:7), &
       tdpart(12)
     write(6, '(a,2f8.2)') '   of MPI: the rows exchanged by the ring, by the hh ladder ', tdpart(13:14)
+    if (dlev == 5) call d5times(nsig)
     call xz_rss(kbr)
     write(6, '(a,i14,a,f10.1,a,f10.1,a,f10.1,a)') '   work array used: ', xzpeak, ' words = ', 8d-6 * xzpeak, &
       ' MB of ', 8d-6 * xzsize, ' MB;  peak resident memory of the process: ', 1d-3 * kbr(1), ' MB'
@@ -136,7 +151,12 @@ subroutine N(xzdea)(w, ecorr)
     call xzrel(m0)
     return
   end if
-  write(6, '(/,a)') '  EOM-DEA-CCSDT: two electrons attached to the closed-shell reference (R = 2p + 3p1h + 4p2h, the sector itself)'
+  if (dlev == 5) then
+    write(6, '(/,a)') '  EOM-DEA-CCSDT: two electrons attached to the closed-shell reference (R = 2p + 3p1h + 4p2h + 5p3h, ' // &
+      'complete 5p3h, the sector itself)'
+  else
+    write(6, '(/,a)') '  EOM-DEA-CCSDT: two electrons attached to the closed-shell reference (R = 2p + 3p1h + 4p2h, the sector itself)'
+  end if
   write(6, '(a)') '  ' // repeat('-', 98)
   write(6, '(a,f10.2,a,f10.2,a)') '   intermediates of the ground state: ', tdeaim, ' s (those of EOM-EE ', t1 - t0, &
     ' s, then Xv and the forms of T3)'
@@ -165,8 +185,13 @@ subroutine N(xzdea)(w, ecorr)
   if (larg > 0) then
     call problem(1_8, s, nroot, ok)
     call xzdsec(s)
+    if (dlev == 5) call xzd5sec()
     call N(xzdwq2)(w)
-    nlen = dn2 + dsz3 + dsz4
+    if (dlev == 5) then
+      call N(xzd5secw)(w)
+      call xzd5slices(int(NW, 8))
+    end if
+    nlen = dn2 + dsz3 + dsz4 + dvec5
     dbatch = 134217728_8 / NW
     call xzoptget('deabatch', arg, larg)
     if (larg > 0) read(arg(1:larg), *) dbatch
@@ -176,7 +201,7 @@ subroutine N(xzdea)(w, ecorr)
     edea = .true.
     dvsd = dn2 + dsz3
     dv1 = dn2
-    dvbig = dsz4
+    dvbig = dsz4 + dvec5
     open(unit=74, file=arg(1:larg), form='unformatted', access='stream', status='old', iostat=ios)
     if (ios == 0) read(74, iostat=ios) w(kxa:kxa + NW * nlen - 1)
     close(74)
@@ -188,6 +213,11 @@ subroutine N(xzdea)(w, ecorr)
     if (dist) then
       ! (over the ranks: the vector to all, the sigma vector from the rows of every rank)
       call xzdslices(int(NW, 8))
+      if (dlev == 5) then
+        call xzd5slices(int(NW, 8))
+        ! (the file has the natural layout [r2|r3|r4|r5]; the ranks hold [their r4|their r5])
+        call N(xzd5natural)(w, kxa, .false.)
+      end if
       ddist = .true.
       call xzecmd(op_shift, dble(s), dble(dbatch))
       ekx = [kxa, kxb]
@@ -198,6 +228,7 @@ subroutine N(xzdea)(w, ecorr)
       call N(xzepspread)(w, kxa)
       call N(xzepsig)(w, kxa, kxb, .false.)
       call N(xzepcollect)(w, kxb)
+      if (dlev == 5) call N(xzd5natural)(w, kxb, .true.)
       ecmd = .false.
       edist = .false.
       ddist = .false.
@@ -208,8 +239,9 @@ subroutine N(xzdea)(w, ecorr)
     end if
     if (dxvfile) call xvfile('c')
     edea = .false.
-    write(6, '(a,f10.3,a,i12,a,i12,a,i14,a)') '   option deasig: a sigma vector in ', omp_get_wtime() - t0, ' s (2p ', dn2, &
-      ', 3p1h ', dsz3, ', 4p2h ', dsz4, ' elements)'
+    write(6, '(a,f10.3,a,i12,a,i12,a,i14,a,i14,a)') '   option deasig: a sigma vector in ', omp_get_wtime() - t0, ' s (2p ', &
+      dn2, ', 3p1h ', dsz3, ', 4p2h ', dsz4, ', 5p3h stored ', dvec5, ' elements)'
+    if (dlev == 5) call d5times(1_8)
     open(unit=74, file=arg(1:larg) // '.out', form='unformatted', access='stream', status='replace')
     write(74) w(kxb:kxb + NW * nlen - 1)
     close(74)
@@ -224,6 +256,7 @@ subroutine N(xzdea)(w, ecorr)
     call problem(it, s, nroot, ok)
     if (.not. ok) cycle
     call xzdsec(s)
+    if (dlev == 5) call xzd5sec()
     nlen = dn2 + dsz3 + dsz4
     write(6, '(/,a)') '  ' // repeat('=', 98)
     write(6, '(a,i5,a,i4,a,i4,a)') '   EOM-DEA-CCSDT, target 2 Omega = ', dtgt(it), ' (the shift ', s, ' classes): ', nroot, ' roots'
@@ -235,23 +268,44 @@ subroutine N(xzdea)(w, ecorr)
     end if
     ms = xzmark()
     call N(xzdwq2)(w)
+    if (dlev == 5) then
+      ! the quintuple lists of the blocks of r5, the stored layout
+      call N(xzd5secw)(w)
+      nlen = nlen + dsz5c
+      write(6, '(a,i16,a,i16,a,f12.1,a)') '   5p3h: ', dsz5, ' elements in the blocks, ', dsz5c, ' stored (the parity) = ', &
+        8d-6 * NW * dsz5c, ' MB of a vector'
+      write(6, '(a,f10.1,a,f10.1,a,i6,a)') '   the quintuple lists of the blocks: ', 8d-6 * q5size, ' MB (a pool of ', &
+        8d-6 * q5cap, ' MB); Xv5 of one k at most ', nint(8d-6 * NW * xv5max), ' MB'
+      if (d5xall .and. .not. ddist) write(6, '(a,f10.1,a)') '   Xv5 of all k in a sigma vector: ', 8d-6 * NW * sum(xv5k), &
+        ' MB (E1x in the products of E1)'
+    end if
     ! (over the ranks: the rows of r4 of every rank, before the vectors and the
     ! batches - a rank holds its part of a vector, and a sigma vector of a
     ! rank takes the buffers of its rows)
     if (dist) then
       call xzdslices(int(NW, 8))
       ddist = .true.
-      write(6, '(a,i4,a,i14,a,i14,a)') '   over ', nrank, ' ranks: rank 0 holds r2, r3 and ', esoff(1), &
-        ' elements of r4, the longest part of another rank ', esmax, ' elements'
+      if (dlev == 5) call xzd5slices(int(NW, 8))
+      if (dlev == 5) then
+        write(6, '(a,i4,a,i14,a,i14,a)') '   over ', nrank, ' ranks: rank 0 holds r2, r3 and ', esoff(1), &
+          ' elements of r4 and r5, the longest part of another rank ', esmax, ' elements'
+      else
+        write(6, '(a,i4,a,i14,a,i14,a)') '   over ', nrank, ' ranks: rank 0 holds r2, r3 and ', esoff(1), &
+          ' elements of r4, the longest part of another rank ', esmax, ' elements'
+      end if
+    else if (dlev == 5) then
+      call xzd5slices(int(NW, 8))
     end if
     kxa = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)')
     kxb = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)')
     msub = subspace(nroot)
     ! the batches of the passes over r4: as large as the work array leaves them
-    ! (at most 1 GB of an operand) next to the buffer of the subspace in files
-    ! - the batches first, as for the DIIS vectors and the EOM-EE subspace
+    ! (at most 1 GB of an operand; with 5p3h 4 GB: a batch of the ring walks
+    ! all rows of its spectator pair) next to the buffer of the subspace in
+    ! files - the batches first, as for the DIIS vectors and the EOM-EE subspace
     reserve = msub * NW * min(nlen, 1048576_8) + 64
     btarget = 1073741824_8 / (8 * NW)
+    if (dlev == 5) btarget = 4 * btarget
     call xzoptget('deabatch', arg, larg)
     if (larg > 0) then
       read(arg(1:larg), *) btarget
@@ -324,11 +378,12 @@ subroutine N(xzdea)(w, ecorr)
       edea = .true.
       dvsd = dn2 + dsz3
       dv1 = dn2
-      dvbig = dsz4
+      dvbig = dsz4 + dvec5
       tsg = tdeasig
       t1 = omp_get_wtime()
       ndeasig = 0
       tdpart = 0d0
+      td5 = 0d0
       if (dist) call xzecmd(op_shift, dble(s), dble(dbatch))
       edist = dist
       call N(xzesolve)(w, .false., nroot, ethr, emaxcyc, msub, nst, 0_8, guess, kxa, kxb, avail, &
@@ -349,6 +404,7 @@ subroutine N(xzdea)(w, ecorr)
       if (dist) write(6, '(a,f8.2,a,f8.2,a,f8.2,a)') '     (the transfers and the sums over the ranks: ', &
         tdpart(12) / max(ndeasig, 1_8), ' s per sigma vector; of them the rows exchanged by the ring ', &
         tdpart(13) / max(ndeasig, 1_8), ', by the hh ladder ', tdpart(14) / max(ndeasig, 1_8), ')'
+      if (dlev == 5) call d5times(ndeasig)
       tdeasig = tdeasig + sum(tdpart(1:7))
       write(6, '(/,a)') '   root        omega / Eh            eV            cm-1    max |r|      |r|   cycle    2p   3p1h   4p2h' // &
                         '          total energy / Eh'
@@ -410,20 +466,25 @@ contains
     mk = xzmark()
     call N(xzeomkeep)()
     call N(xzdkeep)()
+    if (dlev == 5) call N(xzd5keep)()
     call N(xzeomim)(w)
     call N(xzdim)(w)
+    if (dlev == 5) call N(xzd5im)(w)
     do it = 1, dnt
       call problem(it, s, nroot, ok)
       if (.not. ok) cycle
       call xzdsec(s)
+      if (dlev == 5) call xzd5sec()
+      dbatch = 1
+      mp = xzmark()
+      call N(xzdwq2)(w)
+      if (dlev == 5) call N(xzd5secw)(w)
       if (nrank > 1) then
         call xzdslices(int(NW, 8))
         ddist = .true.
       end if
-      dbatch = 1
-      nlen = dn2 + dsz3 + dsz4
-      mp = xzmark()
-      call N(xzdwq2)(w)
+      if (dlev == 5) call xzd5slices(int(NW, 8))
+      nlen = dn2 + dsz3 + dsz4 + dvec5
       kk = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)')
       kk = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)')
       msub = subspace(nroot)
@@ -471,16 +532,22 @@ contains
       do rr = 0, n - 1
         myrank = rr
         call xzdranges(w, nsel, sh)
+        if (dlev == 5) then
+          call xzd5ranges(nsel, sh)
+          call N(xzd5glay)(w)
+        end if
         dxvfile = .false.
         mk = xzmark()
         call N(xzeomkeep)()
         call N(xzdkeep)()
+        if (dlev == 5) call N(xzd5keep)()
         kept = xztop - mk
         r13w = NW * r13loc
         r13f = NW * r13pmax
         xzpeak = xztop
         call N(xzeomim)(w)
         call N(xzdim)(w)
+        if (dlev == 5) call N(xzd5im)(w)
         pim = xzpeak - xztop
         wvec = 0
         wsg1 = 0
@@ -493,19 +560,22 @@ contains
           call problem(it, s, nroot, ok)
           if (.not. ok) cycle
           call xzdsec(s)
+          if (dlev == 5) call xzd5sec()
           ddist = .false.
+          mp = xzmark()
+          call N(xzdwq2)(w)
+          if (dlev == 5) call N(xzd5secw)(w)
           if (n > 1) then
             call xzdslices(int(NW, 8))
             ddist = .true.
           end if
-          nlen = dn2 + dsz3 + dsz4
+          if (dlev == 5) call xzd5slices(int(NW, 8))
+          nlen = dn2 + dsz3 + dsz4 + dvec5
           own = nlen
           if (n > 1) then
             own = esoff(rr + 1) - esoff(rr)
             if (rr == 0) own = own + dn2 + dsz3
           end if
-          mp = xzmark()
-          call N(xzdwq2)(w)
           kk = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)')
           kk = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)')
           vec = xztop - mp
@@ -519,6 +589,12 @@ contains
           call N(xzdsig)(w, kk, kk)
           call N(xzdprec)(w, kk, zz)
           sg1 = xzpeak - xztop
+          ! (the regions at the peak of the sigma vector of the last rank: the largest)
+          if (rr == n - 1 .and. dlev == 5) then
+            write(6, '(a,i5,a,i4,a)') '   the largest regions at the peak of a sigma vector of rank ', rr, ' of ', n, &
+              ' (batches of 1 GB):'
+            call xzpeaklist(125000000_8)
+          end if
           msub = subspace(nroot)
           wvec = max(wvec, vec)
           wsg1 = max(wsg1, sg1)
@@ -541,6 +617,10 @@ contains
     myrank = mr0
     dbatch = 0
     call xzdranges(w, nsel, sh)
+    if (dlev == 5) then
+      call xzd5ranges(nsel, sh)
+      call N(xzd5glay)(w)
+    end if
     deallocate(sh)
   end subroutine
 
@@ -624,7 +704,12 @@ contains
     logical, intent(in) :: sec
     myrank = r
     call xzdranges(w, nsh, shl)
+    if (dlev == 5) then
+      call xzd5ranges(nsh, shl)
+      call N(xzd5glay)(w)
+    end if
     if (sec) call xzdslices(int(NW, 8))
+    if (sec .and. dlev == 5) call xzd5slices(int(NW, 8))
   end subroutine
 
   ! (more than one rank) the words of R13 that rank r holds more than rank
@@ -633,6 +718,8 @@ contains
     integer(8), intent(in) :: r
     r13more = 0
     if (.not. dxvfile) r13more = NW * ((r13p(dqb(r + 1)) - r13p(dqb(r))) - (r13p(dqb(myrank0 + 1)) - r13p(dqb(myrank0))))
+    ! (level 5p3h: Xv2 of the pairs of the triples of the rank in place, asrank(r))
+    if (dlev == 5) r13more = r13more + NW * (x2size - x2size0)
   end function
 
   ! (more than one rank) the words of the two parts of the vectors that rank r
@@ -692,6 +779,76 @@ contains
     call c_f_pointer(c_loc(w(k)), qq, [max(n, 1_8)])
     p(0:max(n, 1_8) - 1) => qq
   end subroutine
+
+  ! (level 5p3h) the seconds of the pieces of the 5p3h part per sigma vector
+  subroutine d5times(nsg)
+    integer(8), intent(in) :: nsg
+    real(8) :: f
+    f = 1d0 / dble(max(nsg, 1_8))
+    write(6, '(a,f8.2,a,f8.2,a,f8.2,a,f8.2,a,f8.2,a,f8.2,a,f8.2,a,f8.2,a,f8.2)') &
+      '     5p3h part per sigma vector (s): r5 and r4 to the passes ', f * td5(1), ', G and XoRp ', f * td5(3), &
+      ', Z4 ', f * td5(4), ', XoR5 ', f * td5(5), ', pp ', f * td5(6), ', ring ', f * td5(7), ', hh ', f * td5(8), &
+      ', rows ', f * td5(9), ', Xv5 and E1x ', f * td5(12)
+    write(6, '(a,f8.2,a,f8.2,a,f8.2,a,f8.2,a,f8.2,a,f8.2,a)') '       (of them: the expansions and reductions ', f * td5(17), &
+      ', the products of pp ', f * td5(18), ', of the ring ', f * td5(19), ', of the rows ', f * td5(10), ' + ', f * td5(11), &
+      '; sigma4, sigma5 back ', f * td5(2), ')'
+    if (nrank > 1) write(6, '(a,4f8.2,a)') '       (over the ranks: the rows of the ring, of the hh ladder, of Xv5 and E1x, ' // &
+      'the sums of the intermediates ', f * td5(13), f * td5(14), f * td5(16), f * td5(15), ')'
+    if (d5zm >= 0) then
+      write(6, '(a,i4,a,i4,a,i6,a)') '       (Z4: ', d5zs, ' slots for the ', d5zd, ' indices of the triples of the rank, ', d5zm, &
+        ' slabs made in the last sigma vector)'
+    else
+      write(6, '(a,i4,a,f8.2,a)') '       (Z4: the slabs of the ', d5zd, ' indices of the triples of the rank, made once over ' // &
+        'the ranks; their transfers ', f * td5(20), ' s)'
+    end if
+    if (nrank > 1) write(6, '(a,i6,a)') '       (Xv5 and E1x: ', d5xb, ' rounds of the exchanges at once)'
+    write(6, '(a,i8,a,f8.2,a,f8.2,a)') '       (quintuple lists made: ', q5made, ' in all; ', f * td5(21), &
+      ' s per sigma vector, of it moving the pool ', f * td5(22), ' s)'
+    flush(6)
+  end subroutine
+end subroutine
+
+! ---------------------------------------------------------------------------
+! (level 5p3h over the ranks, the test hook deasig) the whole vector at kx of
+! rank 0 from the natural layout [r2 | r3 | r4 | r5 stored] into the
+! rank-major one of the solver [r2 | r3 | r4 and r5 of rank 0 | of rank 1 ..]
+! (back: the other way)
+subroutine N(xzd5natural)(w, kx, back)
+  use xzdata
+  use xzmem
+  use xzdead
+  use xzdead5
+  use xzeomd, only: esoff
+  use xzpar, only: myrank, nrank
+  implicit none
+  real(8), target :: w(*)
+  integer(8), intent(in) :: kx
+  logical, intent(in) :: back
+  integer(8) :: m0, kt, nb, r, k0, i, o
+  if (myrank /= 0) return
+  nb = dsz4 + dvec5
+  m0 = xzmark()
+  kt = xzget(NW * max(nb, 1_8), 'DEA5: a copy of r4 and r5')
+  k0 = kx + NW * (dn2 + dsz3)
+  call N(xzecopy)(nb, w(k0), w(kt))
+  do r = 0, nrank - 1
+    if (back) then
+      call N(xzecopy)(d4e(r + 1) - d4e(r), w(kt + NW * esoff(r)), w(k0 + NW * d4e(r)))
+    else
+      call N(xzecopy)(d4e(r + 1) - d4e(r), w(kt + NW * d4e(r)), w(k0 + NW * esoff(r)))
+    end if
+  end do
+  ! (the rows of r5: natural r5c, in the part of the owner r5own)
+  do i = 0, nto - 1
+    if (blk5(i) < 0 .or. r5w(i) == 0) cycle
+    o = xzd5owner(i)
+    if (back) then
+      call N(xzecopy)(r5w(i), w(kt + NW * (esoff(o) + d4e(o + 1) - d4e(o) + r5own(i))), w(k0 + NW * (dsz4 + r5c(i))))
+    else
+      call N(xzecopy)(r5w(i), w(kt + NW * (dsz4 + r5c(i))), w(k0 + NW * (esoff(o) + d4e(o + 1) - d4e(o) + r5own(i))))
+    end if
+  end do
+  call xzrel(m0)
 end subroutine
 
 ! ---------------------------------------------------------------------------
@@ -729,6 +886,7 @@ subroutine N(xzdshift)(w, s, nb, ms, mv)
   use xzdata
   use xzmem
   use xzdead
+  use xzdead5
   use xzeomd
   use xzpar, only: myrank
   implicit none
@@ -736,14 +894,17 @@ subroutine N(xzdshift)(w, s, nb, ms, mv)
   integer(8), intent(in) :: s, nb
   integer(8), intent(out) :: ms, mv
   call xzdsec(s)
-  call xzdslices(int(NW, 8))
-  ddist = .true.
+  if (dlev == 5) call xzd5sec()
   dbatch = nb
-  dvsd = dn2 + dsz3
-  dv1 = dn2
-  dvbig = dsz4
   ms = xzmark()
   call N(xzdwq2)(w)
+  if (dlev == 5) call N(xzd5secw)(w)
+  call xzdslices(int(NW, 8))
+  if (dlev == 5) call xzd5slices(int(NW, 8))
+  ddist = .true.
+  dvsd = dn2 + dsz3
+  dv1 = dn2
+  dvbig = dsz4 + dvec5
   ekx(1) = xzget(NW * xzdpart(), 'DEA: a vector (the part of this rank)') - NW * esoff(myrank)
   ekx(2) = xzget(NW * xzdpart(), 'DEA: its sigma vector (the part of this rank)') - NW * esoff(myrank)
   mv = xzmark()
@@ -754,5 +915,7 @@ subroutine N(xzdshift)(w, s, nb, ms, mv)
   evlen = esoff(myrank + 1) - esoff(myrank)
   write(6, '(a,i5,a,i12,a,i12,a,i14,a,f10.1,a)') '   EOM-DEA, the shift ', s, ' classes: the rows of r4 of this rank are the pairs ', &
     dp0, ' to ', dp1 - 1, ' (', evlen, ' elements, ', 8d-6 * NW * evlen, ' MB of a vector)'
+  if (dlev == 5) write(6, '(a,i8,a,i8,a,i14,a)') '   and its rows of r5 the triples ', dt0, ' to ', dt1 - 1, ' (', d5own, &
+    ' stored elements)'
   flush(6)
 end subroutine

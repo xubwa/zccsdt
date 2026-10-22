@@ -38,7 +38,8 @@ stored (its EOM in every label shift) - section 17.  CC4 and EOM-EE-CC4
 without stored quadruples, over MPI ranks, with checkpoints after every
 evaluation of the T4 terms - section 19.  EOM-DEA-CCSDT (two electrons
 attached, 2p + 3p1h + 4p2h on the sector itself, the roots of the targets 2
-Omega of `%xzdea`), over MPI ranks too - section 20.
+Omega of `%xzdea`), over MPI ranks too - section 20; with complete 5p3h
+(`level 5p3h`), every array of the size of r5 distributed - section 21.
 
 **The program takes no argument** (since commit a38e493): the job comes from
 the ZMAT as joda stored it, and the steps that were arguments before (`(q)`,
@@ -106,7 +107,7 @@ the ZMAT asks for, from the flags that joda stored in JOBARC (`xzjob` in
 | `CALC=MP2` | the MP2 energy of the integral files (a check; `TOTENERG` not written) |
 | `CALC=CC3` (with or without `EXCITE=EOMEE`) | stops: not in this version (the place of the next method in `xzjob`) |
 | `CALC=CC4` (with or without `EXCITE=EOMEE`) | CC4 without stored quadruples, from the CCSDT amplitudes; EOM-EE-CC4 with the quadruples folded in (section 19) |
-| `CALC=CCSDT` and the section `%xzdea` | CCSDT, then EOM-DEA-CCSDT: the states with two electrons more (section 20: the targets 2 Omega and their roots from `%xzdea`, the thresholds as for EOM-EE) |
+| `CALC=CCSDT` and the section `%xzdea` | CCSDT, then EOM-DEA-CCSDT: the states with two electrons more (section 20: the targets 2 Omega and their roots from `%xzdea`, the thresholds as for EOM-EE; `level 5p3h`: section 21) |
 
 What joda (x2cso branch, `cfour-x2cso/bin/xjoda`, with `RELATIVISTIC=X2C1E`)
 stores for these, measured 2026-10-12 on the test case of the package
@@ -415,6 +416,7 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzcc3.inc` | CC3 (section 17): the step without stored triples, the batches of occupied triples and their fold, the diagonal Fock operator of T3, the folded EOM sigma vector and its driver |
 | `xzcc4.inc` | CC4 (section 19): the T4 terms of the doubles and triples equations per occupied quadruple (dense and in sectors, with label shifts), the extrapolation over the macro iterations, the T4 terms of a sigma vector and the folded EOM driver, the files of a later run (`XZCC4`, `XZE4R`, `XZE4Q`, `XZEOMR`) |
 | `xzdead.F90`, `xzdea.inc`, `xzdeas.inc`, `xzdeam.inc` | EOM-DEA-CCSDT (section 20): the input, the blocks of the sector and the tables, the slices of the ranks, the results; the intermediates of the ground state (Xv, the forms of T3); the sigma vector, the preconditioner, the masks of the parity; the driver |
+| `xzdea5d.F90`, `xzdea5.inc`, `xzdea5s.inc`, `xzdea5r.inc`, `xzdea5x.inc` | EOM-DEA-CCSDT with complete 5p3h (section 21): the layout of the 5p3h blocks and of the intermediates, the rows of r5 over the ranks; the intermediates of the ground state and the kernels for rank 5; the 5p3h part of a sigma vector (the small intermediates, Z4, the pp ladder); the ring and the hh ladder; the rows of sigma5, Xv5 and E1x |
 | `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
 
 Kernels of `csrc/` that are called: `zc_t3_pass1r`, `zc_t3_pass2r` (the
@@ -4459,6 +4461,7 @@ needs no option.
 | `hh pair` | op | the hh ladder of dense T3 through occupied pairs (section 12) |
 | `qmap 0` | 1 | (Q): T3 in the work array of every rank instead of the mapped `XZAMPS` (section 5) |
 | `eomvec f` | work array | EOM: the vectors of the subspace in files (16.4) |
+| `eomvdir dir` | the run directory | EOM: the files of the subspace in `dir` (made if it is not there), e.g. a node-local disk; over ranks every rank its part (21.1) |
 | `slices 0` | 1 | iterations over ranks without slices of T3 (section 15) |
 | `bpr n` | 8 | batches per rank at least |
 | `rebal x` | 0.03 | the batches are dealt again when the last rank is this fraction behind the mean (0: never) |
@@ -4508,7 +4511,11 @@ package):
 | `eomtest seed` | the sigma vector against the derivative of the amplitude step (16.5); one rank |
 | `deasig file`, `deaonly pieces`, `deabatch n` | EOM-DEA: the sigma vector of the vector of a file (the first target) to `file.out`; only the pieces named (pp hh ring x22 x13 row3 row2, as `dea_sector.Engine.sigma(only=...)`); batches of n elements (20.5); over ranks too |
 | `deaxv m` / `deaxv f` | EOM-DEA: R13 (Xv) in the work array / in the file `XZDXV`, whatever fits (20.4) |
-| `deaplan n1 n2 ...` | EOM-DEA: the memory of every rank for n1, n2, ... ranks from dry runs, then the program stops (one rank; 20.4) |
+| `deaplan n1 n2 ...` | EOM-DEA: the memory of every rank for n1, n2, ... ranks from dry runs, then the program stops (one rank; 20.4, 21.5) |
+| `dea5pool n` | EOM-DEA 5p3h: the pool of the quintuple lists in words (21.2) |
+| `dea5z4 n` | EOM-DEA 5p3h: at most n slots of Z4 on every rank, not made over the ranks (21.3) |
+| `dea5xb n` | EOM-DEA 5p3h over ranks: at most n rounds of the rows of Xv5 and E1x in one exchange (21.4) |
+| `dea5xa 0` / `1` | EOM-DEA 5p3h on one rank: Xv5 k by k / of all k (21.3) |
 | `eomsig file`, `eomsd` | the sigma vector of the vector of a file; its singles-doubles block (16.5); over ranks too (16.7) |
 | `mpitest n` | the chunked transfers on arrays of n words (15.2) |
 | `qsample x`, `qstop n` | (Q): a sample of the quadruples; stop after n tasks (restart test, section 5) |
@@ -5248,9 +5255,9 @@ reductions of `csrc/t4sym.c` (`zc_t4s_x22`, `zc_t4s_x13`, `zc_t4s_x12`,
 `zc_t4s_quads`, added to `KERNELS` of the Makefile), `zc_tn_rows`
 (tnpack.c), `zc_pair_one_body_add`, `zc_vprecond` (t3pack.c), `zc_gemm`.
 
-Not here: R to 5p3h (the folded or complete 5p3h row of docs/eom.md 11.3,
-11.8), the T of CCSDTQ or CC4 (the two T4 terms of 11.9), DIP, left-hand
-vectors, the file of the root vectors.
+R to complete 5p3h (`level 5p3h`): section 21.  Not here: the folded 5p3h
+row of docs/eom.md 11.3, the T of CCSDTQ or CC4 (the two T4 terms of
+11.9), DIP, left-hand vectors, the file of the root vectors.
 
 ### 20.1 Input and output
 
@@ -5886,8 +5893,8 @@ cc-pwCVQZ-X2C-TP: 3.15825644e-07 Eh = 0.06932 cm-1 (cc-pwCVTZ-X2C-TP:
 
 ### 20.8 Not done
 
-- R to 5p3h; the T of CCSDTQ / CC4 in the sector; DIP; left-hand vectors;
-  the vectors of the roots in a file.
+- The folded 5p3h row (complete 5p3h: section 21); the T of CCSDTQ / CC4
+  in the sector; DIP; left-hand vectors; the vectors of the roots in a file.
 - Only the elements of the parity of the target are needed (half of the
   vector): the masks are applied to a vector of both parities, as in the
   Python program.
@@ -5909,3 +5916,354 @@ cc-pwCVQZ-X2C-TP: 3.15825644e-07 Eh = 0.06932 cm-1 (cc-pwCVTZ-X2C-TP:
   rank at cc-pwCVQZ-X2C-TP before its part (20.4), so that two ranks do not
   fit a node there; the table of the quadruples of the classes is on every
   rank as well.
+
+## 21. EOM-DEA-CCSDT with complete 5p3h
+
+    %xzdea
+    0 1
+    2 1
+    parity g
+    level 5p3h                            R = 2p + 3p1h + 4p2h + 5p3h on CCSDT
+
+The level of docs/eom.md 11.11: the right-hand vector to 5p3h, complete,
+on the ground state of CCSDT (T1-dressed integrals, T2, T3) - the target
+states described as CCSDT describes a ground state.  The Python program
+(`src/zccsdt/cc/dea5_sector.py`, `Engine5.sigma`) is the reference of the
+sigma vector and of the roots; its factorization, its layouts and its
+passes are taken over one to one (the term list: the module docstring of
+`dea5_sector`).  The application is the zero-field splitting of O2 X
+3Sigma_g- at cc-pVQZ-X2C-TP (10 + 206 spinors), whose r5 (3.4e10 elements,
+269 GB) is not one node's (docs/eom.md 11.11: the Python plan 99 GB + 806
+GB): every array of the size of r5 is distributed over the ranks.  Sources:
+`xzdea5d.F90` (the layout of the 5p3h blocks, of the intermediates, the
+distribution of the rows of r5), `xzdea5.inc` (the intermediates of the
+ground state, the kernels for rank 5), `xzdea5s.inc` (the 5p3h part of a
+sigma vector, the small intermediates, Z4, the pp ladder), `xzdea5r.inc`
+(the ring, the hh ladder), `xzdea5x.inc` (the rows of sigma5, Xv5 and
+E1x); the driver, the solver and the vectors of section 20 with r5 behind
+r4.  Kernels (`csrc/t4sym.c`): `zc_t5s_quints`, `zc_t5s_quints_par` (the
+quintuples of a class, of one parity), `zc_t5s_x23`, `zc_t5s_x14`,
+`zc_t5s_x14p` (the expansions and reductions of a row of r5 on
+[(ab)][(cde)], [a][(bcde)], and on [a][(bcde)] with the quadruples of one
+parity).
+
+### 21.1 Input and output
+
+| what | ZMAT | default |
+|---|---|---|
+| the level | `level 5p3h` in `%xzdea` (`level 4p2h`: section 20) | 4p2h |
+| the subspace in files elsewhere | `eomvdir dir` in `%xzccsdt`: the files `EOMCnnnn`, `EOMHnnnn` in `dir` (made if it is not there; e.g. node-local `/tmp/...`, every rank its part) | the run directory |
+
+The rest as in 20.1.  A run directory: `bench/dea/native_rundir.py
+<file.npz | file.h5> <dir> --level 5p3h [...]`.  Output per target, in
+addition: the elements of r5 in the blocks and those stored (the parity),
+the quintuple lists (their pool), Xv5 of one k (and of all k on one rank);
+per sigma vector the seconds of the pieces of the 5p3h part:
+
+    5p3h part per sigma vector (s): r5 and r4 to the passes, G and XoRp, Z4, XoR5, pp, ring, hh, rows, Xv5 and E1x
+      (of them: the expansions and reductions, the products of pp, of the ring, of the rows [(ab),(cde)] + [a,(bcde)]; sigma4, sigma5 back)
+      (over the ranks: the rows of the ring, of the hh ladder, of Xv5 and E1x, the sums of the intermediates)
+      (Z4: the slots or the slabs made once over the ranks; Xv5 and E1x: the rounds of the exchanges at once)
+
+`XZDEA` and JOBARC as in 20.1; the weights are those of 2p, 3p1h, 4p2h
+(the rest is 5p3h).
+
+### 21.2 The vector
+
+r5 of the shift s: one block per class M of the virtual quintuples, its
+rows the occupied triples (i<j<k) of group M - s, its columns the
+quintuples a<b<c<d<e of class M (lexicographic, `zc_t5s_quints`) - of a row
+only the quintuples whose parity goes with that of the triple and of the
+target (`parity g`): half of r5, everywhere - in the vectors of the solver
+and in every pass of a sigma vector; a kernel takes the quintuple list of
+the parity of its row.  The lists (the pairs (block, parity), 16 GB at
+cc-pVQZ-X2C-TP) are made when they are used, in a pool (the lists of the
+rows of the rank and the ten largest others; the least recently used goes;
+`dea5pool`).  The natural layout (`dea5_sector.ProblemSector5.pack5`, the
+test hook `deasig`): per block the rows of the triples of parity 0, then
+those of parity 1.  The part of a rank (21.4) is its rows of r4 followed
+by its rows of r5, per block those of parity 0, then 1.  cc-pVQZ-X2C-TP, 2
+Omega = 0: r5 3.36e10 elements in the blocks, 1.68e10 stored (134 GB), a
+row 1.15 GB.
+
+### 21.3 The sigma vector
+
+`N(xzd5sig)` after the rows to 4p2h of section 20, the order of
+`Engine5.sigma`: r4 of all rows on every rank; the small intermediates (G,
+G3, G2, G5, r3 on (h | pair), XoRp; XvR5; Y4, XoR5 and XoRp from r4); **the
+pp ladder** per block and parity group of rows in batches (`zc_t5s_x23`
+expand to [(fg)][(cde)], one product per group of (fg) with Wq5 = Wpp + F_vv
+/ 4, reduce), its thin products (XoR5, sigma3, sigma4 on (a | bcd)); **the
+ring** per spectator pair (u, w): the rows (m, u, w) on [(m e)][(bcde)] by
+`zc_t5s_x14p`, grouped by d = class(m) - class(e) and by the parity of the
+quadruples - two products of a quarter of the work and half the size
+instead of one -, times the stacked operator [Wr rows (i a) | f_ov |
+<mu||ei'> | - <mw||ei'>], reduced into the rows (i, u, w) and sigma4; **the
+hh ladder** per block and parity group; **the rows of sigma5**, one triple
+at a time: X[(ab), (cde)] per group of (ab), one product of the stacked
+operands D1 - D8 (Wv | r4, t2 | XoR5, r3 | Xv2, Y4 | t3, XoRp | t3, t3 | Z4,
+t3 | XvR5, Xo3 | r3) in parts of at most a row on (a | bcde), then X[a,
+(bcde)] (E1: Wo | r4, E2: W2 | r4), each reduced once; **Xv5 and E1x**
+(Xv5(f; k; bcde) from r4, G5 | t3 and the rows (l, n, k) of r5; E1x: t2 |
+Xv5 into the rows (x, y, k)); sigma4 from the terms on (a | bcd).  Real
+arithmetic where the integrals are real, the same source for complex.
+
+**Z4** (Z4(mf; k; K) = sum <ml||fh> r4(lk; h K), 25 GB at cc-pVQZ-X2C-TP)
+is made in the pass of the rows, slab k by slab: on one rank in as many
+slots as there are indices in the triples of the rank if the work array
+has room for them (21.5; else at least three, the least recently used
+replaced); over ranks once over all ranks (21.4).  Before (2026-10-21) a
+slab was made again for almost every triple: 14.6 of 137 s per sigma
+vector at cc-pVTZ-X2C-TP.
+
+**Xv5 on one rank** (11.8 GB per k at cc-pVQZ-X2C-TP): all k at once when
+they take at most a quarter of the free work array (decided with the
+layout of the target, so that the plan of a sigma vector holds them):
+made before the rows, the term of r5 from every row once into the slabs
+of its three indices, E1x in the products of E1 (as `Engine5`).  Else k by
+k after the rows: a row expanded three times for the term of r5 and
+reduced three times for E1x (35 of 137 s at cc-pVTZ-X2C-TP).
+
+**The kernels and the batches.**  A batch of the ring (or a part of a row
+of the rows of sigma5) walks every quintuple of its rows, whatever blocks
+it fills; the rank-5 kernels make the places of an element (the table of
+the quadruples, `pos4`, C(v, 4) int32) only for the labels that some entry
+of the call uses (the ring at cc-pVTZ-X2C-TP on 8 threads 189 -> 140 s),
+and with 5p3h the batches of the passes go up to 4 GB (1 GB with 4p2h;
+the ring 140 -> 80 s).
+
+### 21.4 Over MPI ranks
+
+The rows of r5 go to the ranks by occupied triples: one range of triples
+per rank (`dtb`), the same for all targets, of about equal sums of the
+elements of their rows over the targets; a rank holds its rows of r4 (the
+pairs of section 20.6) and its rows of r5 - its part of every vector of
+the solver and of the subspace.  In a sigma vector: r4 of all rows on
+every rank (gathered, 2.8 GB at cc-pVQZ-X2C-TP), the terms of r5 in sigma4
+summed on their owners; the small intermediates summed over the ranks; the
+pp ladder and the hh ladder on the rows of the rank (the hh ladder
+exchanges the column pieces of a block); the ring: the spectator pairs go
+to the ranks in rounds (the deal of the ring of r4, 20.6), a rank takes
+the rows (m, u, w) of its pair from their owners and gives the rows (i, u,
+w) back (added there); the rows of sigma5: the triples of the rank.
+
+**Z4 over ranks**: the blocks (k, mu, fe) of the slabs that some rank
+needs go to the ranks by their cost (the largest first to the least loaded
+rank); a rank makes its blocks from the rows (l, k) of r4 (made once per
+k) and sends each to the ranks that need its slab (`N(xzd5z4sh)`) - when
+the slabs of every rank fit in its work array, else every rank makes the
+slabs it needs (the slots of one rank).  Before, every rank made the slabs
+of its indices itself: 6 of 81 s per sigma vector at cc-pVTZ-X2C-TP on 2
+ranks, not falling with the ranks.
+
+**The ranges of the triples** weigh the elements of a row and the
+multiply-adds of its pp ladder, sum_q nQ(q)^2 nK(M - q), at 2e5 per
+element (21.8: with the elements alone one rank of 8 had three times the
+pp ladder of the others at cc-pVQZ-X2C-TP).
+
+**Xv5 over ranks**: the index k of Xv5 has its ranks (`xzd5zgroups`).
+With at least as many ranks as occupied spinors every k is held by the
+group of ranks r with r mod no = k, which share the pairs (l, n) of the
+term of r5 and the pairs (x, y) of E1x and sum Xv5(.; k) over a
+sub-communicator (`xzmpi_sub_split`, `xzmpi_sub_allsum_w`); a rank takes
+the rows (l, n, k) from their owners and gives its rows (x, y, k) of
+sigma5 back.  The groups are equal only when the ranks are a multiple of
+the occupied spinors: with 16 ranks and 10 occupied spinors four k have
+one rank, which does the 36 pairs of its k alone.  With fewer ranks a rank
+holds the k with k mod ranks = its rank: all at once if their slabs fit -
+every row with one of them taken once, walked once for the term of r5 and
+once for E1x -, else slot by slot.  The rows go in as many per exchange as
+the work array has room for (`dea5xb`; one per exchange before 2026-10-21:
+14 of 88 s per sigma vector at cc-pVTZ-X2C-TP on 2 ranks were the waits of
+the synchronous rounds).
+
+### 21.5 Memory and disk
+
+The plan of section 20.4 with the arrays of 21.3: the quintuple pool, Z4,
+Xv5, XoR5, Y4, XvR5 and the buffers of the passes are in the dry run of a
+sigma vector; the batches of the passes bisected as in 20.4; the subspace
+takes what is left (in the work array, smaller, or in files - with
+`eomvdir` on the disk of every node).  **`deaplan`** prints the plan of
+every rank for 5p3h (also the largest regions at the peak of a sigma
+vector).  cc-pVQZ-X2C-TP (`pvqz_plan`), GB of the work array of the rank
+that takes the most:
+
+| ranks | stays | two parts (with the pool, 16 GB) | a sigma vector | part of a vector | total, subspace in files | vectors of 23 in 150 GB |
+|---|---|---|---|---|---|---|
+| 16 | 11.1 - 13.2 | 31.5 - 34.9 | 56.4 - 61.0 | 8.2 - 9.5 | 102 - 110 | 2 - 3 |
+| 24 | 10.6 - 11.7 | 24.4 - 28.4 | 53.3 - 59.9 | 4.8 - 6.7 | 92 - 101 | 3 - 6 |
+| 32 | 10.1 - 11.2 | 22.0 - 26.0 | 52.8 - 59.4 | 3.5 - 5.6 | 87 - 97 | 4 - 9 |
+| 48 | 9.3 - 10.3 | 19.5 - 23.2 | 52.3 - 58.9 | 2.2 - 3.5 | 84 - 94 | 8 - 15 |
+
+The peak of a sigma vector is the pp ladder at 16 ranks (a batch of 22 GB
+and its product), the ring from 24 ranks on (a batch 11 GB, its product 11
+GB, the rows of the spectator pair in and out 9 + 9 GB), on top of what
+stays (about 10 GB: B4, Xv2, r4 and the terms in sigma4 of all rows).
+Three things take more than the plan when the work array has room
+(`xzroom` of `xzmem.F90`: in a dry run only what is below the peak so far,
+so the plan holds their floor): the slots of Z4 (the floor three, or the
+slabs of the rank when made over the ranks), the rows of Xv5 and E1x in
+one exchange (the floor one) and, over fewer ranks than occupied spinors,
+Xv5 of all k of the rank; the work array is never exceeded, the resident
+set can be larger than the plan of a sigma vector (cc-pVTZ-X2C-TP on 4
+ranks: 82 GB of the work array used, 32 GB resident - the subspace of 23
+vectors not filled in two iterations).
+
+### 21.6 Validation
+
+**The sigma vector element by element against `Engine5.sigma`**
+(`bench/dea/native_check5.py <rundir> <binary> [--target t] [--batch n]
+[--complex] [--mpi n] [--piece p] [--xz option]`; `check5_runs.sh`,
+`check5_pieces.sh`), the largest difference of every part:
+
+| case | runs | 2p, 3p1h, 4p2h | 5p3h |
+|---|---|---|---|
+| O2 n26 (10 + 16) X2Ccorr, 2 Omega = 0, 2, -2 | serial; batches of 1 and 50 elements; MPI 1, 2, 3, 4, 10, 11, 13 ranks; small pools, `dea5z4 3`, `dea5xb 2`, `dea5xa 0` / 1 | <= 1.1e-14 | 1.4e-14 of 17 - 20 |
+| n26, random spinor phases (complex) | serial; 1, 2, 3, 11 ranks | <= 1.3e-14 | 1.6e-14 of 21 |
+| DYVDZ-SOG (10 + 42) X2Ccorr | serial; 2, 3, 4, 8, 13 ranks | 1.6e-13 of 55 | 1.8e-13 of 74 - 77 |
+| the pieces (pp ring hh x23 x14 e1x) alone | serial, MPI | - | 1e-15 |
+
+**Roots** (ESTATE_CONV 10):
+
+| case | native | Python sector | |
+|---|---|---|---|
+| n26, complex phases, the subspace in files of `eomvdir` (3 ranks) | -149.869782541593, -149.869766407516 | -149.86978254160, -149.86976640752 | split 3.5410 cm-1 |
+| DYVDZ-SOG X2Ccorr (serial) | -150.094871569832, -150.094854897417; split 1.6672415e-05 Eh | -150.09487156985, -150.09485489743; 1.6672424e-05 (dea_strings: 1.66724049e-05) | 3.6592 cm-1 |
+| cc-pVDZ-X2C-TP X2Ccorr (10 + 42; serial, 8 threads: 34 + 31 sigma vectors, 168 s with CCSDT) | -150.096289292237, -150.096272539749; split 1.6752487e-05 Eh | -150.09628929224, -150.09627253975; 1.6752489e-05 (52 + 40 sigma vectors, 707 s) | 3.6767 cm-1 |
+| cc-pVTZ-X2C-TP X2Ccorr (one node each, jobs 32331084, 32331086) | -150.228488820219, -150.228471307068; split 1.7513151e-05 Eh | -150.22848882023, -150.22847130708; 1.7513154e-05 | 3.8437 cm-1 |
+
+The 4p2h level is unchanged (DYVDZ-SOG -150.087442607823, -150.087426722255,
+20.5); `cfour/merge/test/run.sh`: PASS with the serial and the MPI binary.
+
+### 21.7 Timings
+
+**One node, against the Python sector** (`bench/dea/native5_bench.sbatch`:
+the Python sector's sigma vectors of random vectors first, then the native
+program in node-local /tmp, the serial binary on 48 threads; Xeon Gold
+6248R, 180 GB), cc-pVTZ-X2C-TP (10 + 106, 2 Omega = 0; 6.8e8 elements of r5
+stored):
+
+| | Python sector | native | |
+|---|---|---|---|
+| a sigma vector, job 32333565 (c456) | 202.0, 194.6 s (ring 71, rows 43, pp 35, small 16, pack and unpack 34) | 93.7 / 85.0 s with the solver, 2 Omega = 0 / 2 (rows 34.3 - of it the products 25.1 -, pp 24.4 - 11.5 -, ring 14.3 - 3.5 -, Xv5 and E1x 13.4, Z4 2.5, XoR5 2.1; the expansions and reductions 20.8) | 2.2x |
+| the same before 2026-10-21 (job 32331022, c074) | 140.1, 138.3 s | 136.7 / 125.7 s (Xv5 and E1x 34.9, Z4 14.6, ring 27.4) | 1.0x |
+| the roots of 2 Omega = 0 and 2 (the code before 2026-10-21) | 77 + 48 sigma vectors, 17 901 + 10 581 s (jobs 32325450, 32325451) | 45 + 40, 6 233 + 6 379 s (jobs 32331084, 32331086; 138.5, 159.5 s per sigma vector; 12 vectors of the subspace in the work array) | 2.9x, 1.7x |
+| memory | RSS 55.6 GB (5.7 GB fixed + 37 GB per sigma vector) | a sigma vector 9.4 GB of the work array (batches of 4.3 GB; Xv5 of all k 4.9 GB); 150 GB used with the subspace | |
+
+The Python times vary by a factor of 1.45 between nodes of the same type
+(the ring 40 s on c074, 71 s on c456); one job per comparison.  On 8
+threads (the holding job, one sigma vector of a random vector, `deasig`;
+24 GB of work array): 423 s before the masks of the kernels, 377 s with
+them, 312 s with batches of 3.2 GB (the ring 189, 140, 80 s).
+
+**Over nodes** (one rank of 48 threads per node, `native5_mpi.sbatch`, two
+iterations of 2 Omega = 0 - six sigma vectors -, the subspace in the work
+array; seconds per sigma vector with the solver):
+
+| nodes | job | per sigma vector | pp | ring | rows | Xv5 and E1x (of it the exchanges) | Z4 | speed-up |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 32334622 (c207) | 90.8 | 25.3 | 11.5 | 33.0 | 14.0 (Xv5 of all k) | 0.9 | 1 |
+| 2 | 32334855 | 63.9 | 12.1 | 9.8 | 10.7 | 18.2 (4.1) | 0.3 | 1.42 |
+| 4 | 32334862 | 36.3 | 7.3 | 5.4 | 6.5 | 11.3 (0.6) | 0.2 | 2.50 |
+| 8 | 32334863 | 25.2 | 3.3 | 2.9 | 2.8 | 10.4 (3.9) | 0.1 | 3.61 |
+
+The passes of the rows of r5 (pp, ring, rows) scale with the ranks (7.8x
+from 1 to 8 nodes for the three together); Xv5 and E1x do not: with fewer
+ranks than occupied spinors (10) a rank holds Xv5 of its k (k mod ranks)
+and takes, walks and gives back every row with one of them - most rows on
+every rank (on 8 ranks two ranks have two k, the others one: the waits of
+the exchanges).  With slot by slot (before; job 32334257, 2 nodes) Xv5 and
+E1x took 25.8 s.  On the node
+c058 (jobs 32333658, 32334057; its cores at 2.7 GHz against 4.0 GHz of
+the other node) the rows of its rank took more than 25 minutes instead of
+14 s, with or without Z4 made over the ranks, while the other rank waited
+in the exchanges of Xv5; the same binary on two other nodes ran normally
+(job 32334257): the jobs exclude c058.
+
+### 21.8 O2 / cc-pVQZ-X2C-TP
+
+10 + 206 spinors, 9 classes, real; the block file `pvqz5`
+(`/scratch16/lcheng24/xwang405/x2cblk/pvqz5/o2_hf2plus_pvqz_x2c_tp_n216_x2ccorr.h5`,
+made again with this code: no parity adaption needed; h1 and the
+integrals equal those of the earlier file to 2.5e-11, 1.7e-11), 2 Omega =
+0: a vector of 2p .. 4p2h 3.5e8 elements (2.8 GB), r5 3.36e10 in the
+blocks, 1.68e10 stored (134 GB), the quintuple lists 16 GB, Xv5 of one k
+11.8 GB, Z4 25 GB.  CCSDT: 28 iterations, 2.5 s each on 8 nodes.
+
+**Timing runs** (`native5_mpi.sbatch`, one rank of 48 threads per node,
+`guess 2` and `ESTATE_MAXCYC 1`: three sigma vectors of 2 Omega = 0; the
+subspace in files on the node-local disks, `eomvdir /tmp/...`):
+
+| nodes | job | per sigma vector | pp | ring (exchanges) | rows | Xv5 and E1x (exchanges) | the sums after pp | resident per rank |
+|---|---|---|---|---|---|---|---|---|
+| 8 (ranges by elements) | 32335035 | 1537 s | 146 - 197 (rank 5: 559) | 247 (74 - 168) | 69 - 116 | 382 - 434 (216 - 323) | 366 - 417 (rank 5: 1) | 115 - 124 GB, the work array 142.5 GB used to 99.6 % |
+| 8 (ranges by cost) | 32337242 | 1188 s | 154 - 253 | 240 (108) | 64 - 104 | 337 - 377 (183) | 87 | 149 - 151 GB of 154.5 GB |
+
+**The subspace in files** (10 ranks: 2 x 14.8 GB per vector on every
+node; `eomvdir` on the node-local NVMe, 3.3 GB/s for one stream with
+direct I/O): the first production attempt (jobs 32339180, 32339197) read
+the chunks of the vectors one file after the other with Fortran stream
+reads, about 1.2 GB/s; with 5 - 8 vectors an iteration took 20 - 27 min,
+13.5 of them the sigma vector, and the projection was more than the 24 h
+of the job.  Now the chunks of all vectors are read at once (`xz_pread_n`,
+one file per thread) and the second Gram-Schmidt pass is made only if the
+first lost more than 1/sqrt(2) of the norm (with the subspace in files
+only): 15.3 and 15.8 min with 5 and 6 vectors.
+
+On 8 ranks one rank (5) spent 559 s in the pp ladder, the others 146 -
+197 s: the ranges of triples balanced the elements of the rows, not the
+products of the pp ladder, which go by sum_q nQ(q)^2 nK(M - q) and differ
+between the blocks by a factor of about three per element; the others
+waited for it in the sums after the pp ladder (366 - 417 s).  The ranges
+now weigh both (`xzd5ranges`).  Xv5 and E1x on 8 ranks: two ranks hold two
+k, the others one (k mod 8), and take most rows; with as many ranks as a
+multiple of the occupied spinors (10, 20, 30, 40) every k has the same
+number of ranks, which share its pairs.
+
+**Production** (`pvqz_p0`, `pvqz_p2`: one job per target, 10 nodes - one
+rank per occupied spinor, so every k of Xv5 has one rank -, `ESTATE_CONV`
+10, `ESTATE_MAXCYC` 120, the CCSDT amplitudes of the timing run, the
+subspace of 23 vectors in files on the node-local disks; jobs 32341358,
+32341359):
+
+| | 2 Omega = 0 | 2 Omega = 2 |
+|---|---|---|
+| omega / Eh | -1.36584590431882 | -1.36582829387180 |
+| total energy / Eh | -150.27123239578694 | -150.27121478533991 |
+| residual: largest element, norm | 8.5e-11, 1.4e-9 | 4.7e-11, 5.1e-10 |
+| weights 2p, 3p1h, 4p2h | 0.8341, 0.1462, 0.0196 (the same to 1e-4 for both) | |
+| sigma vectors, iterations | 39, 37 | 38, 36 |
+| per sigma vector with the solver | 1259 s (pp 143, ring 163, rows 76, Xv5 and E1x 277 - of it 177 the exchanges and their waits) | 1067 s |
+| the job | 13 h 39 min, 137 node-hours | 11 h 19 min, 113 node-hours |
+| memory of a rank | the work array 149.8 GB used to 99.9 %, resident 143 - 148 GB | 155.0 GB, 142 - 148 GB |
+
+E(SCF) -148.323303488725, E(CCSDT) -148.905386491468.  The zero-field
+splitting E(2) - E(0) = 1.7610447e-05 Eh = **3.8650 cm-1** (cc-pVTZ-X2C-TP
+3.8437, cc-pVDZ-X2C-TP 3.6767 cm-1; factor 219474.6313632).  The results:
+`zccsdt_results/dea5_xc_pvqz_x2c_tp.json` and the outputs `_t0.out`,
+`_t2.out` in `/scratch4/lcheng24/xwang405/o2zfs_coord/`.  250 node-hours
+for both targets; before them the first attempt (the slow reads of the
+subspace, 48 node-hours) and the timing runs (21 node-hours).
+
+### 21.9 Not done
+
+- The expansions and reductions of the rows of r5 are a large part of the
+  passes (21 of 85 s at cc-pVTZ-X2C-TP on 48 threads, besides the
+  products of the rows and of the pp ladder): every row
+  is expanded and reduced six times in the ring (three spectator pairs),
+  twice in the pp ladder and in the rows, and the kernels walk the
+  quintuple lists element by element.
+- Over ranks Xv5 is held per k by groups of ranks; the term of r5 and E1x
+  move every row three times each way (the Python route - the term of r5
+  in the ring, E1x in E1 - needs Xv5 of all k on every rank: 117 GB at
+  cc-pVQZ-X2C-TP).
+- The rounds of the ring and of Xv5 are synchronous; nothing overlaps the
+  exchanges with the products.  At cc-pVQZ-X2C-TP on 10 ranks the
+  exchanges of Xv5 and E1x and their waits took 177 s, those of the ring
+  90 s of a sigma vector of 1259 s.
+- The subspace in files is read about six times per new vector (14.8 GB
+  per vector and rank at cc-pVQZ-X2C-TP on 10 ranks: with 23 vectors an
+  iteration took 25 min instead of 14); a restart from the vectors of a
+  stopped run is not there - a job must hold all iterations of a target.
+- The T of CCSDTQ in the sector; DIP; left-hand vectors; the vectors of the
+  roots in a file.

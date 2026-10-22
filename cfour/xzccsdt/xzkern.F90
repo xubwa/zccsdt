@@ -39,6 +39,27 @@ module xzkern
       integer(c_int64_t) :: cnt
     end function
 
+    ! the quintuples a<b<c<d<e of n indices with labels summing to m (csrc/t4sym.c):
+    ! their number, written to out[.][5] (16-bit integers; the address) unless it is 0
+    function zc_t5s_quints(n, kv, m, out) bind(C) result(cnt)
+      import
+      integer(c_int), value :: n, m
+      type(*), dimension(*) :: kv
+      integer(c_intptr_t), value :: out
+      integer(c_int64_t) :: cnt
+    end function
+
+    ! the same on all threads (cnt: work, n + 1 integers); par (the address of a
+    ! parity 0 / 1 per index; 0: all quintuples): those whose parities add to want
+    function zc_t5s_quints_par(n, kv, m, out, cnt, par, want) bind(C) result(c)
+      import
+      integer(c_int), value :: n, m, want
+      type(*), dimension(*) :: kv
+      integer(c_intptr_t), value :: out, par
+      integer(c_int64_t) :: cnt(*)
+      integer(c_int64_t) :: c
+    end function
+
     subroutine zc_tn_zero(p, nbytes) bind(C)
       import
       type(*), dimension(*) :: p
@@ -53,10 +74,36 @@ module xzkern
     end subroutine
 
     ! bytes that the file system of the directory `path' has free (-1: unknown)
+    ! the directory path (and those above it), as mkdir -p: 0 if it is there
+    function xz_mkdir(path) bind(C) result(r)
+      import
+      character(kind=c_char) :: path(*)
+      integer(c_int64_t) :: r
+    end function
+
     function xz_free_disk(path) bind(C) result(nbytes)
       import
       character(kind=c_char) :: path(*)
       integer(c_int64_t) :: nbytes
+    end function
+
+    ! a file for reading (its descriptor, -1: not opened), its closing; n
+    ! chunks of nbytes from the byte off of the files fd(i) to the addresses
+    ! dst(i), on all threads (0: done)
+    function xz_open_ro(path) bind(C) result(fd)
+      import
+      character(kind=c_char) :: path(*)
+      integer(c_int64_t) :: fd
+    end function
+    subroutine xz_close_fd(fd) bind(C)
+      import
+      integer(c_int64_t), value :: fd
+    end subroutine
+    function xz_pread_n(n, fd, off, nbytes, dst) bind(C) result(nbad)
+      import
+      integer(c_int64_t), value :: n, off, nbytes
+      integer(c_int64_t) :: fd(*), dst(*)
+      integer(c_int64_t) :: nbad
     end function
 
     ! the file `from' takes the name `to' (0: done)

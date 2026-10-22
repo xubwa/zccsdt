@@ -39,6 +39,8 @@
 #include <omp.h>
 
 #define CHUNK 256
+/* the labels of the masks of the rank-5 kernels (more: no mask) */
+#define NLAB 256
 
 /* the quadruples a<b<c<d of n indices with kv[a] + kv[b] + kv[c] + kv[d] = M
  * (kv ascending): their number; written to out[.., 4] unless it is NULL */
@@ -326,6 +328,12 @@ void zc_t5s_x23_##SFX(int mode, T *R, int64_t ldR, const int16_t *quints,      \
 {                                                                              \
     const int64_t nA3 = (int64_t)n * (n - 1) * (n - 2) / 6;                    \
     const int64_t nchunk = (nA + CHUNK - 1) / CHUNK;                           \
+    /* the labels that some entry uses (the places of the others not made) */  \
+    char act[NLAB];                                                            \
+    for (int l = 0; l < nq && l < NLAB; l++) {                                 \
+        act[l] = 0;                                                            \
+        for (int64_t e = 0; e < nent; e++) if (xoff[e * nq + l] >= 0) act[l] = 1;\
+    }                                                                          \
     _Pragma("omp parallel for schedule(dynamic, 4)")                           \
     for (int64_t ch = 0; ch < nchunk; ch++) {                                  \
         const int64_t A0 = ch * CHUNK, A1 = A0 + CHUNK < nA ? A0 + CHUNK : nA; \
@@ -338,6 +346,7 @@ void zc_t5s_x23_##SFX(int mode, T *R, int64_t ldR, const int16_t *quints,      \
                 const int r = v[G23[s][2]], t = v[G23[s][3]], u = v[G23[s][4]]; \
                 const int64_t y1 = n - 1 - r, y2 = n - 1 - t;                  \
                 lab[A - A0][s] = kv[p] + kv[q];                                \
+                if (lab[A - A0][s] < NLAB && !act[lab[A - A0][s]]) continue;   \
                 p1[A - A0][s] = posQ[(int64_t)p * n + q];                      \
                 p2[A - A0][s] = pos3[nA3 - 1 - y1 * (y1 - 1) * (y1 - 2) / 6    \
                                      - y2 * (y2 - 1) / 2 - (n - 1 - u)];       \
@@ -378,6 +387,12 @@ void zc_t5s_x14_##SFX(int mode, T *R, int64_t ldR, const int16_t *quints,      \
 {                                                                              \
     const int64_t nA4 = (int64_t)n * (n - 1) * (n - 2) * (n - 3) / 24;         \
     const int64_t nchunk = (nA + CHUNK - 1) / CHUNK;                           \
+    /* the labels that some entry uses (the places of the others not made) */  \
+    char act[NLAB];                                                            \
+    for (int l = 0; l < ncls && l < NLAB; l++) {                               \
+        act[l] = 0;                                                            \
+        for (int64_t e = 0; e < nent; e++) if (xoff[e * ncls + l] >= 0) act[l] = 1;\
+    }                                                                          \
     _Pragma("omp parallel for schedule(dynamic, 4)")                           \
     for (int64_t ch = 0; ch < nchunk; ch++) {                                  \
         const int64_t A0 = ch * CHUNK, A1 = A0 + CHUNK < nA ? A0 + CHUNK : nA; \
@@ -390,6 +405,7 @@ void zc_t5s_x14_##SFX(int mode, T *R, int64_t ldR, const int16_t *quints,      \
                 for (int x = 0; x < 5; x++) if (x != s) w[k++] = v[x];         \
                 const int64_t y0 = n - 1 - w[0], y1 = n - 1 - w[1], y2 = n - 1 - w[2]; \
                 lab[A - A0][s] = kv[v[s]];                                     \
+                if (lab[A - A0][s] < NLAB && !act[lab[A - A0][s]]) continue;   \
                 p1[A - A0][s] = posV[v[s]];                                    \
                 p2[A - A0][s] = pos4[nA4 - 1 - y0 * (y0 - 1) * (y0 - 2) * (y0 - 3) / 24 \
                                      - y1 * (y1 - 1) * (y1 - 2) / 6 - y2 * (y2 - 1) / 2 \
@@ -426,3 +442,126 @@ void zc_t5s_x14_##SFX(int mode, T *R, int64_t ldR, const int16_t *quints,      \
 
 DEFINE_T5S(double, d)
 DEFINE_T5S(double complex, z)
+
+/* zc_t5s_x14p: zc_t5s_x14 with the products split by parity (the native
+ * EOM-DEA with 5p3h, the ring): the operand or the result of a split (a |
+ * bcde) of a row is one block per label l of a and parity p of a - the
+ * quadruples of one parity, the parity of the row less p -, the block
+ * xoff[e][2 l + p] with the strides s1[e][2 l + p], s2[e][2 l + p], a at
+ * posVp[a] (its place among the indices of its label and parity), the
+ * quadruple at pos4p[rank] (its place among the quadruples of its label and
+ * parity); par: the parity of every index. */
+#define DEFINE_T5SP(T, SFX)                                                    \
+void zc_t5s_x14p_##SFX(int mode, T *R, int64_t ldR, const int16_t *quints,     \
+        int64_t nA, int64_t nent, const int64_t *row, const double *sgn,       \
+        const int64_t *xoff, const int64_t *s1, const int64_t *s2, int ncls,   \
+        int n, const int32_t *kv, const int32_t *par, const int32_t *posVp,    \
+        const int32_t *pos4p, T *X)                                            \
+{                                                                              \
+    const int64_t nA4 = (int64_t)n * (n - 1) * (n - 2) * (n - 3) / 24;         \
+    const int64_t nchunk = (nA + CHUNK - 1) / CHUNK;                           \
+    const int nl = 2 * ncls;                                                   \
+    /* the labels that some entry uses (the places of the others not made) */  \
+    char act[NLAB];                                                            \
+    for (int l = 0; l < nl && l < NLAB; l++) {                                 \
+        act[l] = 0;                                                            \
+        for (int64_t e = 0; e < nent; e++) if (xoff[e * nl + l] >= 0) act[l] = 1;\
+    }                                                                          \
+    _Pragma("omp parallel for schedule(dynamic, 4)")                           \
+    for (int64_t ch = 0; ch < nchunk; ch++) {                                  \
+        const int64_t A0 = ch * CHUNK, A1 = A0 + CHUNK < nA ? A0 + CHUNK : nA; \
+        int lab[CHUNK][5];                                                     \
+        int64_t p1[CHUNK][5], p2[CHUNK][5];                                    \
+        for (int64_t A = A0; A < A1; A++) {                                    \
+            const int16_t *v = quints + 5 * A;                                 \
+            for (int s = 0; s < 5; s++) {                                      \
+                int w[4], k = 0;                                               \
+                for (int x = 0; x < 5; x++) if (x != s) w[k++] = v[x];         \
+                const int64_t y0 = n - 1 - w[0], y1 = n - 1 - w[1], y2 = n - 1 - w[2]; \
+                lab[A - A0][s] = 2 * kv[v[s]] + par[v[s]];                     \
+                if (lab[A - A0][s] < NLAB && !act[lab[A - A0][s]]) continue;   \
+                p1[A - A0][s] = posVp[v[s]];                                   \
+                p2[A - A0][s] = pos4p[nA4 - 1 - y0 * (y0 - 1) * (y0 - 2) * (y0 - 3) / 24 \
+                                      - y1 * (y1 - 1) * (y1 - 2) / 6 - y2 * (y2 - 1) / 2 \
+                                      - (n - 1 - w[3])];                       \
+            }                                                                  \
+        }                                                                      \
+        for (int64_t e = 0; e < nent; e++) {                                   \
+            T *Rr = R + row[e] * ldR;                                          \
+            const int64_t *xo = xoff + e * nl, *t1 = s1 + e * nl, *t2 = s2 + e * nl; \
+            const double sg = sgn[e];                                          \
+            for (int64_t A = A0; A < A1; A++) {                                \
+                const int64_t c = A - A0;                                      \
+                if (mode) {                                                    \
+                    T acc = 0;                                                 \
+                    for (int s = 0; s < 5; s++) {                              \
+                        const int l = lab[c][s];                               \
+                        if (xo[l] < 0) continue;                               \
+                        const T x = X[xo[l] + p1[c][s] * t1[l] + p2[c][s] * t2[l]]; \
+                        if (s & 1) acc -= x; else acc += x;                    \
+                    }                                                          \
+                    Rr[A] += sg * acc;                                         \
+                } else {                                                       \
+                    const T t = sg * Rr[A];                                    \
+                    for (int s = 0; s < 5; s++) {                              \
+                        const int l = lab[c][s];                               \
+                        if (xo[l] < 0) continue;                               \
+                        X[xo[l] + p1[c][s] * t1[l] + p2[c][s] * t2[l]] = (s & 1) ? -t : t; \
+                    }                                                          \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_T5SP(double, d)
+DEFINE_T5SP(double complex, z)
+
+/* zc_t5s_quints on all threads (the native program makes the lists of the
+ * blocks of r5 when it uses them, cfour/xzccsdt/xzdea5.inc): the quintuples
+ * of each first index a counted, then written at their places; the same
+ * list as zc_t5s_quints - or, with par (a parity 0 / 1 per index; not
+ * NULL), its quintuples whose parities add to the parity want, in the same
+ * order (the columns of r5 that a row of one parity has).  cnt: work, n + 1
+ * integers. */
+static int64_t t5s_from(int n, const int32_t *kv, int M, int a, const int32_t *par, int want, int16_t *out)
+{
+    int64_t c = 0;
+    for (int b = a + 1; b < n - 3; b++)
+    for (int cc = b + 1; cc < n - 2; cc++)
+    for (int d = cc + 1; d < n - 1; d++) {
+        const int ke = M - kv[a] - kv[b] - kv[cc] - kv[d];
+        if (ke < kv[d + 1] || ke > kv[n - 1]) continue;
+        int lo = d + 1, hi = n;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (kv[mid] >= ke) hi = mid; else lo = mid + 1;
+        }
+        const int p4 = par ? par[a] + par[b] + par[cc] + par[d] : 0;
+        for (int e = lo; e < n && kv[e] == ke; e++) {
+            if (par && ((p4 + par[e]) & 1) != want) continue;
+            if (out) {
+                int16_t *o = out + 5 * c;
+                o[0] = (int16_t)a; o[1] = (int16_t)b; o[2] = (int16_t)cc;
+                o[3] = (int16_t)d; o[4] = (int16_t)e;
+            }
+            c++;
+        }
+    }
+    return c;
+}
+
+int64_t zc_t5s_quints_par(int n, const int32_t *kv, int M, int16_t *out, int64_t *cnt, const int32_t *par,
+                          int want)
+{
+    if (n < 5) return 0;
+    cnt[0] = 0;
+    _Pragma("omp parallel for schedule(dynamic)")
+    for (int a = 0; a < n - 4; a++) cnt[a + 1] = t5s_from(n, kv, M, a, par, want, NULL);
+    for (int a = 0; a < n - 4; a++) cnt[a + 1] += cnt[a];
+    if (out) {
+        _Pragma("omp parallel for schedule(dynamic)")
+        for (int a = 0; a < n - 4; a++) t5s_from(n, kv, M, a, par, want, out + 5 * cnt[a]);
+    }
+    return cnt[n - 4];
+}

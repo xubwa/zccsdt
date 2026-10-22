@@ -29,6 +29,7 @@ subroutine N(xzdsig)(w, kv, ks)
   use xzmem
   use xzkern
   use xzdead
+  use xzdead5, only: d4e, d4own
   use xzpar, only: myrank, nrank, xzmpi_bcast_w, xzmpi_allsum_w, xzmpi_sum0_w
   use xzeomd, only: esoff
   use omp_lib
@@ -36,20 +37,30 @@ subroutine N(xzdsig)(w, kv, ks)
   real(8), target :: w(*)
   integer(8), intent(in) :: kv, ks
   integer(8) :: m0, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwor, kq3, kxor, kzr, ku, kz, ktu, k2, k3, k4
-  integer(8) :: s2, s3, s4, e0
+  integer(8) :: s2, s3, s4, e0, e4, k5, s5
   logical, allocatable :: zrhave(:, :)
   real(8) :: t0, t1
   ! (over the ranks a rank holds r2, r3 and its rows of r4, e0 .. of r4: the
   ! addresses kv, ks are those of whole vectors, of which only these parts
-  ! are there - N(xzdshift))
+  ! are there - N(xzdshift); level 5p3h: its rows of r4 and of the stored r5,
+  ! e0 the rank-major place of these parts, e4 that of its rows in r4)
   e0 = 0
   if (ddist) e0 = esoff(myrank)
+  e4 = e0
+  if (dlev == 5) e4 = d4e(myrank)
   k2 = kv + NW * e0
   k3 = k2 + NW * dn2
-  k4 = kv + NW * (dn2 + dsz3)
+  k4 = kv + NW * (dn2 + dsz3 + e0 - e4)
   s2 = ks + NW * e0
   s3 = s2 + NW * dn2
-  s4 = ks + NW * (dn2 + dsz3)
+  s4 = ks + NW * (dn2 + dsz3 + e0 - e4)
+  k5 = 0
+  s5 = 0
+  if (dlev == 5) then
+    ! (the stored rows of r5 of this rank behind its rows of r4)
+    k5 = kv + NW * (dn2 + dsz3 + e0 + d4own)
+    s5 = ks + NW * (dn2 + dsz3 + e0 + d4own)
+  end if
   m0 = xzmark()
   kr2 = xzget(NW * nv * nv, 'DEA: r2 on all pairs')
   kx3r = xzget(NW * x3size, 'DEA: r3 on (a | bc)')
@@ -78,7 +89,7 @@ subroutine N(xzdsig)(w, kv, ks)
       tdpart(12) = tdpart(12) + omp_get_wtime() - t0
     end if
     call zc_vzero_d(NW * (dn2 + dsz3), w(s2))
-    call zc_vzero_d(NW * (xzdpart() - dn2 - dsz3), w(s4 + NW * e0))
+    call zc_vzero_d(NW * (xzdpart() - dn2 - dsz3), w(s4 + NW * e4))
     call N(xzdsmall)(w, k2, k3, kr2, kx3r, kx3s, kht, kwhr, kyr, khm, ky3, kwor, kq3, kxor, kzr, zrhave, ku, kz, ktu)
     ! (over the ranks XoR and XvR are partial sums: summed below, after the
     ! thin products of the pp ladder and of the ring have been added)
@@ -115,6 +126,8 @@ subroutine N(xzdsig)(w, kv, ks)
   end if
   if (.not. ddist .or. myrank == 0) call N(xzdrow2)(w, k2, kx3r, s2)
   if (.not. xzdry .and. (.not. ddist .or. myrank == 0)) tdpart(7) = tdpart(7) + omp_get_wtime() - t1
+  ! the terms of r5 and the 5p3h row (level 5p3h)
+  if (dlev == 5) call N(xzd5sig)(w, k3, kr2, kx3r, kyr, kz, kwhr, k4, s3, s4, k5, s5)
   call N(xzdproj)(w, ks)
   if (.not. xzdry) ndeasig = ndeasig + 1
   deallocate(zrhave)
@@ -1566,11 +1579,13 @@ subroutine N(xzdproj)(w, kx)
   use xzdata
   use xzmem
   use xzdead
+  use xzdead5, only: d4e
+  use xzeomd, only: esoff
   use xzpar, only: myrank
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: kx
-  integer(8) :: m0, kp, k, nk, nr, c, r, a, t, mm, q, p0, pr, i0, ra, rb
+  integer(8) :: m0, kp, k, nk, nr, c, r, a, t, mm, q, p0, pr, i0, ra, rb, sh4
   logical :: r23
   integer(2), pointer :: tri(:, :), quads(:, :)
   integer(8), pointer :: vpa(:), vpb(:), opa(:), opb(:)
@@ -1592,13 +1607,16 @@ subroutine N(xzdproj)(w, kx)
     return
   end if
   call cp1view(w, kp, nmax, cp)
-  call N(xzdv)(w, kx, dn2 + dsz3 + dsz4, x)
+  call N(xzdv)(w, kx, dn2 + dsz3 + dsz4 + dvec5, x)
   call xzdi2v2(w, dquads, 4_8, max(nqall, 1_8), quads)
   call xzdiv(w, jvpa, nvp, vpa)
   call xzdiv(w, jvpb, nvp, vpb)
   call xzdiv(w, jopa, npo, opa)
   call xzdiv(w, jopb, npo, opb)
   r23 = .not. ddist .or. myrank == 0
+  ! (level 5p3h over the ranks: the rows of r4 of this rank at their rank-major place)
+  sh4 = 0
+  if (dlev == 5 .and. ddist) sh4 = esoff(myrank) - d4e(myrank)
   do t = 0, dn2 - 1
     if (.not. r23) exit
     q = vpoff(ds) + t
@@ -1638,7 +1656,7 @@ subroutine N(xzdproj)(w, kx)
       p0 = opoff(c) + r
       pr = dpo(opa(p0)) + dpo(opb(p0)) + dtpar
       do a = 0, nk - 1
-        if (mod(cp(a) + pr, 2_8) /= 0) x(dn2 + dsz3 + off4(mm) + r * nk + a) = 0
+        if (mod(cp(a) + pr, 2_8) /= 0) x(dn2 + dsz3 + sh4 + off4(mm) + r * nk + a) = 0
       end do
     end do
   end do
@@ -1664,12 +1682,14 @@ subroutine N(xzdprec)(w, kx, omega)
   use xzmem
   use xzkern
   use xzdead
+  use xzdead5, only: d4e, d4own
+  use xzeomd, only: esoff
   use xzpar, only: myrank
   implicit none
   real(8), target :: w(*)
   integer(8), intent(in) :: kx
   ZT, intent(in) :: omega
-  integer(8) :: m0, kc, k, nk, nr, c, r, a, t, mm, q, p0, i0, nmax, ra, rb
+  integer(8) :: m0, kc, k, nk, nr, c, r, a, t, mm, q, p0, i0, nmax, ra, rb, sh4, e0
   logical :: r23
   real(8), pointer :: cs(:), eps(:)
   integer(2), pointer :: tri(:, :), quads(:, :)
@@ -1698,6 +1718,11 @@ subroutine N(xzdprec)(w, kx, omega)
   call xzdiv(w, jopb, npo, opb)
   allocate(ro(0:max(npo, no, 1_8) - 1))
   r23 = .not. ddist .or. myrank == 0
+  ! (level 5p3h over the ranks: the rows of r4 of this rank at their rank-major place)
+  sh4 = 0
+  e0 = 0
+  if (ddist) e0 = esoff(myrank)
+  if (dlev == 5 .and. ddist) sh4 = esoff(myrank) - d4e(myrank)
   ! r2
   if (dn2 > 0 .and. r23) then
     do t = 0, dn2 - 1
@@ -1741,9 +1766,11 @@ subroutine N(xzdprec)(w, kx, omega)
       p0 = opoff(c) + r
       ro(r - ra) = eps(opa(p0)) + eps(opb(p0))
     end do
-    call N(zc_vprecond)(w(kx + NW * (dn2 + dsz3 + off4(mm) + ra * nk)), rb - ra, nk, ro, cs, omega, floor)
+    call N(zc_vprecond)(w(kx + NW * (dn2 + dsz3 + sh4 + off4(mm) + ra * nk)), rb - ra, nk, ro, cs, omega, floor)
   end do
   deallocate(ro)
+  ! r5 (level 5p3h): the stored rows of this rank behind its rows of r4
+  if (dlev == 5) call N(xzd5prec)(w, kx + NW * (dn2 + dsz3 + e0 + d4own), omega)
   call xzrel(m0)
 contains
   subroutine r8view(w, k, n, p)
