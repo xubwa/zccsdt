@@ -87,6 +87,25 @@ module xzkern
       integer(c_int64_t) :: nbytes
     end function
 
+    ! a file for reading (its descriptor, -1: not opened), its closing; n
+    ! chunks of nbytes from the byte off of the files fd(i) to the addresses
+    ! dst(i), on all threads (0: done)
+    function xz_open_ro(path) bind(C) result(fd)
+      import
+      character(kind=c_char) :: path(*)
+      integer(c_int64_t) :: fd
+    end function
+    subroutine xz_close_fd(fd) bind(C)
+      import
+      integer(c_int64_t), value :: fd
+    end subroutine
+    function xz_pread_n(n, fd, off, nbytes, dst) bind(C) result(nbad)
+      import
+      integer(c_int64_t), value :: n, off, nbytes
+      integer(c_int64_t) :: fd(*), dst(*)
+      integer(c_int64_t) :: nbad
+    end function
+
     ! the file `from' takes the name `to' (0: done)
     function xz_rename(from, to) bind(C) result(ierr)
       import

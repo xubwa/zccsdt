@@ -42,6 +42,38 @@ int64_t xz_mkdir(const char *path)
     return stat(buf, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : 1;
 }
 
+/* a file for reading: its descriptor (-1: it cannot be opened) */
+int64_t xz_open_ro(const char *path)
+{
+    return (int64_t)open(path, O_RDONLY);
+}
+
+void xz_close_fd(int64_t fd)
+{
+    if (fd >= 0) close((int)fd);
+}
+
+/* nbytes from the byte off of each of the n files fd[i] to the address
+ * dst[i], the files on all threads at once (the vectors of the EOM subspace
+ * in files: one chunk of every vector; a disk reads several streams faster
+ * than one).  0: done; else the number of files that came short. */
+int64_t xz_pread_n(int64_t n, const int64_t *fd, int64_t off, int64_t nbytes, const int64_t *dst)
+{
+    int64_t bad = 0;
+    #pragma omp parallel for schedule(dynamic, 1) reduction(+:bad)
+    for (int64_t i = 0; i < n; i++) {
+        char *p = (char *)(intptr_t)dst[i];
+        int64_t got = 0;
+        while (got < nbytes) {
+            ssize_t r = pread((int)fd[i], p + got, (size_t)(nbytes - got), (off_t)(off + got));
+            if (r <= 0) break;
+            got += r;
+        }
+        if (got != nbytes) bad++;
+    }
+    return bad;
+}
+
 /* the file `from' takes the name `to', replacing a file of that name (0: done) */
 int64_t xz_rename(const char *from, const char *to)
 {

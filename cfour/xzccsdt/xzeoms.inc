@@ -177,12 +177,20 @@ end subroutine
 ! the files are closed and deleted
 subroutine N(xzevclose)()
   use xzeomd
+  use xzkern
   use xzpar, only: myrank
   implicit none
   integer(8) :: j
   integer :: ios
   if (ecmd .and. myrank == 0) call xzecmd(op_close)
   if (evfile) then
+    if (allocated(evfd)) then
+      do j = 1, size(evfd, 2, kind=8)
+        call xz_close_fd(evfd(1, j))
+        call xz_close_fd(evfd(2, j))
+      end do
+      deallocate(evfd)
+    end if
     do j = 1, evnc
       close(xzevunit(1, j), status='delete', iostat=ios)
     end do
@@ -200,6 +208,7 @@ end subroutine
 subroutine N(xzevput)(w, kind, j, kx)
   use xzdata
   use xzeomd
+  use xzkern
   use xzpar, only: myrank
   use omp_lib
   implicit none
@@ -221,6 +230,13 @@ subroutine N(xzevput)(w, kind, j, kx)
   end if
   t0 = omp_get_wtime()
   u = xzevunit(kind, j)
+  ! (the descriptor of the parallel reads goes with the file it was opened on)
+  if (allocated(evfd)) then
+    if (j <= size(evfd, 2, kind=8)) then
+      call xz_close_fd(evfd(kind, j))
+      evfd(kind, j) = -1
+    end if
+  end if
   open(unit=u, file=trim(xzevpath(kind, j)), form='unformatted', access='stream', status='replace', iostat=ios)
   if (ios == 0) write(u, iostat=ios) w(kl:kl + NW * evlen - 1)
   if (ios == 0) flush(u, iostat=ios)
@@ -278,7 +294,7 @@ subroutine N(xzevchunk)(w, kind, n, off, nc, ptr)
   integer(8), intent(in) :: n, off, nc
   integer(c_intptr_t), intent(out) :: ptr(*)
   integer(8) :: j, k
-  integer :: ios
+  integer(c_int64_t) :: dst(max(n, 1_8))
   real(8) :: t0
   if (.not. evfile .or. kind > 2) then
     do j = 1, n
@@ -288,15 +304,28 @@ subroutine N(xzevchunk)(w, kind, n, off, nc, ptr)
     return
   end if
   t0 = omp_get_wtime()
+  ! the chunk of every vector, the files read at once (xz_pread_n)
+  if (.not. allocated(evfd)) then
+    allocate(evfd(2, max(evcap, n, 64_8)))
+    evfd = -1
+  else if (size(evfd, 2, kind=8) < n) then
+    write(6, '(/,a)') ' @XZCCSDT-F, more vectors of the EOM subspace in files than descriptors.'
+    call xzerrex
+  end if
   do j = 1, n
     k = evbuf + (j - 1) * NW * evnch
-    read(xzevunit(kind, j), pos=1 + 8 * NW * off, iostat=ios) w(k:k + NW * nc - 1)
-    if (ios /= 0) then
-      write(6, '(/,a,a,a,i8)') ' @XZCCSDT-F, reading the file ', trim(xzevpath(kind, j)), ' failed, iostat ', ios
+    ptr(j) = loc(w(k))
+    dst(j) = loc(w(k))
+    if (evfd(kind, j) < 0) evfd(kind, j) = xz_open_ro(trim(xzevpath(kind, j)) // c_null_char)
+    if (evfd(kind, j) < 0) then
+      write(6, '(/,a,a)') ' @XZCCSDT-F, the file cannot be opened for reading: ', trim(xzevpath(kind, j))
       call xzerrex
     end if
-    ptr(j) = loc(w(k))
   end do
+  if (xz_pread_n(n, evfd(kind, 1:n), 8 * NW * off, 8 * NW * nc, dst) /= 0) then
+    write(6, '(/,a,a)') ' @XZCCSDT-F, reading the files of the EOM subspace failed: ', trim(xzevpath(kind, 1))
+    call xzerrex
+  end if
   evio = evio + omp_get_wtime() - t0
   evbytes = evbytes + 8d0 * NW * nc * n
 end subroutine
@@ -942,6 +971,9 @@ subroutine N(xzeorth)(w, n, kx, rel)
       return
     end if
     call N(xzepscal)(w, kx, 1d0 / nrm)
+    ! (the subspace in files: a second pass only if the first lost more than
+    ! a factor 1 / sqrt(2) of the norm - "twice is enough"; it reads C twice)
+    if (pass == 1 .and. evfile .and. nrm >= 0.7071d0) exit
   end do
 end subroutine
 
