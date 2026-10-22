@@ -6010,8 +6010,8 @@ arithmetic where the integrals are real, the same source for complex.
 
 **Z4** (Z4(mf; k; K) = sum <ml||fh> r4(lk; h K), 25 GB at cc-pVQZ-X2C-TP)
 is made in the pass of the rows, slab k by slab: on one rank in as many
-slots as there are indices in the triples of the rank if they fit below
-the peak of the ring pass (else at least three, the least recently used
+slots as there are indices in the triples of the rank if the work array
+has room for them (21.5; else at least three, the least recently used
 replaced); over ranks once over all ranks (21.4).  Before (2026-10-21) a
 slab was made again for almost every triple: 14.6 of 137 s per sigma
 vector at cc-pVTZ-X2C-TP.
@@ -6023,6 +6023,14 @@ made before the rows, the term of r5 from every row once into the slabs
 of its three indices, E1x in the products of E1 (as `Engine5`).  Else k by
 k after the rows: a row expanded three times for the term of r5 and
 reduced three times for E1x (35 of 137 s at cc-pVTZ-X2C-TP).
+
+**The kernels and the batches.**  A batch of the ring (or a part of a row
+of the rows of sigma5) walks every quintuple of its rows, whatever blocks
+it fills; the rank-5 kernels make the places of an element (the table of
+the quadruples, `pos4`, C(v, 4) int32) only for the labels that some entry
+of the call uses (the ring at cc-pVTZ-X2C-TP on 8 threads 189 -> 140 s),
+and with 5p3h the batches of the passes go up to 4 GB (1 GB with 4p2h;
+the ring 140 -> 80 s).
 
 ### 21.4 Over MPI ranks
 
@@ -6043,19 +6051,31 @@ w) back (added there); the rows of sigma5: the triples of the rank.
 needs go to the ranks by their cost (the largest first to the least loaded
 rank); a rank makes its blocks from the rows (l, k) of r4 (made once per
 k) and sends each to the ranks that need its slab (`N(xzd5z4sh)`) - when
-the slabs of every rank fit below its peak so far, else every rank makes
-the slabs it needs (the slots of one rank).
+the slabs of every rank fit in its work array, else every rank makes the
+slabs it needs (the slots of one rank).  Before, every rank made the slabs
+of its indices itself: 6 of 81 s per sigma vector at cc-pVTZ-X2C-TP on 2
+ranks, not falling with the ranks.
 
-**Xv5 over ranks**: the index k of Xv5 has its ranks (`xzd5zgroups`: with
-at least as many ranks as occupied spinors, every k a group of ranks that
-share the pairs (l, n) of the term of r5 and the pairs (x, y) of E1x; with
-fewer, the k in slots); the ranks of k sum Xv5(.; k) over a
+**The ranges of the triples** weigh the elements of a row and the
+multiply-adds of its pp ladder, sum_q nQ(q)^2 nK(M - q), at 2e5 per
+element (21.8: with the elements alone one rank of 8 had three times the
+pp ladder of the others at cc-pVQZ-X2C-TP).
+
+**Xv5 over ranks**: the index k of Xv5 has its ranks (`xzd5zgroups`).
+With at least as many ranks as occupied spinors every k is held by the
+group of ranks r with r mod no = k, which share the pairs (l, n) of the
+term of r5 and the pairs (x, y) of E1x and sum Xv5(.; k) over a
 sub-communicator (`xzmpi_sub_split`, `xzmpi_sub_allsum_w`); a rank takes
 the rows (l, n, k) from their owners and gives its rows (x, y, k) of
-sigma5 back, as many rows per exchange as fit below the peak of the ring
-pass (`dea5xb`; one per exchange before 2026-10-21: 14 of 88 s per sigma
-vector at cc-pVTZ-X2C-TP on 2 ranks were the waits of the synchronous
-rounds).
+sigma5 back.  The groups are equal only when the ranks are a multiple of
+the occupied spinors: with 16 ranks and 10 occupied spinors four k have
+one rank, which does the 36 pairs of its k alone.  With fewer ranks a rank
+holds the k with k mod ranks = its rank: all at once if their slabs fit -
+every row with one of them taken once, walked once for the term of r5 and
+once for E1x -, else slot by slot.  The rows go in as many per exchange as
+the work array has room for (`dea5xb`; one per exchange before 2026-10-21:
+14 of 88 s per sigma vector at cc-pVTZ-X2C-TP on 2 ranks were the waits of
+the synchronous rounds).
 
 ### 21.5 Memory and disk
 
@@ -6176,8 +6196,19 @@ subspace in files on the node-local disks, `eomvdir /tmp/...`):
 
 | nodes | job | per sigma vector | pp | ring (exchanges) | rows | Xv5 and E1x (exchanges) | the sums after pp | resident per rank |
 |---|---|---|---|---|---|---|---|---|
-| 8 (ranges by elements) | 32335035 | 1537 s | 186 (rank 5: 559) | 247 (74 - 168) | 73 - 116 | 382 - 434 (216 - 323) | 366 - 417 (rank 5: 1) | 115 - 124 GB, the work array 142.5 GB used to 99.6 % |
-TODO
+| 8 (ranges by elements) | 32335035 | 1537 s | 146 - 197 (rank 5: 559) | 247 (74 - 168) | 69 - 116 | 382 - 434 (216 - 323) | 366 - 417 (rank 5: 1) | 115 - 124 GB, the work array 142.5 GB used to 99.6 % |
+| 8 (ranges by cost) | 32337242 | 1188 s | 154 - 253 | 240 (108) | 64 - 104 | 337 - 377 (183) | 87 | 149 - 151 GB of 154.5 GB |
+
+**The subspace in files** (10 ranks: 2 x 14.8 GB per vector on every
+node; `eomvdir` on the node-local NVMe, 3.3 GB/s for one stream with
+direct I/O): the first production attempt (jobs 32339180, 32339197) read
+the chunks of the vectors one file after the other with Fortran stream
+reads, about 1.2 GB/s; with 5 - 8 vectors an iteration took 20 - 27 min,
+13.5 of them the sigma vector, and the projection was more than the 24 h
+of the job.  Now the chunks of all vectors are read at once (`xz_pread_n`,
+one file per thread) and the second Gram-Schmidt pass is made only if the
+first lost more than 1/sqrt(2) of the norm (with the subspace in files
+only): 15.3 and 15.8 min with 5 and 6 vectors.
 
 On 8 ranks one rank (5) spent 559 s in the pp ladder, the others 146 -
 197 s: the ranges of triples balanced the elements of the rows, not the
@@ -6189,10 +6220,36 @@ k, the others one (k mod 8), and take most rows; with as many ranks as a
 multiple of the occupied spinors (10, 20, 30, 40) every k has the same
 number of ranks, which share its pairs.
 
+**Production** (`pvqz_p0`, `pvqz_p2`: one job per target, 10 nodes - one
+rank per occupied spinor, so every k of Xv5 has one rank -, `ESTATE_CONV`
+10, `ESTATE_MAXCYC` 120, the CCSDT amplitudes of the timing run, the
+subspace of 23 vectors in files on the node-local disks; jobs 32341358,
+32341359):
+
+| | 2 Omega = 0 | 2 Omega = 2 |
+|---|---|---|
+| omega / Eh | -1.36584590431882 | -1.36582829387180 |
+| total energy / Eh | -150.27123239578694 | -150.27121478533991 |
+| residual: largest element, norm | 8.5e-11, 1.4e-9 | 4.7e-11, 5.1e-10 |
+| weights 2p, 3p1h, 4p2h | 0.8341, 0.1462, 0.0196 (the same to 1e-4 for both) | |
+| sigma vectors, iterations | 39, 37 | 38, 36 |
+| per sigma vector with the solver | 1259 s (pp 143, ring 163, rows 76, Xv5 and E1x 277 - of it 177 the exchanges and their waits) | 1067 s |
+| the job | 13 h 39 min, 137 node-hours | 11 h 19 min, 113 node-hours |
+| memory of a rank | the work array 149.8 GB used to 99.9 %, resident 143 - 148 GB | 155.0 GB, 142 - 148 GB |
+
+E(SCF) -148.323303488725, E(CCSDT) -148.905386491468.  The zero-field
+splitting E(2) - E(0) = 1.7610447e-05 Eh = **3.8650 cm-1** (cc-pVTZ-X2C-TP
+3.8437, cc-pVDZ-X2C-TP 3.6767 cm-1; factor 219474.6313632).  The results:
+`zccsdt_results/dea5_xc_pvqz_x2c_tp.json` and the outputs `_t0.out`,
+`_t2.out` in `/scratch4/lcheng24/xwang405/o2zfs_coord/`.  250 node-hours
+for both targets; before them the first attempt (the slow reads of the
+subspace, 48 node-hours) and the timing runs (21 node-hours).
+
 ### 21.9 Not done
 
-- The expansions and reductions of the rows of r5 dominate the passes
-  (about 60% of a sigma vector at cc-pVTZ-X2C-TP on 48 threads): every row
+- The expansions and reductions of the rows of r5 are a large part of the
+  passes (21 of 85 s at cc-pVTZ-X2C-TP on 48 threads, besides the
+  products of the rows and of the pp ladder): every row
   is expanded and reduced six times in the ring (three spectator pairs),
   twice in the pp ladder and in the rows, and the kernels walk the
   quintuple lists element by element.
@@ -6201,6 +6258,12 @@ number of ranks, which share its pairs.
   in the ring, E1x in E1 - needs Xv5 of all k on every rank: 117 GB at
   cc-pVQZ-X2C-TP).
 - The rounds of the ring and of Xv5 are synchronous; nothing overlaps the
-  exchanges with the products.
+  exchanges with the products.  At cc-pVQZ-X2C-TP on 10 ranks the
+  exchanges of Xv5 and E1x and their waits took 177 s, those of the ring
+  90 s of a sigma vector of 1259 s.
+- The subspace in files is read about six times per new vector (14.8 GB
+  per vector and rank at cc-pVQZ-X2C-TP on 10 ranks: with 23 vectors an
+  iteration took 25 min instead of 14); a restart from the vectors of a
+  stopped run is not there - a job must hold all iterations of a target.
 - The T of CCSDTQ in the sector; DIP; left-hand vectors; the vectors of the
   roots in a file.
