@@ -333,6 +333,32 @@ the X2CSO programs.  A Fortran scheduler on CFOUR's work array (CRAPSI)
 with C kernels; real or complex arithmetic and the blocks of the symmetry
 labels (dgcosym of xsox2chf with %dglin) are chosen at run time.
 
+Symmetry labels with a modulus (the file xzlabels; xsox2chf writes it for
+the symmetry-blocked SCF of D2h, D2 and C2v, %dgkpscf / %dgkpreal: the C2*
+labels 2 m_j = +-1, modulus 4) block every part of the program (CCSDT,
+(Q), Lambda and (Q)_Lambda, the density, EOM): the sums of the classes of
+the labels are taken modulo modulus / step.  The EOM shifts of %xzeom are
+then residues too (with the C2* labels: 0 and 2).
+
+A second label (a line 'second m2' in xzlabels, then one more integer per
+spinor): xsox2chf writes the g/u parity of D2h this way (0 g, 1 u,
+modulus 2), so that D2h is blocked by C2h* = Z4 x Z2.  The classes are
+then c1 + 24 c2, and the sums of classes are reduced digit by digit
+(xzw; zcred.h for the C kernels).  The EOM shifts of %xzeom take three
+numbers then, 'shift parity-shift roots' (with the C2* labels and the
+parity: 0 0, 0 1, 2 0 and 2 1).
+
+With a section %vtranblk in the ZMAT, xx2cvtran writes the integrals as
+real numbers in the blocks of the labels of xzlabels, or of 2 m_j of
+dgcosym for a linear molecule (%dglin) (mobkhhhh, mobkhhhp,
+mobkhhpp, mobkphhp, PPBK0001.., mobkpppp; about a quarter of the dense
+complex files) instead of the files moin.. and PPPH..; it keeps only the
+allowed (pq|rs), as real numbers, during the transformation (vtdense=1
+in %xzccsdt: the dense transformation).  $prog reads them
+if mobkhhhh is there, and <ab||cd> goes straight into its blocks.  The
+other X2CSO programs need the dense files: run xx2cvtran without
+%vtranblk for them.
+
 Build
 -----
 
@@ -371,6 +397,7 @@ In the run directory, after the chain (ABCDTYPE=STANDARD in the ZMAT):
 (xx2camf after xsox2chf for X2CAMF).  $prog takes no argument: the job is
 what the ZMAT asks for (as joda stored it in JOBARC):
 
+    CALC=CCSD                           CCSD (no T3; EXCITE=EOMEE for EOM-EE-CCSD)
     CALC=CCSDT                          CCSDT
     CALC=CCSDT[Q]                       CCSDT and [Q] (also (Q) printed)
     CALC=CCSDT(Q)                       CCSDT, (Q) and [Q]
@@ -386,10 +413,13 @@ what the ZMAT asks for (as joda stored it in JOBARC):
     CALC=MP2                            the MP2 energy of the integral files (a check)
     CALC=CC3                            not in this version (stops)
 
-CC_CONV (the amplitudes to 10^-CC_CONV, the energy to 10^-(CC_CONV+2)),
-CC_MAXCYC, MEMORY_SIZE (all working memory is CFOUR's work array), DROPMO /
-%vircut (the active spinors are those of the integral files).  The final
-energy goes to JOBARC as TOTENERG; the lowest EOM state as TOTENER2.
+CC_CONV (converged when the largest change of an element of T1, T2, T3 -
+of lambda for the Lambda equations - in one step is below 10^-CC_CONV; the
+energy is not tested; the columns |dT1| |dT2| |dT3| (|dL1| ..) of the
+output are these largest changes), CC_MAXCYC, MEMORY_SIZE (all working
+memory is CFOUR's work array), DROPMO / %vircut (the active spinors are
+those of the integral files).  The final energy goes to JOBARC as
+TOTENERG; the lowest EOM state as TOTENER2.
 
 Earlier runs: the amplitudes are written to XZAMPS, lambda to XZLAMB, and
 the file XZKEY records what they belong to (active spinors, E(SCF), two
@@ -399,11 +429,21 @@ with) CALC=CCSDT(Q) or EXCITE=EOMEE in the same directory computes only the
 new part; the output says "taken" or "solved here".  Remove the files to
 force a new solution.
 
-Environment: OMP_NUM_THREADS (threads); XZ_LABTOL (default 1e-8: the
-largest integral that the symmetry labels forbid and that is taken as
-zero), XZ_IMAGTOL (default 1e-10: the largest imaginary part taken as zero,
-then real arithmetic).  MPI (iterations and (Q) over ranks; the run
-directory with the integral files under the same path on every node):
+Options: a section %xzccsdt of the ZMAT (one key=value per line, ended
+by an empty line), e.g.
+
+    %xzccsdt
+    labtol=1e-5
+    imagtol=1e-5
+
+labtol (default 1e-5): the largest integral that the symmetry labels forbid
+and that is taken as zero; imagtol (default 1e-5): the largest imaginary
+part taken as zero, then real arithmetic.  All options (choices of the
+calculation, test hooks, MPI tuning) are in X2C-OPTIONS.md at the top of
+the tree; the program prints those it was given.  No environment variable
+is read except OMP_NUM_THREADS (threads).  MPI (iterations and (Q) over
+ranks; the run directory with the integral files under the same path on
+every node):
 
     OMP_NUM_THREADS=24 I_MPI_PIN_DOMAIN=omp mpirun -np 2 ${prog}_mpi
 
