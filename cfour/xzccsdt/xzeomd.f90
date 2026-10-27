@@ -196,6 +196,7 @@ contains
 
   ! The input: the flags of joda and the sections of the ZMAT.
   subroutine xzeominp()
+    use xzopt, only: xzoptget
     integer(8) :: iflags
     common /flags/ iflags(100)
     character(len=256) :: line

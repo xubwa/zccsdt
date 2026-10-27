@@ -154,8 +154,6 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms, emax)
   pt = kt3 + NW * soff3
   small = myrank == 0
   ncall = ncall + 1
-  ! norms: the largest change of an element of T1, T2, T3 in this step (the
-  ! new vector minus the extrapolated one of the step before)
   s1 = 0d0
   s2 = 0d0
   emax = 0d0
@@ -190,7 +188,7 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms, emax)
       call xzmpi_max(emax(3:3), mr, 1_8)
       emax(3) = mr(1)
     end if
-    norms = [s1, s2, s3]
+    norms = [sqrt(s1), sqrt(s2), 6d0 * sqrt(s3)]
     if (small) then
       t1 = t1n
       t2 = t2n
@@ -218,8 +216,10 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms, emax)
     s = ord(k)
     call N(zc_vdot)(n1, w(je1(slot)), w(je1(s)), dd)
     d(k) = d(k) + dd
+    if (k == ncnt) s1 = dble(dd)
     call N(zc_vdot)(n2, w(je2(slot)), w(je2(s)), dd)
     d(k) = d(k) + dd
+    if (k == ncnt) s2 = dble(dd)
   end do
   call N(xzamax)(n1, w(je1(slot)), emax(1))
   call N(xzamax)(n2, w(je2(slot)), emax(2))
@@ -241,12 +241,9 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms, emax)
     call N(zc_vmdot)(m3, ncnt, w(je3(slot)), ptr, cz)
   else
     cz(1:ncnt) = 0
-    s3 = 0d0
     do ir = 0, nrl - 1
       off = ir * nchunk
       l = min(nchunk, m3 - off)
-      call N(xzdmax)(l, w(pr + NW * off), w(pt + NW * off), sx)
-      s3 = max(s3, sx)
       call N(zc_vsub)(l, w(pr + NW * off), w(pt + NW * off), w(jchunk1))
       call N(xzamax)(l, w(jchunk1), mx)
       emax(3) = max(emax(3), mx)
@@ -270,13 +267,9 @@ subroutine N(xzdiis_upd)(w, t1, t2, kt3, t1n, t2n, kr3, norms, emax)
     emax(3) = mr(1)
   end if
   d(1:ncnt) = d(1:ncnt) + cz(1:ncnt)
-  if (split) then
-    ss(1) = s3
-    call xzmpi_max(ss, sm, 1_8)
-    s3 = sm(1)
-    call xzmpi_bcast(d, 8_8 * NW * ncnt)
-  end if
-  norms = [s1, s2, s3]
+  s3 = dble(cz(ncnt))
+  if (split) call xzmpi_bcast(d, 8_8 * NW * ncnt)
+  norms = [sqrt(abs(s1)), 2d0 * sqrt(abs(s2)), 6d0 * sqrt(abs(s3))]
   do k = 1, ncnt
     hmat(slot, ord(k)) = d(k)
     hmat(ord(k), slot) = conjg(hmat(slot, ord(k)))

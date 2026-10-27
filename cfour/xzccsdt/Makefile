@@ -89,7 +89,7 @@ $(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o $(BUILD)/xzpar.o: $(BUILD)/
 $(BUILD)/xzdata.o: $(BUILD)/xzopt.o
 $(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzfrzd.o
 $(BUILD)/xzpland.o $(BUILD)/xzampio.o: $(BUILD)/xzdata.o
-$(BUILD)/xzeomd.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzpar.o
+$(BUILD)/xzeomd.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzpar.o $(BUILD)/xzopt.o
 $(BUILD)/xzdead.o: $(BUILD)/xzdata.o $(BUILD)/xzkern.o $(BUILD)/xzopt.o $(BUILD)/xzeomd.o $(BUILD)/xzpar.o
 $(BUILD)/xzdea5d.o: $(BUILD)/xzdead.o $(BUILD)/xzdata.o $(BUILD)/xzkern.o $(BUILD)/xzpar.o $(BUILD)/xzeomd.o
 $(BUILD)/xzdrv.o: $(BUILD)/xzplan.o $(BUILD)/xzdead.o

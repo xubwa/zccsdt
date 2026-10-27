@@ -181,7 +181,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     write(74) w(kt1n:kt1n + NW * no * nv - 1), w(kt2n:kt2n + NW * no * no * nv * nv - 1), &
               w(kr3:kr3 + NW * n3 - 1)
     close(74)
-    write(6, '(a,a)') ' debug: one step written to ', dbg(1:ldbg) // '.out'
+    write(6, '(a,a)') ' option debug: one step written to ', dbg(1:ldbg) // '.out'
     call N(xzdiis_close)()
     call xzrel(m0)
     ecorr = eold
