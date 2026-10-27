@@ -1,5 +1,5 @@
 !
-! The state of the memory plan (xzplan.F90): the batch sizes and their
+! The state of the memory plan (xzplan.f90): the batch sizes and their
 ! bounds, what (Q) and a rank other than 0 take with the plan.
 ! (A file of its own: CFOUR's config/mkdep90.py makes a file that uses a
 ! module it defines depend on itself, and make warns of a circular dependency.)

@@ -64,11 +64,14 @@ are.  The directory is generated; the sources stay here.
 
 ## What the directory is
 
-- Every file of `cfour/xzccsdt/` except its Makefile (a glob).  `make.rules`
-  compiles each `*.f`, `*.f90`, `*.f03`, `*.c` of a directory and has no rule
-  for `%.F90`: the `.F90` files are copied as `.f90`.  CFOUR's `FCFLAGS`
-  preprocess every Fortran file (`-cpp`), so nothing else is needed for the
-  `#include` of the typed sources (`*.inc`, `xztype.h`; `-I.` is added).
+- Every file of `cfour/xzccsdt/` except its Makefile (a glob), under the
+  same name: since 2026-10-27 the free-form sources are `*.f90` here as in
+  CFOUR's `zccsdt/` (they were `*.F90`; `make.rules` compiles each `*.f`,
+  `*.f90`, `*.f03`, `*.c` of a directory and has no rule for `%.F90`, so a
+  `.F90` file would still be copied as `.f90`).  CFOUR's `FCFLAGS` and the
+  repository's Makefile preprocess every Fortran file (`-cpp`), so nothing
+  else is needed for the `#include` of the typed sources (`*.inc`,
+  `xztype.h`; `-I.` is added).
 - The C kernels of `csrc/` that the program links: `KERNELS` of
   `cfour/xzccsdt/Makefile`, read at assembly time (now `ccsdt_t3.c`,
   `t3pack.c`, `tnpack.c`, `lambda_t3.c`, `qlambda.c`, `cc3_fly.c`, `cc3_native.c`,

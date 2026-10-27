@@ -1,5 +1,5 @@
 !
-! EOM-DEA-CCSDT on the sector itself (type-generic; xzdead.F90 has the
+! EOM-DEA-CCSDT on the sector itself (type-generic; xzdead.f90 has the
 ! input and the tables; docs/native.md, section 20).  The algorithm and the
 ! layouts are those of src/zccsdt/cc/dea_sector.py (docs/eom.md, section
 ! 11.9), the reference of every number: the sigma vector of
@@ -27,7 +27,7 @@
 ! of rows expanded into the splits (ab | cd), (a | bcd), (a | bc) and reduced
 ! back) and GEMMs; nothing of the size of T4 is made.
 !
-! Arrays: row-major, indices from 0 (xzdata.F90); views of the work array
+! Arrays: row-major, indices from 0 (xzdata.f90); views of the work array
 ! for the loops, the word addresses for the kernels.
 !
 

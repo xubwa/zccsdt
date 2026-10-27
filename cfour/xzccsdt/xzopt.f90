@@ -2,7 +2,7 @@
 ! The options of xzccsdt: the section %xzccsdt of the ZMAT.  The program is
 ! controlled by the ZMAT alone, as CFOUR's programs are - the job and the
 ! thresholds by CFOUR's keywords (xzjob), the excited states by their
-! sections (xzeomd.F90), everything else here; no environment variable is
+! sections (xzeomd.f90), everything else here; no environment variable is
 ! read (OMP_NUM_THREADS and those of the MPI library are not ours).
 !
 !   %xzccsdt
@@ -120,7 +120,7 @@ contains
         return
       end if
     end do
-    write(6, '(/,a,a)') ' @XZCCSDT-F, xzoptget: an option that is not in the list of xzopt.F90: ', name
+    write(6, '(/,a,a)') ' @XZCCSDT-F, xzoptget: an option that is not in the list of xzopt.f90: ', name
     call xzerrex
   end subroutine
 end module xzopt

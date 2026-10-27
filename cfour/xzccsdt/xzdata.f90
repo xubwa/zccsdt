@@ -287,7 +287,7 @@ module xzdata
   integer(8) :: e3bv = 0                    ! Bv[e][i][Q] = W_vvvo[Q][e][i] (the dressed <ab||ei> of CC3)
   integer(8) :: e3gv = 0                    ! Gv[m][Q][y] = ~<ym||Q>
 
-  ! ---- batch sizes: the memory plan (xzplan.F90)
+  ! ---- batch sizes: the memory plan (xzplan.f90)
   integer(8) :: nbp = 1             ! occupied pairs of a batch of pass 1 and pass 2
   integer(8) :: nqs = 1             ! rows of a slab of the dressed <ab||cd>
   integer(8) :: nbt = 1             ! occupied triples of a batch of the pp ladder

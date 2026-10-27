@@ -33,7 +33,7 @@
 ! the conjugate of moinhhpp and is not read.)
 !
 ! The program may have the spinors in another order than CFOUR (the order of
-! the classes of their symmetry labels, xzdata.F90): operm[i] and vperm[a]
+! the classes of their symmetry labels, xzdata.f90): operm[i] and vperm[a]
 ! are CFOUR's numbers of the occupied spinor i and of the virtual spinor a
 ! of the program.
 !

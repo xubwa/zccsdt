@@ -26,7 +26,7 @@
 !
 ! Batch sizes: nbp (the half-expanded batches of the passes A and B), nbt
 ! (the two gathered batches of pass C), nba (the bra-dressed <ab||ei>).
-! Timers: set 4.  Frozen and dropped spinors: xzdfrz.inc, xzfrz.F90.
+! Timers: set 4.  Frozen and dropped spinors: xzdfrz.inc, xzfrz.f90.
 !
 subroutine N(xzden)(w)
   use xzdata
@@ -356,7 +356,7 @@ end subroutine
 ! The stage of the held spinors (xzdfrz.inc): sweep 1, the gradient and the
 ! rotations, sweep 2; on return x of the active spinors has the Fock matrix
 ! of the rotations, xall(p, q) the elements of the right-hand side with a
-! held index (full order of xzfrz.F90) and ym(p, q) the rotations y[p][q].
+! held index (full order of xzfrz.f90) and ym(p, q) the rotations y[p][q].
 subroutine N(xzdfrz)(w, kden, kdh, kxa, kxall, kym, kl2pp, kl2p, kt2pp, kc3, kz, kdai, krl, ky4, kdk, kdab, kgam)
   use xzdata
   use xzmem

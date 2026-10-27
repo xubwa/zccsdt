@@ -98,8 +98,9 @@ put() {
 # ---- 1. the program's own sources: everything in cfour/xzccsdt -------------
 # make.rules compiles *.f *.f90 *.f03 *.c (found with find -iname) and has
 # pattern rules for %.f %.F %.f90 %.f03 %.c, none for %.F90: the free-form
-# sources that need the preprocessor are copied as .f90.  CFOUR's FCFLAGS
-# preprocess every Fortran file (-cpp), as the repository's Makefile does.
+# sources are *.f90 in the repository too (since 2026-10-27; a *.F90 would
+# be copied as .f90).  CFOUR's FCFLAGS preprocess every Fortran file (-cpp),
+# as the repository's Makefile does.
 nsrc=0
 for f in "$src"/*; do
   [ -f "$f" ] || continue

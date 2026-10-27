@@ -116,7 +116,7 @@ module xzdead
   real(8) :: tdpart(14) = 0d0               ! seconds of the pieces of the sigma vectors (13, 14: the
                                             ! rows exchanged by the ring, by the hh ladder; in 12 too)
   integer(8) :: dbatch = 0                  ! elements of an operand of a batch of the passes over r4
-  integer(8) :: dvec5 = 0                   ! (level 5p3h) stored elements of r5 of a vector (xzdea5d.F90)
+  integer(8) :: dvec5 = 0                   ! (level 5p3h) stored elements of r5 of a vector (xzdea5d.f90)
 
 contains
 

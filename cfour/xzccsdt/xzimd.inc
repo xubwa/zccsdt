@@ -3,7 +3,7 @@
 ! are not sums over T3 (type-generic: compiled once per element type, see
 ! xztype.h).  The equations are those of src/zccsdt/cc/ccsdt_opt.py
 ! (docs/factorization.md); arrays in the layouts of the C kernels, declared
-! with the indices reversed (xzdata.F90).
+! with the indices reversed (xzdata.f90).
 !
 ! Dressing: a virtual bra index a picks up - sum_m t1[m][a] <m..||..>, an
 ! occupied ket index i picks up + sum_e t1[i][e] <..||..e>.

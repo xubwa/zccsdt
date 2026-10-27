@@ -38,7 +38,7 @@ BLAS    := -L$(MKLLIB) -lmkl_intel_ilp64 -lmkl_intel_thread -lmkl_core -liomp5 \
 # (the run-time libraries are found without the oneAPI environment)
 ICLIB   ?= $(dir $(shell which ifort 2>/dev/null))../../compiler/lib/intel64_lin
 RPATH   := -Wl,-rpath,$(MKLLIB) -Wl,-rpath,$(abspath $(ICLIB))
-# integrals with a frozen index for the density stage (xzfrz.F90): CFOUR's own
+# integrals with a frozen index for the density stage (xzfrz.f90): CFOUR's own
 # transformation, three objects of its program directory x2czvec, and its
 # reader of the AO integrals in libx2cint (module cvwint_module of libx2c)
 FRZOBJ  := $(addprefix $(CFOUR)/x2czvec/, vtranpsog.o vtran1sparse.o expnd2p.o)
@@ -68,7 +68,7 @@ all: $(BUILD)/xzccsdt
 $(BUILD)/xzccsdt: $(OBJS)
 	$(LD) $(FCFLAGS) -o $@ $(OBJS) $(LIBS)
 
-$(BUILD)/%.o: %.F90 $(INCS) | $(BUILD)
+$(BUILD)/%.o: %.f90 $(INCS) | $(BUILD)
 	$(FC) $(FCFLAGS) -module $(BUILD) -I. -I$(CFOUR)/libx2c -c $< -o $@
 
 $(BUILD)/xzccsdt.o: xzccsdt.f $(BUILD)/xzpar.o $(BUILD)/xzdist.o | $(BUILD)

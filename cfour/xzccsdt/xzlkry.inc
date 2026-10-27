@@ -1,6 +1,6 @@
 !
 ! The Krylov solver of the Lambda equations, the part that depends on the
-! element type (the scheme and the state: xzlkry.F90; docs/native.md,
+! element type (the scheme and the state: xzlkry.f90; docs/native.md,
 ! section 11).
 !
 ! An iteration (N(xzlk_upd)), given lambda x and its Jacobi image x + g(x):

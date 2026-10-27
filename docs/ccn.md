@@ -521,7 +521,7 @@ indices reversed), `T` = `double` (`_d`) or `double complex` (`_z`):
         work, stats[4])                        work array; seconds: products, amplitudes, gather, contractions
 
 The tables are those the native program has for its T3 blocks (the maps of
-`xzmaps.F90` correspond to `TripleMap`); without labels ncls = 1, orng =
+`xzmaps.f90` correspond to `TripleMap`); without labels ncls = 1, orng =
 (0, no), vrng = (0, nv), qoff = (0, nQ), aoff = (0, nA).
 
 | Operand | Shape (row-major) | Content | From |

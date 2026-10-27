@@ -596,7 +596,7 @@ subroutine N(xzdrrows)(no, nv, npo, nvp, nqh, nq, t1, tau, vv, gq, gh, pa, pb, s
 end subroutine
 
 ! ---------------------------------------------------------------------------
-! With slices (xzdist.F90): the operator on the occupied triples for the
+! With slices (xzdist.f90): the operator on the occupied triples for the
 ! rows of this rank, r[I][A] += sum_J o6[I][J] t3[J][A], and the Jacobi step
 ! on them (r <- t3 + r / D), block by block.
 subroutine N(xzslocc)(w, kt3, kr3, o6)

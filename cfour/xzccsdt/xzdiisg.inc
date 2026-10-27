@@ -1,6 +1,6 @@
 !
 ! DIIS of the amplitudes, the part that depends on the element type
-! (see xzdiis.F90 for the scheme and the storage).
+! (see xzdiis.f90 for the scheme and the storage).
 !
 
 ! ---------------------------------------------------------------------------

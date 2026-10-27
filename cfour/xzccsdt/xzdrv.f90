@@ -145,7 +145,7 @@ subroutine xzdrv(w, maxcor)
   end if
 
   ! ---- which ranks do what: every rank reads the integrals itself; the
-  !      iterations (CCSDT, Lambda) run on all ranks (xzdist.F90: rank 0 sends
+  !      iterations (CCSDT, Lambda) run on all ranks (xzdist.f90: rank 0 sends
   !      the amplitudes, every rank does its batches), (Q) on all ranks from
   !      the files XZAMPS and XZLAMB, the density stage on rank 0
   docc = with_cc
@@ -279,7 +279,7 @@ subroutine xzdrv(w, maxcor)
   if (with_cc .or. with_lam) call xzdeal()
   flush(6)
 
-  ! ---- CCSDT (all ranks: xzdist.F90), or the amplitudes of an earlier run
+  ! ---- CCSDT (all ranks: xzdist.f90), or the amplitudes of an earlier run
   tcc = 0d0
   tlm = 0d0
   mcc = xzmark()
@@ -762,7 +762,7 @@ subroutine xzjob()
   end if
   with_eom = eom
   if (with_eom) call xzeominp()
-  ! EOM-DEA-CCSDT: CALC=CCSDT and the section %xzdea (xzdead.F90; docs/native.md, section 20)
+  ! EOM-DEA-CCSDT: CALC=CCSDT and the section %xzdea (xzdead.f90; docs/native.md, section 20)
   call xzdeainp(dea)
   if (dea) then
     if (method /= 'CCSDT' .or. cc3mode /= 0 .or. cc4) then
@@ -1704,7 +1704,7 @@ subroutine xzwrec(name, n, rec)
 end subroutine xzwrec
 
 ! ---------------------------------------------------------------------------
-! The cost model of the tasks of (Q) (xzpar.F90), in units of one virtual
+! The cost model of the tasks of (Q) (xzpar.f90), in units of one virtual
 ! quadruple of a sector:
 !   qc(M)  an occupied quadruple of total class M: the virtual quadruples
 !          a<b<c<d of total class M (one class: all of them)

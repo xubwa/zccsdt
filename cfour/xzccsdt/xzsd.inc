@@ -9,7 +9,7 @@
 ! is not made.  With one class (no labels) the blocks are the whole arrays.
 !
 ! The spinors are in the order of their classes, the pairs in the order of
-! their groups (xzdata.F90).  t1 conserves the labels: t1[i][a] = 0 unless
+! their groups (xzdata.f90).  t1 conserves the labels: t1[i][a] = 0 unless
 ! s(a) = s(i), so a sum over a virtual index with t1[i][e] runs over the
 ! class of i, and so on.  An array that is "blocked" below has only its
 ! allowed elements set (the others are not read); the others are complete

@@ -58,7 +58,7 @@ module xzeomd
 
   ! ---- more than one rank (docs/native.md, section 16.7).  Rank 0 runs the
   !      solver; R3 and sigma_3 of a vector are cut into one slice of rows per
-  !      rank (as T3 in the iterations, xzdist.F90, here in the layout of the
+  !      rank (as T3 in the iterations, xzdist.f90, here in the layout of the
   !      label shift), and every rank holds of every vector of the subspace
   !      its own rows only - rank 0 with the singles and doubles in front.
   !      A vector operation of the solver is a command of rank 0 that every

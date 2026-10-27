@@ -23,7 +23,7 @@
 ! bare integrals only -, the row t4 = r / (e_ijkl - e_abcd + omega), its
 ! contractions into the four sums, and the row is gone: nothing of the size
 ! of T4 is kept.  The loop over the occupied quadruples is the task list of
-! (Q) (xzpar.F90): every rank its tasks and its own sums, which are added.
+! (Q) (xzpar.f90): every rank its tasks and its own sums, which are added.
 ! The iterations (xzcc.inc) take the two sums as fixed parts of the
 ! residuals of the CCSDT step (xzstep.inc: cc4 of xzdata).
 !
@@ -180,7 +180,7 @@ end subroutine
 
 ! ---------------------------------------------------------------------------
 ! The pass over the occupied quadruples of this rank (the tasks of (Q),
-! xzpar.F90), with the operands of the ground state at g4... of xzdata:
+! xzpar.f90), with the operands of the ground state at g4... of xzdata:
 !   eom = .false.   t4 of (kt2, kt3) over e_ijkl - e_abcd + omega, contracted
 !                   with the integrals of H~: kr2 [P][Q], kr3 (the layout of T3)
 !   eom = .true.    the T4 terms of a sigma vector (the operands at x4...,
@@ -304,7 +304,7 @@ subroutine N(xz4run)(w, kt1, kt2, kt3, kr2, kr3, omega, eom, tq, ndone, nmine)
                  w(jqkv), w(jqlid), w(jqlst), w(jqlmem), w(jqposv), w(jqposq), w(jqpos3), w(jqtri))
   end if
 
-  ! ---- the tasks of (Q) (xzpar.F90): groups of one largest index l, dealt to the ranks
+  ! ---- the tasks of (Q) (xzpar.f90): groups of one largest index l, dealt to the ranks
   call xzqmodel(qcm, xcm)
   call xzq_costs(no, ncls, ocls, qcm, xcm)
   call xzq_build(no, 0_8)

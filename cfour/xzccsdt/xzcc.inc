@@ -1,6 +1,6 @@
 !
 ! The CCSDT iterations (type-generic): second-order start, Jacobi steps
-! (xzstep.inc) with DIIS (xzdiis.F90), convergence as in CFOUR's xx2cccsd:
+! (xzstep.inc) with DIIS (xzdiis.f90), convergence as in CFOUR's xx2cccsd:
 ! the largest element (absolute value) of the Jacobi step - new amplitudes
 ! minus the amplitudes they were made from, i.e. residual over denominator -
 ! over T1, T2 and T3 below conv_t = 10**-CC_CONV; no test of the energy.
@@ -10,7 +10,7 @@
 ! The amplitudes stay in the work array (jt1, jt2, jt3 of xzdata) for what
 ! follows; everything else that is taken here is released.
 !
-! With more than one rank (xzdist.F90) rank 0 runs this loop and sends, at
+! With more than one rank (xzdist.f90) rank 0 runs this loop and sends, at
 ! the start of every iteration, a word that says "one more" and the
 ! amplitudes; the other ranks (N(xzccwork)) take them into their own T1, T2,
 ! T3 and do their part of the step.  The DIIS vectors are those of rank 0.

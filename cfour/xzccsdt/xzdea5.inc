@@ -1,6 +1,6 @@
 !
 ! EOM-DEA-CCSDT with complete 5p3h operators (type-generic; %xzdea level
-! 5p3h; xzdea5d.F90 has the layouts; docs/native.md, section 21).  The
+! 5p3h; xzdea5d.f90 has the layouts; docs/native.md, section 21).  The
 ! algorithm and the layouts are those of src/zccsdt/cc/dea5_sector.py
 ! (docs/eom.md, section 11.11), the reference of every number: the sigma
 ! vector of R = 2p + 3p1h + 4p2h + 5p3h on the CCSDT ground state, the rows

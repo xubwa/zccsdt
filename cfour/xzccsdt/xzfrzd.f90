@@ -1,6 +1,6 @@
 !
 ! The places of the regions of the density stage with a frozen or dropped
-! index in the work array (xzfrz.F90).
+! index in the work array (xzfrz.f90).
 ! (A file of its own: CFOUR's config/mkdep90.py makes a file that uses a
 ! module it defines depend on itself, and make warns of a circular dependency.)
 !

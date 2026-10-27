@@ -1,4 +1,4 @@
-! Interfaces of the C kernels of one element type (included by xzkern.F90
+! Interfaces of the C kernels of one element type (included by xzkern.f90
 ! once per type; csrc/ccsdt_t3.c, csrc/t3pack.c, csrc/tnpack.c).  Arrays are
 ! assumed-type: regions of the work array are passed as they are.  All
 ! layouts are those of the C side (row-major, indices from 0).

@@ -1,6 +1,6 @@
 !
 ! Index tables of the pairs and triples of n indices, as the kernels of
-! csrc/ccsdt_t3.c and csrc/t3pack.c take them (see xzdata.F90), and the
+! csrc/ccsdt_t3.c and csrc/t3pack.c take them (see xzdata.f90), and the
 ! layout of T3 in the blocks of the symmetry labels.
 !
 integer(8) function xztrank(i, j, k, n)

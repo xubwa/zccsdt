@@ -1,6 +1,6 @@
 !
 ! EOM-EE-CCSDT: the solver and the driver (type-generic; the sigma vector:
-! xzeom.inc; input, shifts, results: xzeomd.F90; docs/native.md, section 16).
+! xzeom.inc; input, shifts, results: xzeomd.f90; docs/native.md, section 16).
 !
 ! The solver is that of CFOUR's two-component EOM-CCSD program xx2ceomcc in
 ! its design (docs/eom.md, section 9; its algorithm 2, eomene2): right-hand
@@ -31,7 +31,7 @@
 ! chunks through a buffer of the work array; two vectors are in the work
 ! array in either case (the new vector and its sigma vector).
 !
-! More than one rank (xzeomd.F90; docs/native.md, section 16.7): rank 0 runs
+! More than one rank (xzeomd.f90; docs/native.md, section 16.7): rank 0 runs
 ! this solver; every rank holds its rows of R3 of every vector of the
 ! subspace, and every operation on vectors below is a command of rank 0
 ! that all ranks carry out on their rows (N(xzeserve) on the other ranks),

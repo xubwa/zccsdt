@@ -22,10 +22,10 @@
 ! T3, l3 and the residual are three regions of the size of T3.  The steps
 ! are accelerated by a Krylov subspace (xzlkry.inc: minimal residual over up
 ! to 40 pairs of vectors, the work array or the file XZLKRY), or with option
-! lsolver diis by the DIIS of the amplitudes (xzdiis.F90).  Batch sizes: nbp (two half-expanded batches in pass 1 and
+! lsolver diis by the DIIS of the amplitudes (xzdiis.f90).  Batch sizes: nbp (two half-expanded batches in pass 1 and
 ! in pass 2), nbt (the gathered batch of the ladder and its product), nba.
 !
-! With more than one rank (xzdist.F90): rank 0 sends T1, T2, T3 once - every
+! With more than one rank (xzdist.f90): rank 0 sends T1, T2, T3 once - every
 ! rank makes the intermediates itself - and lambda at the start of every
 ! iteration; the other ranks do their batches of pass 1, pass 2 and the
 ! ladder.  The residuals of rank 1 and 2 are rank 0's, and so are the

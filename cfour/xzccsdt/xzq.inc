@@ -42,7 +42,7 @@
 ! the parts of the range of x that their other three indices fall in).  The
 ! products are done in batches of qc22 columns (cd) and qc13 columns (bcd),
 ! Xv is formed from qrows rows (bc) of <bc||ef> at a time: the plan
-! (xzplan.F90).
+! (xzplan.f90).
 !
 subroutine N(xzq)(w, eq5, eq6)
   use xzdata
@@ -175,7 +175,7 @@ subroutine N(xzq)(w, eq5, eq6)
                  w(jqkv), w(jqlid), w(jqlst), w(jqlmem), w(jqposv), w(jqposq), w(jqpos3), w(jqtri))
   end if
 
-  ! ---- the tasks (xzpar.F90): the list, what an earlier run has finished
+  ! ---- the tasks (xzpar.f90): the list, what an earlier run has finished
   want = 0
   call xzoptget('qtasks', arg, ldbg)
   if (ldbg > 0) read(arg, *) want

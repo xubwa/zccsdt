@@ -34,7 +34,7 @@
 ! and sigma_2 are masked to it (the integrals are symmetric to the rounding
 ! of the SCF only).
 !
-! More than one rank (edist of xzeomd.F90; docs/native.md, section 16.7): as
+! More than one rank (edist of xzeomd.f90; docs/native.md, section 16.7): as
 ! an amplitude step over ranks (xzstep.inc).  Every rank has the whole
 ! vector and T3, makes the small terms itself and does its batches of the
 ! six loops over T3-sized arrays (xzdist: the kinds 7 to 12); the results of
