@@ -10,7 +10,7 @@
 !            provided no integral that they forbid is larger than 1e-8 (option labtol);
 !            otherwise the labels are dropped with a warning (one class: the
 !            dense case of the same code)
-!   real     if no integral has an imaginary part above 1e-10, the real
+!   real     if no integral has an imaginary part above 1e-5, the real
 !            instance of the code runs (half the memory, real kernels)
 ! The integrals are read for the most favourable case first (labels, real);
 ! what does not hold shows in the small blocks, which are read first, and the
@@ -100,14 +100,17 @@ subroutine xzdrv(w, maxcor)
   end if
 
   ! ---- the symmetry labels
-  allocate(lab(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
+  allocate(lab(0:ntot-1), lab2(0:ntot-1), operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1))
+  lab2 = 0
+  modulus2 = 0
   !      (every rank reads them from the files of its run directory, by the
   !      same rule: 1. xzlabels, 2. dgcosym with more than one block, 3. none)
   nblk = 0
-  call xzrdlab(ntot, lab, modulus, there)
+  call xzrdlab(ntot, lab, modulus, lab2, modulus2, there)
   if (there) then
     labfile = 'xzlabels'
     write(6, '(a,i4)') '   symmetry labels: the file xzlabels, modulus ', modulus
+    if (modulus2 > 0) write(6, '(a,i4)') '   a second label (xzlabels: second), modulus ', modulus2
   else
     call xzrddgc(ntot, lab, modulus, there, nblk)
     if (there) then
@@ -122,15 +125,16 @@ subroutine xzdrv(w, maxcor)
   end if
   have_labels = there
   uselab = there
-  ! (labels of either file with a modulus: the blocks of this program are
-  ! for labels that add without one)
-  if (there .and. modulus /= 0) then
-    write(6, '(a)') ' @XZCCSDT-W, labels with a modulus are not used by this program: one block.'
-    uselab = .false.
-  end if
   call xzoptget('labels', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0' .and. uselab) then
     write(6, '(a)') '   option labels 0: the labels are not used'
+    uselab = .false.
+  end if
+  ! (labels with a modulus or a second label: CCSD, CCSDT, (Q), Lambda, the
+  ! density and EOM-EE take them, every sum of classes modulo mgrp (xzw);
+  ! CC3, CC4 and EOM-DEA sum the classes as integers - one block for them)
+  if (uselab .and. (modulus /= 0 .or. modulus2 /= 0) .and. (cc3mode /= 0 .or. cc4 .or. with_dea)) then
+    write(6, '(a)') ' @XZCCSDT-W, labels with a modulus (or a second label) are not used by CC3, CC4 and EOM-DEA: one block.'
     uselab = .false.
   end if
   tryreal = .true.
@@ -161,7 +165,9 @@ subroutine xzdrv(w, maxcor)
     call xzsetmode(uselab)
     nwe = merge(1_8, 2_8, isreal)
     call xzslices()
+    call xztic()
     call xzplan(w, nslot, usefile, nch, .true.)
+    call xztoc(6, 'memory plan')
     call xzrel(0_8)
     call xzlayout(w, status)
     if (status == 0) exit
@@ -181,6 +187,7 @@ subroutine xzdrv(w, maxcor)
   write(6, '(a,a)') '   hh ladder and F_oo of T3: ', merge('through occupied pairs (as in CCSD)   ', &
     'one operator on the occupied triples  ', xzhhpair())
   write(6, '(a,f10.2,a)') '   integrals read and sorted: ', tread, ' s'
+  if (tread > 10d0) call xztable(6, 'the integrals read and sorted', tread, 0_8)
   flush(6)
   ! (a rank other than 0 has decided from its own files: the labels, their
   ! check against the integrals, real or complex - as rank 0, or not at all)
@@ -556,8 +563,8 @@ subroutine xzdrv(w, maxcor)
     write(6, '(a,f25.12)') '   CC4 correlation energy        ', ecorr
     write(6, '(a,f25.12)') '   E(CC4)                        ', escf + ecorr
   else
-    write(6, '(a,f25.12)') '   CCSDT correlation energy      ', ecorr
-    write(6, '(a,f25.12)') '   E(CCSDT)                      ', escf + ecorr
+    write(6, '(a,a5,a,f25.12)') '   ', mname, ' correlation energy      ', ecorr
+    write(6, '(a,a,a,f25.12)') '   E(', trim(mname), ')' // repeat(' ', 27 - len_trim(mname)), escf + ecorr
   end if
   etot = escf + ecorr
   if (with_q .and. .not. q_left) then
@@ -690,6 +697,7 @@ subroutine xzjob()
   den = .not. eom .and. (iprop > 0 .or. ideriv > 0)
   method = ' '
   if (level == 18 .or. (level == 49 .and. nexc == 3)) method = 'CCSDT'
+  if (level == 10) method = 'CCSD'
   if (level == 30) method = 'CCSDT[Q]'
   if (level == 54 .or. (level == 53 .and. nexc == 4)) method = 'CCSDT(Q)'
   if (level == 68 .or. (level == 69 .and. nexc == 4)) method = 'CCSDT(Q)_L'
@@ -708,7 +716,7 @@ subroutine xzjob()
     end if
     if (eom) method = 'CC3_EOM'
   end if
-  mname = merge('CC3  ', 'CCSDT', cc3mode /= 0)
+  mname = merge('CCSD ', merge('CC3  ', 'CCSDT', cc3mode /= 0), ccsdonly)
   if (level == 52) then
     ! ---- CC4 (docs/native.md, section 19): T4 is never stored.  From the
     !      CCSDT amplitudes (the file XZAMPS if it belongs to these integrals,
@@ -732,10 +740,19 @@ subroutine xzjob()
   end if
   if (method == ' ') then
     write(6, '(/,a,i4,a,i3,a)') ' @XZCCSDT-F, CALC of the ZMAT (level ', level, ', EXCITATION ', nexc, &
-      ') is not one of CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2.'
+      ') is not one of CCSD, CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2.'
     call xzerrex
   end if
-  if ((eom .or. den) .and. cc3mode == 0 .and. .not. cc4) then
+  ccsdonly = method == 'CCSD'
+  if (ccsdonly) mname = 'CCSD'
+  if (den .and. ccsdonly) then
+    write(6, '(/,a)') ' @XZCCSDT-F, PROPS (the density) goes with CALC=CCSDT only in this version (not CCSD).'
+    call xzerrex
+  end if
+  if (eom .and. ccsdonly) then
+    ! EOM-EE-CCSD: the singles and doubles of the Jacobian of CCSD (xzesig without R3)
+    method = 'CCSD_EOM'
+  else if ((eom .or. den) .and. cc3mode == 0 .and. .not. cc4) then
     if (method /= 'CCSDT') then
       write(6, '(/,a,a,a)') ' @XZCCSDT-F, ', trim(merge('EXCITE=EOMEE          ', 'PROPS or DERIV_LEV > 0', eom)), &
         ' goes with CALC=CCSDT only (here CALC=' // trim(method) // ').'
@@ -963,7 +980,7 @@ subroutine xzkeyw(tconv, lconv)
   write(76, '(es26.17)') e(1)
   write(76, '(2es26.17)') e(2), e(3)
   write(76, '(2i6)') tconv, lconv
-  write(76, '(a,i8,es12.3,i8,es12.3)') merge('CC3  ', 'CCSDT', cc3mode /= 0), ktcyc, ktbig, &
+  write(76, '(a,i8,es12.3,i8,es12.3)') merge('CCSD ', merge('CC3  ', 'CCSDT', cc3mode /= 0), ccsdonly), ktcyc, ktbig, &
     merge(klcyc, 0_8, lconv >= 0), merge(klbig, 0d0, lconv >= 0)
   close(76)
 end subroutine xzkeyw
@@ -1048,7 +1065,7 @@ subroutine xzkeychk(conv, needl, tok, lok, trst, lrst)
   if (ios == 0 .and. tag == 'XZKEY02') read(76, *, iostat=ios) model, tc, tb, lc, lb
   close(76)
   if (ios /= 0 .or. (tag /= 'XZKEY01' .and. tag /= 'XZKEY02')) return
-  if (model /= merge('CC3  ', 'CCSDT', cc3mode /= 0)) return
+  if (model /= merge('CCSD ', merge('CC3  ', 'CCSDT', cc3mode /= 0), ccsdonly)) return
   call xzkeyval(e)
   if (k(1) /= no .or. k(2) /= nv .or. k(3) /= ntot .or. k(4) /= nfrozen) return
   if (abs(e(1) - ek(1)) > 1d-9 * max(1d0, abs(e(1)))) return
@@ -1089,16 +1106,69 @@ subroutine xzsetmode(uselab)
   use xzdata
   implicit none
   logical, intent(in) :: uselab
-  integer(8) :: p, i, j, k, g, n, d, sa, si, m
+  integer(8) :: p, i, j, k, g, n, d, sa, si, m, h, t, step, a, b, r, lmin
+  integer(8) :: cc(0:no+nv-1)
 
   ncls = 1
+  mgrp = 0
   if (uselab) then
+    ! (with a modulus: the labels as residues 0 .. modulus - 1)
+    if (modulus > 0) lab = modulo(lab, modulus)
     call xzclasses(no, nv, lab(nfrozen), maxcls, ncls, operm, vperm, ocls, vcls, ocoff, vcoff)
     if (ncls == 0) then
       write(6, '(a,i4,a)') ' @XZCCSDT-W, more than ', maxcls, ' classes of labels: the labels are not used.'
       ncls = 1
+    else if (modulus > 0 .and. ncls > 1) then
+      ! the step of the classes (as in xzclasses): the sums of classes are
+      ! taken modulo modulus / step
+      step = 0
+      do p = nfrozen, nfrozen + no + nv - 1
+        a = lab(p) - minval(lab(nfrozen:nfrozen + no + nv - 1))
+        b = step
+        do while (b /= 0)
+          r = mod(a, b)
+          a = b
+          b = r
+        end do
+        step = a
+      end do
+      if (step == 0) step = 1
+      if (modulo(modulus, step) /= 0) then
+        write(6, '(a,i6,a,i6,a)') ' @XZCCSDT-W, the labels have the step ', step, ', which does not divide the modulus ', &
+          modulus, ': the labels are not used.'
+        ncls = 1
+      else
+        mgrp = modulus / step
+      end if
     end if
   end if
+  if (ncls == 1) mgrp = 0
+  ! the second label (xzlabels: second): the classes c1 + gB c2
+  gB = 0
+  gm2 = 0
+  if (uselab .and. modulus2 > 1) then
+    if (mgrp == 0) then
+      write(6, '(a)') '   (the second label needs a first one with a modulus and two classes or more: it is not used)'
+    else
+      lmin = minval(lab(nfrozen:nfrozen + no + nv - 1))
+      do p = nfrozen, nfrozen + no + nv - 1
+        cc(p - nfrozen) = (lab(p) - lmin) / step + 12 * mgrp * lab2(p)
+      end do
+      gB = 12 * mgrp
+      gm2 = modulus2
+      ncls = mgrp + gB * (gm2 - 1)
+      if (ncls > maxcls) then
+        write(6, '(a)') '   (the second label: too many classes for maxcls; it is not used)'
+        gB = 0
+        gm2 = 0
+        ncls = 0
+        call xzclasses(no, nv, lab(nfrozen), maxcls, ncls, operm, vperm, ocls, vcls, ocoff, vcoff)
+      else
+        call xzclasses0(no, nv, cc, ncls, maxcls, operm, vperm, ocls, vcls, ocoff, vcoff)
+      end if
+    end if
+  end if
+  call xzsetred(gB, gm2)
   if (ncls == 1) then
     do p = 0, no - 1
       operm(p) = p
@@ -1113,8 +1183,30 @@ subroutine xzsetmode(uselab)
     ocoff(1) = no
     vcoff(1) = nv
   end if
-  npg = 2 * ncls - 1
-  ntg = 3 * ncls - 2
+  if (gB > 0) then
+    ! two digits: every group is a number 0 .. ncls - 1 (xzw)
+    npg = ncls
+    ntg = ncls
+    dlo = 0
+    dhi = ncls - 1
+    q4hi = ncls - 1
+    q2hi = ncls - 1
+  else if (mgrp > 0) then
+    ! groups, differences and the sums of (Q) are residues modulo mgrp
+    npg = mgrp
+    ntg = mgrp
+    dlo = 0
+    dhi = mgrp - 1
+    q4hi = mgrp - 1
+    q2hi = mgrp - 1
+  else
+    npg = 2 * ncls - 1
+    ntg = 3 * ncls - 2
+    dlo = 1 - ncls
+    dhi = ncls - 1
+    q4hi = 4 * (ncls - 1)
+    q2hi = 2 * (ncls - 1)
+  end if
   ! the sizes of the groups
   opoff = 0
   vpoff = 0
@@ -1122,19 +1214,21 @@ subroutine xzsetmode(uselab)
   vtoff = 0
   do i = 0, no - 1
     do j = i + 1, no - 1
-      g = ocls(i) + ocls(j)
+      g = xzw(ocls(i) + ocls(j))
       opoff(g + 1) = opoff(g + 1) + 1
       do k = j + 1, no - 1
-        otoff(g + ocls(k) + 1) = otoff(g + ocls(k) + 1) + 1
+        t = xzw(g + ocls(k))
+        otoff(t + 1) = otoff(t + 1) + 1
       end do
     end do
   end do
   do i = 0, nv - 1
     do j = i + 1, nv - 1
-      g = vcls(i) + vcls(j)
+      g = xzw(vcls(i) + vcls(j))
       vpoff(g + 1) = vpoff(g + 1) + 1
       do k = j + 1, nv - 1
-        vtoff(g + vcls(k) + 1) = vtoff(g + vcls(k) + 1) + 1
+        t = xzw(g + vcls(k))
+        vtoff(t + 1) = vtoff(t + 1) + 1
       end do
     end do
   end do
@@ -1155,6 +1249,11 @@ subroutine xzsetmode(uselab)
   ! (CC3 without stored triples: no T3 anywhere - the regions of T3, its
   ! residual and the T3 parts of the DIIS vectors are empty)
   if (cc3mode == 2) n3 = 0
+  ! CCSD: no T3
+  if (ccsdonly) then
+    n3 = 0
+    boff = 0
+  end if
   nvv = 0
   nqmax = 0
   do g = 0, npg - 1
@@ -1168,9 +1267,10 @@ subroutine xzsetmode(uselab)
   ndel = 0
   wdoff = 0
   nwd = 0
-  do d = 1 - ncls, ncls - 1
+  do d = dlo, dhi
+    if (.not. xzcan(d)) cycle
     do sa = 0, ncls - 1
-      si = sa - d
+      si = xzw(sa - d)
       if (si < 0 .or. si >= ncls) cycle
       ndel(d) = ndel(d) + (vcoff(sa + 1) - vcoff(sa)) * (ocoff(si + 1) - ocoff(si))
     end do
@@ -1181,7 +1281,7 @@ subroutine xzsetmode(uselab)
   nbd = 0
   do g = 0, npg - 1
     do si = 0, ncls - 1
-      sa = g - si
+      sa = xzw(g - si)
       if (sa < 0 .or. sa >= ncls) cycle
       n = (vcoff(sa + 1) - vcoff(sa) + ocoff(sa + 1) - ocoff(sa)) * (ocoff(si + 1) - ocoff(si)) &
           * (vpoff(g + 1) - vpoff(g))
@@ -1204,35 +1304,41 @@ subroutine xzsetmode(uselab)
   end do
   qn22max = 0
   qn13max = 0
-  do m = 0, 4 * (ncls - 1)
+  do m = 0, q4hi
+    if (.not. xzcan(m)) cycle
     n = 0
     do g = 0, npg - 1
-      if (m - g < 0 .or. m - g >= npg) cycle
-      n = n + (vpoff(g + 1) - vpoff(g)) * (vpoff(m - g + 1) - vpoff(m - g))
+      h = xzw(m - g)
+      if (h < 0 .or. h >= npg) cycle
+      n = n + (vpoff(g + 1) - vpoff(g)) * (vpoff(h + 1) - vpoff(h))
     end do
     qn22max = max(qn22max, n)
     n = 0
     do sa = 0, ncls - 1
-      if (m - sa < 0 .or. m - sa >= ntg) cycle
-      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(m - sa + 1) - vtoff(m - sa))
+      h = xzw(m - sa)
+      if (h < 0 .or. h >= ntg) cycle
+      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(h + 1) - vtoff(h))
     end do
     qn13max = max(qn13max, n)
   end do
   qxvmax = 0
   qm3max = 0
   qwbmax = 0
-  do k = 0, 2 * (ncls - 1)
+  do k = 0, q2hi
+    if (.not. xzcan(k)) cycle
     n = 0
     do sa = 0, ncls - 1
-      if (sa + k >= ntg) cycle
-      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(sa + k + 1) - vtoff(sa + k))
+      t = xzw(sa + k)
+      if (t >= ntg) cycle
+      n = n + (vcoff(sa + 1) - vcoff(sa)) * (vtoff(t + 1) - vtoff(t))
       ! the products of this block: pairs (bc) of group g, f of class g - sa, d of class k - (g - sa)
       d = 0
       do g = 0, npg - 1
-        si = g - sa
+        si = xzw(g - sa)
         if (si < 0 .or. si >= ncls) cycle
-        if (k - si < 0 .or. k - si >= ncls) cycle
-        d = d + (vpoff(g + 1) - vpoff(g)) * (vcoff(sa + 1) - vcoff(sa)) * (vcoff(k - si + 1) - vcoff(k - si))
+        h = xzw(k - si)
+        if (h < 0 .or. h >= ncls) cycle
+        d = d + (vpoff(g + 1) - vpoff(g)) * (vcoff(sa + 1) - vcoff(sa)) * (vcoff(h + 1) - vcoff(h))
         qwbmax = max(qwbmax, (vpoff(g + 1) - vpoff(g)) * (vcoff(sa + 1) - vcoff(sa)) &
                              * (vcoff(si + 1) - vcoff(si)))
       end do
@@ -1337,6 +1443,12 @@ subroutine xzlayout(w, status)
                                w(jvsgn), ocoff, vcoff, boff, n3, w(jobase), w(jvcol), w(josig), &
                                w(jvsig), w(jvci), w(jrowpos))
     if (cc3mode == 2) n3 = 0
+    ! CCSD: no T3 (xzt3lay sets n3 and boff from the triples again; without
+    ! this the T3 storage and the T3 parts of the DIIS vectors were kept)
+    if (ccsdonly) then
+      n3 = 0
+      boff = 0
+    end if
   end if
   call xzrel(m)
 
@@ -1351,21 +1463,26 @@ subroutine xzlayout(w, status)
   nbuf = max(2 * po * po, 2 * po * no * nv, 2 * no * no * nv * nv, 2 * ntot)
   kbuf = xzget(nbuf, 'record of an integral file')
   if (.not. xzdry) then
+    call xztic()
     call xzrdeps(w(jeps), w(kbuf))
     call xzsum3(no, nto, w(jofree), w(jeps), w(jeo3))
     call xzsum3(nv, nvt, w(jvfree), w(jeps + no), w(jev3))
     call xzrdsmall(w(jold(1)), w(jold(2)), w(jold(3)), w(jold(4)), w(jold(5)), w(jold(6)), w(jvpa), &
                    w(jvpb), w(jopa), w(jopb), w(kbuf))
+    call xztoc(6, 'the small blocks')
   end if
   call xzrel(m)
   jold(7) = xzget(2 * nel(7), names(7))
   m = xzmark()
   kbuf = xzget(2 * pv * nv, 'record of a file PPPH')
   if (.not. xzdry) then
+    call xztic()
     call xzrdovvq(w(jold(7)), w(jvpa), w(jvpb), w(kbuf))
+    call xztoc(6, '<ov||vv>')
     if (ncls > 1) then
       call xzchklab(w(jold(1)), w(jold(2)), w(jold(3)), w(jold(4)), w(jold(7)), w(jvpgrp), &
                     vmax, what)
+      call xztoc(6, 'check of the labels')
       if (vmax > tol_label) then
         write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
         write(6, '(a,a,a,es10.2,a)') '             an element of ', trim(what), ' that they forbid is ', &
@@ -1402,6 +1519,7 @@ subroutine xzlayout(w, status)
       if (.not. xzdry) call xztoreal(nel(k), w(jold(k)), w(m))
       jold(k) = m
     end do
+    if (.not. xzdry) call xztoc(6, 'imaginary and real parts')
   end if
   joooo = jold(1)
   jooov = jold(2)
@@ -1410,6 +1528,35 @@ subroutine xzlayout(w, status)
   joovvp = jold(5)
   jgpp = jold(6)
   jovvq = jold(7)
+
+  ! ---- <ab||cd> from the blocked real file: straight into its blocks
+  if (blkin) then
+    jvvvv = xzget(nwe * nvv, '<vv||vv> on a<b, c<d')
+    m = xzmark()
+    krow = xzget(2 * nvp, 'row of <vv||vv>')
+    ksrc = xzget(2 * nvp, 'permutation of the pairs')
+    ksg = xzget(nvp, 'signs of the pairs')
+    if (.not. xzdry) then
+      call xztic()
+      call xzrbvvvv(w(jvvvv), w(jvpa), w(jvpb), w(ksrc), w(ksrc + nvp), w(ksg), w(krow), offmax, ximag)
+      call xztoc(6, '<vv||vv>')
+      if (nwe == 1 .and. ximag > tol_imag) then
+        write(6, '(a,es10.2,a,es9.2,a)') '   the largest imaginary part of <vv||vv>: ', ximag, &
+          ' (above the tolerance ', tol_imag, ', imagtol: complex arithmetic)'
+        status = 2
+        return
+      end if
+      if (offmax > tol_label) then
+        write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
+        write(6, '(a,es10.2,a)') '             an element of <vv||vv> that they forbid is ', offmax, &
+          '.  The labels are not used.'
+        status = 1
+        return
+      end if
+    end if
+    call xzrel(m)
+    return
+  end if
 
   ! ---- <ab||cd> from the file xzvvvv in blocks (ours, xzrdvvb): straight into its place
   call xzvvhdr(vvblk, nwf, bmax)
@@ -1453,7 +1600,9 @@ subroutine xzlayout(w, status)
   ksrc = xzget(2 * nvp, 'permutation of the pairs')
   ksg = xzget(nvp, 'signs of the pairs')
   if (.not. xzdry) then
+    call xztic()
     call xzrdvvvv(w(jvvvv), w(jvpa), w(jvpb), w(krow), w(ksrc), w(ksg), offmax)
+    call xztoc(6, '<vv||vv>')
     if (offmax > tol_label) then
       write(6, '(/,a)') ' @XZCCSDT-W, the labels of ' // trim(labfile) // ' are not symmetry labels of these spinors:'
       write(6, '(a,es10.2,a)') '             an element of <vv||vv> that they forbid is ', offmax, &

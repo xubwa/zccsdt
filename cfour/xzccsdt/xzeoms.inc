@@ -919,7 +919,9 @@ subroutine N(xzeprec)(w, kx, omega, sd)
     call xzepsum(nvp, nv, w(jvpa), w(jvpb), w(jeps + no), ev2)
     if (npo > 0) call N(zc_vprecond)(w(kx + NW * no * nv), npo, nvp, eo2, ev2, omega, floor)
   end if
-  if (sd) return
+  ! (EOM-EE-CCSD: a vector has no triples; the tables of the triples are
+  ! there all the same, so they must not be used here)
+  if (sd .or. ccsdonly) return
   ! (the triples: the rows of this rank)
   if (ncls == 1) then
     call xzeslrows(0_8, a, b)
@@ -932,7 +934,7 @@ subroutine N(xzeprec)(w, kx, omega, sd)
       call xzeslrows(g, a, b)
       if (b <= a) cycle
       call N(zc_vprecond)(w(kx + NW * (nsd + boff_s(g) + a * na)), b - a, na, w(jeo3 + otoff(g) + a), &
-                          w(jev3 + vtoff(g + eshift)), omega, floor)
+                          w(jev3 + vtoff(xzw(g + eshift))), omega, floor)
     end do
   end if
 end subroutine
@@ -1123,10 +1125,10 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
            keep(msub), ccyc(nroot), qm(msub, msub), qr(msub * msub), gq(msub, msub))
   gm = 0
   n = 0
-  ! a compaction keeps mkeep0 Ritz vectors (the roots and two more); an
+  ! a compaction keeps mkeep0 Ritz vectors (the roots and ekeep more); an
   ! iteration adds at most nblk corrections, to the lowest roots that are
   ! not converged, so that what is kept and what is added always fit
-  mkeep0 = max(1_8, min(nroot + 2, msub - 1))
+  mkeep0 = max(1_8, min(nroot + ekeep, msub - 1))
   nblk = max(1_8, msub - mkeep0)
   ! ---- the vectors to start from
   do g = 1, nstart
@@ -1692,13 +1694,17 @@ subroutine N(xzeom)(w, ecorr)
     write(6, '(a)') '  (first the roots of the matrix without the T4 terms - that of EOM-CCSDT at the CC4 amplitudes -,'
     write(6, '(a)') '  then every root with the quadruples at its own frequency)'
   else
-  write(6, '(/,a)') '  EOM-EE-CCSDT: excitation energies and right-hand vectors'
+    write(6, '(/,a)') '  EOM-EE-' // trim(mname) // ': excitation energies and right-hand vectors'
   end if
   write(6, '(a)') '  ' // repeat('-', 98)
   write(6, '(a,f10.2,a)') '   intermediates of the ground state (the pp operator in the place of <ab||cd>): ', teomim, ' s'
   write(6, '(a,es9.2,a,i4,a)') '   convergence: the largest element of a residual below ', ethr, &
     ' (ESTATE_CONV, %eomthrs);  at most ', emaxcyc, ' iterations (ESTATE_MAXCYC)'
-  if (eguess == 1) then
+  ! (EOM-EE-CCSD: the CIS-type guess unless %xzeomguess 0)
+  if (ccsdonly .and. eguess == 1) eguess = 2
+  if (eguess == 2) then
+    write(6, '(a)') '   start: the lowest roots of the singles block of the Jacobian (CIS-type guess, %xzeomguess 2)'
+  else if (eguess == 1 .and. .not. ccsdonly) then
     write(6, '(a)') '   start: the roots of the singles-doubles block from unit vectors (%xzeomguess 1)'
   else
     write(6, '(a)') '   start: unit vectors on the lowest single excitations (%xzeomguess 0)'
@@ -1796,13 +1802,26 @@ subroutine N(xzeom)(w, ecorr)
     call xzeomlay(w, s)
     nlen = nsd + n3s
     nkeep = nroot + 2
+    ! (EOM-EE-CCSD: eomstart=k starts from nroot + k singles, a test hook)
+    if (ccsdonly) then
+      call xzoptget('eomstart', arg, larg)
+      if (larg > 0) then
+        read(arg(1:larg), *) k
+        nkeep = nroot + k
+      end if
+    end if
     allocate(singles(nkeep))
     call xzesingles(eshift, w(jeps), nkeep, singles, nsing)
     write(6, '(/,a)') '  ' // repeat('=', 98)
     if (dense) then
-      write(6, '(a,i5,a)') '   EOM-EE-CCSDT on the packed block: ', nroot, ' roots'
+      write(6, '(a,a,a,i5,a)') '   EOM-EE-', trim(mname), ' on the packed block: ', nroot, ' roots'
     else
-      write(6, '(a,i5,a,i4,a,i5,a)') '   EOM-EE-CCSDT, label shift ', eshl(ish), ' (', s, ' classes): ', nroot, ' roots'
+      if (gB > 0) then
+        write(6, '(a,a,a,i5,a,i2,a,i4,a,i5,a)') '   EOM-EE-', trim(mname), ', label shift ', eshl(ish), ', second label ', &
+          modulo(eshl2(ish), gm2), ' (', s, ' classes): ', nroot, ' roots'
+      else
+        write(6, '(a,a,a,i5,a,i4,a,i5,a)') '   EOM-EE-', trim(mname), ', label shift ', eshl(ish), ' (', s, ' classes): ', nroot, ' roots'
+      end if
     end if
     write(6, '(a,i14,a,i12,a,i14,a,f10.1,a)') '   a vector: ', nlen, ' elements (singles and doubles ', nsd, ', triples ', n3s, &
       ') = ', 8d-6 * NW * nlen, ' MB'
@@ -1849,7 +1868,37 @@ subroutine N(xzeom)(w, ecorr)
       if (dist) eplan = ish
     end if
     if (.not. e4rst) then
-    if (eguess == 1) then
+    ! EOM-EE-CCSD: one stage (the singles-doubles block is the whole problem),
+    ! from nkeep = nroot + 2 singles, and a compaction that keeps nroot + 20
+    ! Ritz vectors (eomkeep: another number than 20) in a subspace of at
+    ! least nroot + ekeep + 2 nroot vectors, so that it is not cut back to
+    ! nearly the roots every two iterations
+    ekeep = 2
+    if (ccsdonly) then
+      ekeep = 20
+      call xzoptget('eomkeep', arg, larg)
+      if (larg > 0) read(arg(1:larg), *) ekeep
+      nst = nkeep
+    end if
+    if (eguess == 2) then
+      ! ---- the CIS-type guess: the lowest roots of the singles block of the
+      !      Jacobian (sigma_1 of r1 with r2 = 0: xzesig with essonly), from
+      !      unit vectors on the lowest singles, to 1e-5
+      t1 = omp_get_wtime()
+      msd = 8 + 4 * nkeep
+      essonly = .true.
+      call xzdry_begin()
+      call N(xzesig)(w, kxa, kxb, .true.)
+      call xzdry_end(peak)
+      avail = xzsize - xztop - (peak - xztop)
+      call N(xzesolve)(w, .true., nkeep, 1d-5, 100_8, msd, nkeep, 0_8, singles, kxa, kxb, avail, &
+                       ee, rmax, rnorm, wts, cyc, nfound, nsgd, nitd, kst, 0, lead, vlead, .true.)
+      essonly = .false.
+      write(6, '(a,i4,a,i5,a,i4,a,f9.2,a)') '   CIS-type guess: ', nfound, ' roots, ', nsgd, ' sigma_1 vectors, ', &
+        nitd, ' iterations, ', omp_get_wtime() - t1, ' s'
+      write(6, '(a,8f14.8)') '     roots / Eh: ', (dble(ee(k)), k = 1, min(nfound, 8_8))
+      nst = nfound
+    else if (eguess == 1 .and. .not. ccsdonly) then
       ! ---- the singles-doubles block of the matrix, from unit vectors
       t1 = omp_get_wtime()
       msd = 8 + 4 * nkeep
@@ -1866,6 +1915,7 @@ subroutine N(xzeom)(w, ecorr)
     end if
     ! ---- the problem with triples
     msub = subspace(nroot)
+    if (ccsdonly) msub = max(msub, nroot + ekeep + 2 * nroot)
     edist = dist
     eplan = 0
     if (dist) eplan = ish
@@ -1882,7 +1932,7 @@ subroutine N(xzeom)(w, ecorr)
       8d-6 * avail, ' MB'
     flush(6)
     evfout = cc4
-    if (eguess == 1) then
+    if (eguess == 2 .or. (eguess == 1 .and. .not. ccsdonly)) then
       call N(xzesolve)(w, .false., nroot, ethr, emaxcyc, msub, nst, kst, singles, kxa, kxb, avail, &
                        ee, rmax, rnorm, wts, cyc, nfound, nsig, nit, kxf, iures, lead, vlead, .false.)
     else
@@ -1979,11 +2029,21 @@ contains
     end if
     nr = enr(ip)
     sc = eshl(ip) / labstep
-    if (mod(eshl(ip), labstep) /= 0 .or. abs(sc) > ntg - 1) then
+    ! (with a modulus every multiple of the step is a shift: modulo mgrp)
+    if (mod(eshl(ip), labstep) /= 0 .or. (mgrp == 0 .and. abs(sc) > ntg - 1)) then
       good = .false.
       if (.not. xzdry) write(6, '(/,a,i6,a,i4,a)') ' @XZCCSDT-W, EOM: the shift ', eshl(ip), &
         ' is not a difference of sums of the labels of this run (their step: ', labstep, '); it is left out.'
     end if
+    ! the shift of the second label: the second digit of the class shift
+    if (gB > 0) then
+      sc = sc + gB * modulo(eshl2(ip), gm2)
+    else if (eshl2(ip) /= 0) then
+      good = .false.
+      if (.not. xzdry) write(6, '(/,a,i6,a)') ' @XZCCSDT-W, EOM: the shift ', eshl2(ip), &
+        ' of a second label, but this run has none; it is left out.'
+    end if
+    sc = xzw(sc)
   end subroutine
 
   integer(8) function subspace(nr)

@@ -333,6 +333,32 @@ the X2CSO programs.  A Fortran scheduler on CFOUR's work array (CRAPSI)
 with C kernels; real or complex arithmetic and the blocks of the symmetry
 labels (dgcosym of xsox2chf with %dglin) are chosen at run time.
 
+Symmetry labels with a modulus (the file xzlabels; xsox2chf writes it for
+the symmetry-blocked SCF of D2h, D2 and C2v, %dgkpscf / %dgkpreal: the C2*
+labels 2 m_j = +-1, modulus 4) block every part of the program (CCSDT,
+(Q), Lambda and (Q)_Lambda, the density, EOM): the sums of the classes of
+the labels are taken modulo modulus / step.  The EOM shifts of %xzeom are
+then residues too (with the C2* labels: 0 and 2).
+
+A second label (a line 'second m2' in xzlabels, then one more integer per
+spinor): xsox2chf writes the g/u parity of D2h this way (0 g, 1 u,
+modulus 2), so that D2h is blocked by C2h* = Z4 x Z2.  The classes are
+then c1 + 24 c2, and the sums of classes are reduced digit by digit
+(xzw; zcred.h for the C kernels).  The EOM shifts of %xzeom take three
+numbers then, 'shift parity-shift roots' (with the C2* labels and the
+parity: 0 0, 0 1, 2 0 and 2 1).
+
+With a section %vtranblk in the ZMAT, xx2cvtran writes the integrals as
+real numbers in the blocks of the labels of xzlabels, or of 2 m_j of
+dgcosym for a linear molecule (%dglin) (mobkhhhh, mobkhhhp,
+mobkhhpp, mobkphhp, PPBK0001.., mobkpppp; about a quarter of the dense
+complex files) instead of the files moin.. and PPPH..; it keeps only the
+allowed (pq|rs), as real numbers, during the transformation (vtdense=1
+in %xzccsdt: the dense transformation).  $prog reads them
+if mobkhhhh is there, and <ab||cd> goes straight into its blocks.  The
+other X2CSO programs need the dense files: run xx2cvtran without
+%vtranblk for them.
+
 Build
 -----
 
@@ -371,6 +397,7 @@ In the run directory, after the chain (ABCDTYPE=STANDARD in the ZMAT):
 (xx2camf after xsox2chf for X2CAMF).  $prog takes no argument: the job is
 what the ZMAT asks for (as joda stored it in JOBARC):
 
+    CALC=CCSD                           CCSD (no T3; EXCITE=EOMEE for EOM-EE-CCSD)
     CALC=CCSDT                          CCSDT
     CALC=CCSDT[Q]                       CCSDT and [Q] (also (Q) printed)
     CALC=CCSDT(Q)                       CCSDT, (Q) and [Q]
@@ -447,9 +474,11 @@ spinor energies.  The program prints the largest elements of the Fock
 matrix of the SCF off the diagonal on the active spinors and stops above
 the option focktol.
 
-Options: the section %xzccsdt of the ZMAT, one "name value" per line (the
-name in either case; the section ends at an empty line or at the next %
-line; a name that is not an option stops the program with the list).  No
+Options: the section %xzccsdt of the ZMAT, one "name value" or "name=value"
+per line (the form of X2C-OPTIONS.md at the top of the tree; the name in
+either case; # and ! start comment lines; the section ends at an empty line
+or at the next line that starts with % or *; a name that is not an option
+stops the program with the list; vtdense is an option of xx2cvtran).  No
 environment variable is read (OMP_NUM_THREADS sets the threads).  An
 ordinary run needs none of them:
 

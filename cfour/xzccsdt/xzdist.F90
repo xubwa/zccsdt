@@ -150,12 +150,12 @@ contains
     case (1)
       do sd = 0, ncls - 1
         do sm = 0, ncls - 1
-          gq = g + sm - sd
+          gq = xzw(g + sm - sd)
           if (gq < 0 .or. gq >= npg) cycle
           nd = vcoff(sd + 1) - vcoff(sd)
           nm = ocoff(sm + 1) - ocoff(sm)
           nq = vpoff(gq + 1) - vpoff(gq)
-          sy = g - sd
+          sy = xzw(g - sd)
           ney = 0d0
           if (sy >= 0 .and. sy < ncls) ney = vcoff(sy + 1) - vcoff(sy) + ocoff(sy + 1) - ocoff(sy)
           c = c + nd * nm * nq * (cg1 + ney)
@@ -163,14 +163,14 @@ contains
       end do
     case (2, 5)
       do gq = 0, npg - 1
-        if (abs(g - gq) >= ncls) cycle
-        dl = ndel(g - gq)
+        if (.not. xzdok(g - gq)) cycle
+        dl = ndel(xzw(g - gq))
         nq = vpoff(gq + 1) - vpoff(gq)
         c = c + dl * nq * (dl + merge(cg2, cg5, kind == 2))
       end do
     case (3, 6)
       do sc = 0, ncls - 1
-        h = g - sc
+        h = xzw(g - sc)
         if (h < 0 .or. h >= npg) cycle
         nc = vcoff(sc + 1) - vcoff(sc)
         nqh = vpoff(h + 1) - vpoff(h)
@@ -184,19 +184,19 @@ contains
       end do
     case (4)
       do gq = 0, npg - 1
-        if (abs(g - gq) >= ncls) cycle
-        dl = ndel(g - gq)
+        if (.not. xzdok(g - gq)) cycle
+        dl = ndel(xzw(g - gq))
         nq = vpoff(gq + 1) - vpoff(gq)
         c = c + dl * nq * (dl + cg4)
       end do
       do sd = 0, ncls - 1
         do sm = 0, ncls - 1
-          gq = g + sm - sd
+          gq = xzw(g + sm - sd)
           if (gq < 0 .or. gq >= npg) cycle
           nd = vcoff(sd + 1) - vcoff(sd)
           nm = ocoff(sm + 1) - ocoff(sm)
           nq = vpoff(gq + 1) - vpoff(gq)
-          sy = g - sd
+          sy = xzw(g - sd)
           ney = 0d0
           if (sy >= 0 .and. sy < ncls) ney = vcoff(sy + 1) - vcoff(sy) + ocoff(sy + 1) - ocoff(sy)
           c = c + nd * nm * nq * ney
@@ -205,7 +205,7 @@ contains
     case (7, 10)
       do sd = 0, ncls - 1
         do sm = 0, ncls - 1
-          gq = g + sm - sd + st
+          gq = xzw(g + sm - sd + st)
           if (gq < 0 .or. gq >= npg) cycle
           nd = vcoff(sd + 1) - vcoff(sd)
           nm = ocoff(sm + 1) - ocoff(sm)
@@ -216,19 +216,19 @@ contains
       end do
     case (8, 11)
       do gq = 0, npg - 1
-        if (abs(g - gq + st + sw) >= ncls) cycle
-        dl = ndel(g - gq + st + sw)
+        if (.not. xzdok(g - gq + st + sw)) cycle
+        dl = ndel(xzw(g - gq + st + sw))
         nq = vpoff(gq + 1) - vpoff(gq)
         c = c + dl * nq * (xzndel(g - gq + st) + cg2)
       end do
     case (9, 12)
       do sc = 0, ncls - 1
-        h = g + st - sc
-        if (h < 0 .or. h >= npg .or. h + sw < 0 .or. h + sw >= npg) cycle
+        h = xzw(g + st - sc)
+        if (h < 0 .or. h >= npg .or. xzw(h + sw) < 0 .or. xzw(h + sw) >= npg) cycle
         if (xzna(st, g) == 0 .or. xzna(st + sw, g) == 0) cycle
         nc = vcoff(sc + 1) - vcoff(sc)
         nqh = vpoff(h + 1) - vpoff(h)
-        c = c + nc * nqh * (vpoff(h + sw + 1) - vpoff(h + sw) + cg3)
+        c = c + nc * nqh * (vpoff(xzw(h + sw) + 1) - vpoff(xzw(h + sw)) + cg3)
       end do
     end select
     xzbcost1 = c

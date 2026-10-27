@@ -11,10 +11,16 @@
 !   ...
 !
 ! one option per line, the name first (letters of either case), its value
-! the rest of the line (a name alone: the value 1); the section ends at an
-! empty line, at a line that starts with % or at the end of the file.  A
-! name that is not in the list below stops the program with the list.
-! Every rank reads the ZMAT of its run directory.
+! the rest of the line after a blank or '=' (a name alone: the value 1) -
+! "name value" and CFOUR's "name=value" (X2C-OPTIONS.md of the CFOUR tree,
+! libx2c x2c_getopt) alike; lines that start with # or ! are comments; the
+! section ends at an empty line, at a line that starts with % or *, or at
+! the end of the file.  A name that is not in the list below stops the
+! program with the list (vtdense is an option of xx2cvtran in the same
+! section: accepted, not used here).  Every rank reads the ZMAT of its run
+! directory.  (The program has its own reader rather than x2c_getopt of
+! libx2c so that a misspelt option stops the run, and so that it builds
+! against a CFOUR tree without x2c_getopt.)
 !
 ! xzoptget(name, value, length) is how the program asks: the value as text
 ! and its length, 0 if the option is not given (the call has the form of
@@ -25,7 +31,7 @@ module xzopt
   implicit none
   private
   public :: xzoptget
-  integer, parameter :: nuser = 28, ndev = 30, nopt = nuser + ndev
+  integer, parameter :: nuser = 28, ndev = 37, nopt = nuser + ndev
   ! the user options first, then the developer and test options
   character(len=10), parameter :: oname(nopt) = [character(len=10) :: &
     'labtol', 'imagtol', 'focktol', 'omegatol', 'foldwin', 'real', 'labels', 'cc3', 'start', 'hh', &
@@ -33,7 +39,8 @@ module xzopt
     'qtasks', 'qranks', 'cc4', 'cc4micro', 'cc4eom', 'cc4acc', 'lsolver', 'eomvdir', &
     'ncyc', 'maxcor', 'debug', 'ddebug', 'ldebug', 'qdebug', 'den_active', 'wfail', 'eomtest', 'eomsig', &
     'eomsd', 'mpitest', 'qsample', 'qstop', 'qcost', 'bcost', 'r0load', 'cc4stop', 'lkry', 'lritz', 'lprec', 'deasig', 'deaonly', 'deabatch', 'deaxv', &
-    'deaplan', 'dea5pool', 'dea5z4', 'dea5xb', 'dea5xa']
+    'deaplan', 'dea5pool', 'dea5z4', 'dea5xb', 'dea5xa', 'terms', 'ampin', 'ampout', 'eomkeep', 'eomstart', &
+    'eomcyc', 'vtdense']
   character(len=256) :: oval(nopt) = ' '
   logical :: oset(nopt) = .false.
   logical :: oread = .false.
@@ -68,7 +75,8 @@ contains
           read(31, '(a)', iostat=ios) line
           if (ios /= 0) exit
           line = adjustl(line)
-          if (len_trim(line) == 0 .or. line(1:1) == '%') exit
+          if (len_trim(line) == 0 .or. line(1:1) == '%' .or. line(1:1) == '*') exit
+          if (line(1:1) == '#' .or. line(1:1) == '!') cycle
           i = scan(line, ' ' // achar(9) // '=')
           nm = line(1:i - 1)
           call lower(nm)
@@ -83,7 +91,7 @@ contains
           end do
           if (.not. found) then
             write(6, '(/,a,a,a)') ' @XZCCSDT-F, the section %xzccsdt of the ZMAT: "', trim(nm), '" is not an option.'
-            write(6, '(a)') '   The options (one per line, "name value"; docs/native.md, section 18):'
+            write(6, '(a)') '   The options (one per line, "name value" or "name=value"; docs/native.md, section 18):'
             write(6, '(4x,8a11)') (oname(j), j = 1, nuser)
             write(6, '(a)') '   developer and test options:'
             write(6, '(4x,8a11)') (oname(j), j = nuser + 1, nopt)

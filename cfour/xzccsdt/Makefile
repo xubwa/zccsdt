@@ -57,9 +57,9 @@ KCFLAGS ?= $(CFLAGS)
 
 # the C kernels that the program calls
 KERNELS := ccsdt_t3 t3pack tnpack lambda_t3 qlambda cc3_fly cc3_native cc3_shift cc4_native t4sym
-MODS    := xzkern xzopt xzmem xzdata xzdiis xzlkry xzpar xzdist xzfrzd xzfrz xzpland xzeomd xzdead xzdea5d
+MODS    := xzkern xzopt xzmem xzdata xzdiis xzlkry xzpar xzdist xzfrzd xzfrz xzpland xzeomd xzdead xzdea5d xzampio
 SRCS    := xzmaps xzread xzplan xzdrv xzcc_z xzcc_d
-INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzblk.inc xzdiisg.inc xzlkry.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc xzeom.inc xzeoms.inc xzcc3.inc xzcc4.inc xzdea.inc xzdeas.inc xzdeam.inc xzdea5.inc xzdea5s.inc xzdea5r.inc xzdea5x.inc
+INCS    := xztype.h xzkern.inc xzimd.inc xzstep.inc xzsd.inc xzblk.inc xzdiisg.inc xzlkry.inc xzcc.inc xzlam.inc xzlblk.inc xzden.inc xzdfrz.inc xzq.inc xzqs.inc xzeom.inc xzeoms.inc xzcc3.inc xzcc4.inc xzdea.inc xzdeas.inc xzdeam.inc xzdea5.inc xzdea5s.inc xzdea5r.inc xzdea5x.inc
 
 OBJS := $(addprefix $(BUILD)/, $(addsuffix .o, $(MODS) $(SRCS) xzccsdt xzutil xzmpi $(KERNELS)))
 
@@ -80,7 +80,7 @@ $(BUILD)/xzutil.o: xzutil.c | $(BUILD)
 $(BUILD)/xzmpi.o: xzmpi.c | $(BUILD)
 	$(MPICC) $(CFLAGS) $(MPIDEF) -c $< -o $@
 
-$(BUILD)/%.o: $(CSRC)/%.c | $(BUILD)
+$(BUILD)/%.o: $(CSRC)/%.c $(CSRC)/zcred.h | $(BUILD)
 	$(KCC) $(KCFLAGS) -c $< -o $@
 
 # the modules before what uses them
@@ -88,7 +88,7 @@ $(addprefix $(BUILD)/, $(addsuffix .o, $(SRCS))): $(addprefix $(BUILD)/, $(addsu
 $(BUILD)/xzmem.o $(BUILD)/xzdata.o $(BUILD)/xzdiis.o $(BUILD)/xzpar.o: $(BUILD)/xzkern.o
 $(BUILD)/xzdata.o: $(BUILD)/xzopt.o
 $(BUILD)/xzfrz.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzfrzd.o
-$(BUILD)/xzpland.o: $(BUILD)/xzdata.o
+$(BUILD)/xzpland.o $(BUILD)/xzampio.o: $(BUILD)/xzdata.o
 $(BUILD)/xzeomd.o: $(BUILD)/xzdata.o $(BUILD)/xzmem.o $(BUILD)/xzpar.o
 $(BUILD)/xzdead.o: $(BUILD)/xzdata.o $(BUILD)/xzkern.o $(BUILD)/xzopt.o $(BUILD)/xzeomd.o $(BUILD)/xzpar.o
 $(BUILD)/xzdea5d.o: $(BUILD)/xzdead.o $(BUILD)/xzdata.o $(BUILD)/xzkern.o $(BUILD)/xzpar.o $(BUILD)/xzeomd.o

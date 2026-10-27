@@ -28,6 +28,8 @@ end function xzpidx
 !   pgrp(P)              the group of a pair
 !   tnew                 work: nt integers
 subroutine xzmaps(n, np, nt, nc, cls, tri, sgn, free, pair, pa, pb, pidx, pgrp, poff, toff, tnew)
+  ! (the groups as in xzsetmode: npg, ntg of them, sums of classes xzw)
+  use xzdata, only: xzw, npg, ntg, maxgrp
   implicit none
   integer(8), intent(in) :: n, np, nt, nc
   integer(8), intent(in) :: cls(0:n-1)
@@ -38,29 +40,29 @@ subroutine xzmaps(n, np, nt, nc, cls, tri, sgn, free, pair, pa, pb, pidx, pgrp, 
   integer(8), intent(out) :: pa(0:np-1), pb(0:np-1)
   integer(8), intent(out) :: pidx(0:n-1, 0:n-1)       ! [p][q]
   integer(8), intent(out) :: pgrp(0:np-1)
-  integer(8), intent(out) :: poff(0:2*nc-1), toff(0:3*nc-2)
+  integer(8), intent(out) :: poff(0:npg), toff(0:ntg)
   integer(8) :: tnew(0:nt-1)
   integer(8) :: i, j, k, x, p, it, g, l
-  integer(8) :: cnt(0:3*nc-2), nxt(0:3*nc-2)
+  integer(8) :: cnt(0:maxgrp), nxt(0:maxgrp)
   integer(8), external :: xztrank
 
   ! pairs
   cnt = 0
   do i = 0, n - 1
     do j = i + 1, n - 1
-      g = cls(i) + cls(j)
+      g = xzw(cls(i) + cls(j))
       cnt(g) = cnt(g) + 1
     end do
   end do
   poff(0) = 0
-  do g = 0, 2 * nc - 2
+  do g = 0, npg - 1
     poff(g + 1) = poff(g) + cnt(g)
   end do
-  nxt(0:2*nc-2) = poff(0:2*nc-2)
+  nxt(0:npg-1) = poff(0:npg-1)
   pidx = -1
   do i = 0, n - 1
     do j = i + 1, n - 1
-      g = cls(i) + cls(j)
+      g = xzw(cls(i) + cls(j))
       p = nxt(g)
       nxt(g) = p + 1
       pa(p) = i
@@ -74,21 +76,21 @@ subroutine xzmaps(n, np, nt, nc, cls, tri, sgn, free, pair, pa, pb, pidx, pgrp, 
   do i = 0, n - 1
     do j = i + 1, n - 1
       do k = j + 1, n - 1
-        g = cls(i) + cls(j) + cls(k)
+        g = xzw(cls(i) + cls(j) + cls(k))
         cnt(g) = cnt(g) + 1
       end do
     end do
   end do
   toff(0) = 0
-  do g = 0, 3 * nc - 3
+  do g = 0, ntg - 1
     toff(g + 1) = toff(g) + cnt(g)
   end do
-  nxt(0:3*nc-3) = toff(0:3*nc-3)
+  nxt(0:ntg-1) = toff(0:ntg-1)
   l = 0
   do i = 0, n - 1
     do j = i + 1, n - 1
       do k = j + 1, n - 1
-        g = cls(i) + cls(j) + cls(k)
+        g = xzw(cls(i) + cls(j) + cls(k))
         it = nxt(g)
         nxt(g) = it + 1
         tnew(l) = it
@@ -134,21 +136,23 @@ end subroutine xzmaps
 !                        order, a slowest, i fastest
 subroutine xzt3lay(no, nv, npo, nvp, nto, nvt, nc, ocls, vcls, otoff, vtoff, vtri, vsgn, ocoff, vcoff, &
                    boff, n3, obase, vcol, osig, vsig, vci, rowpos)
+  ! (the groups as in xzsetmode: ntg of them; the differences dlo .. dhi, xzw)
+  use xzdata, only: xzw, xzcan, ntg, dlo, dhi
   implicit none
   integer(8), intent(in) :: no, nv, npo, nvp, nto, nvt, nc
   integer(8), intent(in) :: ocls(0:no-1), vcls(0:nv-1)
-  integer(8), intent(in) :: otoff(0:3*nc-2), vtoff(0:3*nc-2)
+  integer(8), intent(in) :: otoff(0:ntg), vtoff(0:ntg)
   integer(8), intent(in) :: vtri(0:nvp-1, 0:nv-1)
   integer(1), intent(in) :: vsgn(0:nvp-1, 0:nv-1)
   integer(8), intent(in) :: ocoff(0:nc), vcoff(0:nc)
-  integer(8), intent(out) :: boff(0:3*nc-2), n3
+  integer(8), intent(out) :: boff(0:ntg), n3
   integer(8), intent(out) :: obase(0:nto-1), vcol(0:nvt-1)
   real(8), intent(out) :: osig(0:nto-1), vsig(0:nvt-1)
   integer(4), intent(out) :: vci(0:nvp-1, 0:nv-1)
   integer(8), intent(out) :: rowpos(0:no-1, 0:nv-1)   ! [a][i]
   integer(8) :: g, it, a, i, d, q, delta, sa, si, pos, na
   n3 = 0
-  do g = 0, 3 * nc - 3
+  do g = 0, ntg - 1
     boff(g) = n3
     na = vtoff(g + 1) - vtoff(g)
     do it = otoff(g), otoff(g + 1) - 1
@@ -159,7 +163,7 @@ subroutine xzt3lay(no, nv, npo, nvp, nto, nvt, nc, ocls, vcls, otoff, vtoff, vtr
     end do
     n3 = n3 + (otoff(g + 1) - otoff(g)) * na
   end do
-  boff(3 * nc - 2) = n3
+  boff(ntg) = n3
   osig = 1d0
   vsig = 1d0
   do d = 0, nv - 1
@@ -169,10 +173,11 @@ subroutine xzt3lay(no, nv, npo, nvp, nto, nvt, nc, ocls, vcls, otoff, vtoff, vtr
     end do
   end do
   rowpos = -1
-  do delta = 1 - nc, nc - 1
+  do delta = dlo, dhi
+    if (.not. xzcan(delta)) cycle
     pos = 0
     do sa = 0, nc - 1
-      si = sa - delta
+      si = xzw(sa - delta)
       if (si < 0 .or. si >= nc) cycle
       do a = vcoff(sa), vcoff(sa + 1) - 1
         do i = ocoff(si), ocoff(si + 1) - 1
@@ -273,6 +278,60 @@ subroutine xzclasses(no, nv, lab, maxcls, nc, operm, vperm, ocls, vcls, ocoff, v
 end subroutine xzclasses
 
 ! ---------------------------------------------------------------------------
+! The same with the classes given (0 .. nc - 1, some of them empty): the
+! classes c1 + gB c2 of two labels (xzsetmode).
+subroutine xzclasses0(no, nv, cc, nc, maxcls, operm, vperm, ocls, vcls, ocoff, vcoff)
+  implicit none
+  integer(8), intent(in) :: no, nv, nc
+  integer(8), intent(in) :: cc(0:no+nv-1)
+  integer, intent(in) :: maxcls
+  integer(8), intent(out) :: operm(0:no-1), vperm(0:nv-1), ocls(0:no-1), vcls(0:nv-1)
+  integer(8), intent(out) :: ocoff(0:maxcls), vcoff(0:maxcls)
+  integer(8) :: p, s, k
+  k = 0
+  ocoff = 0
+  do s = 0, nc - 1
+    ocoff(s) = k
+    do p = 0, no - 1
+      if (cc(p) == s) then
+        operm(k) = p
+        ocls(k) = s
+        k = k + 1
+      end if
+    end do
+  end do
+  ocoff(nc) = k
+  k = 0
+  vcoff = 0
+  do s = 0, nc - 1
+    vcoff(s) = k
+    do p = 0, nv - 1
+      if (cc(no + p) == s) then
+        vperm(k) = p
+        vcls(k) = s
+        k = k + 1
+      end if
+    end do
+  end do
+  vcoff(nc) = k
+end subroutine xzclasses0
+
+! ---------------------------------------------------------------------------
+! The two digits of the classes for the C kernels (zc_set_red of tnpack.c).
+subroutine xzsetred(b, m2)
+  use iso_c_binding
+  implicit none
+  integer(8), intent(in) :: b, m2
+  interface
+    subroutine zc_set_red(bb, mm) bind(C, name='zc_set_red')
+      import :: c_int
+      integer(c_int), value :: bb, mm
+    end subroutine zc_set_red
+  end interface
+  call zc_set_red(int(b, c_int), int(m2, c_int))
+end subroutine xzsetred
+
+! ---------------------------------------------------------------------------
 ! The tables of the sector kernels of (Q) (csrc/tnpack.c: zc_q_sector_energy,
 ! zc_xv_sector), 32-bit integers; the classes of the virtual spinors are
 ! their labels there.
@@ -284,6 +343,7 @@ end subroutine xzclasses
 !   tri[A][3]      the indices of the triple A (the order of the program)
 subroutine xzqstab(nv, nvp, nvt, nc, vcls, vcoff, vpoff, vtoff, vpidx, vpgrp, vtri, vfree, &
                    kv, lid, lst, lmem, posv, posq, pos3, tri)
+  use xzdata, only: xzw
   implicit none
   integer(8), intent(in) :: nv, nvp, nvt, nc
   integer(8), intent(in) :: vcls(0:nv-1), vcoff(0:nc), vpoff(0:*), vtoff(0:*)
@@ -309,7 +369,7 @@ subroutine xzqstab(nv, nvp, nvt, nc, vcls, vcoff, vpoff, vtoff, vpidx, vpgrp, vt
       posq(xzpidx(a, b, nv)) = int(p - vpoff(vpgrp(p)), 4)
       do c = b + 1, nv - 1
         t = vtri(vpidx(c, b), a)
-        g = vcls(a) + vcls(b) + vcls(c)
+        g = xzw(vcls(a) + vcls(b) + vcls(c))
         pos3(xztrank(a, b, c, nv)) = int(t - vtoff(g), 4)
       end do
     end do

@@ -38,7 +38,8 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   integer(8) :: kc4, nall
   character(len=24) :: mark
   integer(8), external :: N(xzdiis_target)
-  real(8) :: norms(3), eold, enew, de, normt, t0, t1w, ctl(2), tsg
+  real(8), external :: xzmaxd
+  real(8) :: norms(3), eold, enew, de, t0, t1w, ctl(2), tsg
   ZT :: e
   character(len=256) :: dbg
   integer :: ldbg
@@ -131,6 +132,37 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   end if
   call N(xzecorr)(no, nv, w(jt1), w(jt2), w(joovv), e)
   eold = dble(e)
+  ! ampin=file: one step on the amplitudes of the file (CFOUR's order,
+  ! xzampio.f90; written by ampout), the new ones to file.out, and the
+  ! largest change of T1, T2, T3: a test of the step between runs with other
+  ! labels or arithmetic (converged amplitudes: no change)
+  call xzoptget('ampin', dbg, ldbg)
+  if (ldbg > 0) then
+    if (nrank > 1) then
+      write(6, '(/,a)') ' @XZCCSDT-F, ampin runs with one rank only.'
+      call xzerrex
+    end if
+    if (.not. xzdry) then
+      call xzampr(w, jt1, jt2, jt3, dbg(1:ldbg), ctl(1), ctl(2))
+      write(6, '(/,a,a,a,es10.2,a,es10.2)') '   ampin: ', dbg(1:ldbg), ': imaginary parts dropped ', ctl(1), &
+        ', elements of T3 that the labels forbid ', ctl(2)
+    end if
+    kr3 = N(xzdiis_target)()
+    call N(xzstep)(w, jt1, jt2, jt3, kt1n, kt2n, kr3)
+    if (.not. xzdry) then
+      norms(1) = xzmaxd(NW * no * nv, w(jt1), w(kt1n))
+      norms(2) = xzmaxd(NW * no * no * nv * nv, w(jt2), w(kt2n))
+      norms(3) = xzmaxd(NW * n3, w(jt3), w(kr3))
+      write(6, '(a,3es12.3)') '   ampin: largest change of T1, T2, T3 in one step:', norms
+      call xzampw(w, kt1n, kt2n, kr3, dbg(1:ldbg) // '.out')
+    end if
+    call N(xzdiis_close)()
+    call xzrel(m0)
+    ecorr = 0d0
+    converged = .false.
+    ncyc = 0
+    return
+  end if
   call xzoptget('debug', dbg, ldbg)
   if (ldbg > 0 .and. nrank > 1) then
     write(6, '(/,a)') ' @XZCCSDT-F, option debug (one step from a file) runs with one rank only.'
@@ -149,7 +181,7 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
     write(74) w(kt1n:kt1n + NW * no * nv - 1), w(kt2n:kt2n + NW * no * no * nv * nv - 1), &
               w(kr3:kr3 + NW * n3 - 1)
     close(74)
-    write(6, '(a,a)') ' option debug: one step written to ', dbg(1:ldbg) // '.out'
+    write(6, '(a,a)') ' debug: one step written to ', dbg(1:ldbg) // '.out'
     call N(xzdiis_close)()
     call xzrel(m0)
     ecorr = eold
@@ -432,6 +464,9 @@ subroutine N(xzcc)(w, nslot, usefile, nch, ecorr, converged, ncyc)
   if (cc4 .and. converged .and. cc4rst /= 2 .and. .not. timing_run) &
     call N(xz4ckpt)(w, 'w', nint(-log10(conv_t), 8), eold, dprev)
   ecorr = eold
+  ! ampout=file: the amplitudes in CFOUR's order (xzampio.f90)
+  call xzoptget('ampout', dbg, ldbg)
+  if (ldbg > 0 .and. .not. xzdry .and. myrank == 0) call xzampw(w, jt1, jt2, jt3, dbg(1:ldbg))
   call N(xzdiis_close)()
   call xzrel(m0)
 end subroutine
