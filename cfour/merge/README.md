@@ -62,6 +62,18 @@ are.  The directory is generated; the sources stay here.
    by themselves), `make`, `regress.sh`.  Nothing is edited in CFOUR's copy;
    its `README` names the commit it was made from.
 
+**Changes made in CFOUR's tree** (since 2026-10-15 CFOUR's x2cso branch has
+the directory as `zccsdt/` and Lan Cheng changes it there): `fromcfour.sh
+ZCCSDT_DIR` copies such a directory (e.g. `git -C <cfour> archive <commit>
+zccsdt | tar -x -C DIR`) back into this layout - the inverse of
+`assemble.sh`; the changes of the generated `Makefile` and `README` go by
+hand into `cfour/xzccsdt/Makefile` and the README template of
+`assemble.sh`.  Commit them on a branch from the commit the CFOUR directory
+was assembled from (one commit per commit of CFOUR, his authorship) and
+merge that branch: the branch `lan/x2cso-zccsdt` (his commits to
+81c6dbd00) was made and merged this way on 2026-10-27 (docs/native.md,
+section 22).  The sources have the same names in both trees (`*.f90`).
+
 ## What the directory is
 
 - Every file of `cfour/xzccsdt/` except its Makefile (a glob), under the
