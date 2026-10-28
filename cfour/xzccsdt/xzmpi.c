@@ -7,7 +7,7 @@
  * All calls of MPI of the program are in this file, and they are plain
  * MPI-3 calls with int counts (no large-count routines, nothing of one
  * vendor): an array of n double words goes in messages of at most
- * xz_chunk words (2^23 = 64 MB by default, the option mpichunk: words, at most 2^27
+ * xz_chunk words (2^23 = 64 MB by default, the option mpichunk of %xzccsdt, at most 2^27
  * so that no count in bytes passes 2^31 - 1 either).
  *
  * Compiled with -DXZ_MPI (and an MPI compiler wrapper) these are calls of
@@ -354,8 +354,8 @@ void xzmpi_abort(int64_t code) { exit((int)code); }
 
 #endif
 
-/* ---- A test of the chunked routines (option mpitest n words, with the chunk
- * that the option mpichunk gives): patterns that depend on the rank and on the
+/* ---- A test of the chunked routines (mpitest=n words, with the chunk
+ * that mpichunk gives; options of %xzccsdt): patterns that depend on the rank and on the
  * index go through the broadcast, a ring of sends and receives, the sum
  * onto rank 0 and the sum on all ranks; returns the number of wrong words
  * on this rank (0 without MPI and with one rank as well). */

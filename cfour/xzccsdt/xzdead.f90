@@ -235,7 +235,7 @@ contains
     character(len=*), intent(in) :: piece
     character(len=128), save :: v = ' '
     integer, save :: lv = -1
-    if (lv < 0) call xzoptget('deaonly', v, lv)
+    if (lv < 0) call x2c_getopt('xzccsdt', 'deaonly', v, lv)
     xzdwant = lv == 0
     if (lv > 0) xzdwant = index(' ' // v(1:lv) // ' ', ' ' // piece // ' ') > 0
   end function

@@ -749,14 +749,14 @@ subroutine N(xzeom3)(w, ecorr)
     return
   end if
   otol = ethr / 100d0
-  call xzoptget('omegatol', arg, larg)
+  call x2c_getopt('xzccsdt', 'omegatol', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *, iostat=ios) otol
     if (ios /= 0) otol = ethr / 100d0
   end if
   ! roots of the singles-doubles stage closer than cwin: one cluster (option foldwin, Eh)
   cwin = 5d-4
-  call xzoptget('foldwin', arg, larg)
+  call x2c_getopt('xzccsdt', 'foldwin', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *, iostat=ios) cwin
     if (ios /= 0) cwin = 5d-4

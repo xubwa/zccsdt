@@ -131,7 +131,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o, kxva)
     zrq = NW * (ndist * z4max + max(nst, 1_8) + no * max(x4max, 1_8) + max(nocmax * nvcmax * nvcmax, 1_8)) + 256
     zsh = zrq <= xzroom()
     ! (option dea5z4: the slots of the ranks, not shared)
-    call xzoptget('dea5z4', zarg, lzarg)
+    call x2c_getopt('xzccsdt', 'dea5z4', zarg, lzarg)
     if (lzarg > 0) zsh = .false.
     if (.not. xzdry) then
       ! (all ranks or none)
@@ -149,7 +149,7 @@ subroutine N(xzd5rows)(w, k3, kr4f, kx3r, kxvr5, ky4, kxor5, kxorp, s5o, kxva)
     zbud = xzroom() - NW * (max(x4max, 1_8) + max(nocmax * nvcmax * nvcmax, 1_8)) - 64
     nzs = min(max(ndist, 3_8), max(3_8, zbud / (NW * z4max)))
     ! (option dea5z4: at most that many slots, a test of the replacement)
-    call xzoptget('dea5z4', zarg, lzarg)
+    call x2c_getopt('xzccsdt', 'dea5z4', zarg, lzarg)
     if (lzarg > 0) then
       read(zarg(1:lzarg), *) zs
       nzs = max(3_8, min(nzs, zs))
@@ -558,7 +558,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
     end do
     zset = NW * (nzmy + 2 * max(maxval(r5w), 1_8) + max(nvcmax * n13amax, 1_8) + no * max(x4max, 1_8) + &
                  max(n14max, 1_8)) + ntmp + 256 <= xzroom()
-    call xzoptget('dea5xb', barg, lbarg)
+    call x2c_getopt('xzccsdt', 'dea5xb', barg, lbarg)
     if (lbarg > 0) zset = .false.
     if (.not. xzdry) then
       zflag(1) = merge(1d0, 0d0, zset)
@@ -593,7 +593,7 @@ subroutine N(xzd5zx)(w, kr4f, k5o, s5o, kg5, kxva)
     nb = (xzroom() - ntmp - 64) / (2 * NW * mrow)
     nb = max(1_8, min(nb, nrmax))
     ! (option dea5xb: at most that many rounds in a batch)
-    call xzoptget('dea5xb', barg, lbarg)
+    call x2c_getopt('xzccsdt', 'dea5xb', barg, lbarg)
     if (lbarg > 0) then
       read(barg(1:lbarg), *) zq
       nb = max(1_8, min(nb, zq))

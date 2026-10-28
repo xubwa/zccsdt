@@ -22,9 +22,9 @@
 !
 ! Restart: every rank appends a line per finished task to its file
 ! XZQCHK.<rank> (task, its two energies, seconds).  A later run with the
-! same task list (the same number of ranks, or the same option qtasks) takes
+! same task list (the same number of ranks, or the same qtasks) takes
 ! the finished tasks of all such files as done.  The same lines give the
-! progress report; option qsample f does the fraction f of the quadruples of
+! progress report; qsample=f does the fraction f of the quadruples of
 ! every task, evenly spread, and extrapolates the time.
 !
 module xzpar
@@ -293,7 +293,7 @@ contains
   !              they need (x from their smallest i on): that repeat is
   !              accepted, it is a small part of a piece (section 14).
   !   want > 0   about that many tasks of equal numbers of quadruples
-  !              (option qtasks: tests of the list and of restart)
+  !              (qtasks: tests of the list and of restart)
   subroutine xzq_build(no, want)
     integer(8), intent(in) :: no, want
     integer(8) :: npc(0:no-1), best(0:no-1), l, n, it, big, total, nql, step

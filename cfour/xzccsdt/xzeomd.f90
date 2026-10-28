@@ -196,7 +196,7 @@ contains
 
   ! The input: the flags of joda and the sections of the ZMAT.
   subroutine xzeominp()
-    use xzopt, only: xzoptget
+    use xzopt, only: x2c_getopt, x2c_hasopt
     integer(8) :: iflags
     common /flags/ iflags(100)
     character(len=256) :: line
@@ -270,7 +270,7 @@ contains
       if (enr(a) <= 0) enr(a) = max(nroot0, 1_8)
     end do
     ! a test hook: eomcyc=n iterations at most (ESTATE_MAXCYC is in JOBARC, from xjoda)
-    call xzoptget('eomcyc', line, ios)
+    call x2c_getopt('xzccsdt', 'eomcyc', line, ios)
     if (ios > 0) read(line(1:ios), *, iostat=ios2) emaxcyc
   end subroutine xzeominp
 

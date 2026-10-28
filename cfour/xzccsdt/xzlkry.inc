@@ -55,10 +55,10 @@ subroutine N(xzlk_alloc)(nslot, usefile, nch)
   knres = 0
   kkeep = max(0_8, min(kp - 2, (kp - 1) / 2))
   kfile = usefile .and. kp > 0
-  call xzoptget('lritz', length=ios)
+  call x2c_hasopt('xzccsdt', 'lritz', ios)
   kdbg = ios > 0 .and. .not. xzdry
   ! (option lprec 0: the denominators for the singles too)
-  call xzoptget('lprec', arg, ios)
+  call x2c_getopt('xzccsdt', 'lprec', arg, ios)
   kprec1 = .true.
   if (ios > 0) kprec1 = arg(1:1) /= '0'
   tmat = 0

@@ -108,7 +108,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
     return
   end if
 
-  call xzoptget('ldebug', dbg, ldbg)
+  call x2c_getopt('xzccsdt', 'ldebug', dbg, ldbg)
   t0 = omp_get_wtime()
   if (nrank > 1) then
     ! the amplitudes of rank 0 on every rank (when all ranks have read the integrals)
@@ -249,7 +249,7 @@ subroutine N(xzlam)(w, nslot, usefile, nch, converged, ncyc)
   end if
   ! (option lritz n: the softest directions of the subspace)
   if (lamkry) then
-    call xzoptget('lritz', dbg, ldbg)
+    call x2c_getopt('xzccsdt', 'lritz', dbg, ldbg)
     if (ldbg > 0 .and. .not. slices) then
       read(dbg(1:ldbg), *) kk
       call N(xzlk_ritz)(w, kk)
@@ -405,7 +405,7 @@ subroutine N(xzlamb)(w, rw, ecorr)
     write(6, '(a,5i12)') '   occupied, virtual, words per element, classes, l3 in the file: ', head
     write(6, '(a,5i12)') '   and here:                                                      ', no, nv, &
       int(NW, 8), ncls, n3
-    write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: option labels, option real)'
+    write(6, '(a)') '   (the labels and the arithmetic must be those of the run that wrote it: labels, real)'
     call xzerrex
   end if
   if (abs(e - ecorr) > 1d-9) then
@@ -625,7 +625,7 @@ end subroutine
 !   kl1, kl2, kl3     lambda (in)
 !   kl1n, kl2n        the new l1 and l2 (out)
 !   kr3               the residual of l3, on return the new l3 (out)
-!   dump              write the residuals to files (option ldebug)
+!   dump              write the residuals to files (ldebug)
 subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
   use xzdata
   use xzmem
@@ -994,7 +994,7 @@ subroutine N(xzlamstep)(w, kl1, kl2, kl3, kl1n, kl2n, kr3, dump)
                    w(kr2))
     call xztoc(2, 'R2: part b')
     if (dump) then
-      call xzoptget('ldebug', dbg, ldbg)
+      call x2c_getopt('xzccsdt', 'ldebug', dbg, ldbg)
       call xzdumpw(dbg(1:ldbg) // '.r1', NW * ov, w(kr1))
       call xzdumpw(dbg(1:ldbg) // '.r2', NW * npo * nvp, w(kr2))
       call xzdumpw(dbg(1:ldbg) // '.r3', NW * n3, w(kr3))
@@ -1020,7 +1020,7 @@ end subroutine
 
 ! ---------------------------------------------------------------------------
 ! The kept arrays after the intermediates, for comparisons with the Python
-! program (option ldebug prefix: one file per array, raw).
+! program (ldebug=prefix: one file per array, raw).
 subroutine N(xzlamdump)(w, pre)
   use xzdata
   implicit none

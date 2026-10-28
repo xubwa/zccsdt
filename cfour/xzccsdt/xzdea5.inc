@@ -444,7 +444,7 @@ subroutine N(xzd5secw)(w)
     end if
   end do
   q5cap = min(q5size, own + sum(big))
-  call xzoptget('dea5pool', arg, larg)
+  call x2c_getopt('xzccsdt', 'dea5pool', arg, larg)
   if (larg > 0) read(arg(1:larg), *) q5cap
   q5cap = max(q5cap, maxval(q5len))
   q5pool = xzget(max(q5cap, 1_8), 'DEA5: the quintuple lists of the blocks of r5 (a pool)')
@@ -457,7 +457,7 @@ subroutine N(xzd5secw)(w)
   ! of the free work array (N(xzd5sig); option dea5xa 0 / 1: never / always)
   d5xall = .false.
   if (.not. ddist) d5xall = NW * sum(xv5k) <= (xzsize - xztop) / 4
-  call xzoptget('dea5xa', arg, larg)
+  call x2c_getopt('xzccsdt', 'dea5xa', arg, larg)
   if (larg > 0 .and. .not. ddist) d5xall = arg(1:1) == '1'
 end subroutine
 

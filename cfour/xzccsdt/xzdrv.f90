@@ -7,7 +7,7 @@
 !            the file dgcosym of CFOUR's SCF if that was done in more than
 !            one block (%dglin: 2 m_j), are used - the spinors in the order
 !            of their classes, T3 and <ab||cd> on the allowed blocks only -
-!            provided no integral that they forbid is larger than 1e-8 (option labtol);
+!            provided no integral that they forbid is larger than 1e-5 (labtol);
 !            otherwise the labels are dropped with a warning (one class: the
 !            dense case of the same code)
 !   real     if no integral has an imaginary part above 1e-5, the real
@@ -43,7 +43,7 @@ subroutine xzdrv(w, maxcor)
   twall = omp_get_wtime()
   call xzinit(loc(w(1)), maxcor)
   ! (a test hook: option maxcor words of the work array are used)
-  call xzoptget('maxcor', arg, larg)
+  call x2c_getopt('xzccsdt', 'maxcor', arg, larg)
   if (larg > 0 .and. myrank == 0) then
     read(arg, *) nmax
     xzsize = min(xzsize, nmax)
@@ -72,15 +72,15 @@ subroutine xzdrv(w, maxcor)
       xzmpi_chunk(), ' words)'
   end if
   call xzreuse()
-  ! (Q) reads T3 (and Lambda3) where the files are mapped unless option qmap 0
+  ! (Q) reads T3 (and Lambda3) where the files are mapped unless qmap=0
   t3shared = with_q
-  call xzoptget('qmap', arg, larg)
+  call x2c_getopt('xzccsdt', 'qmap', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0') t3shared = .false.
-  if (with_q .and. .not. t3shared) write(6, '(a)') '   option qmap 0: (Q) with a private copy of T3 in the work array of every rank'
+  if (with_q .and. .not. t3shared) write(6, '(a)') '   qmap=0: (Q) with a private copy of T3 in the work array of every rank'
   if (t3shared .and. xz_fs_local('.' // c_null_char) == 0) then
     write(6, '(a)') ' @XZCCSDT-W, the run directory is on a network file system: (Q) maps the file XZAMPS there'
     write(6, '(a)') '             (one copy of T3 in the page cache of every node; pages are read over the network'
-    write(6, '(a)') '             when they are first needed or after the system has dropped them).  option qmap 0 reads'
+    write(6, '(a)') '             when they are first needed or after the system has dropped them).  qmap=0 reads'
     write(6, '(a)') '             T3 into the work array of every rank instead.'
   end if
   if (ilp64 /= 1) then
@@ -125,9 +125,9 @@ subroutine xzdrv(w, maxcor)
   end if
   have_labels = there
   uselab = there
-  call xzoptget('labels', arg, larg)
+  call x2c_getopt('xzccsdt', 'labels', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0' .and. uselab) then
-    write(6, '(a)') '   option labels 0: the labels are not used'
+    write(6, '(a)') '   labels=0: the labels are not used'
     uselab = .false.
   end if
   ! (labels with a modulus or a second label: CCSD, CCSDT, (Q), Lambda, the
@@ -138,9 +138,9 @@ subroutine xzdrv(w, maxcor)
     uselab = .false.
   end if
   tryreal = .true.
-  call xzoptget('real', arg, larg)
+  call x2c_getopt('xzccsdt', 'real', arg, larg)
   if (larg > 0 .and. arg(1:1) == '0') then
-    write(6, '(a)') '   option real 0: complex arithmetic whatever the integrals'
+    write(6, '(a)') '   real=0: complex arithmetic whatever the integrals'
     tryreal = .false.
   end if
 
@@ -152,7 +152,7 @@ subroutine xzdrv(w, maxcor)
   planq = .not. (with_cc .or. with_lam .or. with_den .or. with_eom .or. with_dea)
   if (with_den .and. .not. (with_cc .or. with_lam) .and. myrank > 0) return
   ! (a test hook: option den_active 1 writes the files of the active spinors alone)
-  call xzoptget('den_active', arg, larg)
+  call x2c_getopt('xzccsdt', 'den_active', arg, larg)
   den_active = larg > 0
   if (method == 'MP2' .and. myrank > 0) return
   sync = 0d0
@@ -240,7 +240,7 @@ subroutine xzdrv(w, maxcor)
   end if
   ! (option deaplan n1 n2 ...: the memory of EOM-DEA per rank for n1, n2, ... ranks,
   ! from dry runs after the layout and the places of the amplitudes; nothing computed)
-  call xzoptget('deaplan', arg, larg)
+  call x2c_getopt('xzccsdt', 'deaplan', arg, larg)
   if (larg > 0 .and. with_dea) then
     if (nrank > 1) then
       write(6, '(/,a)') ' @XZCCSDT-F, option deaplan: a plan for several ranks is made by one rank.'
@@ -270,9 +270,9 @@ subroutine xzdrv(w, maxcor)
     return
   end if
   ! (a test hook: option wfail, an error on a rank other than 0)
-  call xzoptget('wfail', length=larg)
+  call x2c_hasopt('xzccsdt', 'wfail', larg)
   if (larg > 0 .and. myrank > 0) then
-    write(6, '(a)') ' @XZCCSDT-F, option wfail: a test of the exit of a rank other than 0.'
+    write(6, '(a)') ' @XZCCSDT-F, wfail: a test of the exit of a rank other than 0.'
     call xzerrex
   end if
   ! the batches of the iterations, dealt to the ranks
@@ -297,12 +297,12 @@ subroutine xzdrv(w, maxcor)
   end if
   if (docc .and. myrank == 0) then
     if (.not. converged .and. timing_run) then
-      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, option ncyc: CCSDT stopped after ', maxcyc, &
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, ncyc: CCSDT stopped after ', maxcyc, &
         ' cycles; the amplitudes and what follows are NOT converged.'
       converged = .true.
     end if
     if (.not. converged) then
-      call xzoptget('debug', length=larg)
+      call x2c_hasopt('xzccsdt', 'debug', larg)
       if (larg == 0) write(6, '(/,a,a,a,i5,a)') ' @XZCCSDT-F, ', trim(mname), ' did not converge in ', maxcyc, &
         ' cycles (CC_MAXCYC).'
       if (larg == 0 .and. ampsaved .and. cc4) write(6, '(a)') '             (its CCSDT iterations, the start of CC4)'
@@ -408,7 +408,7 @@ subroutine xzdrv(w, maxcor)
   end if
   if (with_lam .and. myrank == 0) then
     if (.not. converged .and. timing_run) then
-      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, option ncyc: the Lambda equations stopped after ', maxcyc, &
+      write(6, '(/,a,i5,a)') ' @XZCCSDT-W, ncyc: the Lambda equations stopped after ', maxcyc, &
         ' cycles; lambda and what follows are NOT converged.'
       converged = .true.
     end if
@@ -483,9 +483,9 @@ subroutine xzdrv(w, maxcor)
       call xzeom_d(w, ecorr)
     end if
     teom = omp_get_wtime() - t0
-    call xzoptget('eomtest', length=larg)
+    call x2c_hasopt('xzccsdt', 'eomtest', larg)
     if (larg > 0) return
-    call xzoptget('eomsig', length=larg)
+    call x2c_hasopt('xzccsdt', 'eomsig', larg)
     if (larg > 0) return
     call xztable(5, 'EOM: the intermediates and the sigma vectors', teomim + teomsig + teomsd, neomsig)
   end if
@@ -499,7 +499,7 @@ subroutine xzdrv(w, maxcor)
       call xzdea_d(w, ecorr)
     end if
     teom = omp_get_wtime() - t0
-    call xzoptget('deasig', length=larg)
+    call x2c_hasopt('xzccsdt', 'deasig', larg)
     if (larg > 0) return
   end if
 
@@ -708,7 +708,7 @@ subroutine xzjob()
     !      without stored triples; option cc3 stored (a check route): T3 stored
     method = 'CC3'
     cc3mode = 2
-    call xzoptget('cc3', arg, larg)
+    call x2c_getopt('xzccsdt', 'cc3', arg, larg)
     if (larg > 0 .and. (arg(1:1) == 's' .or. arg(1:1) == 'S')) cc3mode = 1
     if (den) then
       write(6, '(/,a)') ' @XZCCSDT-F, CALC=CC3: no density (PROPS, DERIV_LEV) in this program.'
@@ -728,7 +728,7 @@ subroutine xzjob()
     mname = 'CC4'
     cc4 = .true.
     cc4mode = 0
-    call xzoptget('cc4', arg, larg)
+    call x2c_getopt('xzccsdt', 'cc4', arg, larg)
     if (larg > 0 .and. (arg(1:1) == 'p' .or. arg(1:1) == 'P')) cc4mode = 1
     if (larg > 0 .and. (arg(1:1) == 's' .or. arg(1:1) == 'S')) cc4mode = 2
     if (larg > 0 .and. (arg(1:1) == 'c' .or. arg(1:1) == 'C')) cc4mode = 3
@@ -783,7 +783,7 @@ subroutine xzjob()
   maxcyc = iflags(7)
   if (maxcyc <= 0) maxcyc = 50
   ! a timing run: option ncyc cycles of every iteration, converged or not
-  call xzoptget('ncyc', arg, larg)
+  call x2c_getopt('xzccsdt', 'ncyc', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *) maxcyc
     timing_run = .true.
@@ -791,7 +791,7 @@ subroutine xzjob()
   ndiis = 8
   ! the solver of the Lambda equations: option lsolver diis | krylov (default);
   ! option lkry n: the pairs of vectors of the Krylov subspace (3 .. 63)
-  call xzoptget('lsolver', arg, larg)
+  call x2c_getopt('xzccsdt', 'lsolver', arg, larg)
   lamkry = .true.
   if (larg > 0) then
     if (arg(1:1) == 'd' .or. arg(1:1) == 'D') then
@@ -803,7 +803,7 @@ subroutine xzjob()
   end if
   nlkry = 40
   lkplace = 0
-  call xzoptget('lkry', arg, larg)
+  call x2c_getopt('xzccsdt', 'lkry', arg, larg)
   if (larg > 0) then
     if (arg(1:1) == 'm' .or. arg(1:1) == 'M' .or. arg(1:1) == 'f' .or. arg(1:1) == 'F') then
       lkplace = merge(2, 1, arg(1:1) == 'f' .or. arg(1:1) == 'F')
@@ -831,18 +831,13 @@ end subroutine xzjob
 !   (XZKEY02) the model of the amplitudes (CCSDT, CC3), their cycles in all
 !   runs and the largest element of the last step, the same two of lambda
 ! XZAMPS is taken if XZKEY and XZAMPS are there, its header has these active
-! spaces, the numbers above agree (sizes exactly, energies to 1e-9 relative),
-! the model is CCSDT and it was converged at least as tightly (CC_CONV not
-! smaller); XZLAMB if XZAMPS is taken, XZLAMB is lambda of these amplitudes
-! (its header, the CCSDT energy) and its CC_CONV is not smaller.  A file
-! that fits in all but its convergence is the START of the iterations
-! (amprst, lamrst): the run continues an earlier one that ran out of cycles
-! or was stopped.  CC3 amplitudes are never a result (a converged CC3 run
-! leaves no XZKEY); a CC3 run continues CC3 amplitudes, a CCSDT run those of
-! CCSDT.  The labels and the arithmetic (real or complex) are decided again
-! from the same files; a converged file of another mode (option labels,
-! option real changed) stops the run when it is read, one that is not
-! converged is left aside.  Rank 0 decides, the other ranks are told.
+! spaces, the numbers above agree (sizes exactly, energies to 1e-9 relative)
+! and it was converged at least as tightly (CC_CONV not smaller); XZLAMB if
+! XZAMPS is taken, XZLAMB is lambda of these amplitudes (its header, the
+! CCSDT energy) and its CC_CONV is not smaller.  The labels and the
+! arithmetic (real or complex) are decided again from the same files; a
+! file of another mode (labels, real changed) stops the run when it is
+! read.  Rank 0 decides, the other ranks are told.
 subroutine xzreuse()
   use xzdata
   use xzpar
@@ -887,7 +882,7 @@ subroutine xzreuse()
   lamrst = lrst
   if (cc4) then
     ! (a test hook: option cc4stop n - the run stops after its n-th evaluation of the T4 terms)
-    call xzoptget('cc4stop', arg, larg)
+    call x2c_getopt('xzccsdt', 'cc4stop', arg, larg)
     if (larg > 0) read(arg(1:larg), *) nt4stop
     ! CC4: the amplitudes of XZAMPS are those of CCSDT (a CC4 run writes no
     ! others there) - the start of its iterations, never their result
@@ -1385,12 +1380,12 @@ subroutine xzlayout(w, status)
   ! orders below a real violation.  The largest values found are printed.
   tol_label = 1d-5
   tol_imag = 1d-7
-  call xzoptget('labtol', targ, ltarg)
+  call x2c_getopt('xzccsdt', 'labtol', targ, ltarg)
   if (ltarg > 0) then
     read(targ(1:ltarg), *, iostat=ios) tol_label
     if (ios /= 0 .or. tol_label <= 0d0) tol_label = 1d-5
   end if
-  call xzoptget('imagtol', targ, ltarg)
+  call x2c_getopt('xzccsdt', 'imagtol', targ, ltarg)
   if (ltarg > 0) then
     read(targ(1:ltarg), *, iostat=ios) tol_imag
     if (ios /= 0 .or. tol_imag <= 0d0) tol_imag = 1d-7
@@ -1792,10 +1787,10 @@ end subroutine xzrankmem
 ! The start of the ranks (called by every rank after the flags of joda went
 ! round): the largest number of threads of a rank - the memory plan of a
 ! rank has buffers per thread, and rank 0 plans for all -, and the test of
-! the chunked transfers (option mpitest n: arrays of n words through every
-! routine, with the chunk of option mpichunk).
+! the chunked transfers (mpitest=n: arrays of n words through every
+! routine, with the chunk of mpichunk).
 subroutine xzmpistart()
-  use xzopt, only: xzoptget
+  use xzopt, only: x2c_getopt, x2c_hasopt
   use xzpar
   use xzdist
   use xzkern
@@ -1814,12 +1809,12 @@ subroutine xzmpistart()
   if (myrank == 0 .and. b(1) /= -b(2)) write(6, '(a,i4,a,i4,a)') ' @XZCCSDT-W, the ranks have between ', &
     nint(-b(2)), ' and ', nint(b(1)), ' threads: the memory of every rank is planned for the largest number.'
   ! (the option mpichunk: words of a message)
-  call xzoptget('mpichunk', arg, larg)
+  call x2c_getopt('xzccsdt', 'mpichunk', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *) n
     call xzmpi_set_chunk(n)
   end if
-  call xzoptget('mpitest', arg, larg)
+  call x2c_getopt('xzccsdt', 'mpitest', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *) n
     a = [dble(xzmpi_selftest(n)), 0d0]
@@ -1849,12 +1844,12 @@ subroutine xzmapt3(w, name, nskip, n3w, j3)
   if (addr == 0 .or. nbytes /= 56 + 8 * (nskip + n3w)) then
     write(6, '(/,a,a,a)') ' @XZCCSDT-F, the file ', name, ' could not be mapped (or has another length than its header says).'
     write(6, '(a,i16,a,i16)') '   bytes mapped: ', nbytes, '   expected: ', 56 + 8 * (nskip + n3w)
-    write(6, '(a)') '   option qmap 0 reads T3 into the work array of every rank instead.'
+    write(6, '(a)') '   qmap=0 reads T3 into the work array of every rank instead.'
     call xzerrex
   end if
   diff = addr + 56 + 8 * nskip - loc(w(1))
   if (mod(diff, 8_8) /= 0) then
-    write(6, '(/,a,a,a)') ' @XZCCSDT-F, the map of the file ', name, ' is not aligned with the work array; use option qmap 0.'
+    write(6, '(/,a,a,a)') ' @XZCCSDT-F, the map of the file ', name, ' is not aligned with the work array; use qmap=0.'
     call xzerrex
   end if
   j3 = diff / 8 + 1
@@ -1929,7 +1924,7 @@ subroutine xzfockchk(w)
   write(6, '(a,es10.2,a,es10.2,a,es10.2,a,es10.2)') '     on the active spinors: largest |F_oo| off the diagonal ', oo, &
     ',  |F_vv| ', vv, ',  |F_ov| ', ov, ';  |F_pp - e_p| ', dg
   tol = 1d-6
-  call xzoptget('focktol', arg, larg)
+  call x2c_getopt('xzccsdt', 'focktol', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *, iostat=ios) tol
     if (ios /= 0) tol = 1d-6

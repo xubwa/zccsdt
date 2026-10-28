@@ -75,7 +75,7 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
     if (epf(eplan)) evfile = .true.
   end if
   ! a test hook: option eomvec f (files), m (the work array)
-  call xzoptget('eomvec', arg, larg)
+  call x2c_getopt('xzccsdt', 'eomvec', arg, larg)
   if (larg > 0 .and. mayfile .and. .not. xzdry) then
     if (arg(1:1) == 'f' .or. arg(1:1) == 'F') evfile = .true.
   end if
@@ -93,7 +93,7 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
   end if
   ! ---- files: the buffer, the disk (the directory of option eomvdir, e.g. a
   !      node-local disk; made if it is not there; default the run directory)
-  call xzoptget('eomvdir', evdir, larg)
+  call x2c_getopt('xzccsdt', 'eomvdir', evdir, larg)
   if (larg <= 0) evdir = ' '
   if (len_trim(evdir) > 0) then
     if (xz_mkdir(trim(evdir) // c_null_char) /= 0) then
@@ -158,7 +158,7 @@ subroutine N(xzevopenw)(msub)
   evcap = msub
   if (evfile) then
     ! (the directory of the files, option eomvdir: every rank its own files there)
-    call xzoptget('eomvdir', evdir, larg)
+    call x2c_getopt('xzccsdt', 'eomvdir', evdir, larg)
     if (larg <= 0) evdir = ' '
     if (len_trim(evdir) > 0) then
       if (xz_mkdir(trim(evdir) // c_null_char) /= 0) then
@@ -1667,7 +1667,7 @@ subroutine N(xzeom)(w, ecorr)
   ! ---- a test hook: option eomtest seed, the sigma vector of a random vector
   !      against the derivative of the amplitude step (before the pp operator
   !      takes the place of <ab||cd>)
-  call xzoptget('eomtest', arg, larg)
+  call x2c_getopt('xzccsdt', 'eomtest', arg, larg)
   if (larg > 0) then
     if (dist) then
       write(6, '(/,a)') ' @XZCCSDT-F, option eomtest (the sigma vector against the derivative of the amplitude step)'
@@ -1714,9 +1714,9 @@ subroutine N(xzeom)(w, ecorr)
   if (dist) write(6, '(a,i4,a)') '   over ', nrank, ' ranks: every rank does its batches of the two residuals of a sigma vector and ' // &
     'holds its rows of R3 of every vector; rank 0 runs the solver'
 
-  ! ---- a test hook: option eomsig file, sigma of the vector of the file (of the
+  ! ---- a test hook: eomsig=file, sigma of the vector of the file (of the
   !      first shift), written to file.out
-  call xzoptget('eomsig', arg, larg)
+  call x2c_getopt('xzccsdt', 'eomsig', arg, larg)
   if (larg > 0) then
     call problem(1_8, s, nroot, ok)
     call xzeomlay(w, s)
@@ -1733,10 +1733,10 @@ subroutine N(xzeom)(w, ecorr)
     if (ios == 0) read(74, iostat=ios) w(kxa:kxa + NW * nlen - 1)
     close(74)
     if (ios /= 0) then
-      write(6, '(a,i12,a)') ' @XZCCSDT-F, option eomsig: the file does not hold a vector of ', nlen, ' elements.'
+      write(6, '(a,i12,a)') ' @XZCCSDT-F, eomsig: the file does not hold a vector of ', nlen, ' elements.'
       call xzerrex
     end if
-    call xzoptget('eomsd', length=larg)
+    call x2c_hasopt('xzccsdt', 'eomsd', larg)
     ! (over ranks: the vector to all, sigma_3 from the owners of its rows)
     edist = dist
     ecmd = dist .and. larg == 0
@@ -1753,11 +1753,11 @@ subroutine N(xzeom)(w, ecorr)
       call xzecmd(op_end)
       call xzdtable(3, 1_8)
     end if
-    call xzoptget('eomsig', arg, larg)
+    call x2c_getopt('xzccsdt', 'eomsig', arg, larg)
     open(unit=74, file=arg(1:larg) // '.out', form='unformatted', access='stream', status='replace')
     write(74) w(kxb:kxb + NW * nlen - 1)
     close(74)
-    write(6, '(a,i12,a,a)') ' option eomsig: sigma of a vector of ', nlen, ' elements written to ', arg(1:larg) // '.out'
+    write(6, '(a,i12,a,a)') ' eomsig: sigma of a vector of ', nlen, ' elements written to ', arg(1:larg) // '.out'
     call xzrel(m0)
     return
   end if
@@ -1804,7 +1804,7 @@ subroutine N(xzeom)(w, ecorr)
     nkeep = nroot + 2
     ! (EOM-EE-CCSD: eomstart=k starts from nroot + k singles, a test hook)
     if (ccsdonly) then
-      call xzoptget('eomstart', arg, larg)
+      call x2c_getopt('xzccsdt', 'eomstart', arg, larg)
       if (larg > 0) then
         read(arg(1:larg), *) k
         nkeep = nroot + k
@@ -1853,7 +1853,7 @@ subroutine N(xzeom)(w, ecorr)
     e4kdone = 0
     ck4 = .false.
     if (cc4) then
-      call xzoptget('cc4eom', arg, larg)
+      call x2c_getopt('xzccsdt', 'cc4eom', arg, larg)
       ck4 = .not. (larg > 0 .and. (arg(1:1) == 'd' .or. arg(1:1) == 'D'))
     end if
     if (ck4) call N(xz4er)(w, 'r', ish, merge(0_8, eshl(ish), dense), nroot, nlen, ecorr, kxf, ee, nfound, e4kdone, &
@@ -1876,7 +1876,7 @@ subroutine N(xzeom)(w, ecorr)
     ekeep = 2
     if (ccsdonly) then
       ekeep = 20
-      call xzoptget('eomkeep', arg, larg)
+      call x2c_getopt('xzccsdt', 'eomkeep', arg, larg)
       if (larg > 0) read(arg(1:larg), *) ekeep
       nst = nkeep
     end if
@@ -2072,7 +2072,7 @@ real(8) function N(xzeimag)(x)
 end function
 
 ! ---------------------------------------------------------------------------
-! option eomtest seed: the sigma vector of a random totally symmetric vector R
+! eomtest=seed: the sigma vector of a random totally symmetric vector R
 ! against the derivative of the residual of the amplitude step along R,
 !   [8 (Res(T + R) - Res(T - R)) - (Res(T + 2R) - Res(T - 2R))] / 12,
 ! which is exact for a polynomial of degree 4 (docs/eom.md, section 1).  The
@@ -2143,7 +2143,7 @@ subroutine N(xzeomtest)(w, seedtext)
   n2 = dble(s)
   call N(zc_vdot)(n3s, w(ksg + NW * nsd), w(ksg + NW * nsd), s)
   n3n = dble(s)
-  write(6, '(/,a)') ' option eomtest: sigma of a random vector against the derivative of the amplitude step'
+  write(6, '(/,a)') ' eomtest: sigma of a random vector against the derivative of the amplitude step'
   write(6, '(a,3es14.6)') '   |sigma_1|, |sigma_2|, |sigma_3|:        ', sqrt(n1), sqrt(n2), sqrt(n3n)
   write(6, '(a,3es14.6)') '   |sigma - derivative|, the three ranks:  ', sqrt(d1), sqrt(d2), sqrt(d3)
 end subroutine

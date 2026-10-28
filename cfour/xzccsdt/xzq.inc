@@ -76,7 +76,7 @@ subroutine N(xzq)(w, eq5, eq6)
   eq5 = 0d0
   eq6 = 0d0
   if (no < 4 .or. nv < 4) return
-  call xzoptget('qdebug', length=ldbg)
+  call x2c_hasopt('xzccsdt', 'qdebug', ldbg)
   qdebug = ldbg > 0
   qparts = 0d0
   na4 = nv * (nv - 1) * (nv - 2) * (nv - 3) / 24
@@ -177,14 +177,14 @@ subroutine N(xzq)(w, eq5, eq6)
 
   ! ---- the tasks (xzpar.f90): the list, what an earlier run has finished
   want = 0
-  call xzoptget('qtasks', arg, ldbg)
+  call x2c_getopt('xzccsdt', 'qtasks', arg, ldbg)
   if (ldbg > 0) read(arg, *) want
   qkind = '(Q)'
   if (q_left) qkind = '(Q)_L'
   call xzqmodel(qcm, xcm)
   call xzq_costs(no, ncls, ocls, qcm, xcm)
   ! (option qranks "n1 n2 ..": what the list would be for these numbers of ranks)
-  call xzoptget('qranks', arg, ldbg)
+  call x2c_getopt('xzccsdt', 'qranks', arg, ldbg)
   if (ldbg > 0 .and. myrank == 0) then
     nrk = 0
     read(arg, *, iostat=ios) nrk
@@ -194,7 +194,7 @@ subroutine N(xzq)(w, eq5, eq6)
       nrank = nrk(i)
       call xzq_build(no, want)
       call xzq_xvstat(no, nxvs, xvextra, worst)
-      write(6, '(a,i5,a,i6,a,i6,a,i6,a,f6.2,a,f6.2,a)') '   option qranks: ', nrank, ' ranks: ', ntask, ' tasks, Xv ', &
+      write(6, '(a,i5,a,i6,a,i6,a,i6,a,f6.2,a,f6.2,a)') '   qranks: ', nrank, ' ranks: ', ntask, ' tasks, Xv ', &
         nxvs(2), ' of ', nxvs(1), ' pairs; the slowest rank ', 100d0 * worst, ' % above the mean; repeated Xv ', &
         100d0 * xvextra, ' % of the work'
     end do
@@ -203,11 +203,11 @@ subroutine N(xzq)(w, eq5, eq6)
   call xzq_build(no, want)
   call xzq_xvstat(no, nxvs, xvextra, worst)
   qsample = 0d0
-  call xzoptget('qsample', arg, ldbg)
+  call x2c_getopt('xzccsdt', 'qsample', arg, ldbg)
   if (ldbg > 0) read(arg, *) qsample
   if (qsample <= 0d0 .or. qsample >= 1d0) qsample = 0d0
   nstop = -1
-  call xzoptget('qstop', arg, ldbg)
+  call x2c_getopt('xzccsdt', 'qstop', arg, ldbg)
   if (ldbg > 0) read(arg, *) nstop
   nold = 0
   ! (all ranks read the checkpoints of an earlier run before any of them writes one)
@@ -235,11 +235,11 @@ subroutine N(xzq)(w, eq5, eq6)
   if (nrank > 1) write(6, '(a,f6.2,a,f6.2,a)') '   cost model: the slowest rank ', 100d0 * worst, &
     ' % above the mean; the repeated Xv ', 100d0 * xvextra, ' % of the work'
   if (nold > 0) write(6, '(a,i6,a)') '   restart: ', nold, ' tasks were finished by an earlier run (files XZQCHK.*)'
-  if (qsample > 0d0) write(6, '(a,f7.4,a)') '   option qsample: the fraction ', qsample, &
+  if (qsample > 0d0) write(6, '(a,f7.4,a)') '   qsample: the fraction ', qsample, &
     ' of the quadruples of every task is done; the energies are not those of (Q)'
   flush(6)
 
-  call xzoptget('qcost', arg, ldbg)
+  call x2c_getopt('xzccsdt', 'qcost', arg, ldbg)
   qcost = ldbg > 0 .and. myrank == 0
   if (qcost) then
     open(unit=78, file=arg(1:ldbg), form='formatted', status='replace')
@@ -341,7 +341,7 @@ subroutine N(xzq)(w, eq5, eq6)
                 e = e + e1
                 ndone = ndone + 1
                 if (qcost) then
-                  ! (option qcost: the times of every quadruple, for the cost model of the tasks)
+                  ! (qcost: the times of every quadruple, for the cost model of the tasks)
                   write(78, '(4i4,i5,3es12.4)') i, j, k, l, ocls(i) + ocls(j) + ocls(k) + ocls(l), &
                     tq(3) - tq0(3), tq(4) - tq0(4), tq(5) - tq0(5)
                   tq0 = tq
@@ -365,10 +365,10 @@ subroutine N(xzq)(w, eq5, eq6)
       te(:, it) = e
       tdone(it) = .true.
       call xzq_save(it, no, nv, nwe, ncls, first)
-      ! (a test hook: option qstop n ends the run after n tasks, as an interruption would)
+      ! (a test hook: qstop=n ends the run after n tasks, as an interruption would)
       nstop = nstop - 1
       if (nstop == 0) then
-        write(6, '(a)') ' @XZCCSDT-F, option qstop: stopped after the task above.'
+        write(6, '(a)') ' @XZCCSDT-F, qstop: stopped after the task above.'
         flush(6)
         call xzmpi_abort(3_8)
       end if
@@ -837,7 +837,7 @@ subroutine N(xzqlc)(n, sg, a, out)
   out = sg * CONJ(a)
 end subroutine
 
-! the parts of the energy of a quadruple (diagnostic, option qdebug):
+! the parts of the energy of a quadruple (diagnostic, qdebug):
 ! z.[V,T3], z.T2T2, [V,T3].[V,T3], [V,T3].T2T2
 subroutine N(xzqparts)(n, z, rt3, rtt, ev4, eo, s)
   implicit none

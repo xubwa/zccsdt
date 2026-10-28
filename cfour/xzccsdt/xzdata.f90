@@ -187,7 +187,7 @@ module xzdata
   real(8) :: tfly(4) = 0d0          ! seconds of the CC3 kernel: products, amplitudes, gather, contractions
   ! (Q) reads T3 (and Lambda3) where the files XZAMPS (XZLAMB) are mapped,
   ! read-only: one copy in the page cache of a node for all its ranks, not
-  ! in the work array (option qmap 0: a private copy in the work array)
+  ! in the work array (qmap=0: a private copy in the work array)
   logical :: t3shared = .false.
   logical :: sizes_set = .false.    ! xzsizes was called (a rank other than 0, before its work array)
   logical :: den_active = .false.   ! option den_active: the files of the active spinors alone (a test hook)
@@ -489,7 +489,7 @@ contains
 
   ! The hh ladder and F_oo of dense T3 with the operator on occupied triples
   ! (xzo6, one GEMM: the default) or through occupied pairs (xzwpair,
-  ! xzhhapply: option hh pair).  The pair form has (o-2)**2 / (9 o) times fewer
+  ! xzhhapply: hh=pair).  The pair form has (o-2)**2 / (9 o) times fewer
   ! operations, but its gather and reduction are bound by the memory: measured
   ! for 26 occupied spinors it is faster on 8 threads and slower on 16 and
   ! more (docs/native.md), so it is an option.  In blocks of the labels the
@@ -503,7 +503,7 @@ contains
     character(len=16), save :: terms = '?'
     integer :: larg
     if (terms == '?') then
-      call xzoptget('terms', terms, larg)
+      call x2c_getopt('xzccsdt', 'terms', terms, larg)
       if (larg == 0) terms = ' '
     end if
     xzskip = index(terms, char(ichar('0') + k)) > 0
@@ -514,7 +514,7 @@ contains
     integer :: larg
     if (hhset == 0) then
       hhset = 1
-      call xzoptget('hh', arg, larg)
+      call x2c_getopt('xzccsdt', 'hh', arg, larg)
       if (larg > 0) then
         if (arg(1:1) == 'p') hhset = 2
         if (arg(1:1) == 'o') hhset = 1

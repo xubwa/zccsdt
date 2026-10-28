@@ -2146,18 +2146,18 @@ subroutine N(xzeom4f)(w, ip, lshift, nroot, nfound, ee, kxf, kxa, kxb, singles, 
   integer(8), parameter :: maxouter = 30
 
   otol = ethr / 100d0
-  call xzoptget('omegatol', arg, larg)
+  call x2c_getopt('xzccsdt', 'omegatol', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *, iostat=ios) otol
     if (ios /= 0) otol = ethr / 100d0
   end if
   cwin = 5d-4
-  call xzoptget('foldwin', arg, larg)
+  call x2c_getopt('xzccsdt', 'foldwin', arg, larg)
   if (larg > 0) then
     read(arg(1:larg), *, iostat=ios) cwin
     if (ios /= 0) cwin = 5d-4
   end if
-  call xzoptget('cc4eom', arg, larg)
+  call x2c_getopt('xzccsdt', 'cc4eom', arg, larg)
   davidson = larg > 0 .and. (arg(1:1) == 'd' .or. arg(1:1) == 'D')
   ! (macro / micro: the files XZE4R.nnn, XZE4Q.nnn for a later run)
   ckpt = .not. davidson

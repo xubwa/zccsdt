@@ -52,7 +52,7 @@ module xzdist
   real(8) :: rplan(20) = 0d0                  ! the plan of rank 0: words of a worker, the 8 batch sizes, ..;
                                               ! 17: EOM, the words of the subspace of a rank other than 0
   integer(8) :: maxthr = 0                    ! the largest number of threads of a rank
-  ! ---- slices (more than one rank; option slices 0: off): every rank owns a range of
+  ! ---- slices (more than one rank; slices=0: off): every rank owns a range of
   !      rows of T3 - the elements soff(r) <= e < soff(r + 1) of the stored
   !      array, cut at rows -, gets the residual of its rows from all ranks,
   !      does the operator on occupied triples, the Jacobi step and DIIS on
@@ -264,20 +264,20 @@ contains
     rload = 0d0
     ksec = 0d0
     nrebal = 0
-    ! option dist: the kinds that are dealt out, as digits ("123456": all, the default; "0": none)
+    ! dist: the kinds that are dealt out, as digits ("123456": all, the default; "0": none)
     distk = .true.
-    call xzoptget('dist', arg, larg)
+    call x2c_getopt('xzccsdt', 'dist', arg, larg)
     if (larg > 0) then
       do kind = 1, ndk
         distk(kind) = index(arg(1:larg), achar(48 + kind)) > 0
       end do
     end if
     r0extra = 0d0
-    call xzoptget('r0load', arg, larg)
+    call x2c_getopt('xzccsdt', 'r0load', arg, larg)
     if (larg > 0) read(arg(1:larg), *, end=10, err=10) r0extra
 10  continue
     ! option rebal x: deal again when the slowest rank is the fraction x above the mean (0: never)
-    call xzoptget('rebal', arg, larg)
+    call x2c_getopt('xzccsdt', 'rebal', arg, larg)
     if (larg > 0) read(arg(1:larg), *, end=11, err=11) rebtol
 11  continue
     end if
@@ -437,7 +437,7 @@ contains
     ! (the default with more than one rank; option slices 0: rank 0 sends T3,
     ! takes the sum of the residual and holds the DIIS vectors alone)
     slices = .true.
-    call xzoptget('slices', arg, larg)
+    call x2c_getopt('xzccsdt', 'slices', arg, larg)
     if (larg > 0) slices = arg(1:1) /= '0'
     if (.not. slices) return
     ! (the rows of a rank take the operator on occupied triples: not its pair form)
@@ -596,16 +596,16 @@ contains
     nrebal(set) = nrebal(set) + 1
   end subroutine
 
-  ! option bcost file: the batches of this rank, their model cost and their
+  ! bcost=file: the batches of this rank, their model cost and their
   ! seconds, to file.<rank> (what the cost model is checked against)
   subroutine xzbdump()
-    use xzopt, only: xzoptget
+    use xzopt, only: x2c_getopt, x2c_hasopt
     integer :: kind, larg
     integer(8) :: s
     character(len=256) :: arg
     character(len=4) :: tag
     if (.not. allocated(bown)) return
-    call xzoptget('bcost', arg, larg)
+    call x2c_getopt('xzccsdt', 'bcost', arg, larg)
     if (larg == 0) return
     write(tag, '(i4.4)') myrank
     open(unit=76, file=arg(1:larg) // '.' // tag, form='formatted', status='replace')

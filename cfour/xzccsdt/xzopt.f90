@@ -22,15 +22,20 @@
 ! libx2c so that a misspelt option stops the run, and so that it builds
 ! against a CFOUR tree without x2c_getopt.)
 !
-! xzoptget(name, value, length) is how the program asks: the value as text
-! and its length, 0 if the option is not given (the call has the form of
-! get_environment_variable, which it replaced).  The options and their
-! defaults: docs/native.md, section 18.
+! The program asks as CFOUR's programs do (libx2c x2c_getopt.f90), with
+! x2c_getopt('xzccsdt', name, value, length) - the value as text and its
+! length, 0 if the option is not given (the form of get_environment_variable,
+! which it replaced) - and x2c_hasopt('xzccsdt', name, length): the module
+! procedures here, which every routine that uses xzdata sees (they take the
+! place of the external routines of libx2c, which are not linked: the calls
+! are those of CFOUR's zccsdt/, word for word).  xzoptget(name, value,
+! length) is the same without the section.  The options and their defaults:
+! docs/native.md, section 18.
 !
 module xzopt
   implicit none
   private
-  public :: xzoptget
+  public :: xzoptget, x2c_getopt, x2c_hasopt
   integer, parameter :: nuser = 28, ndev = 37, nopt = nuser + ndev
   ! the user options first, then the developer and test options
   character(len=10), parameter :: oname(nopt) = [character(len=10) :: &
@@ -122,5 +127,29 @@ contains
     end do
     write(6, '(/,a,a)') ' @XZCCSDT-F, xzoptget: an option that is not in the list of xzopt.f90: ', name
     call xzerrex
+  end subroutine
+
+  ! the forms of libx2c (x2c_getopt, x2c_hasopt): the section is always %xzccsdt
+  subroutine xzoptsec(section)
+    character(len=*), intent(in) :: section
+    if (section /= 'xzccsdt') then
+      write(6, '(/,a,a)') ' @XZCCSDT-F, x2c_getopt: the options of this program are those of %xzccsdt, not %', section
+      call xzerrex
+    end if
+  end subroutine
+
+  subroutine x2c_getopt(section, name, value, length)
+    character(len=*), intent(in) :: section, name
+    character(len=*), intent(out) :: value
+    integer, intent(out), optional :: length
+    call xzoptsec(section)
+    call xzoptget(name, value, length)
+  end subroutine
+
+  subroutine x2c_hasopt(section, name, length)
+    character(len=*), intent(in) :: section, name
+    integer, intent(out) :: length
+    call xzoptsec(section)
+    call xzoptget(name, length=length)
   end subroutine
 end module xzopt
