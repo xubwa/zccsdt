@@ -31,11 +31,14 @@ module xzeomd
   integer, parameter :: maxsh = 64, maxres = 512, nlead = 6
   integer(8) :: enshift = 0                 ! shifts asked for
   integer(8) :: eshl(maxsh) = 0             ! in labels
+  integer(8) :: eshl2(maxsh) = 0            ! the shift of the second label (xzlabels: second)
   integer(8) :: enr(maxsh) = 1              ! roots of each
   integer(8) :: emaxcyc = 40
   integer(8) :: emaxsub = 0                 ! 0: 20 + roots + 2
   real(8) :: ethr = 1d-5
   integer(8) :: eguess = 1
+  integer(8) :: ekeep = 2                   ! Ritz vectors kept at a compaction: roots + ekeep
+  logical :: essonly = .false.              ! xzesig: the singles alone, r2 = 0 (the CIS-type guess)
   integer(8) :: ewvec = 1                   ! the vectors of the roots go to the file XZEOMR
   integer(8) :: labstep = 1                 ! the step of the labels: a class is (label - smallest) / step
 
@@ -55,7 +58,7 @@ module xzeomd
 
   ! ---- more than one rank (docs/native.md, section 16.7).  Rank 0 runs the
   !      solver; R3 and sigma_3 of a vector are cut into one slice of rows per
-  !      rank (as T3 in the iterations, xzdist.F90, here in the layout of the
+  !      rank (as T3 in the iterations, xzdist.f90, here in the layout of the
   !      label shift), and every rank holds of every vector of the subspace
   !      its own rows only - rank 0 with the singles and doubles in front.
   !      A vector operation of the solver is a command of rank 0 that every
@@ -193,11 +196,12 @@ contains
 
   ! The input: the flags of joda and the sections of the ZMAT.
   subroutine xzeominp()
+    use xzopt, only: x2c_getopt, x2c_hasopt
     integer(8) :: iflags
     common /flags/ iflags(100)
     character(len=256) :: line
     integer :: ios, ios2
-    integer(8) :: nroot0, a, b
+    integer(8) :: nroot0, a, b, c
     logical :: there
     emaxcyc = iflags(97)
     if (emaxcyc <= 0) emaxcyc = 40
@@ -231,17 +235,26 @@ contains
         do
           read(30, '(a)', iostat=ios) line
           if (ios /= 0) exit
+          ! shift [second shift] roots: 'a b' or 'a' as before; three
+          ! integers 'a c b' with a second label (c: its shift)
           a = 0
           b = -1
-          read(line, *, iostat=ios2) a, b
+          c = 0
+          read(line, *, iostat=ios2) a, c, b
           if (ios2 /= 0) then
+            c = 0
             b = -1
-            read(line, *, iostat=ios2) a
-            if (ios2 /= 0) exit
+            read(line, *, iostat=ios2) a, b
+            if (ios2 /= 0) then
+              b = -1
+              read(line, *, iostat=ios2) a
+              if (ios2 /= 0) exit
+            end if
           end if
           if (enshift < maxsh) then
             enshift = enshift + 1
             eshl(enshift) = a
+            eshl2(enshift) = c
             enr(enshift) = b
           end if
         end do
@@ -256,6 +269,9 @@ contains
     do a = 1, enshift
       if (enr(a) <= 0) enr(a) = max(nroot0, 1_8)
     end do
+    ! a test hook: eomcyc=n iterations at most (ESTATE_MAXCYC is in JOBARC, from xjoda)
+    call x2c_getopt('xzccsdt', 'eomcyc', line, ios)
+    if (ios > 0) read(line(1:ios), *, iostat=ios2) emaxcyc
   end subroutine xzeominp
 
   ! The layout of a rank-3 array of the label shift s (classes): the blocks
@@ -269,7 +285,14 @@ contains
     integer(8), intent(in) :: s
     integer(8) :: g
     external :: xzeomfill
-    eshift = s
+    eshift = xzw(s)
+    if (ccsdonly) then
+      ! EOM-EE-CCSD: no triples in a vector
+      if (ncls == 1) eshift = 0
+      n3s = 0
+      boff_s = 0
+      return
+    end if
     if (ncls == 1) then
       eshift = 0
       n3s = nto * nvt
@@ -419,7 +442,7 @@ contains
     do i = 0, no - 1
       do a = 0, nv - 1
         if (ncls > 1) then
-          if (vcls(a) - ocls(i) /= s) cycle
+          if (.not. xzeq(vcls(a) - ocls(i), s)) cycle
         end if
         n = n + 1
         x = eps(no + a) - eps(i)

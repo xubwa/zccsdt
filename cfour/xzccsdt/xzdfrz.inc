@@ -7,7 +7,7 @@
 ! relaxed_rdm1; zvector._relax).
 !
 ! All of it from x[q][r][s] = (h q|r s), one held spinor at a time, q, r, s
-! over all spinors in the full order of xzfrz.F90 (active occupied, active
+! over all spinors in the full order of xzfrz.f90 (active occupied, active
 ! virtual, frozen, dropped):
 !   sweep 1   bf, kf: the blocks of the two-particle density with the
 !             T1-dressed integrals <h a||b c> of the active spinors; the Fock

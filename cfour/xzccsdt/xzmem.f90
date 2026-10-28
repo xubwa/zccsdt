@@ -11,7 +11,7 @@
 !
 ! In a dry run (xzdry = .true.) nothing may be touched: the scheduler runs
 ! through its allocations only, and xzpeak is what a real run with the same
-! batch sizes takes.  The memory plan is made from such runs (xzplan.F90),
+! batch sizes takes.  The memory plan is made from such runs (xzplan.f90),
 ! so the plan and the placement cannot disagree.
 !
 module xzmem

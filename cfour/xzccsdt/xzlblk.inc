@@ -45,7 +45,8 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
   zero = 0
   nth = omp_get_max_threads()
   nrmax = 0
-  do delta = 1 - ncls, ncls - 1
+  do delta = dlo, dhi
+    if (.not. xzcan(delta)) cycle
     nrmax = max(nrmax, ndel(delta))
   end do
   m0 = xzmark()
@@ -69,8 +70,8 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
       ntask = 0
       ngath = 0
       do gq = 0, npg - 1
-        delta = gp - gq
-        if (abs(delta) >= ncls) cycle
+        if (.not. xzdok(gp - gq)) cycle
+        delta = xzw(gp - gq)
         nr = ndel(delta)
         nq = vpoff(gq + 1) - vpoff(gq)
         if (nr == 0 .or. nq == 0) cycle
@@ -80,7 +81,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
         gkt(gq) = xzget(NW * nb * nr * nq, 'pass-1 batch of T3')
         r0 = 0
         do sd = 0, ncls - 1
-          sm = sd - delta
+          sm = xzw(sd - delta)
           if (sm < 0 .or. sm >= ncls) cycle
           nd = vcoff(sd + 1) - vcoff(sd)
           nm = ocoff(sm + 1) - ocoff(sm)
@@ -90,7 +91,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
             gsd(ngath) = sd
             gr0(ngath) = r0
           end if
-          sy = gp - sd
+          sy = xzw(gp - sd)
           if (nd > 0 .and. nm > 0 .and. sy >= 0 .and. sy < ncls) then
             ne = vcoff(sy + 1) - vcoff(sy)
             nj = ocoff(sy + 1) - ocoff(sy)
@@ -113,7 +114,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
         call xztic()
         ! the gathers: one task per (gQ, class of d)
         do it = 1, ngath
-          sm = gsd(it) - (gp - ggq(it))
+          sm = xzw(gsd(it) - (gp - ggq(it)))
           cost(it) = dble(vcoff(gsd(it) + 1) - vcoff(gsd(it))) * (ocoff(sm + 1) - ocoff(sm)) &
                      * (vpoff(ggq(it) + 1) - vpoff(ggq(it)))
         end do
@@ -124,8 +125,8 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           if (big(it) .neqv. (phase == 1)) cycle
           gq = ggq(it)
           sd = gsd(it)
-          delta = gp - gq
-          sm = sd - delta
+          delta = xzw(gp - gq)
+          sm = xzw(sd - delta)
           nr = ndel(delta)
           qlo = vpoff(gq)
           nq = vpoff(gq + 1) - qlo
@@ -148,7 +149,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
         ! docs/native.md, section 13.)
         do ig = 0, ngq - 1
           gq = lst(ig)
-          cost(ig * nb + 1:ig * nb + nb) = dble(ndel(gp - gq)) ** 2 * (vpoff(gq + 1) - vpoff(gq))
+          cost(ig * nb + 1:ig * nb + nb) = dble(ndel(xzw(gp - gq))) ** 2 * (vpoff(gq + 1) - vpoff(gq))
         end do
         call xzbig(ngq * nb, cost, big)
         do phase = 1, 2
@@ -157,7 +158,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           do k = 0, nb - 1
             if (big(ig * nb + k + 1) .neqv. (phase == 1)) cycle
             gq = lst(ig)
-            delta = gp - gq
+            delta = xzw(gp - gq)
             nr = ndel(delta)
             qlo = vpoff(gq)
             nq = vpoff(gq + 1) - qlo
@@ -176,8 +177,8 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
         call xztoc(tcur, 'pass 1: density')
         ! the stacked products, per gQ and class of d (and of m)
         do it = 1, ntask
-          sm = tsd(it) - (gp - tgq(it))
-          sy = gp - tsd(it)
+          sm = xzw(tsd(it) - (gp - tgq(it)))
+          sy = xzw(gp - tsd(it))
           cost(it) = dble(vcoff(tsd(it) + 1) - vcoff(tsd(it))) * (ocoff(sm + 1) - ocoff(sm)) &
                      * (vpoff(tgq(it) + 1) - vpoff(tgq(it))) &
                      * (8 + vcoff(sy + 1) - vcoff(sy) + ocoff(sy + 1) - ocoff(sy))
@@ -189,9 +190,9 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
           if (big(it) .neqv. (phase == 1)) cycle
           gq = tgq(it)
           sd = tsd(it)
-          delta = gp - gq
-          sm = sd - delta
-          sy = gp - sd
+          delta = xzw(gp - gq)
+          sm = xzw(sd - delta)
+          sy = xzw(gp - sd)
           nr = ndel(delta)
           qlo = vpoff(gq)
           nq = vpoff(gq + 1) - qlo
@@ -208,7 +209,7 @@ subroutine N(xzlbpass1)(w, kl3, kt3, gpd, gmq, l2pp, xacc, yall, dr, d1)
         end do
         do it = 1, ntask
           sd = tsd(it)
-          sy = gp - sd
+          sy = xzw(gp - sd)
           call N(xzbp1yadd)(no, nv, npo, nb, vcoff(sd + 1) - vcoff(sd), vcoff(sy + 1) - vcoff(sy), &
                             ocoff(sy + 1) - ocoff(sy), p0, vcoff(sd), vcoff(sy), ocoff(sy), w(tky(it)), yall)
         end do
@@ -251,10 +252,11 @@ subroutine N(xzlbdr)(dd, d0, dr, d1)
   ZT, intent(in) :: dd(0:*), d0(0:*)
   ZT :: dr(0:no*nv-1, 0:no*nv-1), d1(0:no*nv-1)
   integer(8) :: idx(0:no*nv-1), delta, sa, si, a, i, n, r, c
-  do delta = 1 - ncls, ncls - 1
+  do delta = dlo, dhi
+    if (.not. xzcan(delta)) cycle
     n = 0
     do sa = 0, ncls - 1
-      si = sa - delta
+      si = xzw(sa - delta)
       if (si < 0 .or. si >= ncls) cycle
       do a = vcoff(sa), vcoff(sa + 1) - 1
         do i = ocoff(si), ocoff(si + 1) - 1
@@ -305,7 +307,7 @@ subroutine N(xzlbladder)(w, kl3, kr3, xq, x2, r2q, r1x)
       end if
       call xzbtic()
       do sc = 0, ncls - 1
-        h = g - sc
+        h = xzw(g - sc)
         if (h < 0 .or. h >= npg) cycle
         nc = vcoff(sc + 1) - vcoff(sc)
         qlo = vpoff(h)
@@ -403,7 +405,7 @@ subroutine N(xzlbcx)(w, kt3, gpp, vq, xq, x2)
     do i0 = otoff(g), otoff(g + 1) - 1, nbt
       nb = min(nbt, otoff(g + 1) - i0)
       do sc = 0, ncls - 1
-        h = g - sc
+        h = xzw(g - sc)
         if (h < 0 .or. h >= npg) cycle
         nc = vcoff(sc + 1) - vcoff(sc)
         qlo = vpoff(h)
@@ -424,7 +426,7 @@ subroutine N(xzlbcx)(w, kt3, gpp, vq, xq, x2)
           end if
         end if
         do se = 0, ncls - 1
-          si = h - se
+          si = xzw(h - se)
           if (si < 0 .or. si >= ncls) cycle
           ne = vcoff(se + 1) - vcoff(se)
           nj = ocoff(si + 1) - ocoff(si)

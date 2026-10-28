@@ -75,7 +75,7 @@ integer(8) function xzpeak_cc(w)
   end if
   ! EOM-DEA (one rank; not with option deaplan, whose plan per rank for other
   ! numbers of ranks follows the plan of the amplitudes)
-  call xzoptget('deaplan', length=ldp)
+  call x2c_hasopt('xzccsdt', 'deaplan', ldp)
   if (with_dea .and. ldp <= 0) then
     if (nwe == 2) then
       call xzdea_z(w, e)
@@ -114,7 +114,7 @@ integer(8) function xzpeak_q(w)
   call xzlayout(w, status)
   k = xzget(nwe * no * nv, 'T1')
   k = xzget(nwe * no * no * nv * nv, 'T2')
-  ! (T3 and Lambda3 of (Q): mapped files, not in the work array, unless option qmap 0)
+  ! (T3 and Lambda3 of (Q): mapped files, not in the work array, unless qmap=0)
   if (method /= 'MP2' .and. .not. t3shared) k = xzget(nwe * n3, 'T3')
   if (with_q .and. q_left) then
     k = xzget(nwe * no * no * nv * nv, 'Lambda2')
@@ -180,10 +180,10 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   plo(3) = 1
   phi(3) = max(1_8, min(npo, int(2d9 / (3d0 * 8 * nwe * f * frac), 8)))
   ! (with more than one rank the batches are what is dealt out: at least
-  ! bpr of them per rank, option bpr, so that the cost model can balance the ranks)
+  ! bpr of them per rank, bpr, so that the cost model can balance the ranks)
   if (nrank > 1) then
     bpr = 8
-    call xzoptget('bpr', arg, larg)
+    call x2c_getopt('xzccsdt', 'bpr', arg, larg)
     if (larg > 0) read(arg(1:larg), *) bpr
     phi(2) = max(1_8, min(phi(2), nto / (max(bpr, 1_8) * nrank)))
     phi(3) = max(1_8, min(phi(3), npo / (max(bpr, 1_8) * nrank)))
@@ -295,7 +295,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   !      the macro iterations (rank 0), before any batch grows - they save an
   !      evaluation of the T4 terms, a hundred iterations
   if (cc4 .and. .not. planq .and. (cc4mode == 0 .or. cc4mode == 3)) then
-    call xzoptget('cc4acc', arg, larg)
+    call x2c_getopt('xzccsdt', 'cc4acc', arg, larg)
     acc4 = .not. (larg > 0 .and. arg(1:1) == '0')
     if (acc4) then
       if (xzpeak_cc(w) > xzsize) acc4 = .false.
@@ -318,7 +318,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   if (cc3mode == 2) then
     call raise(9, .true.)
     ! a test hook: option cc3w n elements of the work of a batch (at least one triple)
-    call xzoptget('cc3w', arg, larg)
+    call x2c_getopt('xzccsdt', 'cc3w', arg, larg)
     if (larg > 0) then
       read(arg(1:larg), *) k8
       call setpar(9, max(plo(9), k8))
@@ -377,7 +377,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
   end if
   need_q = xzpeak_q(w)
   ! a test hook: batch sizes given explicitly, option plan "nqs nbt nbp nba qxv qc22 qc13 qrows"
-  call xzoptget('plan', length=larg)
+  call x2c_hasopt('xzccsdt', 'plan', larg)
   if (larg > 0) call explicit()
 
   nslot = pslot
@@ -432,7 +432,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       write(6, '(a,f10.1,a)') '        one copy in the page cache of a node for all its ranks: ', 8d-6 * nwe * n3, ' MB)'
     end if
   else if (with_q) then
-    write(6, '(a)') '       (private to a rank, T3 included: option qmap 0)'
+    write(6, '(a)') '       (private to a rank, T3 included: qmap=0)'
   end if
   if (.not. planq) then
   write(6, '(a,i8,a,i8)') '     rows of a slab of the dressed <ab||cd>:      ', nqs, '  of ', nqmax
@@ -476,7 +476,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
       write(6, '(a,f10.1,a)') '     CC4: extrapolation over the macro iterations, three sets of amplitudes in the work array (', &
         24d-6 * nwe * (no * nv + no * no * nv * nv + n3), ' MB)'
     else
-      call xzoptget('cc4acc', arg, larg)
+      call x2c_getopt('xzccsdt', 'cc4acc', arg, larg)
       if (larg > 0 .and. arg(1:1) == '0') then
         write(6, '(a)') '     CC4: no extrapolation over the macro iterations (option cc4acc 0)'
       else
@@ -494,7 +494,7 @@ subroutine xzplan(w, nslot, usefile, nch, flooronly)
     end if
   end if
   if (max(need_cc, need_q) > xzsize) then
-    write(6, '(/,a)') ' @XZCCSDT-F, the plan does not fit the work array (option plan?).'
+    write(6, '(/,a)') ' @XZCCSDT-F, the plan does not fit the work array (plan?).'
     call xzerrex
   end if
   flush(6)
@@ -578,22 +578,22 @@ contains
     character(len=256) :: text
     integer(8) :: v(npar)
     integer :: kk, ios
-    call xzoptget('plan', text)
+    call x2c_getopt('xzccsdt', 'plan', text)
     read(text, *, iostat=ios) v
     if (ios /= 0) then
-      write(6, '(a)') ' @XZCCSDT-F, option plan: eight numbers expected.'
+      write(6, '(a)') ' @XZCCSDT-F, plan: eight numbers expected.'
       call xzerrex
     end if
     do kk = 1, npar
       if (v(kk) > 0) call setpar(kk, max(1_8, v(kk)))
     end do
-    call xzoptget('diis', arg, larg)
+    call x2c_getopt('xzccsdt', 'diis', arg, larg)
     if (larg > 0) then
       pfile = arg(1:1) == 'f' .or. arg(1:1) == 'F'
       if (larg > 1) read(arg(2:larg), *) pslot
     end if
     need_cc = xzpeak_cc(w)
     need_q = xzpeak_q(w)
-    write(6, '(a)') '     (batch sizes from option plan)'
+    write(6, '(a)') '     (batch sizes from plan)'
   end subroutine
 end subroutine xzplan

@@ -73,7 +73,7 @@ subroutine N(xzdea)(w, ecorr)
   ! rank alike for the rank whose part takes the most (the work arrays of all
   ! ranks have the words of rank 0)
   myrank0 = myrank
-  call xzoptget('deaxv', arg, larg)
+  call x2c_getopt('xzccsdt', 'deaxv', arg, larg)
   if (larg > 0) then
     dxvfile = arg(1:1) == 'f' .or. arg(1:1) == 'F'
   else
@@ -181,7 +181,7 @@ subroutine N(xzdea)(w, ecorr)
 
   ! ---- a test hook: option deasig file, sigma of the vector of the file (the
   !      first target), written to file.out
-  call xzoptget('deasig', arg, larg)
+  call x2c_getopt('xzccsdt', 'deasig', arg, larg)
   if (larg > 0) then
     call problem(1_8, s, nroot, ok)
     call xzdsec(s)
@@ -193,9 +193,9 @@ subroutine N(xzdea)(w, ecorr)
     end if
     nlen = dn2 + dsz3 + dsz4 + dvec5
     dbatch = 134217728_8 / NW
-    call xzoptget('deabatch', arg, larg)
+    call x2c_getopt('xzccsdt', 'deabatch', arg, larg)
     if (larg > 0) read(arg(1:larg), *) dbatch
-    call xzoptget('deasig', arg, larg)
+    call x2c_getopt('xzccsdt', 'deasig', arg, larg)
     kxa = xzget(NW * nlen, 'DEA: a vector')
     kxb = xzget(NW * nlen, 'DEA: its sigma vector')
     edea = .true.
@@ -306,7 +306,7 @@ subroutine N(xzdea)(w, ecorr)
     reserve = msub * NW * min(nlen, 1048576_8) + 64
     btarget = 1073741824_8 / (8 * NW)
     if (dlev == 5) btarget = 4 * btarget
-    call xzoptget('deabatch', arg, larg)
+    call x2c_getopt('xzccsdt', 'deabatch', arg, larg)
     if (larg > 0) then
       read(arg(1:larg), *) btarget
       blo = btarget

@@ -36,10 +36,10 @@ subroutine N(xzqsxv)(w, x, l, tri, xv, m3, wb)
   ZT :: one, zero
   one = 1
   zero = 0
-  kxl = ocls(x) + ocls(l)
+  kxl = xzw(ocls(x) + ocls(l))
   xoff = 0
   do ke = 0, ncls - 1
-    t = ke + kxl
+    t = xzw(ke + kxl)
     if (t >= ntg) cycle
     ne = vcoff(ke + 1) - vcoff(ke)
     nt = vtoff(t + 1) - vtoff(t)
@@ -48,9 +48,9 @@ subroutine N(xzqsxv)(w, x, l, tri, xv, m3, wb)
     ndd = 0
     n = 0
     do q2 = 0, npg - 1
-      kf = q2 - ke
+      kf = xzw(q2 - ke)
       if (kf < 0 .or. kf >= ncls) cycle
-      kd = kxl - kf
+      kd = xzw(kxl - kf)
       if (kd < 0 .or. kd >= ncls) cycle
       nf = vcoff(kf + 1) - vcoff(kf)
       nd = vcoff(kd + 1) - vcoff(kd)
@@ -64,7 +64,7 @@ subroutine N(xzqsxv)(w, x, l, tri, xv, m3, wb)
                       w(jt2 + NW * (((x * no + l) * nv + vcoff(kf)) * nv + vcoff(kd))), nv, zero, m3(n), nd)
       n = n + nq * ne * nd
     end do
-    call N(zc_xv_sector)(int(nv, 4), w(jqkv), 0_4, tri(0, vtoff(t)), nt, int(ne, 4), 0_4, &
+    call N(zc_xv_sector)(int(nv, 4), w(jqkv), int(mgrp, 4), tri(0, vtoff(t)), nt, int(ne, 4), 0_4, &
                          int(npg, 4), off, ndd, w(jqposv), w(jqposq), m3, xv(xoff))
     xoff = xoff + ne * nt
   end do
@@ -101,11 +101,12 @@ integer(8) function N(xzqsxvoff)(kxl, ke)
   use xzdata
   implicit none
   integer(8), intent(in) :: kxl, ke
-  integer(8) :: k
+  integer(8) :: k, t
   N(xzqsxvoff) = 0
   do k = 0, ke - 1
-    if (k + kxl >= ntg) cycle
-    N(xzqsxvoff) = N(xzqsxvoff) + (vcoff(k + 1) - vcoff(k)) * (vtoff(k + kxl + 1) - vtoff(k + kxl))
+    t = xzw(k + kxl)
+    if (t >= ntg) cycle
+    N(xzqsxvoff) = N(xzqsxvoff) + (vcoff(k + 1) - vcoff(k)) * (vtoff(t + 1) - vtoff(t))
   end do
 end function
 
@@ -159,7 +160,7 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
   s13 = [1d0, -1d0, 1d0, -1d0]
   s22 = [1d0, -1d0, 1d0, 1d0, -1d0, 1d0]
   eo = w(jeps + i) + w(jeps + j) + w(jeps + k) + w(jeps + l)
-  mt = ocls(i) + ocls(j) + ocls(k) + ocls(l)
+  mt = xzw(ocls(i) + ocls(j) + ocls(k) + ocls(l))
   ! the occupied triples of the splits (i|jkl) and the pairs of the splits (ij|kl)
   jt(0) = otri(opidx(q(3), q(2)), q(1))
   jt(1) = otri(opidx(q(3), q(2)), q(0))
@@ -177,7 +178,7 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
   nc22 = 0
   n22 = 0
   do qq = 0, npg - 1
-    r = mt - qq
+    r = xzw(mt - qq)
     if (r < 0 .or. r >= npg) cycle
     nr = vpoff(qq + 1) - vpoff(qq)
     nc = vpoff(r + 1) - vpoff(r)
@@ -188,7 +189,7 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
     nb = 0
     do s = 0, 3
       x = q(s)
-      ke = qq - ocls(x)
+      ke = xzw(qq - ocls(x))
       if (ke < 0 .or. ke >= ncls) cycle
       ne = vcoff(ke + 1) - vcoff(ke)
       nm = ocoff(ke + 1) - ocoff(ke)
@@ -237,7 +238,7 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
       na = 0
       do s = 0, 3
         x = q(s)
-        ke = qq - ocls(x)
+        ke = xzw(qq - ocls(x))
         if (ke < 0 .or. ke >= ncls) cycle
         ne = vcoff(ke + 1) - vcoff(ke)
         if (ne > 0) call N(xzqsab)(nv, nvp, nr, nc, ne, s13(s), .false., vcoff(ke), vpoff(qq), vpoff(r), &
@@ -261,7 +262,7 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
   nc13 = 0
   n13 = 0
   do p = 0, ncls - 1
-    r = mt - p
+    r = xzw(mt - p)
     if (r < 0 .or. r >= ntg) cycle
     nr = vcoff(p + 1) - vcoff(p)
     nc = vtoff(r + 1) - vtoff(r)
@@ -271,7 +272,7 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
     ! <ma||ij> t(m kl; bcd): rows of T3 where they are
     n = 0
     do s = 0, 5
-      km = opgrp(p22(s)) - p
+      km = xzw(opgrp(p22(s)) - p)
       if (km < 0 .or. km >= ncls) cycle
       do m = ocoff(km), ocoff(km + 1) - 1
         if (osgn(q22(s), m) == 0) cycle
@@ -292,7 +293,7 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
       tl0 = omp_get_wtime()
       n = 0
       do s = 0, 5
-        km = opgrp(p22(s)) - p
+        km = xzw(opgrp(p22(s)) - p)
         if (km < 0 .or. km >= ncls) cycle
         do m = ocoff(km), ocoff(km + 1) - 1
           if (osgn(q22(s), m) == 0) cycle
@@ -312,11 +313,11 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
     first = .true.
     do m = 1, 3
       s = last(m)
-      ke = opgrp(p22(s)) - p
+      ke = xzw(opgrp(p22(s)) - p)
       if (ke < 0 .or. ke >= ncls) cycle
       ne = vcoff(ke + 1) - vcoff(ke)
       if (ne == 0) cycle
-      kxl = ocls(xfirst(s)) + ocls(l)
+      kxl = xzw(ocls(xfirst(s)) + ocls(l))
       alpha = 2d0 * s22(s)
       beta = one
       if (first) beta = zero
@@ -333,11 +334,11 @@ subroutine N(xzqsquad)(w, i, j, k, l, otri, osgn, opidx, opgrp, t2pp, t2p, t2px,
   t0 = omp_get_wtime()
   e = 0d0
   if (left) then
-    call N(zc_ql_sector_energy)(int(nv, 4), w(jqkv), 0_4, int(mt, 4), w(jeps + no), eo, 0_4, int(ncls, 4), &
+    call N(zc_ql_sector_energy)(int(nv, 4), w(jqkv), int(mgrp, 4), int(mt, 4), w(jeps + no), eo, 0_4, int(ncls, 4), &
                                 w(jqlid), w(jqlst), w(jqlmem), 0_4, int(npg, 4), off22, nc22, off13, nc13, &
                                 w(jqposv), w(jqposq), w(jqpos3), b1, b2, b3, b4, c1, c2, c3, e)
   else
-    call N(zc_q_sector_energy)(int(nv, 4), w(jqkv), 0_4, int(mt, 4), w(jeps + no), eo, 0_4, int(ncls, 4), &
+    call N(zc_q_sector_energy)(int(nv, 4), w(jqkv), int(mgrp, 4), int(mt, 4), w(jeps + no), eo, 0_4, int(ncls, 4), &
                                w(jqlid), w(jqlst), w(jqlmem), 0_4, int(npg, 4), off22, nc22, off13, nc13, &
                                w(jqposv), w(jqposq), w(jqpos3), b1, b2, b3, c1, c2, e)
   end if

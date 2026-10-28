@@ -62,13 +62,28 @@ are.  The directory is generated; the sources stay here.
    by themselves), `make`, `regress.sh`.  Nothing is edited in CFOUR's copy;
    its `README` names the commit it was made from.
 
+**Changes made in CFOUR's tree** (since 2026-10-15 CFOUR's x2cso branch has
+the directory as `zccsdt/` and Lan Cheng changes it there): `fromcfour.sh
+ZCCSDT_DIR` copies such a directory (e.g. `git -C <cfour> archive <commit>
+zccsdt | tar -x -C DIR`) back into this layout - the inverse of
+`assemble.sh`; the changes of the generated `Makefile` and `README` go by
+hand into `cfour/xzccsdt/Makefile` and the README template of
+`assemble.sh`.  Commit them on a branch from the commit the CFOUR directory
+was assembled from (one commit per commit of CFOUR, his authorship) and
+merge that branch: the branch `lan/x2cso-zccsdt` (his commits to
+81c6dbd00) was made and merged this way on 2026-10-27 (docs/native.md,
+section 22).  The sources have the same names in both trees (`*.f90`).
+
 ## What the directory is
 
-- Every file of `cfour/xzccsdt/` except its Makefile (a glob).  `make.rules`
-  compiles each `*.f`, `*.f90`, `*.f03`, `*.c` of a directory and has no rule
-  for `%.F90`: the `.F90` files are copied as `.f90`.  CFOUR's `FCFLAGS`
-  preprocess every Fortran file (`-cpp`), so nothing else is needed for the
-  `#include` of the typed sources (`*.inc`, `xztype.h`; `-I.` is added).
+- Every file of `cfour/xzccsdt/` except its Makefile (a glob), under the
+  same name: since 2026-10-27 the free-form sources are `*.f90` here as in
+  CFOUR's `zccsdt/` (they were `*.F90`; `make.rules` compiles each `*.f`,
+  `*.f90`, `*.f03`, `*.c` of a directory and has no rule for `%.F90`, so a
+  `.F90` file would still be copied as `.f90`).  CFOUR's `FCFLAGS` and the
+  repository's Makefile preprocess every Fortran file (`-cpp`), so nothing
+  else is needed for the `#include` of the typed sources (`*.inc`,
+  `xztype.h`; `-I.` is added).
 - The C kernels of `csrc/` that the program links: `KERNELS` of
   `cfour/xzccsdt/Makefile`, read at assembly time (now `ccsdt_t3.c`,
   `t3pack.c`, `tnpack.c`, `lambda_t3.c`, `qlambda.c`, `cc3_fly.c`, `cc3_native.c`,

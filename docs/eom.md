@@ -21,7 +21,7 @@ and a one-shot quadruples correction of the excitation energies (sections
 | one-shot quadruples correction of the excitation energies (section 14) | `src/zccsdt/cc/eom_q.py`, `tests/test_eom_q.py`, `GCCSDT.eom_quadruples`, `bench/eom_q_bench.py` |
 | reference runs | `bench/refs/reference_energies.json` (`eom_ee`), `bench/dirac/mrcc_eom.sh`, `bench/cfour/eom_ccsd.sh` |
 | timing | `bench/eom_bench.py`, `bench/slurm_eom.sh`; label blocks: `bench/eom2_bench.py`, `bench/slurm_eom2.sh`; left-hand vectors and densities: `bench/eom_left_bench.py`, `bench/slurm_eom_left.sh` |
-| the native program in CFOUR's chain (`xzccsdt eom`, `ccsdt_eom`): the sigma vector of section 3 and the label shifts of section 6 in Fortran, with the solver of section 9 | `cfour/xzccsdt/xzeom.inc`, `xzeoms.inc`, `xzeomd.F90`; docs/native.md, section 16 |
+| the native program in CFOUR's chain (`xzccsdt eom`, `ccsdt_eom`): the sigma vector of section 3 and the label shifts of section 6 in Fortran, with the solver of section 9 | `cfour/xzccsdt/xzeom.inc`, `xzeoms.inc`, `xzeomd.f90`; docs/native.md, section 16 |
 
 Stage two (sections 4 to 6, 8): states with a label shift in the blocks of
 a linear molecule, IP and EA with short vectors, the threaded solver, the

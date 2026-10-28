@@ -1,6 +1,6 @@
 !
 ! EOM-DEA-CCSDT with complete 5p3h operators (type-generic; %xzdea level
-! 5p3h; xzdea5d.F90 has the layouts; docs/native.md, section 21).  The
+! 5p3h; xzdea5d.f90 has the layouts; docs/native.md, section 21).  The
 ! algorithm and the layouts are those of src/zccsdt/cc/dea5_sector.py
 ! (docs/eom.md, section 11.11), the reference of every number: the sigma
 ! vector of R = 2p + 3p1h + 4p2h + 5p3h on the CCSDT ground state, the rows
@@ -444,7 +444,7 @@ subroutine N(xzd5secw)(w)
     end if
   end do
   q5cap = min(q5size, own + sum(big))
-  call xzoptget('dea5pool', arg, larg)
+  call x2c_getopt('xzccsdt', 'dea5pool', arg, larg)
   if (larg > 0) read(arg(1:larg), *) q5cap
   q5cap = max(q5cap, maxval(q5len))
   q5pool = xzget(max(q5cap, 1_8), 'DEA5: the quintuple lists of the blocks of r5 (a pool)')
@@ -457,7 +457,7 @@ subroutine N(xzd5secw)(w)
   ! of the free work array (N(xzd5sig); option dea5xa 0 / 1: never / always)
   d5xall = .false.
   if (.not. ddist) d5xall = NW * sum(xv5k) <= (xzsize - xztop) / 4
-  call xzoptget('dea5xa', arg, larg)
+  call x2c_getopt('xzccsdt', 'dea5xa', arg, larg)
   if (larg > 0 .and. .not. ddist) d5xall = arg(1:1) == '1'
 end subroutine
 

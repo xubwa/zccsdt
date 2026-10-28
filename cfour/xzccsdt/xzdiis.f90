@@ -23,7 +23,7 @@ module xzdiisd
   integer, parameter :: ludiis = 73
   character(len=11) :: fdiis = 'XZDIIS'        ! (a rank other than 0: XZDIIS.<rank>)
   ! the T3 part that this rank holds of every vector: all of it, or - with
-  ! slices (xzdist.F90) - the elements soff3 <= e < soff3 + slen3 of the
+  ! slices (xzdist.f90) - the elements soff3 <= e < soff3 + slen3 of the
   ! stored T3; then the overlaps are sums over the ranks
   logical :: split = .false.
   integer(8) :: soff3 = 0, slen3 = 0

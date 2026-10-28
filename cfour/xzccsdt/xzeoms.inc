@@ -1,6 +1,6 @@
 !
 ! EOM-EE-CCSDT: the solver and the driver (type-generic; the sigma vector:
-! xzeom.inc; input, shifts, results: xzeomd.F90; docs/native.md, section 16).
+! xzeom.inc; input, shifts, results: xzeomd.f90; docs/native.md, section 16).
 !
 ! The solver is that of CFOUR's two-component EOM-CCSD program xx2ceomcc in
 ! its design (docs/eom.md, section 9; its algorithm 2, eomene2): right-hand
@@ -31,7 +31,7 @@
 ! chunks through a buffer of the work array; two vectors are in the work
 ! array in either case (the new vector and its sigma vector).
 !
-! More than one rank (xzeomd.F90; docs/native.md, section 16.7): rank 0 runs
+! More than one rank (xzeomd.f90; docs/native.md, section 16.7): rank 0 runs
 ! this solver; every rank holds its rows of R3 of every vector of the
 ! subspace, and every operation on vectors below is a command of rank 0
 ! that all ranks carry out on their rows (N(xzeserve) on the other ranks),
@@ -75,7 +75,7 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
     if (epf(eplan)) evfile = .true.
   end if
   ! a test hook: option eomvec f (files), m (the work array)
-  call xzoptget('eomvec', arg, larg)
+  call x2c_getopt('xzccsdt', 'eomvec', arg, larg)
   if (larg > 0 .and. mayfile .and. .not. xzdry) then
     if (arg(1:1) == 'f' .or. arg(1:1) == 'F') evfile = .true.
   end if
@@ -93,7 +93,7 @@ subroutine N(xzevopen)(nlen, msub, nmin, nmem, avail, mayfile)
   end if
   ! ---- files: the buffer, the disk (the directory of option eomvdir, e.g. a
   !      node-local disk; made if it is not there; default the run directory)
-  call xzoptget('eomvdir', evdir, larg)
+  call x2c_getopt('xzccsdt', 'eomvdir', evdir, larg)
   if (larg <= 0) evdir = ' '
   if (len_trim(evdir) > 0) then
     if (xz_mkdir(trim(evdir) // c_null_char) /= 0) then
@@ -158,7 +158,7 @@ subroutine N(xzevopenw)(msub)
   evcap = msub
   if (evfile) then
     ! (the directory of the files, option eomvdir: every rank its own files there)
-    call xzoptget('eomvdir', evdir, larg)
+    call x2c_getopt('xzccsdt', 'eomvdir', evdir, larg)
     if (larg <= 0) evdir = ' '
     if (len_trim(evdir) > 0) then
       if (xz_mkdir(trim(evdir) // c_null_char) /= 0) then
@@ -919,7 +919,9 @@ subroutine N(xzeprec)(w, kx, omega, sd)
     call xzepsum(nvp, nv, w(jvpa), w(jvpb), w(jeps + no), ev2)
     if (npo > 0) call N(zc_vprecond)(w(kx + NW * no * nv), npo, nvp, eo2, ev2, omega, floor)
   end if
-  if (sd) return
+  ! (EOM-EE-CCSD: a vector has no triples; the tables of the triples are
+  ! there all the same, so they must not be used here)
+  if (sd .or. ccsdonly) return
   ! (the triples: the rows of this rank)
   if (ncls == 1) then
     call xzeslrows(0_8, a, b)
@@ -932,7 +934,7 @@ subroutine N(xzeprec)(w, kx, omega, sd)
       call xzeslrows(g, a, b)
       if (b <= a) cycle
       call N(zc_vprecond)(w(kx + NW * (nsd + boff_s(g) + a * na)), b - a, na, w(jeo3 + otoff(g) + a), &
-                          w(jev3 + vtoff(g + eshift)), omega, floor)
+                          w(jev3 + vtoff(xzw(g + eshift))), omega, floor)
     end do
   end if
 end subroutine
@@ -1123,10 +1125,10 @@ subroutine N(xzesolve)(w, sd, nroot, thr, maxit, msub, nstart, kstart, singles, 
            keep(msub), ccyc(nroot), qm(msub, msub), qr(msub * msub), gq(msub, msub))
   gm = 0
   n = 0
-  ! a compaction keeps mkeep0 Ritz vectors (the roots and two more); an
+  ! a compaction keeps mkeep0 Ritz vectors (the roots and ekeep more); an
   ! iteration adds at most nblk corrections, to the lowest roots that are
   ! not converged, so that what is kept and what is added always fit
-  mkeep0 = max(1_8, min(nroot + 2, msub - 1))
+  mkeep0 = max(1_8, min(nroot + ekeep, msub - 1))
   nblk = max(1_8, msub - mkeep0)
   ! ---- the vectors to start from
   do g = 1, nstart
@@ -1665,7 +1667,7 @@ subroutine N(xzeom)(w, ecorr)
   ! ---- a test hook: option eomtest seed, the sigma vector of a random vector
   !      against the derivative of the amplitude step (before the pp operator
   !      takes the place of <ab||cd>)
-  call xzoptget('eomtest', arg, larg)
+  call x2c_getopt('xzccsdt', 'eomtest', arg, larg)
   if (larg > 0) then
     if (dist) then
       write(6, '(/,a)') ' @XZCCSDT-F, option eomtest (the sigma vector against the derivative of the amplitude step)'
@@ -1692,13 +1694,17 @@ subroutine N(xzeom)(w, ecorr)
     write(6, '(a)') '  (first the roots of the matrix without the T4 terms - that of EOM-CCSDT at the CC4 amplitudes -,'
     write(6, '(a)') '  then every root with the quadruples at its own frequency)'
   else
-  write(6, '(/,a)') '  EOM-EE-CCSDT: excitation energies and right-hand vectors'
+    write(6, '(/,a)') '  EOM-EE-' // trim(mname) // ': excitation energies and right-hand vectors'
   end if
   write(6, '(a)') '  ' // repeat('-', 98)
   write(6, '(a,f10.2,a)') '   intermediates of the ground state (the pp operator in the place of <ab||cd>): ', teomim, ' s'
   write(6, '(a,es9.2,a,i4,a)') '   convergence: the largest element of a residual below ', ethr, &
     ' (ESTATE_CONV, %eomthrs);  at most ', emaxcyc, ' iterations (ESTATE_MAXCYC)'
-  if (eguess == 1) then
+  ! (EOM-EE-CCSD: the CIS-type guess unless %xzeomguess 0)
+  if (ccsdonly .and. eguess == 1) eguess = 2
+  if (eguess == 2) then
+    write(6, '(a)') '   start: the lowest roots of the singles block of the Jacobian (CIS-type guess, %xzeomguess 2)'
+  else if (eguess == 1 .and. .not. ccsdonly) then
     write(6, '(a)') '   start: the roots of the singles-doubles block from unit vectors (%xzeomguess 1)'
   else
     write(6, '(a)') '   start: unit vectors on the lowest single excitations (%xzeomguess 0)'
@@ -1708,9 +1714,9 @@ subroutine N(xzeom)(w, ecorr)
   if (dist) write(6, '(a,i4,a)') '   over ', nrank, ' ranks: every rank does its batches of the two residuals of a sigma vector and ' // &
     'holds its rows of R3 of every vector; rank 0 runs the solver'
 
-  ! ---- a test hook: option eomsig file, sigma of the vector of the file (of the
+  ! ---- a test hook: eomsig=file, sigma of the vector of the file (of the
   !      first shift), written to file.out
-  call xzoptget('eomsig', arg, larg)
+  call x2c_getopt('xzccsdt', 'eomsig', arg, larg)
   if (larg > 0) then
     call problem(1_8, s, nroot, ok)
     call xzeomlay(w, s)
@@ -1727,10 +1733,10 @@ subroutine N(xzeom)(w, ecorr)
     if (ios == 0) read(74, iostat=ios) w(kxa:kxa + NW * nlen - 1)
     close(74)
     if (ios /= 0) then
-      write(6, '(a,i12,a)') ' @XZCCSDT-F, option eomsig: the file does not hold a vector of ', nlen, ' elements.'
+      write(6, '(a,i12,a)') ' @XZCCSDT-F, eomsig: the file does not hold a vector of ', nlen, ' elements.'
       call xzerrex
     end if
-    call xzoptget('eomsd', length=larg)
+    call x2c_hasopt('xzccsdt', 'eomsd', larg)
     ! (over ranks: the vector to all, sigma_3 from the owners of its rows)
     edist = dist
     ecmd = dist .and. larg == 0
@@ -1747,11 +1753,11 @@ subroutine N(xzeom)(w, ecorr)
       call xzecmd(op_end)
       call xzdtable(3, 1_8)
     end if
-    call xzoptget('eomsig', arg, larg)
+    call x2c_getopt('xzccsdt', 'eomsig', arg, larg)
     open(unit=74, file=arg(1:larg) // '.out', form='unformatted', access='stream', status='replace')
     write(74) w(kxb:kxb + NW * nlen - 1)
     close(74)
-    write(6, '(a,i12,a,a)') ' option eomsig: sigma of a vector of ', nlen, ' elements written to ', arg(1:larg) // '.out'
+    write(6, '(a,i12,a,a)') ' eomsig: sigma of a vector of ', nlen, ' elements written to ', arg(1:larg) // '.out'
     call xzrel(m0)
     return
   end if
@@ -1796,13 +1802,26 @@ subroutine N(xzeom)(w, ecorr)
     call xzeomlay(w, s)
     nlen = nsd + n3s
     nkeep = nroot + 2
+    ! (EOM-EE-CCSD: eomstart=k starts from nroot + k singles, a test hook)
+    if (ccsdonly) then
+      call x2c_getopt('xzccsdt', 'eomstart', arg, larg)
+      if (larg > 0) then
+        read(arg(1:larg), *) k
+        nkeep = nroot + k
+      end if
+    end if
     allocate(singles(nkeep))
     call xzesingles(eshift, w(jeps), nkeep, singles, nsing)
     write(6, '(/,a)') '  ' // repeat('=', 98)
     if (dense) then
-      write(6, '(a,i5,a)') '   EOM-EE-CCSDT on the packed block: ', nroot, ' roots'
+      write(6, '(a,a,a,i5,a)') '   EOM-EE-', trim(mname), ' on the packed block: ', nroot, ' roots'
     else
-      write(6, '(a,i5,a,i4,a,i5,a)') '   EOM-EE-CCSDT, label shift ', eshl(ish), ' (', s, ' classes): ', nroot, ' roots'
+      if (gB > 0) then
+        write(6, '(a,a,a,i5,a,i2,a,i4,a,i5,a)') '   EOM-EE-', trim(mname), ', label shift ', eshl(ish), ', second label ', &
+          modulo(eshl2(ish), gm2), ' (', s, ' classes): ', nroot, ' roots'
+      else
+        write(6, '(a,a,a,i5,a,i4,a,i5,a)') '   EOM-EE-', trim(mname), ', label shift ', eshl(ish), ' (', s, ' classes): ', nroot, ' roots'
+      end if
     end if
     write(6, '(a,i14,a,i12,a,i14,a,f10.1,a)') '   a vector: ', nlen, ' elements (singles and doubles ', nsd, ', triples ', n3s, &
       ') = ', 8d-6 * NW * nlen, ' MB'
@@ -1834,7 +1853,7 @@ subroutine N(xzeom)(w, ecorr)
     e4kdone = 0
     ck4 = .false.
     if (cc4) then
-      call xzoptget('cc4eom', arg, larg)
+      call x2c_getopt('xzccsdt', 'cc4eom', arg, larg)
       ck4 = .not. (larg > 0 .and. (arg(1:1) == 'd' .or. arg(1:1) == 'D'))
     end if
     if (ck4) call N(xz4er)(w, 'r', ish, merge(0_8, eshl(ish), dense), nroot, nlen, ecorr, kxf, ee, nfound, e4kdone, &
@@ -1849,7 +1868,37 @@ subroutine N(xzeom)(w, ecorr)
       if (dist) eplan = ish
     end if
     if (.not. e4rst) then
-    if (eguess == 1) then
+    ! EOM-EE-CCSD: one stage (the singles-doubles block is the whole problem),
+    ! from nkeep = nroot + 2 singles, and a compaction that keeps nroot + 20
+    ! Ritz vectors (eomkeep: another number than 20) in a subspace of at
+    ! least nroot + ekeep + 2 nroot vectors, so that it is not cut back to
+    ! nearly the roots every two iterations
+    ekeep = 2
+    if (ccsdonly) then
+      ekeep = 20
+      call x2c_getopt('xzccsdt', 'eomkeep', arg, larg)
+      if (larg > 0) read(arg(1:larg), *) ekeep
+      nst = nkeep
+    end if
+    if (eguess == 2) then
+      ! ---- the CIS-type guess: the lowest roots of the singles block of the
+      !      Jacobian (sigma_1 of r1 with r2 = 0: xzesig with essonly), from
+      !      unit vectors on the lowest singles, to 1e-5
+      t1 = omp_get_wtime()
+      msd = 8 + 4 * nkeep
+      essonly = .true.
+      call xzdry_begin()
+      call N(xzesig)(w, kxa, kxb, .true.)
+      call xzdry_end(peak)
+      avail = xzsize - xztop - (peak - xztop)
+      call N(xzesolve)(w, .true., nkeep, 1d-5, 100_8, msd, nkeep, 0_8, singles, kxa, kxb, avail, &
+                       ee, rmax, rnorm, wts, cyc, nfound, nsgd, nitd, kst, 0, lead, vlead, .true.)
+      essonly = .false.
+      write(6, '(a,i4,a,i5,a,i4,a,f9.2,a)') '   CIS-type guess: ', nfound, ' roots, ', nsgd, ' sigma_1 vectors, ', &
+        nitd, ' iterations, ', omp_get_wtime() - t1, ' s'
+      write(6, '(a,8f14.8)') '     roots / Eh: ', (dble(ee(k)), k = 1, min(nfound, 8_8))
+      nst = nfound
+    else if (eguess == 1 .and. .not. ccsdonly) then
       ! ---- the singles-doubles block of the matrix, from unit vectors
       t1 = omp_get_wtime()
       msd = 8 + 4 * nkeep
@@ -1866,6 +1915,7 @@ subroutine N(xzeom)(w, ecorr)
     end if
     ! ---- the problem with triples
     msub = subspace(nroot)
+    if (ccsdonly) msub = max(msub, nroot + ekeep + 2 * nroot)
     edist = dist
     eplan = 0
     if (dist) eplan = ish
@@ -1882,7 +1932,7 @@ subroutine N(xzeom)(w, ecorr)
       8d-6 * avail, ' MB'
     flush(6)
     evfout = cc4
-    if (eguess == 1) then
+    if (eguess == 2 .or. (eguess == 1 .and. .not. ccsdonly)) then
       call N(xzesolve)(w, .false., nroot, ethr, emaxcyc, msub, nst, kst, singles, kxa, kxb, avail, &
                        ee, rmax, rnorm, wts, cyc, nfound, nsig, nit, kxf, iures, lead, vlead, .false.)
     else
@@ -1979,11 +2029,21 @@ contains
     end if
     nr = enr(ip)
     sc = eshl(ip) / labstep
-    if (mod(eshl(ip), labstep) /= 0 .or. abs(sc) > ntg - 1) then
+    ! (with a modulus every multiple of the step is a shift: modulo mgrp)
+    if (mod(eshl(ip), labstep) /= 0 .or. (mgrp == 0 .and. abs(sc) > ntg - 1)) then
       good = .false.
       if (.not. xzdry) write(6, '(/,a,i6,a,i4,a)') ' @XZCCSDT-W, EOM: the shift ', eshl(ip), &
         ' is not a difference of sums of the labels of this run (their step: ', labstep, '); it is left out.'
     end if
+    ! the shift of the second label: the second digit of the class shift
+    if (gB > 0) then
+      sc = sc + gB * modulo(eshl2(ip), gm2)
+    else if (eshl2(ip) /= 0) then
+      good = .false.
+      if (.not. xzdry) write(6, '(/,a,i6,a)') ' @XZCCSDT-W, EOM: the shift ', eshl2(ip), &
+        ' of a second label, but this run has none; it is left out.'
+    end if
+    sc = xzw(sc)
   end subroutine
 
   integer(8) function subspace(nr)
@@ -2012,7 +2072,7 @@ real(8) function N(xzeimag)(x)
 end function
 
 ! ---------------------------------------------------------------------------
-! option eomtest seed: the sigma vector of a random totally symmetric vector R
+! eomtest=seed: the sigma vector of a random totally symmetric vector R
 ! against the derivative of the residual of the amplitude step along R,
 !   [8 (Res(T + R) - Res(T - R)) - (Res(T + 2R) - Res(T - 2R))] / 12,
 ! which is exact for a polynomial of degree 4 (docs/eom.md, section 1).  The
@@ -2083,7 +2143,7 @@ subroutine N(xzeomtest)(w, seedtext)
   n2 = dble(s)
   call N(zc_vdot)(n3s, w(ksg + NW * nsd), w(ksg + NW * nsd), s)
   n3n = dble(s)
-  write(6, '(/,a)') ' option eomtest: sigma of a random vector against the derivative of the amplitude step'
+  write(6, '(/,a)') ' eomtest: sigma of a random vector against the derivative of the amplitude step'
   write(6, '(a,3es14.6)') '   |sigma_1|, |sigma_2|, |sigma_3|:        ', sqrt(n1), sqrt(n2), sqrt(n3n)
   write(6, '(a,3es14.6)') '   |sigma - derivative|, the three ranks:  ', sqrt(d1), sqrt(d2), sqrt(d3)
 end subroutine

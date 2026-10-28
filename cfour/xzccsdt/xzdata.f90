@@ -32,12 +32,31 @@ module xzdata
 
   ! ---- symmetry labels (the file xzlabels, else dgcosym of CFOUR's SCF) and
   !      their classes.  A label is an integer that adds, modulo modulus if
-  !      that is not 0; the block code below is for modulus 0 only (the
-  !      classes are (label - smallest) / step, a group is a sum of classes)
+  !      that is not 0.  The classes are (label - smallest) / step, a group is
+  !      a sum of classes.  With a modulus the labels are first reduced to
+  !      0 .. modulus - 1, and the sums of classes are taken modulo mgrp =
+  !      modulus / step (xzw): groups, differences (delta) and label shifts
+  !      are then residues 0 .. mgrp - 1 (e.g. the C2* labels 2 m_j = +-1,
+  !      modulus 4, of a double group D2h, D2 or C2v: mgrp = 2).  mgrp = 0:
+  !      no modulus, the sums as they are.
+  !      A second label (xzlabels: 'second' and its modulus; the g/u parity
+  !      of D2h, modulus 2) needs the first one with a modulus: the class is
+  !      c1 + gB c2, c1 the class of the first label, c2 the second label
+  !      (0 .. gm2 - 1), gB = 12 mgrp; xzw reduces the two digits of a sum
+  !      apart (c1 modulo mgrp, c2 modulo gm2; no sum of the program comes
+  !      near gB / 2 in its first digit).  The groups are then the numbers
+  !      0 .. mgrp + gB (gm2 - 1) - 1, not all of them sums of classes (those
+  !      are empty); C2h* = Z4 x Z2 of D2h.
   integer, parameter :: maxcls = 64, maxgrp = 3 * maxcls
   logical :: have_labels = .false.  ! labels were found and can be used
   character(len=8) :: labfile = ' ' ! the file they came from: xzlabels, dgcosym
+  logical :: blkin = .false.        ! the integrals from the blocked real files of xx2cvtran (%vtranblk)
   integer(8) :: modulus = 0
+  integer(8) :: mgrp = 0            ! the sums of classes modulo mgrp (0: not modular)
+  integer(8) :: modulus2 = 0        ! the modulus of the second label (0: none)
+  integer(8) :: gB = 0, gm2 = 0     ! the second digit of a class: gB, its modulus (0: one label)
+  integer(8) :: dlo = 0, dhi = 0    ! the range of a difference of two classes (delta)
+  integer(8) :: q4hi = 0, q2hi = 0  ! the largest sum of 4, of 2 classes ((Q) sectors)
   integer(8) :: ncls = 1            ! classes of the labels: (label - smallest) / step
   integer(8) :: npg = 1, ntg = 1    ! groups of pairs (2 ncls - 1) and of triples (3 ncls - 2)
   integer(8) :: ocoff(0:maxcls) = 0, vcoff(0:maxcls) = 0    ! first spinor of a class
@@ -57,6 +76,7 @@ module xzdata
   ! (small integer arrays, not in the work array: the plan needs them before
   ! anything is placed)
   integer(8), allocatable :: lab(:)         ! labels of all spinors, CFOUR's order (0:ntot-1)
+  integer(8), allocatable :: lab2(:)        ! the second label (modulus2 > 0), CFOUR's order
   integer(8), allocatable :: operm(:), vperm(:)     ! CFOUR's number (from 0, among the active
                                             ! occupied or virtual ones) of the spinors in the order here
   integer(8), allocatable :: ocls(:), vcls(:)       ! their classes
@@ -92,6 +112,7 @@ module xzdata
   character(len=16) :: method = ' '
   logical :: with_q = .false.
   logical :: with_cc = .false.      ! the CCSDT iterations are part of the job
+  logical :: ccsdonly = .false.     ! CALC=CCSD: T1 and T2 only, no T3 (xzstep leaves out the T3 parts)
   logical :: with_lam = .false.     ! the Lambda equations are
   logical :: q_left = .false.       ! (Q) with lambda on the left: (Q)_Lambda
   logical :: with_den = .false.     ! the density and the orbital gradient of CCSDT are (xzden.inc)
@@ -166,7 +187,7 @@ module xzdata
   real(8) :: tfly(4) = 0d0          ! seconds of the CC3 kernel: products, amplitudes, gather, contractions
   ! (Q) reads T3 (and Lambda3) where the files XZAMPS (XZLAMB) are mapped,
   ! read-only: one copy in the page cache of a node for all its ranks, not
-  ! in the work array (option qmap 0: a private copy in the work array)
+  ! in the work array (qmap=0: a private copy in the work array)
   logical :: t3shared = .false.
   logical :: sizes_set = .false.    ! xzsizes was called (a rank other than 0, before its work array)
   logical :: den_active = .false.   ! option den_active: the files of the active spinors alone (a test hook)
@@ -266,7 +287,7 @@ module xzdata
   integer(8) :: e3bv = 0                    ! Bv[e][i][Q] = W_vvvo[Q][e][i] (the dressed <ab||ei> of CC3)
   integer(8) :: e3gv = 0                    ! Gv[m][Q][y] = ~<ym||Q>
 
-  ! ---- batch sizes: the memory plan (xzplan.F90)
+  ! ---- batch sizes: the memory plan (xzplan.f90)
   integer(8) :: nbp = 1             ! occupied pairs of a batch of pass 1 and pass 2
   integer(8) :: nqs = 1             ! rows of a slab of the dressed <ab||cd>
   integer(8) :: nbt = 1             ! occupied triples of a batch of the pp ladder
@@ -299,8 +320,8 @@ module xzdata
   !      first use.  Sets: 1 the CCSDT iterations, 2 the iterations of the
   !      Lambda equations, 3 the intermediates of the Lambda equations (once),
   !      4 the density and the orbital gradient, 5 EOM (the intermediates
-  !      once, the sigma vectors)
-  integer, parameter :: ntset = 5, ntmax = 64
+  !      once, the sigma vectors), 6 the integrals read and sorted
+  integer, parameter :: ntset = 6, ntmax = 64
   character(len=28) :: tnam(ntmax, ntset) = ' '
   real(8) :: twal(ntmax, ntset) = 0d0, tcpu(ntmax, ntset) = 0d0
   logical :: tpart(ntmax, ntset) = .false.      ! a part of another entry: wall only, not summed
@@ -311,36 +332,111 @@ module xzdata
 
 contains
 
+  ! a sum or difference of classes, groups or shifts as an index: modulo
+  ! mgrp with a modulus (0 .. mgrp - 1), itself without one; with a second
+  ! label the two digits x1 + gB x2 (|x1| < gB / 2) apart
+  integer(8) elemental function xzw(x)
+    integer(8), intent(in) :: x
+    integer(8) :: x2
+    if (gB > 0) then
+      x2 = nint(dble(x) / dble(gB), 8)
+      xzw = modulo(x - gB * x2, mgrp) + gB * modulo(x2, gm2)
+    else if (mgrp > 0) then
+      xzw = modulo(x, mgrp)
+    else
+      xzw = x
+    end if
+  end function xzw
+
+  ! x is a value of a sum or difference itself (with a second label not
+  ! every number below ncls is: the first digit of a sum has |x1| < gB / 2,
+  ! and a loop over 0 .. ncls - 1 or dlo .. dhi has to leave out the others,
+  ! whose two digits xzw cannot tell apart)
+  logical elemental function xzcan(x)
+    integer(8), intent(in) :: x
+    xzcan = gB == 0 .or. xzw(x) == x
+  end function xzcan
+
+  ! two sums of classes are the same label (modulo mgrp with a modulus)
+  logical elemental function xzeq(a, b)
+    integer(8), intent(in) :: a, b
+    xzeq = xzw(a - b) == 0
+  end function xzeq
+
   ! virtual triples of the block of the group g of occupied triples in the
   ! layout of a rank-3 array of shift s (0: no such block)
-  integer(8) function xzna(s, g)
+  integer(8) pure function xzna(s, g)
     integer(8), intent(in) :: s, g
-    integer(8) :: h
-    h = g + s
+    integer(8) :: h, gg
+    gg = xzw(g)
+    h = xzw(g + s)
     xzna = 0
-    if (g < 0 .or. g >= ntg .or. h < 0 .or. h >= ntg) return
+    if (gg < 0 .or. gg >= ntg .or. h < 0 .or. h >= ntg) return
     xzna = vtoff(h + 1) - vtoff(h)
   end function xzna
 
   ! spinors of a class (0 outside the classes): virtual, occupied
-  integer(8) function xznvc(s)
+  integer(8) pure function xznvc(s)
     integer(8), intent(in) :: s
+    integer(8) :: c
+    c = xzw(s)
     xznvc = 0
-    if (s >= 0 .and. s < ncls) xznvc = vcoff(s + 1) - vcoff(s)
+    if (c >= 0 .and. c < ncls) xznvc = vcoff(c + 1) - vcoff(c)
   end function xznvc
 
-  integer(8) function xznoc(s)
+  integer(8) pure function xznoc(s)
     integer(8), intent(in) :: s
+    integer(8) :: c
+    c = xzw(s)
     xznoc = 0
-    if (s >= 0 .and. s < ncls) xznoc = ocoff(s + 1) - ocoff(s)
+    if (c >= 0 .and. c < ncls) xznoc = ocoff(c + 1) - ocoff(c)
   end function xznoc
 
-  ! pairs (a, i) with s(a) - s(i) = d (0 outside the range of d)
-  integer(8) function xzndel(d)
+  ! d is a possible difference of two classes (always, with a modulus)
+  logical elemental function xzdok(d)
     integer(8), intent(in) :: d
+    xzdok = mgrp > 0 .or. abs(d) < ncls
+  end function xzdok
+
+  ! pairs (a, i) with s(a) - s(i) = d (0 outside the range of d)
+  integer(8) pure function xzndel(d)
+    integer(8), intent(in) :: d
+    integer(8) :: dd
+    dd = xzw(d)
     xzndel = 0
-    if (abs(d) < ncls) xzndel = ndel(d)
+    if (dd >= dlo .and. dd <= dhi) xzndel = ndel(dd)
   end function xzndel
+
+  ! The pairs (i, a) of an occupied and a virtual spinor by their delta
+  ! s(a) - s(i) (xzw): those of delta d are lx(k), ly(k) for k = loff(d) ..
+  ! loff(d + 1) - 1, by the classes of a, then a, then i (one class: all
+  ! pairs, d = 0).  The blocked products of the CCSD step (xzsd.inc) couple
+  ! the pairs of one delta with those of another.
+  subroutine xzovlist(lx, ly, loff)
+    integer(8), intent(out) :: lx(0:no*nv-1), ly(0:no*nv-1), loff(dlo:dhi+1)
+    integer(8) :: d, sa, si, a, i, n
+    n = 0
+    do d = dlo, dhi
+      loff(d) = n
+      if (.not. xzcan(d)) cycle
+      do sa = 0, ncls - 1
+        si = xzw(sa - d)
+        if (si < 0 .or. si >= ncls) cycle
+        do a = vcoff(sa), vcoff(sa + 1) - 1
+          do i = ocoff(si), ocoff(si + 1) - 1
+            lx(n) = i
+            ly(n) = a
+            n = n + 1
+          end do
+        end do
+      end do
+    end do
+    loff(dhi + 1) = n
+    if (n /= no * nv) then
+      write(6, '(a,2i12)') ' @XZCCSDT-F, xzovlist: the pairs (i, a) by delta are not all pairs: ', n, no * nv
+      call xzerrex
+    end if
+  end subroutine xzovlist
 
   ! The shifts of a pass in blocks (see sh_t ..): the layouts of operand and
   ! result, the ring operators - for the pairs (d, m) of delta the block
@@ -351,13 +447,14 @@ contains
   subroutine xzshctx(st, sw, sa)
     integer(8), intent(in) :: st, sw, sa
     integer(8) :: d, g, si, n
-    sh_t = st
-    sh_w = sw
-    sh_a = sa
-    sh_o = st + sw
-    sh_b = sh_o - sa
+    ! (with a modulus every shift is a residue, xzw)
+    sh_t = xzw(st)
+    sh_w = xzw(sw)
+    sh_a = xzw(sa)
+    sh_o = xzw(st + sw)
+    sh_b = xzw(sh_o - sa)
     if (ncls == 1) return
-    if (st == 0) then
+    if (sh_t == 0) then
       kob_in = jobase
       bof_in = boff
     else
@@ -373,9 +470,10 @@ contains
     end if
     wdoff = 0
     nwd = 0
-    do d = 1 - ncls, ncls - 1
+    do d = dlo, dhi
+      if (.not. xzcan(d)) cycle
       wdoff(d) = nwd
-      nwd = nwd + xzndel(d + sw) * ndel(d)
+      nwd = nwd + xzndel(d + sh_w) * ndel(d)
     end do
     bdoff = -1
     nbd = 0
@@ -391,17 +489,32 @@ contains
 
   ! The hh ladder and F_oo of dense T3 with the operator on occupied triples
   ! (xzo6, one GEMM: the default) or through occupied pairs (xzwpair,
-  ! xzhhapply: option hh pair).  The pair form has (o-2)**2 / (9 o) times fewer
+  ! xzhhapply: hh=pair).  The pair form has (o-2)**2 / (9 o) times fewer
   ! operations, but its gather and reduction are bound by the memory: measured
   ! for 26 occupied spinors it is faster on 8 threads and slower on 16 and
   ! more (docs/native.md), so it is an option.  In blocks of the labels the
   ! operator on triples is used in any case.
+  ! a test hook: terms=digits leaves out parts of the T3 equation in a step
+  ! (dense and blocked alike): 1 the pp ladder, 2 pass 2 (ring and drive
+  ! terms), 3 the operator on the occupied triples (hh ladder, F_oo); 4 the
+  ! ring terms of pass 2, 5 its drive terms
+  logical function xzskip(k)
+    integer, intent(in) :: k
+    character(len=16), save :: terms = '?'
+    integer :: larg
+    if (terms == '?') then
+      call x2c_getopt('xzccsdt', 'terms', terms, larg)
+      if (larg == 0) terms = ' '
+    end if
+    xzskip = index(terms, char(ichar('0') + k)) > 0
+  end function xzskip
+
   logical function xzhhpair()
     character(len=8) :: arg
     integer :: larg
     if (hhset == 0) then
       hhset = 1
-      call xzoptget('hh', arg, larg)
+      call x2c_getopt('xzccsdt', 'hh', arg, larg)
       if (larg > 0) then
         if (arg(1:1) == 'p') hhset = 2
         if (arg(1:1) == 'o') hhset = 1

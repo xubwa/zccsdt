@@ -94,10 +94,11 @@ the LP64 Python build.
 The program takes no argument (one stops it: `@XZCCSDT-F, xzccsdt takes no
 argument ...` with the keywords below).  As every CFOUR program it does what
 the ZMAT asks for, from the flags that joda stored in JOBARC (`xzjob` in
-`xzdrv.F90`):
+`xzdrv.f90`):
 
 | ZMAT | job |
 |---|---|
+| `CALC=CCSD` (with or without `EXCITE=EOMEE`) | CCSD in the blocks of the labels, no T3 (`xzsd.inc`); EOM-EE-CCSD with the CIS-type guess (Lan Cheng's, section 22) |
 | `CALC=CCSDT` (`CC(n)` with `EXCITATION=3`) | CCSDT |
 | `CALC=CCSDT[Q]` | CCSDT, [Q] (the final energy; (Q) printed too) |
 | `CALC=CCSDT(Q)` (`CC(n-1)(n)` with `EXCITATION=4`) | CCSDT, (Q) and [Q] |
@@ -105,7 +106,7 @@ the ZMAT asks for, from the flags that joda stored in JOBARC (`xzjob` in
 | `CALC=CCSDT,EXCITE=EOMEE` | CCSDT, then EOM-EE-CCSDT (section 16: the roots, their label shifts and the thresholds from `%eomnroot`, `%xzeom`, `ESTATE_CONV`, `ESTATE_MAXCYC`) |
 | `CALC=CCSDT,PROPS=FIRST_ORDER` or `DERIV_LEV=1` | CCSDT, Lambda, the unrelaxed density and the orbital gradient as the files of `xx2czvec` (section 13) - the keywords with which CFOUR's own spinor CC programs (`xx2cccsd`: `max(DERIV_LEV, PROPS)`) make the density |
 | `CALC=MP2` | the MP2 energy of the integral files (a check; `TOTENERG` not written) |
-| `CALC=CC3` (with or without `EXCITE=EOMEE`) | stops: not in this version (the place of the next method in `xzjob`) |
+| `CALC=CC3` (with or without `EXCITE=EOMEE`) | CC3 without stored triples; EOM-EE-CC3 folded (section 17) |
 | `CALC=CC4` (with or without `EXCITE=EOMEE`) | CC4 without stored quadruples, from the CCSDT amplitudes; EOM-EE-CC4 with the quadruples folded in (section 19) |
 | `CALC=CCSDT` and the section `%xzdea` | CCSDT, then EOM-DEA-CCSDT: the states with two electrons more (section 20: the targets 2 Omega and their roots from `%xzdea`, the thresholds as for EOM-EE; `level 5p3h`: section 21) |
 
@@ -318,7 +319,8 @@ file, complex, the first index fastest, antisymmetrized integrals):
 | `moinhhhh`, `moinhhhp`, `moinhhpp`, `moinphhp` | `<ij||kl>`, `<ij||ka>`, `<ij||ab>`, `<ia||bj>` |
 | `PPPH0001` ... | `<ab||ci>`, one file per occupied spinor |
 | `moinpppp` | `<ab||cd>` on pairs (written only with `ABCDTYPE=STANDARD`) |
-| `xzvvvv` | optional, not a file of CFOUR: `<ab||cd>` for a<b, c<d in the blocks of the pairs of one label sum - what `bench/dea/native_rundir.py` writes from a block file of `zccsdt.hblocks`; if it is there, `moinpppp` is not read (format: 20.1) |
+| `mobkhhhh`, `mobkhhhp`, `mobkhhpp`, `mobkphhp`, `PPBK0001` ..., `mobkpppp` | instead of the files above when `mobkhhhh` is there: the blocked files of `xx2cvtran` with a section `%vtranblk` in the ZMAT (CFOUR x2cso since 2026-10-15, `x2cvtran/xzbwrite.f90`): the same integrals in the order of the dense files, but only the elements that the symmetry labels allow and only strict pairs p<q, real numbers (version 2) or complex (version 3: C2h, C2, Cs); each file a header record (20261015, version, kind 1 - 6, spinors, modulus, frozen, occupied, virtual, the modulus and the base of a second label), the labels of all spinors, then the elements (`mobkpppp`: one record per column c<d with its allowed rows a<b).  Read by `xzrint`, `xzrbovvq`, `xzrbvvvv` (Lan Cheng's, section 22): `<ab||cd>` and `<ab||ci>` straight into their blocks.  `bench/dea/native_rundir.py` writes them too (`zccsdt.cfour.write_blocked`, `BlockedPPPP`) |
+| `xzvvvv` | optional, not a file of CFOUR: `<ab||cd>` for a<b, c<d in the blocks of the pairs of one label sum - what `bench/dea/native_rundir.py` wrote from a block file of `zccsdt.hblocks` between 2026-10-20 and 10-27 (now `--dense`; the default is `mobkpppp`, which holds the same elements); if it is there, `moinpppp` is not read (format: 20.1) |
 | `dgcosym` | optional: the block of the SCF of every spinor (`xsox2chf`; one record of `nmototal` 8-byte integers, the order of `scf2ceig`; all 1 without a section `%dglin` in the ZMAT). The symmetry labels of the run if it has more than one block and there is no `xzlabels` (section 6) |
 | `xzlabels` | optional, not a file of CFOUR: a symmetry label per spinor; goes before `dgcosym` (section 6) |
 | `XZAMPS` | the amplitudes of an earlier run, for `(q)` / `[q]`, `lambda`, `(q)_l` / `[q]_l` and for the ranks other than 0 |
@@ -392,16 +394,16 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | file | what |
 |---|---|
 | `xzccsdt.f` | main program in CFOUR's style: MPI start, CRAPSI on rank 0, the work array `ICORE(I0)`, `XZDRV`, CRAPSO |
-| `xzdrv.F90` | driver: job (`xzjob`), labels, the mode loop (labels x real), `xzsetmode` (classes, groups, block sizes), `xzlayout` (tables and integrals in the work array), energies, TOTENERG |
-| `xzread.F90` | readers of CFOUR's files and of the labels (`xzrdlab`: `xzlabels`; `xzrddgc`: `dgcosym`); checks of the labels and of the imaginary parts |
-| `xzmaps.F90` | index tables of pairs and triples (grouped by classes), layout of T3 in blocks |
-| `xzmem.F90` | the stack on the work array, dry runs |
-| `xzplan.F90` | the memory plan |
-| `xzdata.F90` | sizes, the job, offsets of the arrays that live for the run |
-| `xzdiis.F90` | DIIS: slots, the file, the small linear problem (ZHEEV) |
-| `xzpar.F90` | ranks and the task list of (Q) (groups, pieces, the distribution by the cost model), checkpoint files |
-| `xzdist.F90` | the iterations and the sigma vectors of EOM over ranks: the batches of pairs and triples and their ranks (cost model), the slices of T3, the times of the ranks |
-| `xzkern.F90`, `xzkern.inc` | explicit `bind(C)` interfaces of the kernels, one include for `_d` and `_z` |
+| `xzdrv.f90` | driver: job (`xzjob`), labels, the mode loop (labels x real), `xzsetmode` (classes, groups, block sizes), `xzlayout` (tables and integrals in the work array), energies, TOTENERG |
+| `xzread.f90` | readers of CFOUR's files and of the labels (`xzrdlab`: `xzlabels`; `xzrddgc`: `dgcosym`); checks of the labels and of the imaginary parts |
+| `xzmaps.f90` | index tables of pairs and triples (grouped by classes), layout of T3 in blocks |
+| `xzmem.f90` | the stack on the work array, dry runs |
+| `xzplan.f90` | the memory plan |
+| `xzdata.f90` | sizes, the job, offsets of the arrays that live for the run |
+| `xzdiis.f90` | DIIS: slots, the file, the small linear problem (ZHEEV) |
+| `xzpar.f90` | ranks and the task list of (Q) (groups, pieces, the distribution by the cost model), checkpoint files |
+| `xzdist.f90` | the iterations and the sigma vectors of EOM over ranks: the batches of pairs and triples and their ranks (cost model), the slices of T3, the times of the ranks |
+| `xzkern.f90`, `xzkern.inc` | explicit `bind(C)` interfaces of the kernels, one include for `_d` and `_z` |
 | `xzmpi.c`, `xzutil.c` | C: all MPI calls of the program behind a few functions (stubs without MPI) - broadcasts and sums of a few numbers, and arrays of the size of T3 in chunks: broadcast, send / receive, sum onto rank 0, sum on all ranks, the two exchanges of slices; free disk space, resident set (anonymous and mapped), BLAS integer size, a file mapped read-only (`xz_map_file`: T3 of (Q)), whether a directory is on a network file system |
 | `xztype.h` | the element type of a compilation of the type-generic sources |
 | `xzimd.inc` | T1-dressed integrals, W and F intermediates, the CCSD part, the occupied operator |
@@ -410,14 +412,14 @@ the whole (pq|rs) in core, n^4 complex numbers for n spinors (196 spinors:
 | `xzdiisg.inc`, `xzcc.inc` | DIIS update, the iterations, `XZAMPS` |
 | `xzlam.inc`, `xzlblk.inc` | the Lambda equations: intermediates, an iteration, the residuals of rank 1 and 2, `XZLAMB`; the passes over l3 in blocks of the labels |
 | `xzden.inc` | the density stage: the passes over l3 and T3, the blocks of the two-particle density, the orbital gradient, the files of `xx2czvec`; its pass C in blocks |
-| `xzdfrz.inc`, `xzfrz.F90` | frozen and dropped spinors in the density stage: the contractions with integrals of one such index, the rotations, the rows and columns of `xfull`; the integrals through CFOUR's `int_mintv2e` and `vtranpsog` |
+| `xzdfrz.inc`, `xzfrz.f90` | frozen and dropped spinors in the density stage: the contractions with integrals of one such index, the rotations, the rows and columns of `xfull`; the integrals through CFOUR's `int_mintv2e` and `vtranpsog` |
 | `xzq.inc`, `xzqs.inc` | (Q) and (Q)_Lambda: the task loop and the dense quadruple; the quadruple in sectors of the labels |
-| `xzeom.inc`, `xzeoms.inc`, `xzeomd.F90` | EOM-EE-CCSDT: the intermediates of the ground state and the sigma vector; the solver, the driver, the test hooks and the vector operations over ranks; the input (flags, ZMAT sections), the label shifts and their layout, the slices and commands of the ranks, the results (section 16) |
+| `xzeom.inc`, `xzeoms.inc`, `xzeomd.f90` | EOM-EE-CCSDT: the intermediates of the ground state and the sigma vector; the solver, the driver, the test hooks and the vector operations over ranks; the input (flags, ZMAT sections), the label shifts and their layout, the slices and commands of the ranks, the results (section 16) |
 | `xzcc3.inc` | CC3 (section 17): the step without stored triples, the batches of occupied triples and their fold, the diagonal Fock operator of T3, the folded EOM sigma vector and its driver |
 | `xzcc4.inc` | CC4 (section 19): the T4 terms of the doubles and triples equations per occupied quadruple (dense and in sectors, with label shifts), the extrapolation over the macro iterations, the T4 terms of a sigma vector and the folded EOM driver, the files of a later run (`XZCC4`, `XZE4R`, `XZE4Q`, `XZEOMR`) |
-| `xzdead.F90`, `xzdea.inc`, `xzdeas.inc`, `xzdeam.inc` | EOM-DEA-CCSDT (section 20): the input, the blocks of the sector and the tables, the slices of the ranks, the results; the intermediates of the ground state (Xv, the forms of T3); the sigma vector, the preconditioner, the masks of the parity; the driver |
-| `xzdea5d.F90`, `xzdea5.inc`, `xzdea5s.inc`, `xzdea5r.inc`, `xzdea5x.inc` | EOM-DEA-CCSDT with complete 5p3h (section 21): the layout of the 5p3h blocks and of the intermediates, the rows of r5 over the ranks; the intermediates of the ground state and the kernels for rank 5; the 5p3h part of a sigma vector (the small intermediates, Z4, the pp ladder); the ring and the hh ladder; the rows of sigma5, Xv5 and E1x |
-| `xzcc_z.F90`, `xzcc_d.F90` | the two instances of the `.inc` files |
+| `xzdead.f90`, `xzdea.inc`, `xzdeas.inc`, `xzdeam.inc` | EOM-DEA-CCSDT (section 20): the input, the blocks of the sector and the tables, the slices of the ranks, the results; the intermediates of the ground state (Xv, the forms of T3); the sigma vector, the preconditioner, the masks of the parity; the driver |
+| `xzdea5d.f90`, `xzdea5.inc`, `xzdea5s.inc`, `xzdea5r.inc`, `xzdea5x.inc` | EOM-DEA-CCSDT with complete 5p3h (section 21): the layout of the 5p3h blocks and of the intermediates, the rows of r5 over the ranks; the intermediates of the ground state and the kernels for rank 5; the 5p3h part of a sigma vector (the small intermediates, Z4, the pp ladder); the ring and the hh ladder; the rows of sigma5, Xv5 and E1x |
+| `xzcc_z.f90`, `xzcc_d.f90` | the two instances of the `.inc` files |
 
 Kernels of `csrc/` that are called: `zc_t3_pass1r`, `zc_t3_pass2r` (the
 passes for a range of occupied pairs - four kernels added to `ccsdt_t3.c`
@@ -456,8 +458,8 @@ binomials, a line per thread).
 
 The kernels are one C source instantiated for `double` and `double complex`
 (`_d`, `_z`).  The Fortran that touches array elements or calls a kernel is
-one source as well: the `.inc` files are compiled twice, by `xzcc_z.F90` and
-`xzcc_d.F90` (the Lambda equations and (Q)_Lambda as well), with `xztype.h` giving the element type (`ZT`), the words per
+one source as well: the `.inc` files are compiled twice, by `xzcc_z.f90` and
+`xzcc_d.f90` (the Lambda equations and (Q)_Lambda as well), with `xztype.h` giving the element type (`ZT`), the words per
 element (`NW`), the suffix (`N(name)`) and the conjugation (`CONJ`).  Nothing
 is written twice.  Everything outside the `.inc` files knows only the number
 of words per element (`nwe`) and dispatches on it in six places (`xzdrv`:
@@ -484,7 +486,7 @@ case through both.
 ## 4. Memory: the work array, the stack, the plan
 
 `CRAPSI` returns one array of `MAXCOR` double words.  Every array of the
-program is a region of it (`xzmem.F90`): `xzget(n, name)` takes the next n
+program is a region of it (`xzmem.f90`): `xzget(n, name)` takes the next n
 words from a stack, on a 64-byte boundary; a stage marks the stack when it
 starts (`xzmark`) and releases to the mark when it ends (`xzrel`).  A complex
 number is two words.  There is no `allocate` and no `malloc` of anything that
@@ -520,7 +522,7 @@ pairs in place, rows and columns are permuted to the order of the program
 labels are moved together, and real parts are compacted.  The transient is
 the size of the file, not twice the packed block.
 
-**The plan** (`xzplan.F90`) is made before anything is placed, and again for
+**The plan** (`xzplan.f90`) is made before anything is placed, and again for
 the mode that the integrals turn out to have.  It is not computed from
 formulae: the scheduler itself is run *dry* - through every `xzget` of the
 layout, of the iterations and of (Q), with nothing touched - and the peak of
@@ -587,7 +589,7 @@ plan` to the word).
 - **The work array of a rank other than 0 is not `MEMORY_SIZE`.**  Rank 0
   makes the plan - the batch sizes, the place of the DIIS vectors - in its
   `MEMORY_SIZE`, then runs the scheduler dry once more *as a rank other
-  than 0* (`asworker` of `xzdist.F90`: the same allocations without the DIIS
+  than 0* (`asworker` of `xzdist.f90`: the same allocations without the DIIS
   vectors, and with the largest number of threads that a rank has, because
   the passes in blocks have buffers per thread) and sends the peak of that
   run - or what (Q) takes, if that is more - with the batch sizes.  The
@@ -679,7 +681,7 @@ time, r and z over all virtual quadruples from five stacked matrix products,
 each reduced onto a<b<c<d by the kernels of `tnpack.c`; the intermediate Xv
 of T2 with `<vv||vv>` is held for the pairs (x, l) of one largest index l.
 
-The unit of work is a **task** (`xzpar.F90`): a *group* - the quadruples
+The unit of work is a **task** (`xzpar.f90`): a *group* - the quadruples
 i<j<k<l of one l, which share the Xv(x, l) of that l - or a *piece* of a
 group: those of one l whose smallest index i lies in a range.  A task needs
 Xv(x, l) only for x >= its smallest i; it reads T2, T3 and the integrals and
@@ -731,7 +733,7 @@ quadruples, seconds, the seconds of Xv and Xo, its own memory and the mapped
 files - and "sum over ranks / slowest", the speedup that the partition
 allowed.
 
-**The cost model** (`xzqmodel` of `xzdrv.F90`, `xzq_costs`), in units of one
+**The cost model** (`xzqmodel` of `xzdrv.f90`, `xzq_costs`), in units of one
 virtual quadruple: an occupied quadruple of total class M costs the number
 of virtual quadruples a<b<c<d of total class M (their sector; without labels
 all of them, so every quadruple costs the same); Xv(x, l) costs 0.0012 times
@@ -793,12 +795,12 @@ adds: `<pq||rs>` vanishes unless l_p + l_q = l_r + l_s (modulo a modulus if
 that is not 0) - 2 m_j of a linear molecule with modulus 0.
 
 **Where the labels of a run come from** (the same rule in the native
-program, `xzdrv.F90`, and in the Python reader, `zccsdt.cfour.read_labels`):
+program, `xzdrv.f90`, and in the Python reader, `zccsdt.cfour.read_labels`):
 
 1. the file **`xzlabels`** of the run directory, if it is there;
 2. else the file **`dgcosym`** of CFOUR's SCF, if it has more than one
    block: label +(2k - 1) for block 2k - 1, -(2k - 1) for block 2k, modulus
-   0 (`xzrddgc` of `xzread.F90`, `zccsdt.cfour.read_dgcosym`);
+   0 (`xzrddgc` of `xzread.f90`, `zccsdt.cfour.read_dgcosym`);
 3. else no labels.
 
 Nothing is parsed from the ZMAT.  The output says which it was:
@@ -809,7 +811,27 @@ Nothing is parsed from the ZMAT.  The output says which it was:
     symmetry labels: none (no file xzlabels, no file dgcosym)
 
 `labels 0` switches the labels of either file off.  The labels of either
-file are checked against the integrals (below).  In an MPI run every rank
+file are checked against the integrals (below).
+
+**Labels with a modulus and a second label** (Lan Cheng's, CFOUR x2cso
+2026-10-15; section 22).  `xsox2chf` writes `xzlabels` for the
+symmetry-blocked SCF of D2h, D2 and C2v (`%dgkpscf` / `%dgkpreal`): the C2*
+labels 2 m_j = +-1, modulus 4.  The labels are reduced to 0 .. modulus - 1
+and every sum or difference of classes - groups of pairs and triples, the
+deltas of the ring terms, the label shifts, the (Q) sectors - is taken
+modulo mgrp = modulus / step (`xzw`, `xzeq`, `xzdok`, `xzcan` of
+`xzdata.f90`; `zcred.h` for the C kernels of (Q)): CCSD, CCSDT, (Q),
+Lambda, (Q)_Lambda, the density and EOM-EE run in these blocks.  A second
+label (a line `second m2` in `xzlabels`, then one more integer per spinor):
+the g/u parity of D2h (modulus 2), so that D2h is blocked by C2h* = Z4 x Z2;
+the classes are c1 + gB c2 (gB = 12 mgrp), the sums are reduced digit by
+digit, and `%xzeom` takes `shift parity-shift roots`.  Without a modulus
+(2 m_j of `%dglin`) all of it is what it was.  CC3, CC4 and EOM-DEA, which
+sum the classes as integers, do not take such labels: with a modulus or a
+second label they run in one block (`@XZCCSDT-W ... not used by CC3, CC4
+and EOM-DEA: one block`); the distributed pieces of EOM-EE-CCSDT (the
+occupied operator of a rank, the cost model of the EOM kinds) take the
+shifts modulo mgrp.  In an MPI run every rank
 reads the two files itself in its run directory; the ranks must find the
 same (section 1: a rank that decides otherwise than rank 0 stops the run).
 
@@ -955,7 +977,7 @@ What the program does with the labels:
 
 `labels 0`: the labels are not used.  **Not done:** labels with a modulus
 - the file format of `xzlabels` has one, the readers pass it on (`modulus` of
-`xzdata.F90`; `xzrddgc` returns one too, 0 for the m_j blocks), and the
+`xzdata.f90`; `xzrddgc` returns one too, 0 for the m_j blocks), and the
 driver decides in one place: with a modulus that is not 0 the program warns
 (`@XZCCSDT-W, labels with a modulus are not used by this program: one
 block.`) and runs dense, whichever file the labels came from.  What assumes
@@ -1582,7 +1604,7 @@ integrals, nothing conjugated, l1 and l2 dense, l3 and its residual stored
 as T3 is (the packed block, or the blocks of the labels).  Start from
 conj(t), Jacobi steps accelerated by a Krylov subspace (since 2026-10-14,
 below: `xzlkry.inc`, up to 40 pairs of vectors in the work array or their l3
-parts in `XZLKRY`; with option `lsolver diis` DIIS as before, `xzdiis.F90`,
+parts in `XZLKRY`; with option `lsolver diis` DIIS as before, `xzdiis.f90`,
 the code of the amplitudes: 8 vectors in the work array or their l3 parts in
 `XZDIIS`), converged when the largest element of the Jacobi step over l1,
 l2, l3 is below 10^-`CC_CONV` (section 1; until 2026-10-13: |dL1| + |dL2| +
@@ -1655,7 +1677,7 @@ prints "the least that Lambda takes"; below it:
 not l3: for the labelled HBr case 18.6 MB where the three T3-sized regions
 are 0.8 MB.
 
-### The solver: a Krylov subspace (`xzlkry.F90`, `xzlkry.inc`; 2026-10-14)
+### The solver: a Krylov subspace (`xzlkry.f90`, `xzlkry.inc`; 2026-10-14)
 
 **Why.**  The Lambda equations are linear in lambda, `R(L) = eta + L A`
 with A the Jacobian of CCSDT, and the Jacobi step `g(x) = R(x) / D` is
@@ -1984,7 +2006,7 @@ one job on one node, the old one first.
 
 **The timers.**  Every stage of the amplitude step, of the Lambda
 intermediates and of a Lambda iteration has a named timer (`xztic`, `xztoc`
-of `xzdata.F90`): wall time and the CPU time of all threads of the process;
+of `xzdata.f90`): wall time and the CPU time of all threads of the process;
 the output has both and their ratio.  That ratio is **not** the number of
 cores that work: a thread of the OpenMP runtime that waits spins for
 `KMP_BLOCKTIME` (200 ms) and counts as busy, so the ratio is close to the
@@ -2203,7 +2225,7 @@ for `xsox2cprop`.  Nothing of the Z-vector equations is here.  With frozen
 occupied or dropped virtual spinors the stage also makes the gradient
 between them and the active spinors (below).  Rank 0 only; no energy changes
 (`TOTENERG` is the CCSDT energy).  Sources: `xzden.inc`, `xzdfrz.inc`
-(type-generic), `xzfrz.F90`; the reference is `zccsdt.cc.density_opt`
+(type-generic), `xzfrz.f90`; the reference is `zccsdt.cc.density_opt`
 (`kernel`, `_frozen_stage`, `frozen_terms`, `relaxed_rdm1`; docs/lambda.md,
 section 10) and `zccsdt.cfour.handover_files`.
 
@@ -2243,7 +2265,7 @@ In blocks of the labels only the three passes and the Gram matrix differ;
 everything after them is the same code on the same dense arrays.  Real and
 complex: the two instances of the `.inc` files, as everywhere.
 
-### Frozen occupied and dropped virtual spinors (`xzdfrz.inc`, `xzfrz.F90`)
+### Frozen occupied and dropped virtual spinors (`xzdfrz.inc`, `xzfrz.f90`)
 
 **How CFOUR's own chain does it** (from reading `x2cccdenocbp/` and
 `x2czvec/` of `~/apps/cfour-x2cso-rebuild`; the format of the files measured
@@ -2266,7 +2288,7 @@ from four blocks (`xmatfull.f90`).  The files of `xx2cvtran` have no
 integral with a frozen index.
 
 **What the native program does.**  The same integrals by the same routines:
-`xzfrz.F90` reads the AO integrals of `IIII` into the work array with
+`xzfrz.f90` reads the AO integrals of `IIII` into the work array with
 `int_mintv2e` (libx2cint), takes the spinors from `JOBARC` (`scf2ccmo`) and
 their energies from `scf2ceig`, and calls `vtranpsog` for one frozen or
 dropped ("held") spinor h at a time: `(h q|r s)`, q, r, s over all N spinors.
@@ -2842,7 +2864,7 @@ loops that are 95 % of a dense iteration - pass 1 and pass 2 over batches of
 occupied pairs, the pp ladder over batches of occupied triples (in the
 Lambda equations: pass 1 with the densities, pass 2, the ladder) - skip the
 batches of other ranks; the ranks meet twice to sum what the batches made;
-and the rows of T3 have owners.  `xzdist.F90` holds the list of batches, the
+and the rows of T3 have owners.  `xzdist.f90` holds the list of batches, the
 slices and the clocks; all MPI calls are in `xzmpi.c`.
 
 *What a rank holds* (its own work array): the tables and the integrals - it
@@ -3334,7 +3356,7 @@ the transfer rates above are Intel MPI's, in particular the slow
 ### 15.11 The sigma vectors of EOM
 
 The excited states use this machinery for a second kind of step: the kinds
-of batches 7 to 12 of `xzdist.F90`, dealt per label shift (`xzdeal_eom`,
+of batches 7 to 12 of `xzdist.f90`, dealt per label shift (`xzdeal_eom`,
 `xzrebal_eom`), the sums of pass 1, rows with owners.  Section 16.7.
 
 ## 16. EOM-EE-CCSDT: excited states
@@ -3363,7 +3385,7 @@ MPI ranks: 16.7.
 The input is CFOUR's where CFOUR's two-component EOM program `xx2ceomcc`
 has a keyword or a section for the thing (docs/eom.md, section 9), read the
 same way: the flags of joda from JOBARC, the sections from the ZMAT (a line
-with the tag, the value on the next line; `xzeomd.F90`: `xzeominp`).
+with the tag, the value on the next line; `xzeomd.f90`: `xzeominp`).
 
 | what | keyword / section | default |
 |---|---|---|
@@ -3457,7 +3479,7 @@ amplitude step - so a sigma vector takes no v^4 array of its own; and the
 operator O'_hh of a shift is the full matrix on occupied triples, of which
 the passes take the blocks between two groups.
 
-**Label shifts in the blocks** (`xzblk.inc`, `xzdata.F90`: `xzshctx`).  The
+**Label shifts in the blocks** (`xzblk.inc`, `xzdata.f90`: `xzshctx`).  The
 block passes of the ground state take the shifts of their operands from
 module variables - `sh_t` of the rank-3 operand, `sh_w` of the operators (of
 the integrals in pass 1), `sh_a` of the amplitudes of the drive terms; the
@@ -3825,7 +3847,7 @@ vector:
 
 sigma_1 and sigma_2 come out the same on every rank (after the sums of the
 passes 1); rank 0's are used.  The six loops are six more kinds of batches
-of `xzdist.F90` (7 to 12; the batches themselves are those of the plan,
+of `xzdist.f90` (7 to 12; the batches themselves are those of the plan,
 `nbp` pairs and `nbt` triples), dealt **per label shift** by a cost model
 that has the shifts of the operands (`xzbcost1`: the classes of the summed
 indices with `sh_t`, `sh_w` as the passes of `xzblk.inc` have them), and
@@ -4429,16 +4451,26 @@ reached, and a rerun continues; section 1), `ESTATE_CONV`,
 `ESTATE_MAXCYC`, the memory by `MEMORY_SIZE`,
 the excited states by `%eomnroot`, `%eomthrs`, `%eomndav0`, `%xzeom`,
 `%xzeomguess`, `%xzeomvec` (16.1) - and everything else by one section of
-its own (`xzopt.F90`):
+its own (`xzopt.f90`):
 
     %xzccsdt
     cc3 stored
     labtol 1e-6
 
 one option per line, the name first (either case), its value the rest of
-the line (a name alone: 1); the section ends at an empty line, at the next
-line that starts with `%` or at the end of the file.  A name that is not
-an option stops the program with the list of the options.  **No
+the line after a blank or `=` (a name alone: 1) - `labtol 1e-6` and
+CFOUR's `labtol=1e-6` (`X2C-OPTIONS.md` at the top of the x2cso tree,
+`libx2c/x2c_getopt.f90`) alike; lines that start with `#` or `!` are
+comments; the section ends at an empty line, at the next line that starts
+with `%` or `*` or at the end of the file.  A name that is not an option
+stops the program with the list of the options (`vtdense`, an option of
+`xx2cvtran` in the same section, is accepted and not used here).  The
+program asks for an option as CFOUR's programs do, `call
+x2c_getopt('xzccsdt', name, value, length)` and `x2c_hasopt`, but these are
+module procedures of `xzopt.f90` (every routine that uses `xzdata` sees
+them), not the routines of `libx2c`: a misspelt option still stops the run,
+the program builds against a CFOUR tree without `x2c_getopt`, and the calls
+are those of CFOUR's `zccsdt/` word for word (section 22).  **No
 environment variable is read** (`OMP_NUM_THREADS` and those of the MPI
 library are not ours); the variables `XZ_*` of earlier versions, which the
 sections above still describe by the name of their option, are gone.  In an
@@ -4489,12 +4521,14 @@ tolerance in every run:
 
     the largest imaginary part of the integrals:   1.50E-12 (below the tolerance  1.00E-07: taken as zero)
 
-The two numbers are in `xzlayout` of `xzdrv.F90`.
+The two numbers are in `xzlayout` of `xzdrv.f90`.
 
-**CFOUR keywords in the place of earlier variables**: `eomcyc` is gone -
-`ESTATE_MAXCYC` of the ZMAT (the program takes its job from the ZMAT and
-xjoda is run again when it changes); the amplitudes of CFOUR's CCSD as
-the whole problem (`eomccsd`, `ccsd_eom`) went with the argument.
+**CFOUR keywords in the place of earlier variables**: `ESTATE_MAXCYC` of
+the ZMAT (the program takes its job from the ZMAT and xjoda is run again
+when it changes); `eomcyc n` is back since the merge with CFOUR's zccsdt
+(section 22) as a test hook of Lan Cheng's (at most n iterations); the
+amplitudes of CFOUR's CCSD as the whole problem (`eomccsd`, `ccsd_eom`) went
+with the argument (`CALC=CCSD` is CCSD of this program now).
 
 **Developer and test options** (the same section; not in the README of the
 package):
@@ -4525,6 +4559,11 @@ package):
 | `lkry n`, `lkry m<n>`, `lkry f<n>` | the Krylov solver of the Lambda equations with up to n pairs of vectors (3 .. 63; default 40, as many as fit), in the work array / in the file `XZLKRY` (section 11) |
 | `lprec 0` | the Krylov solver: the singles of the step from the denominators instead of the singles block of the Jacobian (section 11) |
 | `lritz n` | the Krylov solver: per cycle the norm of the step and of the minimal residual, at the end the n harmonic Ritz values of the smallest \|theta\| and the largest l1 elements of the softest direction (section 11) |
+| `ampout file` | write T1, T2, T3 in CFOUR's order of the spinors (`xzampio.f90`; whatever the labels, blocks or arithmetic of the run) - Lan Cheng's test hooks, section 22 |
+| `ampin file` | one step on the amplitudes of the file (written by `ampout`), the new ones to `file.out` and the largest change of T1, T2, T3 (one rank): the step compared between runs with other labels or arithmetic |
+| `terms digits` | leave out parts of the T3 equation in a step, dense and blocked alike: 1 the pp ladder, 2 pass 2, 3 the operator on the occupied triples (hh ladder, F_oo), 4 the ring terms of pass 2, 5 its drive terms |
+| `eomkeep n`, `eomstart k` | EOM-EE-CCSD: Ritz vectors kept beyond the roots at a compaction (default 20); start from nroot + k singles |
+| `eomcyc n` | EOM: at most n iterations |
 
 Checked (HBr / cc-pVDZ-DK with `%dglin`, `CALC=CC3`): no section - real, 6
 classes, E(CC3) -2604.989088528367; `cc3 stored` - ..366; `imagtol 1e-12`
@@ -4548,7 +4587,7 @@ Python program (`ccn.cc4_kernel(store_t4=False)`, `cc.cc4fly`), which is
 validated against MRCC's CC4.  Sources: `xzcc4.inc`, `csrc/cc4_native.c`
 (added; not in the Python build), the loop of `xzcc.inc`, two lines of
 `xzstep.inc`, and for the excited states the solver of section 16
-(`xzeoms.inc`, `xzeomd.F90`).
+(`xzeoms.inc`, `xzeomd.f90`).
 
 A run of production size takes days, so every completed evaluation of the T4
 terms is written down: a run of the same ZMAT in the same directory goes on
@@ -5246,7 +5285,7 @@ application is the zero-field splitting of O2 X 3Sigma_g- from O2(2+)
 `Engine.sigma`) is the reference of the sigma vector and of the roots; its
 factorization, its layouts and its passes are taken over one to one (the
 term list: the module docstring of `dea_sector`, docs/eom.md 11.9).
-Sources: `xzdead.F90` (input, tables, slices, the results),
+Sources: `xzdead.f90` (input, tables, slices, the results),
 `xzdea.inc` (the intermediates of the ground state), `xzdeas.inc` (the
 sigma vector, the preconditioner, the masks of the parity), `xzdeam.inc`
 (the driver); the solver is that of section 16 (`xzeoms.inc`, generalized
@@ -5332,7 +5371,7 @@ ordered pairs while it is made).  The format (stream, 8 bytes per number):
                               CFOUR's numbers of the virtual spinors from 0
     the blocks, group after group: [i][j] = <pair_i || pair_j>, row-major
 
-The program reads it when it is there (`xzvvhdr`, `xzrdvvb` of `xzread.F90`;
+The program reads it when it is there (`xzvvhdr`, `xzrdvvb` of `xzread.f90`;
 the output says `<vv||vv>: the file xzvvvv`): block by block of the file into
 the diagonal blocks of its own groups of pairs, every element to its place
 with the signs of its two pairs (the program may order the spinors
@@ -5345,6 +5384,24 @@ an element of the file between two groups of the program is checked against
 `moinpppp`: the check of the two routes on the same integrals, 20.5).  For
 cc-pV5Z-X2C-TP (360 spinors, 10 + 350) the run directory takes 67 s and 11 GB
 (`xzvvvv` 2.8 GB, 23 groups; the ten files `PPPH` 3.4 GB).
+
+**Since 2026-10-27 the run directories hold the blocked files of
+`xx2cvtran`** (`%vtranblk`, section 2; section 22): `native_rundir.py`
+writes `mobkhhhh`, `mobkhhhp`, `mobkhhpp`, `mobkphhp`, `PPBK0001..` from
+the dense files it made (`zccsdt.cfour.write_blocked`: the allowed elements
+of strict pairs, real unless an element has an imaginary part above
+1e-12) and, from a block file, `mobkpppp` instead of `xzvvvv`
+(`write_blocked_pppp`: the same groups of one label sum, made the same way,
+each column c<d written in its place of the file, `zccsdt.cfour.BlockedPPPP`;
+no n^4 array).  The two formats hold the same elements - the columns of
+`mobkpppp` of one label sum are the columns of the block of `xzvvvv` of that
+sum - so nothing is lost, and the program reads one reader's files for
+CFOUR's chain and for these Hamiltonians.  `--dense` writes the dense files
+and `xzvvvv` as before; the program still reads `xzvvvv` (the run
+directories of 2026-10-20 to 10-27).  The parity of the spinors stays in
+`xzparity`: the second label of `xzlabels` needs a first label with a
+modulus, and 2 Omega has none.  The roots on the blocked files are those of
+the dense files to all printed digits (section 22).
 `bench/dea/native_blocks.sbatch SNAP H5 RUNDIR TAG [MAXCYC] [MEMWORDS]`
 makes the run directory and runs it with one rank of 48 threads per node
 (`MEMORY_SIZE` at most the least `MemAvailable` of the nodes less 6 GB:
@@ -5935,7 +5992,7 @@ passes are taken over one to one (the term list: the module docstring of
 3Sigma_g- at cc-pVQZ-X2C-TP (10 + 206 spinors), whose r5 (3.4e10 elements,
 269 GB) is not one node's (docs/eom.md 11.11: the Python plan 99 GB + 806
 GB): every array of the size of r5 is distributed over the ranks.  Sources:
-`xzdea5d.F90` (the layout of the 5p3h blocks, of the intermediates, the
+`xzdea5d.f90` (the layout of the 5p3h blocks, of the intermediates, the
 distribution of the rows of r5), `xzdea5.inc` (the intermediates of the
 ground state, the kernels for rank 5), `xzdea5s.inc` (the 5p3h part of a
 sigma vector, the small intermediates, Z4, the pp ladder), `xzdea5r.inc`
@@ -6100,7 +6157,7 @@ and its product), the ring from 24 ranks on (a batch 11 GB, its product 11
 GB, the rows of the spectator pair in and out 9 + 9 GB), on top of what
 stays (about 10 GB: B4, Xv2, r4 and the terms in sigma4 of all rows).
 Three things take more than the plan when the work array has room
-(`xzroom` of `xzmem.F90`: in a dry run only what is below the peak so far,
+(`xzroom` of `xzmem.f90`: in a dry run only what is below the peak so far,
 so the plan holds their floor): the slots of Z4 (the floor three, or the
 slabs of the rank when made over the ranks), the rows of Xv5 and E1x in
 one exchange (the floor one) and, over fewer ranks than occupied spinors,
@@ -6267,3 +6324,111 @@ subspace, 48 node-hours) and the timing runs (21 node-hours).
   stopped run is not there - a job must hold all iterations of a target.
 - The T of CCSDTQ in the sector; DIP; left-hand vectors; the vectors of the
   roots in a file.
+
+## 22. The merge with CFOUR's zccsdt (Lan Cheng, 2026-10-15 to 10-17)
+
+CFOUR's x2cso branch has the program as the directory `zccsdt/` since its
+commit 335c05a7b (2026-10-15): the tree that `cfour/merge/assemble.sh` made
+of this repository at 1a59728 (2026-10-12), "unchanged; later changes are
+made here" - with three small edits in fact (the convergence on the energy
+alone, norms divided by the numbers of elements, `labtol` and `imagtol`
+1e-5), which his commit 81c6dbd00 replaced again.  His 16 commits of
+`zccsdt/` (to 2026-10-17; later x2cso commits change `x2cvtran` only) are
+the branch `lan/x2cso-zccsdt` of this repository: one commit each, his
+author and date, mapped back into this layout (`*.f90` -> `cfour/xzccsdt/`,
+the C kernels and `zcred.h` -> `csrc/`; the generated Makefile and README
+into `cfour/xzccsdt/Makefile` and the README template of `assemble.sh`), so
+that `assemble.sh` on that branch gives his `zccsdt/` (up to the generated
+header lines).  It is merged into this program (merge commit 0c6fe6c).
+
+**What came from his side.**
+
+| his commit | what | here |
+|---|---|---|
+| 0419eed7a, 3fd76655d | symmetry labels with a modulus (the C2* labels 2 m_j = +-1 mod 4 of D2h, D2, C2v) in CCSDT, (Q), Lambda, the density, EOM | `xzw`, `xzeq`, `xzdok` of `xzdata.f90`, every sum of classes (section 6) |
+| 3e408caf6, c94029783, 6b1a3f482 | the blocked integral files of `xx2cvtran` with `%vtranblk` (real; complex for C2h, C2, Cs) | `xzrint`, `xzrbovvq`, `xzrbvvvv`, `xzbhead`, `xzbidx` of `xzread.f90` (section 2) |
+| 68ad139c2, 5863ac111 | the g/u parity of D2h as a second label (C2h* = Z4 x Z2); loops over sums that skip the numbers that are not sums (`xzcan`) | `xzdata.f90`, `zcred.h`, `%xzeom` with a parity shift |
+| c3845c8d8 | test hooks of one CCSDT step | `xzampio.f90`; options `ampout`, `ampin`, `terms` |
+| 4e972cf5f, c25791eeb, 30dbbfaa1 | `CALC=CCSD` without T3 (no T3 storage, no T3 parts of the DIIS vectors), in the blocks of the labels; shared with CCSDT: the dressing of `<ab||cd>` limited to the classes (`zc_vvvv_dress_cls`), the reader by label classes (`xzpcls`), threaded DIIS pair loops | `xzsd.inc`, `xzstep.inc`, `csrc/t3pack.c` |
+| 729af8923 | EOM-EE-CCSD (`CALC=CCSD,EXCITE=EOMEE`), the CIS-type guess (`%xzeomguess 2`, the default for CCSD), 20 Ritz vectors kept (`ekeep`); the preconditioner no longer writes past a vector without triples | `xzeoms.inc`, `xzeom.inc` |
+| 4e6ff235c | the options in `%xzccsdt` instead of environment variables (his reader `x2c_getopt` of libx2c) | here the same calls, served by `xzopt.f90` (below) |
+| 81c6dbd00 | converged by the largest change of an element, no energy test | the same criterion as here (since 78546ff); ours kept |
+| fdcdd786b | README | the README template of `assemble.sh` |
+
+**Where both sides did the same thing, or where they differ** (decided in
+the merge; to be agreed with him):
+
+- *Options.*  Both replaced the `XZ_*` variables by `%xzccsdt`.  The calls
+  are now his, word for word (`x2c_getopt('xzccsdt', name, value, length)`,
+  `x2c_hasopt`), and his comments and messages where both had reworded the
+  same line; they are served by the module procedures of `xzopt.f90`, not by
+  libx2c: a misspelt option stops the run (libx2c ignores it), the program
+  builds against CFOUR trees without `x2c_getopt` (cfour-x2cso-rebuild),
+  and the syntax is the union (`name value` and `name=value`, comments,
+  the end at `*`).  `vtdense` (`xx2cvtran`'s) is accepted.  His options
+  that were not here: `terms`, `ampin`, `ampout`, `eomkeep`, `eomstart`,
+  `eomcyc`.  `mpichunk` is read once, in `xzmpistart` (his main program read
+  it through libx2c as well).
+- *Convergence.*  The same criterion; ours is kept (the norms and the
+  largest element printed, the save and restart of unconverged iterations,
+  section 1).  The merge had mixed his largest-change norms of the split
+  path of rank 0 into ours; restored (0b5d2af).
+- *`imagtol`*: 1e-7 here (the reasons in `xzdrv.f90`: CFOUR's integrals of
+  ThF+ have imaginary parts up to 2e-9, labels that are not symmetry labels
+  leave 1e-2), 1e-5 in his tree and in `X2C-OPTIONS.md`.
+- *The model in `XZKEY`.*  It now tells CCSD from CCSDT and CC3: a CCSD run
+  writes `XZAMPS` with n3 = 0, which a later CCSDT run in the same directory
+  took as its own (in his tree: a mismatch of the header, fatal) - now it
+  solves CCSDT anew.
+- *The EOM solver.*  Our block-Davidson compaction (no cap of 64; `mkeep0`,
+  `nblk`) with his `ekeep` in `mkeep0`; his CIS-type guess without the cap
+  of 64 on its subspace.  His open item (a dense run can miss components of
+  near-degenerate states) was not checked here.
+- *Labels with a modulus and our later methods.*  CC3, CC4 and EOM-DEA sum
+  classes as integers: with a modulus or a second label they run in one
+  block (a warning).  The distributed EOM-EE-CCSDT pieces take the shifts
+  modulo mgrp.
+
+**Layout.**  The free-form sources are `*.f90` here too (b590f9a), so that
+the files of the two trees have the same names.  `assemble.sh` of this
+branch gives a tree whose difference to his `zccsdt/` is: the files that
+are new here (CC3, CC4, EOM-DEA, the Krylov solver of Lambda, `xzopt.f90`,
+the kernels `cc3_*.c`, `cc4_native.c`, `t4sym.c`), the lines of these
+features in the shared files, the points above, and the names `*.f90` in
+comments (his comments still say `.F90`).
+
+**The blocked files for the Hamiltonians of the DEA** (20.1): written by
+`native_rundir.py` in his format (`mobkpppp` instead of `xzvvvv`),
+`zccsdt.cfour.read()` / `from_cfour()` read them as well
+(`read_blocked`); `tests/test_cfour.py::test_blocked_files_of_vtranblk`.
+
+**Validation** (2026-10-27; master 3d6ac78 built from an exported copy
+against the merge, both against cfour-x2cso-rebuild; CFOUR x2cso 60df636c7
+built from an exported copy, `/scratch16/lcheng24/xwang405/cfour_lan`, for
+its `xx2cvtran` with `%vtranblk` and his `xzccsdt`):
+
+| check | result |
+|---|---|
+| `cfour/merge/test/run.sh` (CCSDT, XZAMPS taken, CC3, CC4, EOM-DEA) | PASS: serial, MPI binary; with the programs of cfour-x2cso-rebuild and of 60df636c7 |
+| `regress.sh --eom --tol` against master: 28 runs, 140 energy lines (CCSDT, (Q), [Q], Lambda, (Q)_Lambda, EOM-EE-CCSDT, density files) | identical energies and roots, identical cycles; density files to 1.3e-15 (REGRESSION OK); the same with 2 ranks (EOM over 2 ranks against one rank of master) |
+| `CALC=CCSD,EXCITE=EOMEE` on CFOUR's integrals (`zccsdt_ref/_cfour_eom`), against `xx2cccsd` / `xx2ceomcc` (docs/eom.md section 7) | H2O / 6-31G: E_corr -0.135423711696 (CFOUR -0.135423711709), roots 0.280687329778, 0.280687616385 (CFOUR `%eomalg 2`: ..329835, ..616614; ESTATE_CONV=8 there); HBr / cc-pVDZ-DK: -0.140627327302 (..327312), 0.234048257140 x2, 0.238083258284 x2 (..257246, ..258259); his binary the same digits |
+| HBr / cc-pVDZ-DK `%dglin` (`hbr_dglin_fc`) through the chain of 60df636c7 without and with `%vtranblk` | CCSDT(Q): E(CCSDT) -2604.989297832607 / ..606, E(Q) -0.000217451698 both; EOM-EE-CCSDT (12 roots, 4 shifts) to 3e-14; his binary the same digits on both |
+| C2H4 / 6-31G, X2C-1e, the blocked SCF of D2h (`%dgkpscf`: C2* labels modulus 4 and the parity, 26 classes), the chain of 60df636c7 | CCSD -78.241905927296, CCSDT -78.247527037167 (16 cycles): the same digits with the labels and with `labels=0`, and with his binary; CC3 -78.247269035954: one block (the warning), the digits of `labels=0` |
+| his `zccsdt/test/run.sh` with his CFOUR | PASS with his binary and with this one |
+| `pytest tests/test_cfour.py tests/test_ccsdt.py tests/test_ccsdtq_sym.py tests/test_dea.py` (his kernel changes: `zcred.h`, `zc_vvvv_dress_cls`) | 54 passed |
+| `write_blocked` on the dense HBr files | the same records and numbers of elements as `xx2cvtran`'s files (version 2 against 3 before the rounding tolerance of 1e-12); CCSDT(Q) -2604.989297832607 |
+| EOM-DEA 4p2h, DYVDZ block file, CC_CONV=12, ESTATE_CONV=11 (20.5) | blocked files: -150.08744260781970, -150.08742672225239; `--dense` (xzvvvv), and master on it: the same digits |
+| EOM-DEA 4p2h, n116 (TZ) block file, 10 / 10 | -150.21709561323655, -150.21707919864457 (20.5: ..23652, ..64454) |
+| EOM-DEA complete 5p3h, DYVDZ and cc-pVDZ-X2C-TP `.npz`, blocked files (21.6) | -150.09487156983221, -150.09485489741672; -150.09628929223683, -150.09627253974949: the digits of the run directories of 21.6 |
+
+**What this program has beyond his `zccsdt/`** (for him): CC3 without
+stored triples and EOM-EE-CC3 folded (section 17); CC4 and EOM-EE-CC4 with
+the quadruples folded in, restartable (section 19); EOM-DEA-CCSDT with 4p2h
+and with complete 5p3h, over MPI ranks with distributed vectors (sections
+20, 21); the Krylov solver of the Lambda equations (`lsolver`, section 11);
+EOM-EE-CCSDT over MPI ranks and the EOM solver without the cap of 64 vectors
+(16); `CC_CONV` as `xx2cccsd` with the save and restart of unconverged
+amplitudes and lambda (`XZKEY` with the model; section 1); the subspace of
+the EOM solver in files of a directory of its own (`eomvdir`), read by all
+threads; `%xzccsdt` options that stop on a misspelling; the Python writer
+and reader of the `%vtranblk` files (`zccsdt.cfour`).

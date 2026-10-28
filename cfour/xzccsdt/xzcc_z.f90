@@ -2,6 +2,7 @@
 #include "xztype.h"
 #include "xzimd.inc"
 #include "xzstep.inc"
+#include "xzsd.inc"
 #include "xzblk.inc"
 #include "xzdiisg.inc"
 #include "xzlkry.inc"

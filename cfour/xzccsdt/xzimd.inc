@@ -3,7 +3,7 @@
 ! are not sums over T3 (type-generic: compiled once per element type, see
 ! xztype.h).  The equations are those of src/zccsdt/cc/ccsdt_opt.py
 ! (docs/factorization.md); arrays in the layouts of the C kernels, declared
-! with the indices reversed (xzdata.F90).
+! with the indices reversed (xzdata.f90).
 !
 ! Dressing: a virtual bra index a picks up - sum_m t1[m][a] <m..||..>, an
 ! occupied ket index i picks up + sum_e t1[i][e] <..||..e>.
@@ -12,6 +12,7 @@
 ! ---------------------------------------------------------------------------
 ! The dressed Fock matrix (canonical spinors: the bare one is diagonal).
 subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, fov, fvo, fvv, pvv)
+  use xzdata, only: ocls, vcls, ocoff, vcoff, vpoff, xzw
   implicit none
   integer(8), intent(in) :: no, nv, nvp
   real(8), intent(in) :: eps(0:no+nv-1)
@@ -26,8 +27,10 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
   ZT, intent(out) :: fvo(0:no-1, 0:nv-1)                       ! [a][i]
   ZT, intent(out) :: fvv(0:nv-1, 0:nv-1)                       ! [a][e]
   ZT :: pvv(0:nv-1, 0:nv-1)                                    ! [b][e]
-  integer(8) :: m, i, j, a, b, e, q
+  integer(8) :: m, i, j, a, b, e, q, h
   ZT :: s
+  ! (t1[i][a] = 0 unless s(a) = s(i), <ib||Q> = 0 unless Q is of the group
+  ! s(i) + s(b): the sums leave out these terms, in the same order)
 
   ! f + sum_ia <r i||s a> t1[i][a]
   !$omp parallel do private(m, j, i, a, e, s)
@@ -35,7 +38,7 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
     do j = 0, no - 1
       s = 0
       do i = 0, no - 1
-        do a = 0, nv - 1
+        do a = vcoff(ocls(i)), vcoff(ocls(i) + 1) - 1
           s = s + ooov(a, j, i, m) * t1(a, i)
         end do
       end do
@@ -45,7 +48,7 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
     do e = 0, nv - 1
       s = 0
       do i = 0, no - 1
-        do a = 0, nv - 1
+        do a = vcoff(ocls(i)), vcoff(ocls(i) + 1) - 1
           s = s + oovv(a, e, i, m) * t1(a, i)
         end do
       end do
@@ -57,7 +60,7 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
     do j = 0, no - 1
       s = 0
       do i = 0, no - 1
-        do a = 0, nv - 1
+        do a = vcoff(ocls(i)), vcoff(ocls(i) + 1) - 1
           s = s + ovvo(j, a, b, i) * t1(a, i)
         end do
       end do
@@ -66,10 +69,11 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
   end do
   ! - sum_ia <ib||ea> t1[i][a], from <ib||de> on d<e
   pvv = 0
-  !$omp parallel do private(b, i, q)
+  !$omp parallel do private(b, i, q, h)
   do b = 0, nv - 1
     do i = 0, no - 1
-      do q = 0, nvp - 1
+      h = xzw(ocls(i) + vcls(b))
+      do q = vpoff(h), vpoff(h + 1) - 1
         pvv(vpa(q), b) = pvv(vpa(q), b) - gq(q, b, i) * t1(vpb(q), i)
         pvv(vpb(q), b) = pvv(vpb(q), b) + gq(q, b, i) * t1(vpa(q), i)
       end do
@@ -81,7 +85,7 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
   ! (1 - t1^T) f (1 + t1)
   do m = 0, no - 1
     do i = 0, no - 1
-      do e = 0, nv - 1
+      do e = vcoff(ocls(i)), vcoff(ocls(i) + 1) - 1
         foo(i, m) = foo(i, m) + fov(e, m) * t1(e, i)
       end do
     end do
@@ -89,7 +93,7 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
   do a = 0, nv - 1
     do e = 0, nv - 1
       s = pvv(e, a)
-      do m = 0, no - 1
+      do m = ocoff(vcls(a)), ocoff(vcls(a) + 1) - 1
         s = s - t1(a, m) * fov(e, m)
       end do
       fvv(e, a) = s
@@ -98,10 +102,10 @@ subroutine N(xzfock)(no, nv, nvp, eps, t1, ooov, oovv, ovvo, gq, vpa, vpb, foo, 
   do a = 0, nv - 1
     do i = 0, no - 1
       s = fvo(i, a)
-      do e = 0, nv - 1
+      do e = vcoff(ocls(i)), vcoff(ocls(i) + 1) - 1
         s = s + pvv(e, a) * t1(e, i)
       end do
-      do m = 0, no - 1
+      do m = ocoff(vcls(a)), ocoff(vcls(a) + 1) - 1
         s = s - t1(a, m) * foo(i, m)
       end do
       fvo(i, a) = s

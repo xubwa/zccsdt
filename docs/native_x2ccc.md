@@ -101,7 +101,7 @@ sets them to zero in every iteration).
 | `pppp` | `moinpppp` | `(ab, cd)` | `<ab\|\|cd>` with `ABCDTYPE=STANDARD`; otherwise the ladder is AO-driven |
 | `oe` | JOBARC `scf2ceig` | complex, active occupied then virtual | spinor energies (`oe = ieig + 2 ndrop`) |
 
-These are the files the native reader takes (`xzread.F90`, docs/native.md
+These are the files the native reader takes (`xzread.f90`, docs/native.md
 section 2); it reads `moinhhpp` where CFOUR also reads `moinpphh`.  Frozen
 and dropped spinors: the files hold the active spinors only, `no` and `nu`
 are the active numbers, nothing else in the CC code knows about them.  The

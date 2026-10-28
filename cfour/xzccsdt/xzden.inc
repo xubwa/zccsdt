@@ -26,7 +26,7 @@
 !
 ! Batch sizes: nbp (the half-expanded batches of the passes A and B), nbt
 ! (the two gathered batches of pass C), nba (the bra-dressed <ab||ei>).
-! Timers: set 4.  Frozen and dropped spinors: xzdfrz.inc, xzfrz.F90.
+! Timers: set 4.  Frozen and dropped spinors: xzdfrz.inc, xzfrz.f90.
 !
 subroutine N(xzden)(w)
   use xzdata
@@ -323,7 +323,7 @@ subroutine N(xzden)(w)
     end do
     call N(xzdbra)(no, nv, nvp, w(jvpa), w(jvpb), w(kmq), mone, w(kgnh))
     call xztoc(4, 'gradient: <ab||de>')
-    call xzoptget('ddebug', dbg, ldbg)
+    call x2c_getopt('xzccsdt', 'ddebug', dbg, ldbg)
     if (ldbg > 0) then
       call xzdumpw(dbg(1:ldbg) // '.d1', NW * ny * ny, w(kden))
       call xzdumpw(dbg(1:ldbg) // '.gnh', NW * ov, w(kgnh))
@@ -356,7 +356,7 @@ end subroutine
 ! The stage of the held spinors (xzdfrz.inc): sweep 1, the gradient and the
 ! rotations, sweep 2; on return x of the active spinors has the Fock matrix
 ! of the rotations, xall(p, q) the elements of the right-hand side with a
-! held index (full order of xzfrz.F90) and ym(p, q) the rotations y[p][q].
+! held index (full order of xzfrz.f90) and ym(p, q) the rotations y[p][q].
 subroutine N(xzdfrz)(w, kden, kdh, kxa, kxall, kym, kl2pp, kl2p, kt2pp, kc3, kz, kdai, krl, ky4, kdk, kdab, kgam)
   use xzdata
   use xzmem
@@ -406,7 +406,7 @@ subroutine N(xzdfrz)(w, kden, kdh, kxa, kxall, kym, kl2pp, kl2p, kt2pp, kc3, kz,
                       w(jvpa), w(jvpb), w(jvpidx), w(kus), w(kkf + NW * h * ny))
       call xztoc(4, 'held: sweep 1')
     end do
-    call xzoptget('ddebug', length=ldbg)
+    call x2c_hasopt('xzccsdt', 'ddebug', ldbg)
     if (ldbg > 0) then
       call xzdumpw('xd.bf', NW * ny * nheld, w(kbf))
       call xzdumpw('xd.kf', NW * ny * nheld, w(kkf))
@@ -493,7 +493,7 @@ subroutine N(xzdbpassc)(w, kl3, kt3, t2pp, vvo, kg, nn, held, gam)
     do i0 = otoff(g), otoff(g + 1) - 1, nbt
       nb = min(nbt, otoff(g + 1) - i0)
       do sc = 0, ncls - 1
-        h = g - sc
+        h = xzw(g - sc)
         if (h < 0 .or. h >= npg) cycle
         nc = vcoff(sc + 1) - vcoff(sc)
         qlo = vpoff(h)
@@ -521,7 +521,7 @@ subroutine N(xzdbpassc)(w, kl3, kt3, t2pp, vvo, kg, nn, held, gam)
           end if
         end if
         do se = 0, ncls - 1
-          si = h - se
+          si = xzw(h - se)
           if (si < 0 .or. si >= ncls) cycle
           ne = vcoff(se + 1) - vcoff(se)
           nj = ocoff(si + 1) - ocoff(si)

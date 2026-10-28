@@ -9,7 +9,7 @@ C KERNELS OF ZCCSDT (CSRC/).  ALL WORKING MEMORY IS THE ARRAY THAT CRAPSI
 C ALLOCATES: ICORE(I0), MAXCOR DOUBLE WORDS (MEMORY_SIZE OF THE ZMAT).
 C
 C   xzccsdt               no argument: the job is what the ZMAT asks for
-C                         (the flags of joda in JOBARC; XZJOB in xzdrv.F90):
+C                         (the flags of joda in JOBARC; XZJOB in xzdrv.f90):
 C                         CALC=CCSDT, CCSDT[Q], CCSDT(Q), CCSDT(Q)_L, MP2;
 C                         with CALC=CCSDT, EXCITE=EOMEE (EOM-EE-CCSDT) or
 C                         PROPS / DERIV_LEV (the density files of xx2czvec).
@@ -38,6 +38,7 @@ C
       DIMENSION MXC(1)
 C
       CALL XZMPI_INIT()
+C (THE WORDS OF ONE MPI MESSAGE, OPTION MPICHUNK OF %XZCCSDT: XZMPISTART)
       MYRANK=XZMPI_RANK()
       NRANK=XZMPI_SIZE()
       IF(MYRANK.EQ.0)THEN

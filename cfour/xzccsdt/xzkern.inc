@@ -1,4 +1,4 @@
-! Interfaces of the C kernels of one element type (included by xzkern.F90
+! Interfaces of the C kernels of one element type (included by xzkern.f90
 ! once per type; csrc/ccsdt_t3.c, csrc/t3pack.c, csrc/tnpack.c).  Arrays are
 ! assumed-type: regions of the work array are passed as they are.  All
 ! layouts are those of the C side (row-major, indices from 0).
@@ -194,6 +194,14 @@
       import
       integer(c_int64_t), value :: nrow, ncol, lda, nma, nxa, ldb, nmb, nxb, np
       type(*), dimension(*) :: out, bare, pa, pb, ta, ga, tb, gb, ct, h
+    end subroutine
+
+    ! the same with the sums over m limited to [mlo(a), mhi(a)) (t3pack.c)
+    subroutine N(zc_vvvv_dress_cls)(out, bare, nrow, ncol, pa, pb, ta, lda, ga, nxa, &
+                                    tb, ldb, gb, nxb, mlo, mhi) bind(C)
+      import
+      integer(c_int64_t), value :: nrow, ncol, lda, nxa, ldb, nxb
+      type(*), dimension(*) :: out, bare, pa, pb, ta, ga, tb, gb, mlo, mhi
     end subroutine
 
     subroutine N(zc_pair_one_body_add)(w, nq, ncol, pa, pb, pidx, n, f, ldf, scale) bind(C)
