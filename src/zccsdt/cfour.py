@@ -36,6 +36,18 @@ xzlabels         optional, not a file of CFOUR: a symmetry label per spinor (tex
                  read_labels()), for the native program cfour/xzccsdt and, on
                  request, for from_cfour().
 
+With a section %vtranblk in the ZMAT, xx2cvtran (CFOUR x2cso since
+2026-10-15, x2cvtran/xzbwrite.f90) writes instead of moinhhhh .. moinpppp
+the blocked files mobkhhhh, mobkhhhp, mobkhhpp, mobkphhp, PPBK0001.. and
+mobkpppp: the same integrals in the same order, but only the elements that
+the symmetry labels allow and only strict pairs p<q, as real numbers
+(complex for C2h, C2, Cs); a header (ten integers: 20261015, the version,
+the kind, spinors, modulus, frozen, occupied, virtual, the modulus and base
+of a second label) and the labels of all spinors before them; mobkpppp one
+record per column c<d.  read() takes them when mobkhhhh is there
+(read_blocked()); write_blocked() turns the dense files into them (the run
+directories of bench/dea/native_rundir.py).
+
 ``moinpppp`` is the one file that is not always there.  xx2cvtran writes it
 when ABCDTYPE is not AOBASIS (ABCDTYPE=STANDARD: then the whole (pq|rs) is
 transformed, n^4 complex numbers in core); with ABCDTYPE=AOBASIS, which the
@@ -329,12 +341,16 @@ def read(directory='.', pppp=True):
     '''The Integrals of the files of ``directory``.  ``pppp``: read moinpppp
     if it is there.'''
     d = lambda name: os.path.join(directory, name)
-    for name in ('JAINDX', 'JOBARC', 'nmototal', 'scf2ceig', 'moinhhhh', 'moinhhhp', 'moinhhpp', 'moinpphh',
-                 'moinphhp', 'PPPH0001'):
+    blk = None
+    if os.path.isfile(d('mobkhhhh')):
+        # the blocked files of xx2cvtran with %vtranblk (read_blocked)
+        blk, hdr, _ = read_blocked(directory, pppp)
+    for name in ('JAINDX', 'JOBARC', 'nmototal', 'scf2ceig') + (() if blk else ('moinhhhh', 'moinhhhp', 'moinhhpp',
+                                                                             'moinpphh', 'moinphhp', 'PPPH0001')):
         if not os.path.isfile(d(name)):
             raise FileNotFoundError('%s: no file %s (kept after xjoda, xsox2catm, xsox2chf, xx2cvtran?)'
                                     % (directory, name))
-    no, nv = _sizes(directory)
+    no, nv = (int(hdr[6]), int(hdr[7])) if blk else _sizes(directory)
     ntot = int(_record(d('nmototal'), _I8)[0])
     arc = JobArc(directory)
     nfrozen = 2 * int(arc.get('NUMDROPA')[0])
@@ -352,7 +368,16 @@ def read(directory='.', pppp=True):
     po, pv = no * (no + 1) // 2, nv * (nv + 1) // 2
     ppph = np.empty((pv, nv, no), dtype=np.complex128, order='F')
     for i in range(no):
-        ppph[:, :, i] = _complex(d('PPPH%04d' % (i + 1)), (pv, nv))
+        ppph[:, :, i] = blk['PPPH'][i] if blk else _complex(d('PPPH%04d' % (i + 1)), (pv, nv))
+    if blk:
+        dense = dict(blk)
+        # moinpphh [a<=b, i<=j] = <ab||ij> = conj(<ij||ab>) of moinhhpp [a, i, b, j]
+        qo, qv = _pairs(no), _pairs(nv)
+        dense['moinpphh'] = np.asarray(blk['moinhhpp']).conj()[qv[0][:, None], qo[0][None, :],
+                                                               qv[1][:, None], qo[1][None, :]]
+        get = lambda name, shape: dense[name]
+    else:
+        get = lambda name, shape: _complex(d(name), shape)
     lab = read_labels(directory)
     if lab is not None and len(lab[0]) != ntot:
         raise ValueError('%s: %s has %d labels for %d spinors' % (directory, LABELS, len(lab[0]), ntot))
@@ -360,10 +385,11 @@ def read(directory='.', pppp=True):
         labels=None if lab is None else lab[0][act].copy(), modulus=0 if lab is None else lab[1],
         nocc=no, nvir=nv, nfrozen=nfrozen, ndropped=ndropped, energy=e[0::2][act].copy(), irrep=irrep,
         e_scf=float(arc.get('SCFENEG', _F8)[0]),
-        hhhh=_complex(d('moinhhhh'), (po, po)), hhhp=_complex(d('moinhhhp'), (po, no, nv)),
-        hhpp=_complex(d('moinhhpp'), (nv, no, nv, no)), pphh=_complex(d('moinpphh'), (pv, po)),
-        phhp=_complex(d('moinphhp'), (nv, no, nv, no)), ppph=ppph,
-        pppp=_complex(d('moinpppp'), (pv, pv)) if pppp and os.path.isfile(d('moinpppp')) else None,
+        hhhh=get('moinhhhh', (po, po)), hhhp=get('moinhhhp', (po, no, nv)),
+        hhpp=get('moinhhpp', (nv, no, nv, no)), pphh=get('moinpphh', (pv, po)),
+        phhp=get('moinphhp', (nv, no, nv, no)), ppph=ppph,
+        pppp=(blk['moinpppp'] if blk else
+              _complex(d('moinpppp'), (pv, pv)) if pppp and os.path.isfile(d('moinpppp')) else None),
         directory=directory)
 
 
@@ -439,7 +465,8 @@ def from_cfour(directory='.', packed_vvvv=True, labels=False):
     '''The integral container of the active spinors of a calculation of
     CFOUR's two-component programs (closed shell) from the files that
     xx2cvtran left in ``directory``: container() of read().  The CC classes
-    need <ab||cd>, the file moinpppp (ABCDTYPE=STANDARD).  ``labels``: with
+    need <ab||cd>, the file moinpppp (ABCDTYPE=STANDARD), or mobkpppp of
+    %vtranblk.  ``labels``: with
     the symmetry labels of the file xzlabels (container()).'''
     x = read(directory)
     if x.pppp is None:
@@ -540,6 +567,278 @@ def write(directory, eris, nfrozen=0, flags=None):
         write_labels(directory, np.concatenate((np.zeros(nfrozen, dtype=np.int64), np.asarray(eris.labels))),
                      getattr(eris, 'modulus', 0) or 0)
 
+
+
+# ---------------------------------------------------------------------------
+# the blocked files of xx2cvtran (%vtranblk)
+
+BLOCKED_MAGIC = 20261015
+# kind of each blocked file (the header of x2cvtran/xzbwrite.f90 of CFOUR)
+BLOCKED_KINDS = {'mobkhhhh': 1, 'mobkhhhp': 2, 'mobkhhpp': 3, 'mobkphhp': 4, 'PPBK': 5, 'mobkpppp': 6}
+
+
+def _write_records(f, records, subrecord=None):
+    """Records of a sequential unformatted file, one after the other, on the
+    open file ``f`` (as _write_record)."""
+    limit = subrecord or SUBRECORD
+    for a in records:
+        buf = memoryview(np.ascontiguousarray(a)).cast('B')
+        n = len(buf)
+        at = 0
+        while True:
+            m = min(limit, n - at)
+            more, before = at + m < n, at > 0
+            f.write(np.array([-m if more else m], dtype='<i4').tobytes())
+            f.write(buf[at:at + m])
+            f.write(np.array([-m if before else m], dtype='<i4').tobytes())
+            at += m
+            if not more:
+                break
+
+
+def blocked_header(kind, labels, nfrozen, no, nv, modulus=0, complex_=False):
+    """The first two records of a blocked file of xx2cvtran: ten integers
+    (20261015, the version - 2 real numbers, 3 complex -, the kind, the
+    spinors of the SCF, the modulus, frozen, occupied, virtual, and the
+    modulus and base of a second label: 0 0) and the labels of all spinors
+    (order of scf2ceig)."""
+    labels = np.asarray(labels, dtype=_I8)
+    hdr = np.array([BLOCKED_MAGIC, 3 if complex_ else 2, kind, len(labels), modulus, nfrozen, no, nv, 0, 0],
+                   dtype=_I8)
+    return [hdr, labels]
+
+
+def _allowed(s, modulus, modulus2=0, base=0):
+    """A label sum s of an element is allowed: 0, modulo the modulus; with a
+    second label (labels l1 + base l2) each digit modulo its own modulus
+    (xzbok of xzbwrite.f90 / xzread.f90)."""
+    s = np.asarray(s)
+    if base:
+        x2 = np.rint(s / base).astype(np.int64)
+        return ((s - base * x2) % modulus == 0) & (x2 % modulus2 == 0)
+    return (s % modulus == 0) if modulus else (s == 0)
+
+
+def _blocked_masks(lab, nfrozen, no, nv, modulus=0, modulus2=0, base=0):
+    """The elements of the blocked files among those of the dense ones (in
+    the dense files' order, the first index fastest): {name of the dense
+    file: (kind, Fortran shape, mask of the elements, flattened in Fortran
+    order)}, the masks of PPPH i (list) and of moinpppp."""
+    lab = np.asarray(lab, dtype=np.int64)
+    lo = lab[nfrozen:nfrozen + no]
+    lv = lab[nfrozen + no:nfrozen + no + nv]
+    po, pv = _pairs(no), _pairs(nv)
+    so = lo[po[0]] + lo[po[1]]                  # label sums of the pairs p<=q (CFOUR's order)
+    sv = lv[pv[0]] + lv[pv[1]]
+    stro, strv = po[0] < po[1], pv[0] < pv[1]
+    ok = lambda x: _allowed(x, modulus, modulus2, base)
+    flat = lambda m: np.asarray(m).ravel(order='F')
+    out = {
+        'moinhhhh': (1, (len(so), len(so)), flat(ok(so[:, None] - so[None, :]) & stro[:, None] & stro[None, :])),
+        'moinhhhp': (2, (len(so), no, nv), flat(ok(so[:, None, None] - lo[None, :, None] - lv[None, None, :])
+                                                & stro[:, None, None])),
+        'moinhhpp': (3, (nv, no, nv, no), flat(ok(lo[None, :, None, None] + lo[None, None, None, :]
+                                                  - lv[:, None, None, None] - lv[None, None, :, None]))),
+        'moinphhp': (4, (nv, no, nv, no), flat(ok(lo[None, :, None, None] + lv[None, None, :, None]
+                                                  - lv[:, None, None, None] - lo[None, None, None, :])))}
+    ppph = [flat(ok(sv[:, None] - lv[None, :] - lo[i]) & strv[:, None]) for i in range(no)]
+    pppp = ok(sv[:, None] - sv[None, :]) & strv[:, None] & strv[None, :]       # [row ab, column cd]
+    return out, ppph, pppp, (sv, strv)
+
+
+def _blocked_data(x, complex_):
+    x = np.asarray(x, dtype=np.complex128)
+    if complex_:
+        return np.stack((x.real, x.imag), axis=1).ravel()
+    return np.ascontiguousarray(x.real)
+
+
+def write_blocked(directory, labels=None, modulus=None, remove_dense=True, pppp=True, complex_=None,
+                  nfrozen=None, imag_tol=1e-12):
+    """The integral files of ``directory`` (write(), or CFOUR's xx2cvtran
+    without %vtranblk) as the blocked files of xx2cvtran with %vtranblk
+    (x2cvtran/xzbwrite.f90 of CFOUR's x2cso tree; the reader: xzrint and
+    xzrbvvvv of cfour/xzccsdt/xzread.f90): mobkhhhh, mobkhhhp, mobkhhpp,
+    mobkphhp, PPBK0001.. and, if moinpppp is there and ``pppp``, mobkpppp -
+    the elements of the dense files in their order, but only those that the
+    labels allow (l_p + l_q = l_r + l_s, modulo ``modulus``) and only strict
+    pairs p<q; mobkpppp one record per column c<d with its allowed rows a<b.
+    ``labels``: of all spinors (order of scf2ceig), default read_labels().
+    Real numbers (version 2) unless an allowed element has an imaginary part
+    above ``imag_tol`` (1e-12: rounding; or ``complex_``): then version 3, as
+    xx2cvtran (real files for real spinors, complex ones for C2h, C2, Cs).
+    The dense files are removed (``remove_dense``); moinpphh is not needed
+    by xzccsdt (nor by read(), which makes it from mobkhhpp) and goes too.
+    ``nfrozen``: the frozen spinors (default: 2 NUMDROPA of JOBARC).
+    Returns the largest element that the labels forbid."""
+    d = lambda name: os.path.join(directory, name)
+    if labels is None:
+        got = read_labels(directory)
+        if got is None:
+            raise ValueError('%s: no labels (xzlabels, dgcosym) for the blocked files' % directory)
+        labels, modulus = got
+    labels = np.asarray(labels, dtype=np.int64)
+    modulus = modulus or 0
+    ntot = int(_record(d('nmototal'), _I8)[0])
+    if len(labels) != ntot:
+        raise ValueError('%d labels for %d spinors' % (len(labels), ntot))
+    no, nv = _sizes(directory)
+    if nfrozen is None:
+        nfrozen = 2 * int(JobArc(directory).get('NUMDROPA')[0])
+    masks, mppph, mpppp, (sv, strv) = _blocked_masks(labels, nfrozen, no, nv, modulus)
+    keep, okp = {}, []
+    forb = imag = 0.0
+    def take(x, ok):
+        nonlocal forb, imag
+        if (~ok).any():
+            forb = max(forb, float(abs(x[~ok]).max()))
+        y = x[ok]
+        if y.size:
+            imag = max(imag, float(abs(y.imag).max()))
+        return y
+    for name, (kind, shape, ok) in masks.items():
+        keep[name] = (kind, take(_complex(d(name), shape).ravel(order='F'), ok))
+    for i in range(no):
+        okp.append(take(_complex(d('PPPH%04d' % (i + 1)), (len(sv), nv)).ravel(order='F'), mppph[i]))
+    vvvv = _complex(d('moinpppp'), (len(sv), len(sv))) if pppp and os.path.isfile(d('moinpppp')) else None
+    if vvvv is not None:
+        take(vvvv, mpppp)
+    cplx = imag > imag_tol if complex_ is None else complex_
+    for name, (kind, x) in keep.items():
+        with open(d('mobk' + name[4:]), 'wb') as f:
+            _write_records(f, blocked_header(kind, labels, nfrozen, no, nv, modulus, cplx) + [_blocked_data(x, cplx)])
+    for i in range(no):
+        with open(d('PPBK%04d' % (i + 1)), 'wb') as f:
+            _write_records(f, blocked_header(5, labels, nfrozen, no, nv, modulus, cplx) + [_blocked_data(okp[i], cplx)])
+    if vvvv is not None:
+        rows = np.flatnonzero(strv)
+        with open(d('mobkpppp'), 'wb') as f:
+            _write_records(f, blocked_header(6, labels, nfrozen, no, nv, modulus, cplx))
+            for c in rows:                      # the columns c<d in the order of their numbers
+                r = rows[_allowed(sv[rows] - sv[c], modulus)]
+                _write_records(f, [_blocked_data(vvvv[r, c], cplx)])
+    if remove_dense:
+        for name in ['moinhhhh', 'moinhhhp', 'moinhhpp', 'moinphhp', 'moinpphh'] + \
+                    ['PPPH%04d' % (i + 1) for i in range(no)] + (['moinpppp'] if vvvv is not None else []):
+            if os.path.isfile(d(name)):
+                os.remove(d(name))
+    return forb
+
+
+def _records(path):
+    """The records of a sequential unformatted file (sub-records joined), as bytes."""
+    with open(path, 'rb') as f:
+        raw = f.read()
+    out, pos, part = [], 0, b''
+    while pos < len(raw):
+        n = int(np.frombuffer(raw[pos:pos + 4], '<i4')[0])
+        m = abs(n)
+        part += raw[pos + 4:pos + 4 + m]
+        pos += m + 8
+        if n >= 0:
+            out.append(part)
+            part = b''
+    return out
+
+
+def read_blocked(directory, pppp=True):
+    """The dense arrays of the blocked files of xx2cvtran (%vtranblk) of
+    ``directory``, in the shapes of read() (zeros where the labels forbid,
+    on the diagonal pairs and in the half p > q): {'moinhhhh': .., 'moinhhhp',
+    'moinhhpp', 'moinphhp', 'PPPH': [one per occupied spinor], 'moinpppp'
+    (None without mobkpppp or with pppp=False)} and the header (ten
+    integers) and labels of mobkhhhh.  The labels and moduli of each file's
+    header decide which elements it has."""
+    d = lambda name: os.path.join(directory, name)
+
+    def head(name, kind):
+        recs = _records(d(name))
+        hdr = np.frombuffer(recs[0], '<i8')
+        if hdr[0] != BLOCKED_MAGIC or hdr[2] != kind or not 1 <= hdr[1] <= 3:
+            raise ValueError('%s: not a blocked file of xx2cvtran of kind %d' % (d(name), kind))
+        h = np.zeros(10, dtype=np.int64)
+        h[:len(hdr)] = hdr
+        return recs, h, np.frombuffer(recs[1], '<i8')
+
+    def values(raw, h):
+        x = np.frombuffer(raw, '<f8')
+        return x[0::2] + 1j * x[1::2] if h[1] == 3 else x.astype(np.complex128)
+
+    out = {}
+    recs, h0, lab0 = head('mobkhhhh', 1)
+    no, nv, nfrozen = int(h0[6]), int(h0[7]), int(h0[5])
+    for name, kind in (('moinhhhh', 1), ('moinhhhp', 2), ('moinhhpp', 3), ('moinphhp', 4)):
+        recs, h, lab = head('mobk' + name[4:], kind)
+        masks = _blocked_masks(lab, nfrozen, no, nv, int(h[4]), int(h[8]), int(h[9]))[0]
+        _, shape, ok = masks[name]
+        x = np.zeros(ok.size, dtype=np.complex128)
+        x[ok] = values(recs[2], h)
+        out[name] = x.reshape(shape, order='F')
+    out['PPPH'] = []
+    for i in range(no):
+        recs, h, lab = head('PPBK%04d' % (i + 1), 5)
+        mp = _blocked_masks(lab, nfrozen, no, nv, int(h[4]), int(h[8]), int(h[9]))[1][i]
+        x = np.zeros(mp.size, dtype=np.complex128)
+        x[mp] = values(recs[2], h)
+        out['PPPH'].append(x.reshape((nv * (nv + 1) // 2, nv), order='F'))
+    out['moinpppp'] = None
+    if pppp and os.path.isfile(d('mobkpppp')):
+        recs, h, lab = head('mobkpppp', 6)
+        mv = _blocked_masks(lab, nfrozen, no, nv, int(h[4]), int(h[8]), int(h[9]))[2]
+        pv = nv * (nv + 1) // 2
+        v = np.zeros((pv, pv), dtype=np.complex128)
+        cols = np.flatnonzero(mv.any(axis=0) | (_pairs(nv)[0] < _pairs(nv)[1]))
+        if len(recs) - 2 != len(cols):
+            raise ValueError('%s: %d columns, %d expected' % (d('mobkpppp'), len(recs) - 2, len(cols)))
+        for c, raw in zip(cols, recs[2:]):
+            v[np.flatnonzero(mv[:, c]), c] = values(raw, h)
+        out['moinpppp'] = v
+    return out, h0, lab0
+
+
+class BlockedPPPP:
+    """mobkpppp written column by column from blocks of <ab||cd> of one
+    label sum each (a writer without the n^4 record): ``pairs`` the
+    numbers f = a + b (b - 1) / 2 (a<b, CFOUR's numbers of the virtual
+    spinors from 0) of all strict pairs of each group of one label sum;
+    put(g, block) with block[i][j] = <pair_i||pair_j> of group g writes the
+    columns of that group in their places.  The rows of a column of the
+    file are the pairs of its group in the order of their numbers: the
+    groups must be the classes of the label sums (no modulus)."""
+
+    def __init__(self, path, header, groups, words):
+        self.f = open(path, 'wb')
+        _write_records(self.f, header)
+        self.start = self.f.tell()
+        self.groups = [np.asarray(g, dtype=np.int64) for g in groups]
+        for g in self.groups:
+            if (np.diff(g) <= 0).any():
+                raise ValueError('the pairs of a group must be in the order of their numbers')
+        allp = np.concatenate(self.groups)
+        npair = len(allp)
+        if len(np.unique(allp)) != npair or allp.min() < 0 or allp.max() != npair - 1:
+            raise ValueError('the groups are not a partition of the pairs')
+        size = np.empty(npair, dtype=np.int64)
+        for g in self.groups:
+            size[g] = len(g) * words * 8 + 8         # the record of a column: data and two markers
+        self.offset = self.start + np.concatenate(([0], np.cumsum(size)[:-1]))
+        self.end = self.start + int(size.sum())
+        self.words = words
+
+    def put(self, k, block):
+        g = self.groups[k]
+        block = np.asarray(block)
+        if block.shape != (len(g), len(g)):
+            raise ValueError('block %d: shape %s, %d pairs' % (k, block.shape, len(g)))
+        for j, col in enumerate(g):
+            self.f.seek(int(self.offset[col]))
+            _write_records(self.f, [_blocked_data(block[:, j], self.words == 2)])
+
+    def close(self):
+        self.f.seek(0, 2)
+        if self.f.tell() != self.end:
+            raise ValueError('mobkpppp: not every column was written')
+        self.f.close()
 
 # ---------------------------------------------------------------------------
 # the input of CFOUR as the input of the CC here

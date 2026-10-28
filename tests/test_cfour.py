@@ -454,3 +454,59 @@ def test_labels_from_dgcosym(tmp_path):
     os.remove(tmp_path / 'xzlabels')
     record(np.ones(10, dtype=np.int64))         # one block: no symmetry
     assert cfour.read_dgcosym(d) is None and cfour.read_labels(d) is None
+
+
+@pytest.mark.parametrize('modulus', [0, 4])
+def test_blocked_files_of_vtranblk(bh, tmp_path, modulus):
+    '''The blocked files of xx2cvtran with %vtranblk (write_blocked, the
+    format of x2cvtran/xzbwrite.f90 of CFOUR): integrals that conserve
+    labels (those of BH with the forbidden elements set to zero, complex)
+    through the dense files, the blocked files and back (read() reads the
+    blocked files when mobkhhhh is there): every block the same; the files
+    hold only the allowed elements of strict pairs; mobkpppp written a
+    group of pairs at a time (BlockedPPPP, the writer of native_rundir.py
+    for block files) is byte for byte that of write_blocked.'''
+    ref = E.from_scf(bh, frozen=0, packed_vvvv=False)
+    no, n = ref.nocc, ref.nmo
+    lab = np.array([-1, 1, 3, -3, 1, -1, 3, 1, -1, -3, 1, 3])[:n]
+    if modulus:
+        lab = lab % modulus
+    sl = {'o': slice(0, no), 'v': slice(no, n)}
+    for key in ('oooo', 'ooov', 'oovv', 'ovvo', 'ovvv', 'vvvv'):
+        l = [lab[sl[c]] for c in key]
+        s = l[0][:, None, None, None] + l[1][None, :, None, None] - l[2][None, None, :, None] - l[3][None, None, None, :]
+        x = np.asarray(getattr(ref, key)).copy()
+        x[~cfour._allowed(s, modulus)] = 0
+        setattr(ref, key, x)
+    ref.ovov = -ref.ovvo.transpose(0, 1, 3, 2)
+    ref.labels, ref.modulus = lab, modulus
+    d = str(tmp_path / 'blk')
+    cfour.write(d, ref)
+    forb = cfour.write_blocked(d)
+    assert forb == 0 and not os.path.isfile(os.path.join(d, 'moinpppp'))
+    hdr = np.frombuffer(cfour._records(os.path.join(d, 'mobkhhpp'))[0], '<i8')
+    assert list(hdr) == [20261015, 3, 3, n, modulus, 0, no, n - no, 0, 0]
+    eris = cfour.from_cfour(d, packed_vvvv=False)
+    for key in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvo', 'ovvv', 'vvvv'):
+        assert abs(np.asarray(getattr(eris, key)) - np.asarray(getattr(ref, key))).max() < 1e-13, key
+    # the number of elements of mobkhhpp: the allowed ones (no pairs there)
+    o, v = lab[:no], lab[no:]
+    s = o[None, :, None, None] + o[None, None, None, :] - v[:, None, None, None] - v[None, None, :, None]
+    data = cfour._records(os.path.join(d, 'mobkhhpp'))[2]
+    assert len(data) == 16 * int(cfour._allowed(s, modulus).sum())
+    if modulus:
+        return
+    # mobkpppp by the groups of the label sums of the pairs (no modulus)
+    nv = n - no
+    a, b = np.triu_indices(nv, 1)
+    num = a + b * (b - 1) // 2
+    sums = v[a] + v[b]
+    groups = [np.sort(num[sums == L]) for L in sorted(set(sums))]
+    pair = {int(f): (int(x), int(y)) for f, x, y in zip(num, a, b)}
+    vv = np.asarray(ref.vvvv)
+    w = cfour.BlockedPPPP(str(tmp_path / 'mobkpppp'), cfour.blocked_header(6, lab, 0, no, nv, 0, True), groups, 2)
+    for k, g in enumerate(groups):
+        ab = [pair[int(f)] for f in g]
+        w.put(k, np.array([[vv[p, q, r, t] for (r, t) in ab] for (p, q) in ab]))
+    w.close()
+    assert open(tmp_path / 'mobkpppp', 'rb').read() == open(os.path.join(d, 'mobkpppp'), 'rb').read()
